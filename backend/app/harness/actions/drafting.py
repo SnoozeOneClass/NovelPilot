@@ -1,0 +1,2 @@
+"""Chapter drafting action."""
+

@@ -1,0 +1,318 @@
+from __future__ import annotations
+
+import argparse
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
+
+
+Status = Literal["covered", "partial", "manual_required", "missing"]
+REPORT_SCOPE = (
+    "Static repository evidence map. A covered item means expected files and textual evidence are "
+    "present; dynamic behavior is verified by the quality gate commands and any listed manual gates."
+)
+
+
+@dataclass(frozen=True)
+class EvidenceProbe:
+    path: str
+    contains: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class AcceptanceCriterion:
+    id: str
+    requirement: str
+    probes: tuple[EvidenceProbe, ...]
+    manual_note: str | None = None
+
+
+CRITERIA: tuple[AcceptanceCriterion, ...] = (
+    AcceptanceCriterion(
+        id="project_lifecycle",
+        requirement="Users can create and open local novel projects under output/.",
+        probes=(
+            EvidenceProbe("backend/app/api/projects.py", ("create_project", "open_project")),
+            EvidenceProbe("backend/tests/test_projects.py", ("test_create_project", "test_open_project")),
+            EvidenceProbe("frontend/src/features/project-selector/ProjectSelector.tsx"),
+        ),
+    ),
+    AcceptanceCriterion(
+        id="llm_profiles",
+        requirement="Users can configure multiple local LLM profiles for OpenAI and Anthropic protocols.",
+        probes=(
+            EvidenceProbe("backend/app/api/profiles.py", ("test_profile", "select_profile")),
+            EvidenceProbe("backend/app/llm/openai_compatible.py"),
+            EvidenceProbe("backend/app/llm/anthropic_compatible.py"),
+            EvidenceProbe("frontend/src/features/llm-profiles/LlmProfilesPanel.tsx", ("testProfile",)),
+        ),
+    ),
+    AcceptanceCriterion(
+        id="secret_safety",
+        requirement="LLM secrets are stored only in gitignored local config, not novel output.",
+        probes=(
+            EvidenceProbe(".gitignore", ("config/*.local.json", "output/")),
+            EvidenceProbe("backend/tests/test_profiles.py", ("masks_api_key", "preserves_existing_api_key")),
+            EvidenceProbe("backend/tests/test_happy_path.py", ("secret-key", "_project_tree_contains")),
+            EvidenceProbe("backend/app/storage/secret_audit.py", ("audit_output_for_profile_secrets",)),
+            EvidenceProbe("package.json", ("audit:secrets",)),
+        ),
+    ),
+    AcceptanceCriterion(
+        id="book_setup",
+        requirement="Book setup collects required settings and requires approval before activation.",
+        probes=(
+            EvidenceProbe("backend/app/api/setup.py", ("approve_setup", "answer_setup_question")),
+            EvidenceProbe("backend/app/storage/setup.py", ("DEFAULT_SETUP_QUESTIONS", "_write_approved_book_artifacts")),
+            EvidenceProbe("backend/tests/test_setup.py", ("test_approve_setup_requires_all_required_answers",)),
+            EvidenceProbe("frontend/src/features/setup-conversation/SetupConversation.tsx"),
+        ),
+    ),
+    AcceptanceCriterion(
+        id="operation_modes",
+        requirement="Each novel stores full-auto or participatory mode and enforces arc review gates.",
+        probes=(
+            EvidenceProbe("backend/app/schemas/projects.py", ("OperationMode", "participatory")),
+            EvidenceProbe("backend/tests/test_orchestrator.py", ("test_participatory_arc_waits_for_approval",)),
+            EvidenceProbe("backend/app/harness/orchestrator.py", ("_current_arc_requires_human_review",)),
+        ),
+    ),
+    AcceptanceCriterion(
+        id="feedback_checkpoint",
+        requirement="User feedback is recorded immediately and processed at safe checkpoints.",
+        probes=(
+            EvidenceProbe("backend/app/api/feedback.py", ("user_feedback",)),
+            EvidenceProbe("backend/app/harness/orchestrator.py", ("_process_pending_feedback", "_feedback_prompt_block")),
+            EvidenceProbe("backend/tests/test_orchestrator.py", ("test_orchestrator_injects_feedback_after_context_snapshot_exists",)),
+            EvidenceProbe("frontend/src/features/workspace/Workspace.tsx", ("submitFeedback",)),
+        ),
+    ),
+    AcceptanceCriterion(
+        id="rolling_arc",
+        requirement="Story arc planning is rolling/current-arc-only, not a full upfront roadmap.",
+        probes=(
+            EvidenceProbe("backend/app/harness/orchestrator.py", ("_plan_initial_story_arc", "Do not plan the full book")),
+            EvidenceProbe("backend/tests/test_orchestrator.py", ("test_completed_arc_rolls_to_next_arc_plan",)),
+            EvidenceProbe("README.md", ("rolling current-arc",)),
+        ),
+    ),
+    AcceptanceCriterion(
+        id="candidate_committed_boundaries",
+        requirement="Chapter artifacts distinguish candidate material from committed canon.",
+        probes=(
+            EvidenceProbe("backend/app/schemas/artifacts.py", ("CandidateObservations", "ChapterVerification")),
+            EvidenceProbe("backend/app/storage/artifacts.py", ("candidate_observations", "committed_state_patch")),
+            EvidenceProbe("backend/tests/test_patches.py", ("observations", "canon")),
+        ),
+    ),
+    AcceptanceCriterion(
+        id="state_patch_commit",
+        requirement="LLM-generated candidate state patches are harness-validated before canon commit.",
+        probes=(
+            EvidenceProbe("backend/app/storage/patches.py", ("validate_candidate_state_patch", "commit_candidate_state_patch")),
+            EvidenceProbe("backend/tests/test_patches.py", ("test_patch", "evidence")),
+            EvidenceProbe("backend/app/harness/orchestrator.py", ("generate_candidate_state_patch", "commit_state_patch")),
+        ),
+    ),
+    AcceptanceCriterion(
+        id="domain_canon",
+        requirement="Canonical state is split into domain-specific files.",
+        probes=(
+            EvidenceProbe("backend/app/storage/projects.py", ("canon/characters.json", "canon/relationships.json", "canon/world_facts.json", "canon/foreshadowing.json")),
+            EvidenceProbe("README.md", ("characters.json", "foreshadowing.json")),
+        ),
+    ),
+    AcceptanceCriterion(
+        id="workspace_ui",
+        requirement="Frontend provides a three-column harness workspace with status, artifacts, and signals.",
+        probes=(
+            EvidenceProbe("frontend/src/features/workspace/Workspace.tsx", ("workspace-grid", "可见输出")),
+            EvidenceProbe("frontend/src/features/harness-panel/HarnessPanel.tsx", ("选中证据", "Harness 产物")),
+            EvidenceProbe("frontend/src/styles.css", ("workspace-grid", "grid-template-columns")),
+        ),
+    ),
+    AcceptanceCriterion(
+        id="run_control_sse",
+        requirement="Harness can start, pause cooperatively, resume from state, and stream updates.",
+        probes=(
+            EvidenceProbe("backend/app/api/runs.py", ("start_run", "pause_run", "resume_run", "stream_events")),
+            EvidenceProbe("backend/tests/test_runs.py", ("_events_after_last_event_id", "concurrent")),
+            EvidenceProbe("frontend/src/features/workspace/Workspace.tsx", ("EventSource", "pauseRun", "resumeRun")),
+        ),
+    ),
+    AcceptanceCriterion(
+        id="retry_recovery",
+        requirement="Failed verification or patch rejection can be retried without deleting audit evidence.",
+        probes=(
+            EvidenceProbe("backend/app/api/runs.py", ("retry_current_chapter", "retry_manifest.json")),
+            EvidenceProbe("backend/tests/test_runs.py", ("test_retry_current_chapter",)),
+            EvidenceProbe("frontend/src/features/workspace/Workspace.tsx", ("retryCurrentChapter",)),
+        ),
+    ),
+    AcceptanceCriterion(
+        id="export",
+        requirement="Export generates a manuscript from committed chapter finals only.",
+        probes=(
+            EvidenceProbe("backend/app/api/exports.py", ("export_manuscript",)),
+            EvidenceProbe("backend/app/storage/export.py", ("final.md", "manuscript.md")),
+            EvidenceProbe("backend/tests/test_export.py", ("draft", "final")),
+        ),
+    ),
+    AcceptanceCriterion(
+        id="docs",
+        requirement="Public architecture notes, local usage, README, and validation commands are documented.",
+        probes=(
+            EvidenceProbe("docs/architecture.md", ("Three Loop Layers", "Candidate Versus Committed State")),
+            EvidenceProbe("docs/local-usage.md", ("Quality Gate", "Real Provider Smoke")),
+            EvidenceProbe("README.md", ("Validation", "Storage Model")),
+            EvidenceProbe("package.json", ("typecheck", "lint", "test")),
+        ),
+    ),
+    AcceptanceCriterion(
+        id="live_provider_smoke",
+        requirement="Full local flow works against a real configured LLM provider.",
+        probes=(
+            EvidenceProbe("backend/app/api/profiles.py", ("test_profile",)),
+            EvidenceProbe("scripts/live_provider_smoke.py", ("run_smoke", "live_smoke_report.json")),
+            EvidenceProbe("package.json", ("smoke:live",)),
+            EvidenceProbe("README.md", ("smoke test",)),
+        ),
+        manual_note=(
+            "Requires a user-supplied API key/profile; run "
+            "`npm.cmd run smoke:live -- --profile-id <id>` before marking complete."
+        ),
+    ),
+    AcceptanceCriterion(
+        id="literary_quality_review",
+        requirement="A real generated chapter and state patch are inspected for usefulness.",
+        probes=(
+            EvidenceProbe("backend/tests/test_happy_path.py", ("test_local_happy_path",)),
+            EvidenceProbe(
+                "backend/app/storage/completion.py",
+                ("record_literary_review", "literary_review.json"),
+            ),
+            EvidenceProbe(
+                "backend/app/api/completion.py",
+                ("create_literary_review", "get_completion_audit"),
+            ),
+            EvidenceProbe("scripts/completion_audit.py", ("literary_quality_review", "build_completion_audit")),
+            EvidenceProbe("package.json", ("review:literary", "audit:completion")),
+        ),
+        manual_note=(
+            "Fixture tests prove mechanics; literary usefulness requires reviewing a real provider "
+            "run and recording `exports/literary_review.json`."
+        ),
+    ),
+)
+
+
+def build_report(repo_root: Path) -> dict[str, object]:
+    items = [evaluate_criterion(repo_root, criterion) for criterion in CRITERIA]
+    summary = {
+        "covered": sum(1 for item in items if item["status"] == "covered"),
+        "partial": sum(1 for item in items if item["status"] == "partial"),
+        "manual_required": sum(1 for item in items if item["status"] == "manual_required"),
+        "missing": sum(1 for item in items if item["status"] == "missing"),
+        "total": len(items),
+    }
+    return {"scope": REPORT_SCOPE, "summary": summary, "criteria": items}
+
+
+def evaluate_criterion(repo_root: Path, criterion: AcceptanceCriterion) -> dict[str, object]:
+    evidence = [evaluate_probe(repo_root, probe) for probe in criterion.probes]
+    passed = sum(1 for item in evidence if item["ok"])
+    if criterion.manual_note is not None:
+        status: Status = "manual_required" if passed == len(evidence) else "partial"
+    elif passed == len(evidence):
+        status = "covered"
+    elif passed == 0:
+        status = "missing"
+    else:
+        status = "partial"
+
+    return {
+        "id": criterion.id,
+        "requirement": criterion.requirement,
+        "status": status,
+        "manual_note": criterion.manual_note,
+        "evidence": evidence,
+    }
+
+
+def evaluate_probe(repo_root: Path, probe: EvidenceProbe) -> dict[str, object]:
+    path = repo_root / probe.path
+    if not path.exists():
+        return {"path": probe.path, "ok": False, "reason": "missing file"}
+    if not probe.contains:
+        return {"path": probe.path, "ok": True, "reason": "file exists"}
+
+    text = path.read_text(encoding="utf-8", errors="replace")
+    missing = [needle for needle in probe.contains if needle not in text]
+    if missing:
+        return {
+            "path": probe.path,
+            "ok": False,
+            "reason": "missing text: " + ", ".join(missing),
+        }
+    return {"path": probe.path, "ok": True, "reason": "file contains expected text"}
+
+
+def render_markdown(report: dict[str, object]) -> str:
+    summary = report["summary"]
+    assert isinstance(summary, dict)
+    lines = [
+        "# Novelpilot Acceptance Report",
+        "",
+        str(report["scope"]),
+        "",
+        (
+            f"Summary: {summary['covered']} covered, {summary['partial']} partial, "
+            f"{summary['manual_required']} manual required, {summary['missing']} missing, "
+            f"{summary['total']} total."
+        ),
+        "",
+    ]
+    criteria = report["criteria"]
+    assert isinstance(criteria, list)
+    for item in criteria:
+        assert isinstance(item, dict)
+        lines.extend(
+            [
+                f"## {item['id']} [{item['status']}]",
+                "",
+                str(item["requirement"]),
+                "",
+            ]
+        )
+        manual_note = item.get("manual_note")
+        if manual_note:
+            lines.extend([f"Manual note: {manual_note}", ""])
+        evidence = item["evidence"]
+        assert isinstance(evidence, list)
+        for evidence_item in evidence:
+            assert isinstance(evidence_item, dict)
+            mark = "OK" if evidence_item["ok"] else "MISS"
+            lines.append(f"- {mark}: `{evidence_item['path']}` - {evidence_item['reason']}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate a static Novelpilot acceptance report.")
+    parser.add_argument("--json", action="store_true", help="Emit JSON instead of Markdown.")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    repo_root = Path(__file__).resolve().parents[1]
+    report = build_report(repo_root)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print(render_markdown(report), end="")
+
+
+if __name__ == "__main__":
+    main()
