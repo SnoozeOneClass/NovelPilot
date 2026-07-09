@@ -1,17 +1,17 @@
-# Local Usage
+# 本地使用
 
-## Install
+## 安装
 
-From the repository root:
+在仓库根目录运行：
 
 ```powershell
 python -m pip install -e .[dev]
 npm.cmd --prefix frontend install
 ```
 
-## Run The App
+## 启动应用
 
-Start backend and frontend in separate terminals:
+分别在两个终端启动后端和前端：
 
 ```powershell
 npm.cmd run backend:dev
@@ -21,72 +21,69 @@ npm.cmd run backend:dev
 npm.cmd run frontend:dev
 ```
 
-Open:
+打开：
 
 ```text
 http://127.0.0.1:5173
 ```
 
-The frontend proxies API calls to the FastAPI backend at `http://127.0.0.1:8000`.
+前端会把 API 请求代理到 FastAPI 后端 `http://127.0.0.1:8000`。
 
-## Configure An LLM Profile
+## 配置 LLM Profile
 
-Use the LLM Profiles panel in the app, or configure one from PowerShell:
+可以在应用里的 LLM Profiles 面板配置，也可以用 PowerShell 配置：
 
 ```powershell
 $env:NOVELPILOT_API_KEY = "<your-api-key>"
 npm.cmd run profile:upsert -- --id main --name "Main Provider" --protocol openai-compatible --base-url "https://api.example.com/v1" --model "model-name" --api-key-env NOVELPILOT_API_KEY --select
 ```
 
-Supported protocols:
+支持的协议：
 
 - `openai-compatible`
 - `anthropic-compatible`
 
-Profiles are stored in `config/llm-profiles.local.json`, which is ignored by git. Generated novel
-projects store only sanitized profile/model snapshots.
+Profile 保存在 `config/llm-profiles.local.json`，这个文件会被 git 忽略。生成的小说项目只保存脱敏后的 profile/model 快照。
 
-Test a saved profile:
+测试已保存的 profile：
 
 ```powershell
 npm.cmd run profile:test -- --profile-id main
 ```
 
-## Create And Write A Novel
+## 新建并创作小说
 
-1. Create or open a project from the project selector.
-2. Choose `full_auto` or `participatory`.
-3. Configure and select an LLM profile.
-4. Complete the book setup conversation.
-5. Approve the book setup.
-6. Start or resume the harness.
-7. Watch loop state, visible model output, artifacts, context snapshots, reviews, verification
-   signals, patch status, and routing decisions in the three-column workspace.
-8. Submit feedback whenever needed. It will be processed at the next safe checkpoint.
-9. Export the manuscript when desired.
+1. 在项目选择器中新建或打开项目。
+2. 选择 `full_auto` 或 `participatory`。
+3. 配置并选择 LLM profile。
+4. 完成全书 setup 对话。
+5. 批准全书 setup。
+6. 启动或恢复 harness。
+7. 在三栏工作台中观察 loop 状态、模型可见输出、产物、上下文快照、审查、验证信号、patch 状态和路由决策。
+8. 需要时随时提交反馈。反馈会在下一个安全 checkpoint 被处理。
+9. 需要时导出全书。
 
-Export writes:
-
-```text
-output/<novel-name>/exports/manuscript.md
-```
-
-Only committed chapter `final.md` files are included.
-
-## Local Project Data
-
-Generated projects are stored under:
+导出文件写入：
 
 ```text
-output/<novel-name>/
+output/<小说名>/exports/manuscript.md
 ```
 
-This directory is ignored by git. It may contain drafts, final chapters, reviews, state patches,
-events, exports, and smoke reports.
+导出只包含已经提交的章节 `final.md` 文件。
 
-## Quality Gate
+## 本地项目数据
 
-Run the full local quality gate before publishing changes:
+生成的小说项目保存在：
+
+```text
+output/<小说名>/
+```
+
+这个目录会被 git 忽略。它可能包含草稿、正式章节、审查结果、状态补丁、事件、导出文件和 smoke 报告。
+
+## 质量门禁
+
+发布变更前运行完整本地质量门禁：
 
 ```powershell
 npm.cmd run typecheck
@@ -97,44 +94,39 @@ npm.cmd run acceptance
 npm.cmd run audit:secrets
 ```
 
-The fixture-based tests cover project storage, profile safety, LLM adapters, event replay, run
-control, feedback routing, artifact summaries, chapter verification, state patch commit/rejection,
-retry preparation, and manuscript export.
+基于 fixture 的测试覆盖项目存储、profile 安全、LLM 适配器、事件 replay、运行控制、反馈路由、产物摘要、章节验证、状态补丁提交/拒绝、重试准备和全书导出。
 
-## Real Provider Smoke And Literary Review
+## 真实 Provider Smoke 与文学审查
 
-When a real LLM profile is available, run:
+有真实 LLM profile 可用时，运行：
 
 ```powershell
 npm.cmd run smoke:live -- --profile-id main
 ```
 
-This creates a timestamped smoke project under `output/`, completes setup, runs one bounded
-full-auto chapter loop, exports a manuscript, and writes:
+该命令会在 `output/` 下创建带时间戳的 smoke 项目，完成 setup，运行一个有界的全自动章节 loop，导出 manuscript，并写入：
 
 ```text
 exports/live_smoke_report.json
 ```
 
-After inspecting the generated `final.md`, `review.md`, `verification.json`, and state patch files,
-record the human review:
+检查生成的 `final.md`、`review.md`、`verification.json` 和状态补丁文件后，记录人工审查结果：
 
 ```powershell
 npm.cmd run review:literary -- --project "<smoke-project-path>" --decision approved --chapter-assessment "<notes>" --state-patch-assessment "<notes>"
 ```
 
-Then audit completion:
+然后审计完成度：
 
 ```powershell
 npm.cmd run audit:completion -- --project "<smoke-project-path>"
 ```
 
-Completion passes only when static acceptance, output secret audit, live provider smoke, and
-literary review evidence all pass.
+只有静态验收、输出密钥审计、真实 provider smoke 和文学审查证据都通过时，完成度审计才会通过。
 
-## What Should Stay Local
+## 应留在本地的内容
 
-These paths are intentionally not part of a public push:
+这些路径不应进入公开 push：
 
 ```text
 config/*.local.json
@@ -144,6 +136,4 @@ node_modules/
 cache directories
 ```
 
-If local Trellis or agent-workspace files are present, keep them on a private local branch unless
-you intentionally want to publish that workflow history.
-
+如果本地存在 Trellis 或 agent 工作区文件，除非你明确想公开这些流程历史，否则应该把它们保留在本地私有分支。

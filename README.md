@@ -21,6 +21,7 @@ Novelpilot 是一个本地、单用户的长篇 AI 小说创作工作台。
 
 - [架构说明](docs/architecture.md)
 - [本地使用](docs/local-usage.md)
+- [Harness 设计原则](docs/harness-design-principles.md)
 
 ## 安装与启动
 
