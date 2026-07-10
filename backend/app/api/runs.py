@@ -1,10 +1,12 @@
 import asyncio
 from collections.abc import AsyncIterator
+from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from app.harness.orchestrator import HarnessOrchestrator, HarnessRunContext
 from app.harness.run_control import begin_active_runner, end_active_runner, has_active_runner
@@ -24,6 +26,27 @@ def _active_project_or_404() -> Path:
     if project_path is None:
         raise HTTPException(status_code=404, detail="No active project.")
     return project_path
+
+
+@router.get("/archive")
+def download_run_archive() -> Response:
+    project_path = _active_project_or_404()
+    payload = _build_run_archive(project_path)
+    return Response(
+        content=payload,
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="novelpilot-run.zip"'},
+    )
+
+
+def _build_run_archive(project_path: Path) -> bytes:
+    buffer = BytesIO()
+    with ZipFile(buffer, mode="w", compression=ZIP_DEFLATED) as archive:
+        for path in sorted(project_path.rglob("*")):
+            if not path.is_file() or path.name.endswith(".tmp"):
+                continue
+            archive.write(path, path.relative_to(project_path).as_posix())
+    return buffer.getvalue()
 
 
 @router.post("/start")

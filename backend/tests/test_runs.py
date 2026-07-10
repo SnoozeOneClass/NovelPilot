@@ -1,8 +1,11 @@
+from io import BytesIO
+from zipfile import ZipFile
+
 import pytest
 from fastapi import HTTPException
 
 from app.api import runs as runs_api
-from app.api.runs import _events_after_last_event_id, _format_sse_event
+from app.api.runs import _build_run_archive, _events_after_last_event_id, _format_sse_event
 from app.harness.run_control import begin_active_runner, end_active_runner
 from app.schemas.events import HarnessEvent
 from app.schemas.projects import ProjectMetadata
@@ -45,6 +48,24 @@ def test_format_sse_event_includes_id_and_named_event() -> None:
     assert payload.startswith("id: one\nevent: harness_event\ndata: ")
     assert '"event_id":"one"' in payload
     assert payload.endswith("\n\n")
+
+
+def test_build_run_archive_preserves_project_relative_paths(tmp_path) -> None:
+    project_path = tmp_path / "novel"
+    chapter_path = project_path / "chapters" / "chapter-001"
+    chapter_path.mkdir(parents=True)
+    (project_path / "events.jsonl").write_text('{"kind":"run_started"}\n', encoding="utf-8")
+    (chapter_path / "final.md").write_bytes(b"# Chapter 1\n")
+    (chapter_path / "draft.md.tmp").write_text("partial", encoding="utf-8")
+
+    payload = _build_run_archive(project_path)
+
+    with ZipFile(BytesIO(payload)) as archive:
+        assert sorted(archive.namelist()) == [
+            "chapters/chapter-001/final.md",
+            "events.jsonl",
+        ]
+        assert archive.read("chapters/chapter-001/final.md").decode("utf-8") == "# Chapter 1\n"
 
 
 @pytest.mark.parametrize("run_status", ["running", "pause_requested"])

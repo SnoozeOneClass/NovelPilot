@@ -18,6 +18,12 @@ import type {
 } from "../types/domain";
 
 const jsonHeaders = { "Content-Type": "application/json" };
+const configuredApiBase = import.meta.env.VITE_API_BASE_URL?.trim().replace(/\/$/, "");
+const apiBase = configuredApiBase || (import.meta.env.DEV ? "http://127.0.0.1:8000" : "");
+
+export function apiUrl(path: string): string {
+  return `${apiBase}${path}`;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -69,7 +75,7 @@ export function formatApiError(error: unknown): string {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, init);
+  const response = await fetch(apiUrl(path), init);
   if (!response.ok) {
     throw new Error(await readErrorMessage(response));
   }

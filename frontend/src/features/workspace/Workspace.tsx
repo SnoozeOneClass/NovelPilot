@@ -1,150 +1,138 @@
 import {
   BookOpen,
-  CheckCircle2,
-  CirclePause,
-  CirclePlay,
-  FileDown,
-  FileText,
-  PanelRightOpen,
+  Boxes,
+  Columns3,
+  Feather,
+  GitBranch,
+  Home,
   RefreshCcw,
-  RotateCw,
   Send,
-  ShieldAlert,
+  Settings2,
   ShieldCheck,
   X
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, formatApiError } from "../../api/client";
+import { api, apiUrl, formatApiError } from "../../api/client";
 import { harnessVisibleOutputForLatestAction, isHarnessEvent } from "../../types/domain";
 import {
-  formatArtifactTitle,
-  formatAtomicAction,
-  formatEventKind,
-  formatEventMessage,
-  formatEventStatusLine,
-  formatGateMessage,
-  formatGenericStatus,
-  formatLiteraryDecision,
   formatLoopLayer,
   formatOperationMode,
   formatOptionalId,
   formatRunStatus
 } from "../../types/display";
-import { HarnessPanel } from "../harness-panel/HarnessPanel";
 import { LlmProfilesPanel } from "../llm-profiles/LlmProfilesPanel";
 import { SetupConversation } from "../setup-conversation/SetupConversation";
 import type {
   ArtifactSummary,
   CurrentArcState,
   HarnessEvent,
-  LiteraryReviewDecision,
   LlmProfilesDocument,
   ProjectCompletionAudit,
   ProjectReadiness,
   ProjectSummary
 } from "../../types/domain";
+import { CanonView } from "./CanonView";
+import { CockpitView } from "./CockpitView";
+import { ProjectOverview } from "./ProjectOverview";
+import { StoryArcsView } from "./StoryArcsView";
+import { TraceConsole } from "./TraceConsole";
+import { canonFiles, type CanonKind, parseCanonDocument } from "./workspace-utils";
 
 interface WorkspaceProps {
   project: ProjectSummary;
   onProjectClosed: () => void;
 }
 
-type WorkspaceCommand =
-  | "start"
-  | "resume"
-  | "pause"
-  | "export"
-  | "approve"
-  | "retry"
-  | "recover";
+type WorkspaceView = "overview" | "plan" | "cockpit" | "arcs" | "canon" | "trace" | "settings";
+type WorkspaceCommand = "start" | "resume" | "pause" | "export" | "approve" | "retry" | "recover" | "revision";
 type WorkspaceNotice = { kind: "success" | "error"; text: string };
 
+const viewLabels: Record<WorkspaceView, string> = {
+  overview: "项目概览",
+  plan: "开书规划",
+  cockpit: "创作工作台",
+  arcs: "故事弧与章节",
+  canon: "正史状态 Canon",
+  trace: "运行证据与产物",
+  settings: "设置与模型"
+};
+
+const navItems: Array<{ id: WorkspaceView; label: string; icon: typeof Home }> = [
+  { id: "overview", label: "项目概览", icon: Home },
+  { id: "plan", label: "开书规划", icon: BookOpen },
+  { id: "cockpit", label: "创作工作台", icon: Columns3 },
+  { id: "arcs", label: "故事弧与章节", icon: Boxes },
+  { id: "canon", label: "正史状态", icon: ShieldCheck },
+  { id: "trace", label: "运行证据与产物", icon: GitBranch },
+  { id: "settings", label: "设置与模型", icon: Settings2 }
+];
+
+const emptyCanonContents: Record<CanonKind, string> = {
+  characters: "{\"schema_version\":1,\"version\":1,\"items\":{}}",
+  relationships: "{\"schema_version\":1,\"version\":1,\"items\":{}}",
+  world_facts: "{\"schema_version\":1,\"version\":1,\"items\":{}}",
+  foreshadowing: "{\"schema_version\":1,\"version\":1,\"items\":{}}"
+};
+
 export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
+  const [activeView, setActiveView] = useState<WorkspaceView>(
+    project.metadata.active_arc_id ? "cockpit" : "plan"
+  );
   const [projectState, setProjectState] = useState<ProjectSummary>(project);
   const [events, setEvents] = useState<HarnessEvent[]>([]);
   const [feedback, setFeedback] = useState("");
   const [feedbackNotice, setFeedbackNotice] = useState<WorkspaceNotice | null>(null);
-  const [literaryNotice, setLiteraryNotice] = useState<WorkspaceNotice | null>(null);
   const [sendingFeedback, setSendingFeedback] = useState(false);
-  const [recordingReview, setRecordingReview] = useState(false);
   const [workspaceNotice, setWorkspaceNotice] = useState<WorkspaceNotice | null>(null);
   const [pendingCommands, setPendingCommands] = useState<Set<WorkspaceCommand>>(() => new Set());
   const [currentArc, setCurrentArc] = useState<CurrentArcState | null>(null);
   const [artifactPaths, setArtifactPaths] = useState<string[]>([]);
   const [artifactSummaries, setArtifactSummaries] = useState<ArtifactSummary[]>([]);
   const [selectedArtifactPath, setSelectedArtifactPath] = useState<string | null>(null);
-  const [activeArtifact, setActiveArtifact] = useState<{ path: string; content: string } | null>(
-    null
-  );
-  const [selectedProfileId, setSelectedProfileId] = useState<string | null>(
-    project.metadata.active_profile_id
-  );
+  const [activeArtifact, setActiveArtifact] = useState<{ path: string; content: string } | null>(null);
+  const [artifactDrawerOpen, setArtifactDrawerOpen] = useState(false);
+  const [profiles, setProfiles] = useState<LlmProfilesDocument | null>(null);
   const [completionAudit, setCompletionAudit] = useState<ProjectCompletionAudit | null>(null);
-  const [literaryDecision, setLiteraryDecision] =
-    useState<LiteraryReviewDecision>("approved");
-  const [literaryReviewer, setLiteraryReviewer] = useState("人工审查");
-  const [chapterAssessment, setChapterAssessment] = useState("");
-  const [statePatchAssessment, setStatePatchAssessment] = useState("");
-  const [reviewNotes, setReviewNotes] = useState("");
   const [readiness, setReadiness] = useState<ProjectReadiness | null>(null);
+  const [canonContents, setCanonContents] = useState<Record<CanonKind, string>>(emptyCanonContents);
 
-  const latestEvent = events.at(-1);
-  const latestStatusEvent =
-    [...events].reverse().find((event) => event.kind !== "llm_output_delta") ?? null;
-  const currentLoop = latestStatusEvent?.loop_layer ?? "system";
-  const currentAction = latestStatusEvent?.atomic_action ?? "idle";
-  const projectMetadata = projectState.metadata;
-  const runStatus = projectMetadata.run_status;
-  const activeArcId = currentArc?.arc_id ?? projectMetadata.active_arc_id;
-  const activeChapterId = projectMetadata.active_chapter_id;
-  const activeProfileId = selectedProfileId ?? projectMetadata.active_profile_id;
+  const latestEvent = events.at(-1) ?? null;
+  const latestStatusEvent = [...events].reverse().find((event) => event.kind !== "llm_output_delta") ?? null;
+  const metadata = projectState.metadata;
+  const runStatus = metadata.run_status;
   const runInFlight = runStatus === "running" || runStatus === "pause_requested";
-  const canStartOrResume = readiness?.can_start_run ?? false;
-  const canStartRun = canStartOrResume && readiness?.next_action.id === "start_run";
-  const canResumeRun = canStartOrResume && readiness?.next_action.id === "resume_run";
-  const canPauseRun = runStatus === "running" && readiness?.next_action.id === "wait_for_safe_checkpoint";
-  const canRecoverStaleRun = readiness?.next_action.id === "recover_stale_run";
-  const isCommandPending = (command: WorkspaceCommand) => pendingCommands.has(command);
-  const liveSmokeGate =
-    completionAudit?.gates.find((gate) => gate.id === "live_provider_smoke") ?? null;
-  const liveSmokePassed = liveSmokeGate?.status === "passed";
-  const literaryReviewReady =
-    liveSmokePassed &&
-    Boolean(
-      literaryReviewer.trim() &&
-        chapterAssessment.trim() &&
-        statePatchAssessment.trim()
-    );
-  const literaryReviewBlocker =
-    completionAudit === null || liveSmokePassed
-      ? null
-      : formatGateMessage(liveSmokeGate?.message ?? "Live provider smoke has not passed.");
+  const canStart = Boolean(readiness?.can_start_run && readiness.next_action.id === "start_run");
+  const canResume = Boolean(readiness?.can_start_run && readiness.next_action.id === "resume_run");
+  const canPause = runStatus === "running";
+  const canRecover = readiness?.next_action.id === "recover_stale_run";
+  const commandBusy = pendingCommands.size > 0;
+  const currentProfile = profiles?.profiles.find((profile) => profile.id === profiles.active_profile_id) ?? null;
+  const modelOutput = useMemo(() => harnessVisibleOutputForLatestAction(events), [events]);
+  const canonCounts = useMemo(
+    () => Object.fromEntries(
+      Object.entries(canonContents).map(([kind, content]) => [kind, Object.keys(parseCanonDocument(content).items).length])
+    ) as Record<CanonKind, number>,
+    [canonContents]
+  );
   const retryableChapterArtifact = useMemo(() => {
-    const chapterId = projectMetadata.active_chapter_id;
-    if (!chapterId) {
-      return false;
-    }
-    const chapterPrefix = `chapters/${chapterId}/`;
+    if (!metadata.active_chapter_id) return false;
+    const prefix = `chapters/${metadata.active_chapter_id}/`;
     return artifactSummaries.some(
-      (summary) =>
-        summary.path.startsWith(chapterPrefix) &&
-        ((summary.kind === "verification" && summary.status === "failed") ||
-          summary.kind === "state_patch_rejection")
+      (summary) => summary.path.startsWith(prefix) &&
+        ((summary.kind === "verification" && summary.status === "failed") || summary.kind === "state_patch_rejection")
     );
-  }, [artifactSummaries, projectMetadata.active_chapter_id]);
+  }, [artifactSummaries, metadata.active_chapter_id]);
 
   const refreshWorkspaceState = useCallback(async () => {
     try {
-      const [activeProject, arc, profiles] = await Promise.all([
+      const [activeProject, arc, nextProfiles] = await Promise.all([
         api.activeProject(),
         api.currentArc(),
         api.profiles()
       ]);
-      if (activeProject) {
-        setProjectState(activeProject);
-      }
+      if (activeProject) setProjectState(activeProject);
       setCurrentArc(arc);
-      setSelectedProfileId(profiles.active_profile_id);
+      setProfiles(nextProfiles);
     } catch (error) {
       setWorkspaceNotice({ kind: "error", text: formatApiError(error) });
     }
@@ -158,6 +146,20 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
     } catch (error) {
       setWorkspaceNotice({ kind: "error", text: formatApiError(error) });
     }
+  }, []);
+
+  const refreshCanon = useCallback(async () => {
+    const entries = await Promise.all(
+      (Object.entries(canonFiles) as Array<[CanonKind, string]>).map(async ([kind, path]) => {
+        try {
+          const artifact = await api.artifactContent(path);
+          return [kind, artifact.content] as const;
+        } catch {
+          return [kind, emptyCanonContents[kind]] as const;
+        }
+      })
+    );
+    setCanonContents(Object.fromEntries(entries) as Record<CanonKind, string>);
   }, []);
 
   const refreshReadiness = useCallback(async () => {
@@ -179,8 +181,8 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
   }, []);
 
   const refreshInspection = useCallback(async () => {
-    await Promise.all([refreshArtifacts(), refreshCompletionAudit()]);
-  }, [refreshArtifacts, refreshCompletionAudit]);
+    await Promise.all([refreshArtifacts(), refreshCanon(), refreshCompletionAudit()]);
+  }, [refreshArtifacts, refreshCanon, refreshCompletionAudit]);
 
   useEffect(() => {
     setProjectState(project);
@@ -190,155 +192,80 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
     setArtifactSummaries([]);
     setSelectedArtifactPath(null);
     setActiveArtifact(null);
+    setArtifactDrawerOpen(false);
     setCompletionAudit(null);
     setReadiness(null);
+    setProfiles(null);
     setPendingCommands(new Set());
-    setSelectedProfileId(project.metadata.active_profile_id);
     setFeedbackNotice(null);
-    setLiteraryNotice(null);
     setWorkspaceNotice(null);
-  }, [project]);
-
-  useEffect(() => {
-    if (!latestEvent?.artifact_path) {
-      return;
-    }
-    setSelectedArtifactPath(latestEvent.artifact_path);
-    void refreshInspection();
-  }, [latestEvent?.artifact_path, refreshInspection]);
-
-  useEffect(() => {
-    const artifactPath = selectedArtifactPath;
-    if (!artifactPath) {
-      setActiveArtifact(null);
-      return;
-    }
+    setCanonContents(emptyCanonContents);
+    setActiveView(project.metadata.active_arc_id ? "cockpit" : "plan");
 
     let cancelled = false;
-    api
-      .artifactContent(artifactPath)
-      .then((result) => {
-        if (!cancelled) {
-          setActiveArtifact(result);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setActiveArtifact(null);
-        }
-      });
-
+    api.setupState().then((setup) => {
+      if (!cancelled && setup.approved && !project.metadata.active_arc_id) setActiveView("overview");
+    }).catch(() => undefined);
     return () => {
       cancelled = true;
     };
-  }, [selectedArtifactPath]);
-
-  function handleProfilesChanged(profiles: LlmProfilesDocument) {
-    setSelectedProfileId(profiles.active_profile_id);
-    void refreshWorkspaceState();
-    void refreshReadiness();
-  }
+  }, [project]);
 
   useEffect(() => {
-    const source = new EventSource("/api/runs/events");
-    const handleHarnessEvent = (event: MessageEvent<string>) => {
+    const source = new EventSource(apiUrl("/api/runs/events"));
+    const handleHarnessEvent = (message: MessageEvent<string>) => {
       let parsed: unknown;
       try {
-        parsed = JSON.parse(event.data);
+        parsed = JSON.parse(message.data);
       } catch {
         return;
       }
-      if (!isHarnessEvent(parsed)) {
-        return;
-      }
-      setEvents((current) => {
-        if (current.some((existing) => existing.event_id === parsed.event_id)) {
-          return current;
-        }
-        return [...current, parsed];
-      });
+      if (!isHarnessEvent(parsed)) return;
+      setEvents((current) => current.some((event) => event.event_id === parsed.event_id) ? current : [...current, parsed]);
     };
     source.onmessage = handleHarnessEvent;
-    source.addEventListener("harness_event", (event) => {
-      handleHarnessEvent(event as MessageEvent<string>);
-    });
+    source.addEventListener("harness_event", (event) => handleHarnessEvent(event as MessageEvent<string>));
     source.addEventListener("stream_ready", () => undefined);
     return () => source.close();
   }, [project.metadata.project_id]);
 
   useEffect(() => {
-    refreshWorkspaceState();
-  }, [project.metadata.project_id, latestEvent?.event_id, refreshWorkspaceState]);
+    void Promise.all([refreshWorkspaceState(), refreshReadiness(), refreshArtifacts(), refreshCanon(), refreshCompletionAudit()]);
+  }, [project.metadata.project_id, refreshArtifacts, refreshCanon, refreshCompletionAudit, refreshReadiness, refreshWorkspaceState]);
 
   useEffect(() => {
-    void refreshReadiness();
-  }, [project.metadata.project_id, latestEvent?.event_id, refreshReadiness]);
+    if (!latestStatusEvent?.event_id) return;
+    void Promise.all([refreshWorkspaceState(), refreshReadiness(), refreshInspection()]);
+  }, [latestStatusEvent?.event_id, refreshInspection, refreshReadiness, refreshWorkspaceState]);
 
   useEffect(() => {
-    void refreshArtifacts();
-  }, [project.metadata.project_id, refreshArtifacts]);
+    if (latestEvent?.artifact_path) setSelectedArtifactPath(latestEvent.artifact_path);
+  }, [latestEvent?.artifact_path]);
 
   useEffect(() => {
-    void refreshCompletionAudit();
-  }, [project.metadata.project_id, latestEvent?.event_id, refreshCompletionAudit]);
-
-  const eventRows = useMemo(
-    () =>
-      events
-        .filter((event) => event.kind !== "llm_output_delta")
-        .slice(-20)
-        .reverse(),
-    [events]
-  );
-  const modelOutput = useMemo(() => harnessVisibleOutputForLatestAction(events), [events]);
-  const arcNeedsApproval =
-    currentArc?.human_review === "awaiting_review" ||
-    latestStatusEvent?.kind === "story_arc_review_required";
-  const navigationArtifacts = useMemo(
-    () =>
-      artifactSummaries
-        .filter((summary) =>
-          [
-            "context_snapshot",
-            "candidate_observations",
-            "verification",
-            "candidate_state_patch",
-            "committed_state_patch",
-            "state_patch_rejection",
-            "retry_manifest",
-            "review",
-            "draft",
-            "final",
-            "arc_plan",
-            "arc_revision",
-            "book_feedback",
-            "export"
-          ].includes(summary.kind)
-        )
-        .sort((left, right) => left.path.localeCompare(right.path))
-        .slice(-24),
-    [artifactSummaries]
-  );
-
-  async function closeProject() {
-    setWorkspaceNotice(null);
-    try {
-      await api.closeProject();
-      onProjectClosed();
-    } catch (error) {
-      setWorkspaceNotice({ kind: "error", text: formatApiError(error) });
+    if (!selectedArtifactPath) {
+      setActiveArtifact(null);
+      return;
     }
-  }
+    let cancelled = false;
+    api.artifactContent(selectedArtifactPath)
+      .then((artifact) => {
+        if (!cancelled) setActiveArtifact(artifact);
+      })
+      .catch(() => {
+        if (!cancelled) setActiveArtifact(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedArtifactPath]);
 
-  async function runCommand(
-    command: WorkspaceCommand,
-    action: () => Promise<void>
-  ): Promise<boolean> {
+  async function runCommand(command: WorkspaceCommand, action: () => Promise<void>): Promise<boolean> {
     setPendingCommands((current) => new Set(current).add(command));
     setWorkspaceNotice(null);
     try {
       await action();
-      await Promise.all([refreshWorkspaceState(), refreshReadiness()]);
+      await Promise.all([refreshWorkspaceState(), refreshReadiness(), refreshInspection()]);
       return true;
     } catch (error) {
       setWorkspaceNotice({ kind: "error", text: formatApiError(error) });
@@ -353,88 +280,51 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
   }
 
   async function startRun() {
-    await runCommand("start", async () => {
-      await api.startRun();
-    });
+    await runCommand("start", async () => { await api.startRun(); });
   }
 
   async function resumeRun() {
-    await runCommand("resume", async () => {
-      await api.resumeRun();
-    });
+    await runCommand("resume", async () => { await api.resumeRun(); });
   }
 
   async function pauseRun() {
-    let pauseStatus = "";
-    const paused = await runCommand("pause", async () => {
-      const result = await api.pauseRun();
-      pauseStatus = result.status;
-    });
-    if (paused) {
-      setFeedbackNotice({
-        kind: "success",
-        text:
-          pauseStatus === "pause_requested"
-            ? "已请求暂停，将在当前原子动作结束后生效。"
-            : `当前没有可暂停的 harness 动作：${formatRunStatus(pauseStatus)}。`
-      });
-    }
+    let status = "";
+    const ok = await runCommand("pause", async () => { status = (await api.pauseRun()).status; });
+    if (ok) setFeedbackNotice({ kind: "success", text: status === "pause_requested" ? "已请求暂停，将在当前原子动作结束后生效。" : `当前状态：${formatRunStatus(status)}。` });
   }
 
   async function exportManuscript() {
-    let artifactPath = "";
-    const exported = await runCommand("export", async () => {
-      const result = await api.exportManuscript();
-      artifactPath = result.artifact_path;
-    });
-    if (exported) {
-      setFeedbackNotice({ kind: "success", text: `已导出：${artifactPath}` });
-    }
+    let path = "";
+    const ok = await runCommand("export", async () => { path = (await api.exportManuscript()).artifact_path; });
+    if (ok) setFeedbackNotice({ kind: "success", text: `已导出：${path}` });
   }
 
-  async function approveArc() {
-    const approved = await runCommand("approve", async () => {
-      await api.approveCurrentArc();
+  async function approveArc(): Promise<boolean> {
+    const ok = await runCommand("approve", async () => { await api.approveCurrentArc(); });
+    if (ok) setFeedbackNotice({ kind: "success", text: "当前故事弧已批准，可以继续章节写作。" });
+    return ok;
+  }
+
+  async function requestArcRevision(message: string): Promise<boolean> {
+    const ok = await runCommand("revision", async () => {
+      await api.submitFeedback(`请修改当前 arc plan 与 pacing：${message}`);
+      await api.resumeRun();
     });
-    if (approved) {
-      setFeedbackNotice({ kind: "success", text: "故事弧已批准。" });
-    }
+    if (ok) setFeedbackNotice({ kind: "success", text: "故事弧修改意见已处理。" });
+    return ok;
   }
 
   async function retryCurrentChapter() {
-    let artifactPath = "";
-    const retried = await runCommand("retry", async () => {
-      const result = await api.retryCurrentChapter();
-      artifactPath = result.artifact_path;
-    });
-    if (retried) {
-      setFeedbackNotice({ kind: "success", text: `已准备重试：${artifactPath}` });
-      await refreshArtifacts();
-    }
+    let path = "";
+    const ok = await runCommand("retry", async () => { path = (await api.retryCurrentChapter()).artifact_path; });
+    if (ok) setFeedbackNotice({ kind: "success", text: `已准备重试：${path}` });
   }
 
   async function recoverStaleRun() {
-    if (!canRecoverStaleRun) {
-      return;
-    }
-    const confirmed = window.confirm(
-      "仅在确认没有仍在执行的 harness 请求时恢复。恢复后项目会停在 paused，可从已提交状态继续。"
-    );
-    if (!confirmed) {
-      return;
-    }
-
-    let previousStatus = "";
-    const recovered = await runCommand("recover", async () => {
-      const result = await api.recoverStaleRun();
-      previousStatus = result.previous_status;
-    });
-    if (recovered) {
-      setFeedbackNotice({
-        kind: "success",
-        text: `已恢复陈旧运行锁：${formatRunStatus(previousStatus)} -> ${formatRunStatus("paused")}。`
-      });
-    }
+    if (!canRecover) return;
+    const confirmed = window.confirm("仅在确认没有仍在执行的 harness 请求时恢复。恢复后项目会停在 paused。");
+    if (!confirmed) return;
+    await runCommand("recover", async () => { await api.recoverStaleRun(); });
   }
 
   async function sendFeedback() {
@@ -444,7 +334,7 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
     try {
       await api.submitFeedback(feedback.trim());
       setFeedback("");
-      setFeedbackNotice({ kind: "success", text: "已记录，会在下一个安全检查点处理。" });
+      setFeedbackNotice({ kind: "success", text: "意见已记录，会在当前原子动作结束后的安全检查点注入。" });
     } catch (error) {
       setFeedbackNotice({ kind: "error", text: formatApiError(error) });
     } finally {
@@ -452,330 +342,206 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
     }
   }
 
-  function updateLiteraryDecision(value: string) {
-    if (value === "approved" || value === "rejected") {
-      setLiteraryDecision(value);
+  async function closeProject() {
+    setWorkspaceNotice(null);
+    try {
+      await api.closeProject();
+      onProjectClosed();
+    } catch (error) {
+      setWorkspaceNotice({ kind: "error", text: formatApiError(error) });
     }
   }
 
-  async function recordLiteraryReview() {
-    if (
-      recordingReview ||
-      !literaryReviewReady
-    ) {
-      if (!recordingReview && literaryReviewBlocker) {
-        setLiteraryNotice({ kind: "error", text: literaryReviewBlocker });
-      }
-      return;
-    }
+  function handleProfilesChanged(nextProfiles: LlmProfilesDocument) {
+    setProfiles(nextProfiles);
+    void Promise.all([refreshWorkspaceState(), refreshReadiness()]);
+  }
 
-    setRecordingReview(true);
-    setLiteraryNotice(null);
-    try {
-      const record = await api.recordLiteraryReview({
-        decision: literaryDecision,
-        reviewer: literaryReviewer.trim(),
-        chapter_assessment: chapterAssessment.trim(),
-        state_patch_assessment: statePatchAssessment.trim(),
-        notes: reviewNotes.trim()
-      });
-      setLiteraryNotice({
-        kind: "success",
-        text: `已记录：${record.literary_review_json}`
-      });
-      await refreshInspection();
-    } catch (error) {
-      setLiteraryNotice({ kind: "error", text: formatApiError(error) });
-    } finally {
-      setRecordingReview(false);
+  function openArtifact(path: string) {
+    setSelectedArtifactPath(path);
+    setArtifactDrawerOpen(true);
+  }
+
+  function renderView() {
+    switch (activeView) {
+      case "overview":
+        return (
+          <ProjectOverview
+            project={projectState}
+            currentArc={currentArc}
+            readiness={readiness}
+            summaries={artifactSummaries}
+            canonCounts={canonCounts}
+            canStart={canStart}
+            canResume={canResume}
+            busy={commandBusy}
+            onStart={startRun}
+            onResume={resumeRun}
+            onExport={exportManuscript}
+            onNavigate={setActiveView}
+            onSelectArtifact={openArtifact}
+          />
+        );
+      case "plan":
+        return (
+          <SetupConversation
+            projectId={metadata.project_id}
+            onSetupChanged={() => { void Promise.all([refreshReadiness(), refreshWorkspaceState(), refreshArtifacts()]); }}
+            onExit={() => setActiveView("overview")}
+            onApproved={() => setActiveView("cockpit")}
+          />
+        );
+      case "cockpit":
+        return (
+          <CockpitView
+            project={projectState}
+            events={events}
+            currentArc={currentArc}
+            summaries={artifactSummaries}
+            modelOutput={modelOutput}
+            activeArtifact={activeArtifact}
+            canonCounts={canonCounts}
+            onSelectArtifact={openArtifact}
+            onOpenTrace={() => setActiveView("trace")}
+            onOpenCanon={() => setActiveView("canon")}
+          />
+        );
+      case "arcs":
+        return (
+          <StoryArcsView
+            currentArc={currentArc}
+            activeChapterId={metadata.active_chapter_id}
+            artifactPaths={artifactPaths}
+            summaries={artifactSummaries}
+            approving={pendingCommands.has("approve")}
+            onApprove={approveArc}
+            onRequestRevision={requestArcRevision}
+            onSelectArtifact={openArtifact}
+          />
+        );
+      case "canon":
+        return (
+          <CanonView
+            contents={canonContents}
+            summaries={artifactSummaries}
+            onSelectArtifact={openArtifact}
+            onRefresh={refreshInspection}
+          />
+        );
+      case "trace":
+        return (
+          <TraceConsole
+            events={events}
+            summaries={artifactSummaries}
+            artifactPaths={artifactPaths}
+            selectedArtifactPath={selectedArtifactPath}
+            activeArtifact={activeArtifact}
+            readiness={readiness}
+            completionAudit={completionAudit}
+            canPause={canPause}
+            canResume={canResume}
+            canRetry={Boolean(metadata.active_chapter_id && retryableChapterArtifact && !runInFlight)}
+            busy={commandBusy}
+            onSelectArtifact={setSelectedArtifactPath}
+            onPause={pauseRun}
+            onResume={resumeRun}
+            onRetry={retryCurrentChapter}
+            onRefreshAudit={refreshCompletionAudit}
+          />
+        );
+      case "settings":
+        return <LlmProfilesPanel onProfilesChanged={handleProfilesChanged} />;
     }
   }
 
   return (
-    <main className="workspace">
-      <header className="workspace-topbar">
-        <div>
-          <p className="eyebrow">当前小说</p>
-          <h1>{projectState.title}</h1>
-        </div>
-        <div className="status-cluster">
-          <span>
-            <small>模式</small>
-            {formatOperationMode(projectMetadata.operation_mode)}
-          </span>
-          <span>
-            <small>运行</small>
-            {formatRunStatus(runStatus)}
-          </span>
-          <span>
-            <small>配置</small>
-            {formatOptionalId(activeProfileId)}
-          </span>
-          <span>
-            <small>故事弧</small>
-            {formatOptionalId(activeArcId)}
-          </span>
-          <span>
-            <small>章节</small>
-            {formatOptionalId(activeChapterId)}
-          </span>
-          <span>
-            <small>流程</small>
-            {formatLoopLayer(currentLoop)}
-          </span>
-          <span>
-            <small>动作</small>
-            {formatAtomicAction(currentAction)}
-          </span>
-        </div>
-        <div className="toolbar">
-          <button
-            title="启动"
-            disabled={isCommandPending("start") || runInFlight || !canStartRun}
-            onClick={startRun}
-          >
-            <CirclePlay size={18} />
-          </button>
-          <button
-            title="继续"
-            disabled={isCommandPending("resume") || runInFlight || !canResumeRun}
-            onClick={resumeRun}
-          >
-            <RotateCw size={18} />
-          </button>
-          <button
-            title="暂停"
-            disabled={isCommandPending("pause") || !canPauseRun}
-            onClick={pauseRun}
-          >
-            <CirclePause size={18} />
-          </button>
-          <button
-            title="恢复卡住的运行"
-            disabled={isCommandPending("recover") || !canRecoverStaleRun}
-            onClick={recoverStaleRun}
-          >
-            <ShieldAlert size={18} />
-          </button>
-          <button
-            title="导出全书"
-            disabled={isCommandPending("export")}
-            onClick={exportManuscript}
-          >
-            <FileDown size={18} />
-          </button>
-          <button
-            title="重试当前章节"
-            disabled={
-              isCommandPending("retry") ||
-              runInFlight ||
-              projectMetadata.active_chapter_id === null ||
-              !retryableChapterArtifact
-            }
-            onClick={retryCurrentChapter}
-          >
-            <RefreshCcw size={18} />
-          </button>
-          <button title="关闭项目" disabled={runInFlight} onClick={closeProject}>
-            <X size={18} />
-          </button>
-        </div>
-      </header>
-
-      <section className="workspace-grid">
-        <aside className="left-rail">
-          <div className="panel-title">
-            <BookOpen size={18} />
-            <span>流程层级</span>
-          </div>
-          <nav className="loop-nav">
-            <button className={currentLoop === "book" ? "active" : ""}>全书流程</button>
-            <button className={currentLoop === "story_arc" ? "active" : ""}>故事弧流程</button>
-            <button className={currentLoop === "chapter" ? "active" : ""}>章节流程</button>
-          </nav>
-          {currentArc && (
-            <div className="arc-progress">
-              <p className="eyebrow">当前故事弧</p>
-              <strong>{currentArc.arc_id}</strong>
-              <span>{formatGenericStatus(currentArc.status)}</span>
-              <progress
-                max={currentArc.target_chapter_count}
-                value={currentArc.completed_chapter_ids.length}
-              />
-              <small>
-                {currentArc.completed_chapter_ids.length} / {currentArc.target_chapter_count} 章
-              </small>
-            </div>
-          )}
-          <div className="artifact-nav-block">
-            <div className="panel-title compact">
-              <FileText size={18} />
-              <span>项目文件</span>
-            </div>
-            <div className="artifact-nav">
-              {navigationArtifacts.map((summary) => (
-                <button
-                  key={summary.path}
-                  className={summary.path === selectedArtifactPath ? "active" : ""}
-                  onClick={() => setSelectedArtifactPath(summary.path)}
-                >
-                  <span>{formatArtifactTitle(summary)}</span>
-                  <small>{summary.path}</small>
-                  <em>{formatGenericStatus(summary.status)}</em>
-                </button>
-              ))}
-              {navigationArtifacts.length === 0 && <p className="muted">还没有产物。</p>}
-            </div>
-          </div>
-          <LlmProfilesPanel onProfilesChanged={handleProfilesChanged} />
-        </aside>
-
-        <section className="center-stage">
-          <SetupConversation
-            projectId={projectMetadata.project_id}
-            onSetupChanged={() => {
-              void refreshReadiness();
-              void refreshWorkspaceState();
-            }}
-          />
-          {workspaceNotice && (
-            <p className={`notice-banner ${workspaceNotice.kind}`}>{workspaceNotice.text}</p>
-          )}
-          {arcNeedsApproval && (
-            <div className="arc-approval-card">
-              <div>
-                <p className="eyebrow">故事弧审查</p>
-                <h2>{formatOptionalId(activeArcId)}</h2>
-                <p>{currentArc?.plan_path ?? "当前故事弧计划正在等待批准。"}</p>
-              </div>
-              <button
-                className="primary-button"
-                disabled={isCommandPending("approve")}
-                onClick={approveArc}
-              >
-                <CheckCircle2 size={18} />
-                批准故事弧
+    <main className="novelpilot-app">
+      <aside className="app-sidebar">
+        <header className="sidebar-brand"><Feather size={21} /><strong>NovelPilot</strong></header>
+        <nav>
+          {navItems.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button key={item.id} aria-label={item.label} className={activeView === item.id ? "active" : ""} onClick={() => setActiveView(item.id)}>
+                <Icon size={18} /> <span>{item.label}</span>
               </button>
-            </div>
-          )}
-          <div className="stream-card">
-            <div className="panel-title">
-              <PanelRightOpen size={18} />
-              <span>可见输出</span>
-            </div>
-            {modelOutput && (
-              <div className="model-output">
-                <p className="eyebrow">模型输出</p>
-                <pre>{modelOutput}</pre>
-              </div>
-            )}
-            {activeArtifact && (
-              <div className="active-output">
-                <div>
-                  <p className="eyebrow">当前产物</p>
-                  <strong>{activeArtifact.path}</strong>
-                </div>
-                <pre>{activeArtifact.content}</pre>
-              </div>
-            )}
-            <div className="event-stream">
-              {eventRows.map((event) => (
-                <article key={event.event_id}>
-                  <strong>{formatEventKind(event.kind)}</strong>
-                  <small>{formatEventStatusLine(event)}</small>
-                  <p>{formatEventMessage(event.message)}</p>
-                </article>
-              ))}
-            </div>
+            );
+          })}
+        </nav>
+        <footer>
+          <span>当前书籍</span>
+          <button className="current-book-button" title={projectState.title} onClick={() => setActiveView("overview")}>
+            <span className="book-gem" />
+            <strong>{projectState.title}</strong>
+            <small>⌄</small>
+          </button>
+          <div className="sidebar-utilities">
+            <button title="刷新工作区" onClick={() => void Promise.all([refreshWorkspaceState(), refreshReadiness(), refreshInspection()])}><RefreshCcw size={16} /></button>
+            <button title="恢复卡住的运行" disabled={!canRecover} onClick={() => void recoverStaleRun()}><ShieldCheck size={16} /></button>
+            <button title="关闭项目" disabled={runInFlight} onClick={() => void closeProject()}><X size={16} /></button>
           </div>
-          <div className="literary-review-card">
-            <div className="panel-title">
-              <ShieldCheck size={18} />
-              <span>文学审查</span>
-            </div>
-            <div className="review-form-grid">
-              <select
-                value={literaryDecision}
-                disabled={recordingReview}
-                onChange={(event) => updateLiteraryDecision(event.target.value)}
-              >
-                <option value="approved">{formatLiteraryDecision("approved")}</option>
-                <option value="rejected">{formatLiteraryDecision("rejected")}</option>
-              </select>
-              <input
-                value={literaryReviewer}
-                disabled={recordingReview}
-                onChange={(event) => setLiteraryReviewer(event.target.value)}
-                placeholder="审查人"
-              />
-            </div>
-            <textarea
-              value={chapterAssessment}
-              disabled={recordingReview}
-              onChange={(event) => setChapterAssessment(event.target.value)}
-              placeholder="章节正文评价"
-            />
-            <textarea
-              value={statePatchAssessment}
-              disabled={recordingReview}
-              onChange={(event) => setStatePatchAssessment(event.target.value)}
-              placeholder="状态补丁评价"
-            />
-            <textarea
-              value={reviewNotes}
-              disabled={recordingReview}
-              onChange={(event) => setReviewNotes(event.target.value)}
-              placeholder="补充记录"
-            />
-            <button
-              className="primary-button"
-              disabled={
-                recordingReview || !literaryReviewReady
-              }
-              onClick={recordLiteraryReview}
-            >
-              <ShieldCheck size={18} />
-              记录审查
-            </button>
-            {literaryReviewBlocker && !literaryNotice && (
-              <p className="feedback-status error">{literaryReviewBlocker}</p>
-            )}
-            {literaryNotice && (
-              <p className={`feedback-status ${literaryNotice.kind}`}>{literaryNotice.text}</p>
-            )}
-          </div>
-          <div className="feedback-box">
-            <input
-              value={feedback}
-              disabled={sendingFeedback}
-              onChange={(event) => setFeedback(event.target.value)}
-              placeholder="给下一个安全检查点的反馈"
-            />
-            <button
-              title="提交反馈"
-              disabled={sendingFeedback || !feedback.trim()}
-              onClick={sendFeedback}
-            >
-              <Send size={18} />
-            </button>
-          </div>
-          {feedbackNotice && (
-            <p className={`feedback-status ${feedbackNotice.kind}`}>{feedbackNotice.text}</p>
-          )}
-        </section>
+        </footer>
+      </aside>
 
-        <HarnessPanel
-          events={events}
-          artifacts={artifactPaths}
-          summaries={artifactSummaries}
-          selectedArtifactPath={selectedArtifactPath}
-          artifactContent={activeArtifact?.content ?? ""}
-          readiness={readiness}
-          completionAudit={completionAudit}
-          onSelectArtifact={setSelectedArtifactPath}
-          onRefreshArtifacts={refreshInspection}
-        />
+      <section className="app-workspace">
+        <header className="app-topbar">
+          <div className="provider-status">
+            <span>{currentProfile?.name ?? formatOptionalId(profiles?.active_profile_id)}</span>
+            <small>/ {currentProfile?.model ?? "未选择模型"}</small>
+            <i className={currentProfile?.has_api_key ? "ready" : ""} />
+          </div>
+          <div className="project-location">
+            <strong>《{projectState.title}》</strong>
+            <span>/ {viewLabels[activeView]}</span>
+          </div>
+          <div className="topbar-statuses">
+            <span className="soft-badge amber">{formatOperationMode(metadata.operation_mode)}</span>
+            {latestStatusEvent && <span className="soft-badge">{formatLoopLayer(latestStatusEvent.loop_layer)}</span>}
+            <span className={`soft-badge run-${runStatus}`}><span className={`status-dot ${runStatus}`} />{formatRunStatus(runStatus)}</span>
+          </div>
+        </header>
+
+        {workspaceNotice && (
+          <div className={`workspace-notice ${workspaceNotice.kind}`}>
+            <span>{workspaceNotice.text}</span>
+            <button title="关闭" onClick={() => setWorkspaceNotice(null)}><X size={15} /></button>
+          </div>
+        )}
+
+        <div className={`workspace-view view-${activeView}`}>{renderView()}</div>
+
+        {activeView === "cockpit" && (
+          <footer className="feedback-dock">
+            <label>
+              <input value={feedback} disabled={sendingFeedback} onChange={(event) => setFeedback(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void sendFeedback()} placeholder="告诉 NovelPilot 需要如何纠偏..." />
+            </label>
+            <span className="feedback-scope">范围：<strong>模型自动判断</strong></span>
+            <div className="feedback-suggestions">
+              {["节奏太快", "增加伏笔", "强化动机"].map((suggestion) => <button key={suggestion} onClick={() => setFeedback(suggestion)}>{suggestion}</button>)}
+            </div>
+            <button className="send-feedback-button" title="提交反馈" disabled={sendingFeedback || !feedback.trim()} onClick={() => void sendFeedback()}><Send size={18} /></button>
+          </footer>
+        )}
+
+        {feedbackNotice && (
+          <div className={`feedback-toast ${feedbackNotice.kind}`}>
+            <span>{feedbackNotice.text}</span>
+            <button title="关闭" onClick={() => setFeedbackNotice(null)}><X size={14} /></button>
+          </div>
+        )}
       </section>
+
+      {artifactDrawerOpen && (
+        <div className="artifact-drawer-backdrop" onMouseDown={() => setArtifactDrawerOpen(false)}>
+          <aside className="artifact-drawer" onMouseDown={(event) => event.stopPropagation()}>
+            <header>
+              <div><span>产物预览</span><strong>{selectedArtifactPath}</strong></div>
+              <button title="关闭预览" onClick={() => setArtifactDrawerOpen(false)}><X size={18} /></button>
+            </header>
+            <pre>{activeArtifact?.content ?? "正在读取产物..."}</pre>
+          </aside>
+        </div>
+      )}
     </main>
   );
 }

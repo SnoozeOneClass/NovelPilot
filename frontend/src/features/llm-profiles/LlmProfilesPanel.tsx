@@ -1,4 +1,4 @@
-import { Activity, CheckCircle2, KeyRound, Pencil, Plus, Save } from "lucide-react";
+import { Check, KeyRound, Pencil, PlugZap, Plus, Save } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, formatApiError } from "../../api/client";
 import { formatProtocol } from "../../types/display";
@@ -62,10 +62,7 @@ export function LlmProfilesPanel({ onProfilesChanged }: LlmProfilesPanelProps) {
     setSaving(true);
     setNotice(null);
     try {
-      await api.upsertProfile({
-        ...form,
-        api_key: form.api_key?.trim() || null
-      });
+      await api.upsertProfile({ ...form, api_key: form.api_key?.trim() || null });
       const nextProfiles = await api.profiles();
       setProfiles(nextProfiles);
       onProfilesChanged?.(nextProfiles);
@@ -99,10 +96,7 @@ export function LlmProfilesPanel({ onProfilesChanged }: LlmProfilesPanelProps) {
     setNotice(null);
     try {
       const result = await api.testProfile(profileId);
-      setNotice({
-        kind: "success",
-        text: `连接测试通过：${result.model_snapshot || result.profile_id}`
-      });
+      setNotice({ kind: "success", text: `连接测试通过：${result.model_snapshot || result.profile_id}` });
     } catch (error) {
       setNotice({ kind: "error", text: formatApiError(error) });
     } finally {
@@ -111,115 +105,67 @@ export function LlmProfilesPanel({ onProfilesChanged }: LlmProfilesPanelProps) {
   }
 
   return (
-    <section className="subpanel">
-      <div className="panel-title">
-        <KeyRound size={18} />
-        <span>LLM 配置</span>
-      </div>
-      <div className="profile-list">
-        {profiles?.profiles.map((profile) => (
-          <div key={profile.id} className={profile.id === profiles.active_profile_id ? "active" : ""}>
-            <div>
-              <strong>{profile.name}</strong>
-              <span>{formatProtocol(profile.protocol)}</span>
-              <small>
-                {profile.model} | {profile.has_api_key ? "已保存密钥" : "未保存密钥"}
-              </small>
-            </div>
-            <div className="profile-row-actions">
-              <button
-                title="设为当前配置"
-                disabled={saving || loading || testingProfileId !== null}
-                onClick={() => selectProfile(profile.id)}
-              >
-                <CheckCircle2 size={16} />
-              </button>
-              <button
-                title="测试连接"
-                disabled={saving || loading || testingProfileId !== null || !profile.has_api_key}
-                onClick={() => testProfile(profile.id)}
-              >
-                <Activity size={16} />
-              </button>
-              <button
-                title="编辑配置"
-                disabled={saving || testingProfileId !== null}
-                onClick={() => editProfile(profile)}
-              >
-                <Pencil size={16} />
-              </button>
-            </div>
-          </div>
-        ))}
-        {profiles?.profiles.length === 0 && !loading && (
-          <p className="muted">还没有配置 LLM。</p>
-        )}
-      </div>
-      {notice && <p className={`notice-banner compact ${notice.kind}`}>{notice.text}</p>}
-      <div className="profile-form">
-        <div className="profile-form-title">
-          <span>{editingExisting ? "编辑配置" : "新建配置"}</span>
-          <button
-            title="新建配置"
-            onClick={() => {
-              setForm(emptyForm);
-              setEditingExisting(false);
-            }}
-          >
-            <Plus size={16} />
-          </button>
+    <section className="np-surface llm-settings-view">
+      <header className="view-heading">
+        <div>
+          <h1>设置与模型</h1>
+          <p>配置保存在本机全局文件中；小说项目只记录 profile_id 与模型快照。</p>
         </div>
-        <input
-          value={form.id}
-          disabled={editingExisting}
-          onChange={(event) => setForm({ ...form, id: event.target.value })}
-          placeholder="profile-id"
-        />
-        <input
-          value={form.name}
-          onChange={(event) => setForm({ ...form, name: event.target.value })}
-          placeholder="配置名称"
-        />
-        <select
-          value={form.protocol}
-          onChange={(event) =>
-            setForm({
-              ...form,
-              protocol: event.target.value as LlmProfileMutation["protocol"]
-            })
-          }
-        >
-          <option value="openai-compatible">OpenAI 兼容协议</option>
-          <option value="anthropic-compatible">Anthropic 兼容协议</option>
-        </select>
-        <input
-          value={form.base_url}
-          onChange={(event) => setForm({ ...form, base_url: event.target.value })}
-          placeholder="https://api.example.com/v1"
-        />
-        <input
-          value={form.model}
-          onChange={(event) => setForm({ ...form, model: event.target.value })}
-          placeholder="模型名"
-        />
-        <input
-          value={form.api_key ?? ""}
-          onChange={(event) => setForm({ ...form, api_key: event.target.value })}
-          placeholder={editingExisting ? "留空则保留原密钥" : "API Key"}
-          type="password"
-        />
-        <label className="profile-enabled">
-          <input
-            checked={form.enabled}
-            type="checkbox"
-            onChange={(event) => setForm({ ...form, enabled: event.target.checked })}
-          />
-          启用
-        </label>
-        <button className="primary-button" disabled={saving || loading} onClick={saveProfile}>
-          <Save size={16} />
-          保存
+        <button className="outline-button" onClick={() => { setForm(emptyForm); setEditingExisting(false); }}>
+          <Plus size={16} /> 新建配置
         </button>
+      </header>
+
+      {notice && <p className={`notice-banner ${notice.kind}`}>{notice.text}</p>}
+
+      <div className="llm-settings-grid">
+        <section className="profile-catalog">
+          <h2>LLM Profiles</h2>
+          <div>
+            {profiles?.profiles.map((profile) => {
+              const active = profile.id === profiles.active_profile_id;
+              return (
+                <article key={profile.id} className={active ? "active" : ""}>
+                  <span className={`provider-mark ${active ? "active" : ""}`}><KeyRound size={18} /></span>
+                  <div>
+                    <div className="profile-name-line">
+                      <strong>{profile.name}</strong>
+                      {active && <span className="soft-badge green"><Check size={13} /> 当前配置</span>}
+                    </div>
+                    <p>{formatProtocol(profile.protocol)} · {profile.model}</p>
+                    <small>{profile.base_url} · {profile.has_api_key ? "已保存密钥" : "未保存密钥"}</small>
+                  </div>
+                  <div className="profile-actions">
+                    <button title="设为当前配置" disabled={saving || loading || testingProfileId !== null || active} onClick={() => void selectProfile(profile.id)}><Check size={16} /></button>
+                    <button title="测试连接" disabled={saving || loading || testingProfileId !== null || !profile.has_api_key} onClick={() => void testProfile(profile.id)}><PlugZap size={16} /></button>
+                    <button title="编辑配置" disabled={saving || testingProfileId !== null} onClick={() => editProfile(profile)}><Pencil size={16} /></button>
+                  </div>
+                </article>
+              );
+            })}
+            {profiles?.profiles.length === 0 && !loading && <p className="empty-state">还没有配置可用的 LLM。</p>}
+          </div>
+        </section>
+
+        <section className="profile-editor">
+          <header>
+            <div><h2>{editingExisting ? "编辑配置" : "新建配置"}</h2><p>兼容 OpenAI 与 Anthropic 协议的 Base URL。</p></div>
+          </header>
+          <div className="profile-form-grid">
+            <label><span>Profile ID</span><input value={form.id} disabled={editingExisting} onChange={(event) => setForm({ ...form, id: event.target.value })} placeholder="main" /></label>
+            <label><span>显示名称</span><input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="主要写作模型" /></label>
+            <label><span>协议</span><select value={form.protocol} onChange={(event) => setForm({ ...form, protocol: event.target.value as LlmProfileMutation["protocol"] })}><option value="openai-compatible">OpenAI 兼容协议</option><option value="anthropic-compatible">Anthropic 兼容协议</option></select></label>
+            <label><span>模型名</span><input value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })} placeholder="gpt-4.1" /></label>
+            <label className="wide"><span>Base URL</span><input value={form.base_url} onChange={(event) => setForm({ ...form, base_url: event.target.value })} placeholder="https://api.example.com/v1" /></label>
+            <label className="wide"><span>API Key</span><input value={form.api_key ?? ""} onChange={(event) => setForm({ ...form, api_key: event.target.value })} placeholder={editingExisting ? "留空则保留原密钥" : "API Key"} type="password" /></label>
+            <label className="profile-enabled"><input checked={form.enabled} type="checkbox" onChange={(event) => setForm({ ...form, enabled: event.target.checked })} /><span>启用这个配置</span></label>
+          </div>
+          <footer>
+            <button className="gold-button" disabled={saving || loading || !form.id.trim() || !form.name.trim() || !form.model.trim()} onClick={() => void saveProfile()}>
+              <Save size={16} /> {saving ? "正在保存..." : "保存配置"}
+            </button>
+          </footer>
+        </section>
       </div>
     </section>
   );

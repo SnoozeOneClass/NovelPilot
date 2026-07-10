@@ -1,7 +1,7 @@
-import { FolderOpen, Plus } from "lucide-react";
+import { Bot, Clock3, Feather, FolderOpen, Plus, UserRound } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, formatApiError } from "../../api/client";
-import { formatOperationMode } from "../../types/display";
+import { formatOperationMode, formatRunStatus } from "../../types/display";
 import type { OperationMode, ProjectSummary } from "../../types/domain";
 
 interface ProjectSelectorProps {
@@ -27,11 +27,8 @@ export function ProjectSelector({ onProjectOpened }: ProjectSelectorProps) {
         }
       })
       .catch((error) => {
-        if (!cancelled) {
-          setNotice({ kind: "error", text: formatApiError(error) });
-        }
+        if (!cancelled) setNotice({ kind: "error", text: formatApiError(error) });
       });
-
     return () => {
       cancelled = true;
     };
@@ -65,43 +62,67 @@ export function ProjectSelector({ onProjectOpened }: ProjectSelectorProps) {
   }
 
   return (
-    <main className="project-shell">
-      <section className="project-panel">
-        <div>
-          <p className="eyebrow">Novelpilot</p>
-          <h1>打开小说项目</h1>
-        </div>
+    <main className="project-selector-shell">
+      <header className="selector-brand">
+        <span><Feather size={22} /></span>
+        <div><strong>NovelPilot</strong><small>本地 AI 长篇小说创作系统</small></div>
+      </header>
 
-        <div className="project-create">
-          <input
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            placeholder="小说名称"
-          />
-          <select value={mode} onChange={(event) => setMode(event.target.value as OperationMode)}>
-            <option value="full_auto">全自动</option>
-            <option value="participatory">参与模式</option>
-          </select>
-          <button className="primary-button" disabled={creating} onClick={createProject}>
-            <Plus size={18} /> 新建
-          </button>
-        </div>
-        {notice && <p className={`notice-banner ${notice.kind}`}>{notice.text}</p>}
+      <div className="project-selector-grid">
+        <section className="np-surface create-project-panel">
+          <p className="eyebrow">新建小说</p>
+          <h1>从一个新的创作项目开始</h1>
+          <p>小说、设定、产物与正史状态都会保存在本地项目目录中。</p>
 
-        <div className="project-list">
-          {projects.map((project) => (
-            <button
-              key={project.metadata.project_id}
-              disabled={openingProject === project.name}
-              onClick={() => openProject(project.name)}
-            >
-              <FolderOpen size={18} />
-              <span>{project.title}</span>
-              <small>{formatOperationMode(project.metadata.operation_mode)}</small>
+          <label>
+            <span>小说名称</span>
+            <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="输入小说名称" onKeyDown={(event) => event.key === "Enter" && void createProject()} />
+          </label>
+
+          <fieldset>
+            <legend>创作模式</legend>
+            <button className={mode === "full_auto" ? "selected" : ""} onClick={() => setMode("full_auto")}>
+              <Bot size={19} />
+              <span><strong>全自动模式</strong><small>故事弧与章节由 harness 连续推进，你可以随时提出意见。</small></span>
             </button>
-          ))}
-        </div>
-      </section>
+            <button className={mode === "participatory" ? "selected" : ""} onClick={() => setMode("participatory")}>
+              <UserRound size={19} />
+              <span><strong>参与模式</strong><small>每个故事弧计划都等待你审批，章节 loop 自动执行。</small></span>
+            </button>
+          </fieldset>
+
+          <button className="gold-button create-project-button" disabled={creating || !title.trim()} onClick={() => void createProject()}>
+            <Plus size={17} /> {creating ? "正在创建..." : "新建项目"}
+          </button>
+          {notice && <p className="notice-banner error">{notice.text}</p>}
+        </section>
+
+        <section className="np-surface recent-projects-panel">
+          <header className="view-heading compact-heading">
+            <div><h2>打开本地项目</h2><p>一次只打开一个小说项目继续创作。</p></div>
+          </header>
+          <div className="project-list-modern">
+            {projects.map((project) => (
+              <button key={project.metadata.project_id} disabled={openingProject === project.name} onClick={() => void openProject(project.name)}>
+                <span className="project-folder"><FolderOpen size={20} /></span>
+                <span className="project-list-copy">
+                  <strong>{project.title}</strong>
+                  <small title={project.path}>{project.path}</small>
+                  <span><em>{formatOperationMode(project.metadata.operation_mode)}</em><em>{formatRunStatus(project.metadata.run_status)}</em></span>
+                </span>
+                <Clock3 size={16} />
+              </button>
+            ))}
+            {projects.length === 0 && (
+              <div className="empty-state">
+                <FolderOpen size={26} />
+                <h2>还没有本地项目</h2>
+                <p>在左侧输入小说名称即可创建。</p>
+              </div>
+            )}
+          </div>
+        </section>
+      </div>
     </main>
   );
 }

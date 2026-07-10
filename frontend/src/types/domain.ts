@@ -164,7 +164,7 @@ export function isHarnessEvent(value: unknown): value is HarnessEvent {
   }
 
   return (
-    isNullableNumber(value.seq) &&
+    (value.seq === undefined || isNullableNumber(value.seq)) &&
     typeof value.event_id === "string" &&
     typeof value.timestamp === "string" &&
     typeof value.project_id === "string" &&

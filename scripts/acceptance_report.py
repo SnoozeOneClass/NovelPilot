@@ -94,7 +94,7 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
         probes=(
             EvidenceProbe("backend/app/harness/orchestrator.py", ("_plan_initial_story_arc", "Do not plan the full book")),
             EvidenceProbe("backend/tests/test_orchestrator.py", ("test_completed_arc_rolls_to_next_arc_plan",)),
-            EvidenceProbe("README.md", ("rolling current-arc",)),
+            EvidenceProbe("README.md", ("滚动规划当前故事弧",)),
         ),
     ),
     AcceptanceCriterion(
@@ -127,9 +127,15 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
         id="workspace_ui",
         requirement="Frontend provides a three-column harness workspace with status, artifacts, and signals.",
         probes=(
-            EvidenceProbe("frontend/src/features/workspace/Workspace.tsx", ("workspace-grid", "可见输出")),
-            EvidenceProbe("frontend/src/features/harness-panel/HarnessPanel.tsx", ("选中证据", "Harness 产物")),
-            EvidenceProbe("frontend/src/styles.css", ("workspace-grid", "grid-template-columns")),
+            EvidenceProbe(
+                "frontend/src/features/workspace/CockpitView.tsx",
+                ("cockpit-grid", "Harness 状态", "当前执行流"),
+            ),
+            EvidenceProbe(
+                "frontend/src/features/workspace/TraceConsole.tsx",
+                ("事件时间线", "Artifacts", "Validation"),
+            ),
+            EvidenceProbe("frontend/src/styles.css", (".cockpit-grid", "grid-template-columns")),
         ),
     ),
     AcceptanceCriterion(
@@ -163,9 +169,9 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
         id="docs",
         requirement="Public architecture notes, local usage, README, and validation commands are documented.",
         probes=(
-            EvidenceProbe("docs/architecture.md", ("Three Loop Layers", "Candidate Versus Committed State")),
-            EvidenceProbe("docs/local-usage.md", ("Quality Gate", "Real Provider Smoke")),
-            EvidenceProbe("README.md", ("Validation", "Storage Model")),
+            EvidenceProbe("docs/architecture.md", ("三层 Loop", "候选状态与已提交状态")),
+            EvidenceProbe("docs/local-usage.md", ("质量门禁", "真实 Provider Smoke")),
+            EvidenceProbe("README.md", ("验证", "存储模型")),
             EvidenceProbe("package.json", ("typecheck", "lint", "test")),
         ),
     ),
