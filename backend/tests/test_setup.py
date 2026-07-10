@@ -1,587 +1,1132 @@
+import json
+from dataclasses import replace
+from pathlib import Path
+
 import pytest
+from fastapi import HTTPException
 from pydantic import SecretStr, ValidationError
 
+from app.api import setup as setup_api
 from app.harness.loops import book as book_loop
+from app.harness.loops.book import BookDirectionSynthesis, BookDiscussionTurnResult
 from app.llm.gateway import ChatResult
 from app.schemas.profiles import LlmProfile
-from app.schemas.setup import SetupAnswerRequest
-from app.schemas.setup import SetupAnswer
-from app.schemas.setup import SetupOption
-from app.schemas.setup import SetupQuestion
 from app.schemas.projects import ProjectMetadata
+from app.schemas.setup import (
+    BookDirectionConstraints,
+    BookDirectionReview,
+    BookDirectionReviewIssue,
+    ConfirmedDecisionCoverage,
+    SetupApprovalRequest,
+    SetupMessage,
+    SetupReadinessSignal,
+    SetupStateDocument,
+    SetupSuggestion,
+    SetupTurnRequest,
+    SupersededDecision,
+)
+from app.storage import transactions as file_transactions
 from app.storage.events import read_events
-from app.storage.json_files import read_json
-from app.storage.json_files import write_json
+from app.storage.json_files import read_json, write_json
 from app.storage.setup import (
-    DEFAULT_SETUP_QUESTIONS,
-    answer_setup_question,
-    append_setup_question,
+    SetupRevisionConflict,
     approve_setup,
     initialize_setup_state,
     read_setup_state,
-    replace_setup_question,
+    record_discussion_turn,
+    save_book_direction_candidate,
+    write_discussion_context_snapshot,
+    write_review_context_snapshot,
 )
 
 
-def test_setup_state_initializes_with_first_question(tmp_path) -> None:
-    project_path = tmp_path / "novel"
-    (project_path / "book").mkdir(parents=True)
+def test_setup_state_initializes_as_open_unapproved_discussion(tmp_path: Path) -> None:
+    project_path = _make_project(tmp_path)
 
     state = initialize_setup_state(project_path)
 
+    assert state.schema_version == 2
+    assert state.phase == "discussing"
     assert state.approved is False
-    assert state.next_question is not None
-    assert state.next_question.id == DEFAULT_SETUP_QUESTIONS[0].id
-    assert (project_path / "book" / "setup.json").exists()
+    assert state.turn_count == 0
+    assert state.messages == []
+    assert state.direction_draft == ""
+    assert state.candidate is None
+    assert (project_path / "book" / "discussion" / "transcript.jsonl").read_text(
+        encoding="utf-8"
+    ) == ""
+    assert state.direction_draft_version_path is not None
+    assert state.discussion_state_version_path is not None
+    assert state.discussion_transcript_version_path is not None
+    assert (project_path / state.direction_draft_version_path).exists()
+    assert (project_path / state.discussion_state_version_path).exists()
+    assert (project_path / state.discussion_transcript_version_path).exists()
+    assert not (project_path / "book" / "direction.md").exists()
 
 
-def test_answer_setup_question_moves_to_next_required_question(tmp_path) -> None:
-    project_path = tmp_path / "novel"
-    (project_path / "book").mkdir(parents=True)
-    initialize_setup_state(project_path)
+def test_setup_turn_request_rejects_blank_message() -> None:
+    with pytest.raises(ValidationError, match="must not be blank"):
+        SetupTurnRequest(message="   ")
 
-    state = answer_setup_question(
-        project_path,
-        SetupAnswerRequest(question_id="genre_promise", answer="A tense mystery."),
+    with pytest.raises(ValidationError, match="at most 32000 characters"):
+        SetupTurnRequest(message="x" * 32_001)
+
+
+def test_discussion_context_uses_summary_and_recent_raw_messages_only() -> None:
+    messages = [
+        SetupMessage(
+            id=f"message-{index:02d}",
+            turn=(index // 2) + 1,
+            role="user" if index % 2 == 0 else "assistant",
+            content=f"raw-message-{index:02d}",
+        )
+        for index in range(14)
+    ]
+    state = SetupStateDocument(
+        turn_count=7,
+        messages=messages,
+        direction_draft="# Direction\n\nCurrent complete candidate.",
+        discussion_summary="The older discussion is represented here.",
+        confirmed_decisions=["Keep the mystery fair."],
+        unresolved_questions=["How costly is the ending?"],
     )
 
-    assert state.answers[0].answer == "A tense mystery."
-    assert state.next_question is not None
-    assert state.next_question.id == "protagonist_direction"
+    assembly = book_loop.assemble_discussion_context(state, "Make the ending bittersweet.")
+    recent_source = next(
+        source
+        for source in assembly.snapshot["sources"]
+        if source["id"] == "recent-book-discussion"
+    )
+
+    assert recent_source["included_message_ids"] == [
+        f"message-{index:02d}" for index in range(4, 14)
+    ]
+    assert assembly.snapshot["summarized"] == [
+        f"message-{index:02d}" for index in range(4)
+    ]
+    assert "raw-message-00" not in assembly.prompt
+    assert "raw-message-13" in assembly.prompt
+    assert "The older discussion is represented here." in assembly.prompt
+    assert "Make the ending bittersweet." in assembly.prompt
+    assert assembly.snapshot["budget"]["total_character_count"] <= (
+        book_loop.DISCUSSION_CONTEXT_CHARACTER_BUDGET
+    )
+    injected = {item["id"]: item for item in assembly.snapshot["injected"]}
+    assert injected["current_direction_draft"]["source_path"] == (
+        "book/direction_draft.md"
+    )
+    assert len(injected["current_direction_draft"]["sha256"]) == 64
+    assert "content" not in injected["current_direction_draft"]
 
 
-def test_setup_answer_request_rejects_blank_answer() -> None:
-    with pytest.raises(ValidationError, match="must not be blank"):
-        SetupAnswerRequest(question_id="genre_promise", answer="   ")
+def test_discussion_context_excludes_raw_message_that_exceeds_recent_budget() -> None:
+    state = SetupStateDocument(
+        turn_count=1,
+        messages=[
+            SetupMessage(
+                id="oversized-message",
+                turn=1,
+                role="user",
+                content="x" * (book_loop.RECENT_MESSAGE_CHARACTER_BUDGET + 1),
+            )
+        ],
+        direction_draft="# Direction\n\nThe intent has already been integrated.",
+        discussion_summary="The oversized input is represented by this compact summary.",
+    )
+
+    assembly = book_loop.assemble_discussion_context(state, "Continue from the summary.")
+
+    recent_source = next(
+        source
+        for source in assembly.snapshot["sources"]
+        if source["id"] == "recent-book-discussion"
+    )
+    assert recent_source["included_message_ids"] == []
+    assert assembly.snapshot["summarized"] == ["oversized-message"]
+    assert "x" * 100 not in assembly.prompt
+    assert "The oversized input is represented" in assembly.prompt
 
 
-def test_blank_setup_answer_does_not_satisfy_required_question(tmp_path) -> None:
-    project_path = tmp_path / "novel"
-    (project_path / "book").mkdir(parents=True)
+def test_review_context_records_versioned_sources_hashes_and_total_budget() -> None:
+    state = SetupStateDocument(
+        revision=4,
+        turn_count=3,
+        direction_draft=_long_direction(),
+        discussion_summary="A compact discussion summary.",
+        confirmed_decisions=["Clues must remain fair"],
+        direction_draft_version_path="book/discussion/turn-0003/attempt-001/direction_draft.md",
+        discussion_state_version_path="book/discussion/turn-0003/attempt-001/state.json",
+        discussion_transcript_version_path=(
+            "book/discussion/turn-0003/attempt-001/transcript.jsonl"
+        ),
+    )
+
+    snapshot = book_loop.build_review_context_snapshot(state)
+
+    sources = {source["id"]: source for source in snapshot["sources"]}
+    injected = {item["id"]: item for item in snapshot["injected"]}
+    assert sources["book-direction-draft"]["resolved_version_path"] == (
+        state.direction_draft_version_path
+    )
+    assert sources["book-discussion-state"]["resolved_version_path"] == (
+        state.discussion_state_version_path
+    )
+    assert sources["book-discussion-transcript"]["resolved_version_path"] == (
+        state.discussion_transcript_version_path
+    )
+    assert len(injected["complete_direction_draft"]["sha256"]) == 64
+    assert "content" not in injected["complete_direction_draft"]
+    assert snapshot["budget"]["total_character_count"] <= (
+        book_loop.SYNTHESIS_CONTEXT_CHARACTER_BUDGET
+    )
+
+
+def test_book_discussion_parses_cumulative_draft_and_advisory_readiness(
+    monkeypatch,
+) -> None:
+    profile = _profile()
+    captured = {}
+
+    def fake_call(_profile: LlmProfile, request):
+        captured["request"] = request
+        return ChatResult(
+            content=json.dumps(
+                {
+                    "reply": "The emotional cost is now clear. What must remain unresolved?",
+                    "direction_draft": _long_direction(),
+                    "discussion_summary": "A fair mystery with a costly hopeful ending.",
+                    "confirmed_decisions": ["Fair clues", "Costly hopeful ending"],
+                    "superseded_decisions": [],
+                    "unresolved_questions": ["The final relationship outcome"],
+                    "assumptions": ["The city remains politically stable"],
+                    "contradictions": [],
+                    "suggestions": [
+                        {"label": "Leave it open", "message": "Keep that relationship open."},
+                        {"label": "Reconcile", "message": "Let them reconcile at a cost."},
+                        {"label": "Separate", "message": "They should separate permanently."},
+                        {"label": "Ignored", "message": "This fourth suggestion is discarded."},
+                    ],
+                    "ready_status": "ready",
+                    "readiness_reason": "The stable direction is sufficiently concrete.",
+                },
+                ensure_ascii=False,
+            ),
+            model_snapshot="story-model",
+            provider_snapshot="openai-compatible",
+            usage={"total_tokens": 123},
+        )
+
+    monkeypatch.setattr(book_loop, "call_llm", fake_call)
+    state = SetupStateDocument()
+    assembly = book_loop.assemble_discussion_context(state, "I want a costly hopeful ending.")
+
+    result = book_loop.continue_book_discussion(
+        profile,
+        state,
+        "I want a costly hopeful ending.",
+        assembly,
+    )
+
+    assert result.direction_draft == _long_direction()
+    assert result.readiness.status == "ready"
+    assert len(result.suggestions) == 3
+    assert result.suggestions[0].id == "turn-0001-suggestion-1"
+    assert captured["request"].metadata["atomic_action"] == "continue_book_discussion"
+    assert captured["request"].response_format == {"type": "json_object"}
+
+
+def test_book_discussion_rejects_invalid_model_state(monkeypatch) -> None:
+    monkeypatch.setattr(
+        book_loop,
+        "call_llm",
+        lambda _profile, _request: ChatResult(
+            content=json.dumps(
+                {
+                    "reply": "Looks complete.",
+                    "direction_draft": _long_direction(),
+                    "discussion_summary": "Summary.",
+                    "confirmed_decisions": [],
+                    "superseded_decisions": [],
+                    "unresolved_questions": [],
+                    "assumptions": [],
+                    "contradictions": [],
+                    "suggestions": [],
+                    "ready_status": "approved",
+                    "readiness_reason": "The model tried to approve it.",
+                }
+            ),
+            model_snapshot="story-model",
+            provider_snapshot="openai-compatible",
+        ),
+    )
+    state = SetupStateDocument()
+    assembly = book_loop.assemble_discussion_context(state, "Continue.")
+
+    with pytest.raises(ValueError, match="invalid ready_status"):
+        book_loop.continue_book_discussion(_profile(), state, "Continue.", assembly)
+
+
+def test_book_discussion_redacts_provider_secrets_from_model_content(monkeypatch) -> None:
+    profile = _profile(api_key="secret-key", base_url="https://api.example.com/v1")
+    monkeypatch.setattr(
+        book_loop,
+        "call_llm",
+        lambda _profile, _request: ChatResult(
+            content=json.dumps(
+                {
+                    "reply": "provider echoed secret-key",
+                    "direction_draft": _long_direction() + " https://api.example.com/v1",
+                    "discussion_summary": "Safe summary.",
+                    "confirmed_decisions": [],
+                    "superseded_decisions": [],
+                    "unresolved_questions": [],
+                    "assumptions": [],
+                    "contradictions": [],
+                    "suggestions": [],
+                    "ready_status": "continue",
+                    "readiness_reason": "Continue.",
+                }
+            ),
+            model_snapshot="story-model",
+            provider_snapshot="openai-compatible",
+        ),
+    )
+    state = SetupStateDocument()
+    assembly = book_loop.assemble_discussion_context(state, "Continue.")
+
+    result = book_loop.continue_book_discussion(profile, state, "Continue.", assembly)
+    rendered = json.dumps(result.__dict__, ensure_ascii=False, default=str)
+
+    assert "secret-key" not in rendered
+    assert "https://api.example.com/v1" not in rendered
+    assert "[redacted]" in rendered
+
+
+def test_review_blocks_candidate_without_confirmed_decision_coverage(monkeypatch) -> None:
+    state = SetupStateDocument(
+        direction_draft=_long_direction(),
+        confirmed_decisions=["Clues must remain fair"],
+    )
+    synthesis = replace(_synthesis(), confirmed_decision_coverage=[])
+    monkeypatch.setattr(
+        book_loop,
+        "call_llm",
+        lambda _profile, _request: ChatResult(
+            content=json.dumps(
+                {
+                    "summary": "The candidate is long enough.",
+                    "issues": [],
+                    "signals": [],
+                }
+            ),
+            model_snapshot="review-model",
+            provider_snapshot="openai-compatible",
+        ),
+    )
+
+    review, _, _ = book_loop.review_book_direction(_profile(), state, synthesis)
+
+    assert review.status == "blocked"
+    assert any(
+        issue.kind == "confirmed_decision_coverage_missing"
+        for issue in review.issues
+    )
+
+
+def test_record_discussion_turn_persists_trace_without_committing_book_direction(
+    tmp_path: Path,
+) -> None:
+    project_path = _make_project(tmp_path)
     state = initialize_setup_state(project_path)
-    state.answers = [SetupAnswer(question_id="genre_promise", answer="   ")]
-    write_json(project_path / "book" / "setup.json", state.model_dump(mode="json"))
+    context_path = write_discussion_context_snapshot(
+        project_path,
+        turn=1,
+        snapshot={"sources": ["book/setup.json"]},
+    )
+
+    updated = record_discussion_turn(
+        project_path,
+        state,
+        user_message="A fair mystery with personal consequences.",
+        result=_turn_result(),
+        context_snapshot_path=context_path,
+        profile_id="main",
+    )
+
+    transcript = (project_path / "book" / "discussion" / "transcript.jsonl").read_text(
+        encoding="utf-8"
+    )
+    attempt_dir = project_path / Path(context_path).parent
+    assert updated.turn_count == 1
+    assert updated.revision == 2
+    assert [message.role for message in updated.messages] == ["user", "assistant"]
+    assert "A fair mystery" in transcript
+    assert (attempt_dir / "response.json").exists()
+    assert (attempt_dir / "state.json").exists()
+    assert (attempt_dir / "transcript.jsonl").exists()
+    assert updated.discussion_state_version_path == (
+        Path(context_path).parent / "state.json"
+    ).as_posix()
+    assert updated.discussion_transcript_version_path == (
+        Path(context_path).parent / "transcript.jsonl"
+    ).as_posix()
+    assert (attempt_dir / "direction_draft.md").read_text(encoding="utf-8").rstrip() == (
+        _long_direction()
+    )
+    assert not (project_path / "book" / "direction.md").exists()
+    assert not (project_path / "book" / "constraints.json").exists()
+
+
+def test_review_context_retries_preserve_each_attempt(tmp_path: Path) -> None:
+    project_path = _make_project(tmp_path)
+
+    first_path = write_review_context_snapshot(
+        project_path,
+        candidate_revision=1,
+        snapshot={"attempt": 1},
+    )
+    second_path = write_review_context_snapshot(
+        project_path,
+        candidate_revision=1,
+        snapshot={"attempt": 2},
+    )
+
+    assert first_path == "book/reviews/review-0001/attempt-001/context_snapshot.json"
+    assert second_path == "book/reviews/review-0001/attempt-002/context_snapshot.json"
+    assert read_json(project_path / first_path) == {"attempt": 1}
+    assert read_json(project_path / second_path) == {"attempt": 2}
+
+
+def test_blocking_review_persists_candidate_but_keeps_approval_locked(
+    tmp_path: Path,
+) -> None:
+    project_path, state = _project_with_discussion(tmp_path)
+    context_path = write_review_context_snapshot(
+        project_path,
+        candidate_revision=1,
+        snapshot={"sources": ["book/direction_draft.md"]},
+    )
+    review = BookDirectionReview(
+        status="blocked",
+        summary="A confirmed decision was changed.",
+        issues=[
+            BookDirectionReviewIssue(
+                severity="blocking",
+                kind="contradiction",
+                message="The candidate changes the confirmed ending.",
+                evidence=["confirmed: hopeful", "candidate: tragic"],
+                suggested_question="Which ending should be authoritative?",
+            )
+        ],
+        signals=["confirmed_decision_coverage:1/2"],
+    )
+
+    updated = save_book_direction_candidate(
+        project_path,
+        state,
+        synthesis=_synthesis(),
+        review=review,
+        profile_id="main",
+        review_model_snapshot="review-model",
+        context_snapshot_path=context_path,
+    )
+
+    assert updated.phase == "review_blocked"
+    assert updated.candidate is not None
+    assert updated.candidate.approval_allowed is False
+    assert (project_path / updated.candidate.verification_path).exists()
+    verification = read_json(project_path / updated.candidate.verification_path)
+    coverage_signal = next(
+        signal
+        for signal in verification["signals"]
+        if signal["name"] == "confirmed_decision_coverage"
+    )
+    assert coverage_signal["status"] == "failed"
+    with pytest.raises(ValueError, match="blocking issues"):
+        approve_setup(project_path, SetupApprovalRequest(candidate_revision=1))
+    assert not (project_path / "book" / "direction.md").exists()
+
+
+def test_explicit_approval_requires_latest_revision_and_commits_exact_candidate(
+    tmp_path: Path,
+) -> None:
+    project_path, state = _project_with_discussion(tmp_path)
+    context_path = write_review_context_snapshot(
+        project_path,
+        candidate_revision=1,
+        snapshot={"sources": ["book/direction_draft.md"]},
+    )
+    synthesis = _synthesis()
+    state = save_book_direction_candidate(
+        project_path,
+        state,
+        synthesis=synthesis,
+        review=_passing_review(),
+        profile_id="main",
+        review_model_snapshot="review-model",
+        context_snapshot_path=context_path,
+    )
+
+    with pytest.raises(ValueError, match="stale"):
+        approve_setup(project_path, SetupApprovalRequest(candidate_revision=99))
+    assert not (project_path / "book" / "direction.md").exists()
+
+    approved = approve_setup(project_path, SetupApprovalRequest(candidate_revision=1))
+    constraints = read_json(project_path / "book" / "constraints.json")
+    book_state = read_json(project_path / "book" / "state.json")
+
+    assert approved.approved is True
+    assert approved.phase == "approved"
+    assert (project_path / "book" / "direction.md").read_text(encoding="utf-8") == (
+        synthesis.direction_markdown.rstrip() + "\n"
+    )
+    assert (project_path / "book" / "settings.md").read_text(encoding="utf-8") == (
+        synthesis.direction_markdown.rstrip() + "\n"
+    )
+    assert (project_path / "book" / "outline.md").read_text(encoding="utf-8") == (
+        synthesis.rolling_plan_markdown.rstrip() + "\n"
+    )
+    assert constraints["candidate"] is False
+    assert constraints["source_candidate_revision"] == 1
+    assert constraints["must_preserve"] == synthesis.constraints.must_preserve
+    assert book_state["book_direction_version"] == 1
+    assert book_state["current_strategy"] == "rolling_story_arc_planning"
+
+
+def test_approval_rechecks_confirmed_decisions_even_if_review_claims_passed(
+    tmp_path: Path,
+) -> None:
+    project_path, state = _project_with_discussion(tmp_path)
+    context_path = write_review_context_snapshot(
+        project_path,
+        candidate_revision=1,
+        snapshot={"sources": ["book/direction_draft.md"]},
+    )
+    synthesis = _synthesis()
+    forged = replace(
+        synthesis,
+        constraints=synthesis.constraints.model_copy(update={"confirmed": []}),
+    )
+    reviewed = save_book_direction_candidate(
+        project_path,
+        state,
+        synthesis=forged,
+        review=_passing_review(),
+        profile_id="main",
+        review_model_snapshot="review-model",
+        context_snapshot_path=context_path,
+    )
+
+    with pytest.raises(ValueError, match="does not preserve every confirmed decision"):
+        approve_setup(
+            project_path,
+            SetupApprovalRequest(candidate_revision=reviewed.candidate_revision_counter),
+        )
+
+    assert not (project_path / "book" / "direction.md").exists()
+
+
+def test_new_discussion_turn_invalidates_candidate_without_deleting_review_bundle(
+    tmp_path: Path,
+) -> None:
+    project_path, state = _project_with_discussion(tmp_path)
+    context_path = write_review_context_snapshot(
+        project_path,
+        candidate_revision=1,
+        snapshot={"sources": ["book/direction_draft.md"]},
+    )
+    state = save_book_direction_candidate(
+        project_path,
+        state,
+        synthesis=_synthesis(),
+        review=_passing_review(),
+        profile_id="main",
+        review_model_snapshot="review-model",
+        context_snapshot_path=context_path,
+    )
+    assert state.candidate is not None
+    archived_verification = project_path / state.candidate.verification_path
+    next_context = write_discussion_context_snapshot(
+        project_path,
+        turn=state.turn_count + 1,
+        snapshot={"sources": ["book/setup.json"]},
+    )
+
+    updated = record_discussion_turn(
+        project_path,
+        state,
+        user_message="Change the ending cost.",
+        result=_turn_result(reply="The ending cost is now unresolved."),
+        context_snapshot_path=next_context,
+        profile_id="main",
+    )
+
+    assert updated.phase == "discussing"
+    assert updated.candidate is None
+    assert updated.candidate_revision_counter == 1
+    assert archived_verification.exists()
+    with pytest.raises(ValueError, match="synthesized and reviewed"):
+        approve_setup(project_path, SetupApprovalRequest(candidate_revision=1))
+
+
+def test_discussion_preserves_confirmed_decisions_until_user_supersedes_them(
+    tmp_path: Path,
+) -> None:
+    project_path, state = _project_with_discussion(tmp_path)
+    next_context = write_discussion_context_snapshot(
+        project_path,
+        turn=2,
+        snapshot={"sources": ["book/setup.json"]},
+    )
+    additive_result = replace(
+        _turn_result(),
+        confirmed_decisions=["The ending remains hopeful"],
+    )
+
+    state = record_discussion_turn(
+        project_path,
+        state,
+        user_message="The ending remains hopeful.",
+        result=additive_result,
+        context_snapshot_path=next_context,
+        profile_id="main",
+    )
+
+    assert state.confirmed_decisions == [
+        "Clues must remain fair",
+        "Trust is the central change",
+        "The ending remains hopeful",
+    ]
+
+    replacement_context = write_discussion_context_snapshot(
+        project_path,
+        turn=3,
+        snapshot={"sources": ["book/setup.json"]},
+    )
+    replacement = "Clues may be deliberately misleading when character motive supports it"
+    superseding_result = replace(
+        _turn_result(),
+        confirmed_decisions=[replacement],
+        superseded_decisions=[
+            SupersededDecision(
+                turn=3,
+                decision="Clues must remain fair",
+                replacement=replacement,
+                reason="The user explicitly changed the clue contract.",
+                user_evidence="Change the clue rule",
+            )
+        ],
+    )
+
+    updated = record_discussion_turn(
+        project_path,
+        state,
+        user_message="Change the clue rule; misleading clues are allowed when motives support it.",
+        result=superseding_result,
+        context_snapshot_path=replacement_context,
+        profile_id="main",
+    )
+
+    assert "Clues must remain fair" not in updated.confirmed_decisions
+    assert replacement in updated.confirmed_decisions
+    assert updated.superseded_decisions[-1].decision == "Clues must remain fair"
+
+
+def test_stale_discussion_result_cannot_overwrite_newer_revision(tmp_path: Path) -> None:
+    project_path, stale_state = _project_with_discussion(tmp_path)
+    current_payload = stale_state.model_dump(mode="json")
+    current_payload["revision"] = stale_state.revision + 1
+    write_json(project_path / "book" / "setup.json", current_payload)
+    context_path = write_discussion_context_snapshot(
+        project_path,
+        turn=2,
+        snapshot={"sources": ["book/setup.json"]},
+    )
+
+    with pytest.raises(SetupRevisionConflict, match="stale result"):
+        record_discussion_turn(
+            project_path,
+            stale_state,
+            user_message="This result was generated from stale state.",
+            result=_turn_result(),
+            context_snapshot_path=context_path,
+            profile_id="main",
+        )
+
+    assert read_setup_state(project_path).revision == stale_state.revision + 1
+
+
+def test_approval_transaction_rolls_back_partial_formal_artifacts(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_path, state = _project_with_discussion(tmp_path)
+    context_path = write_review_context_snapshot(
+        project_path,
+        candidate_revision=1,
+        snapshot={"sources": ["book/direction_draft.md"]},
+    )
+    state = save_book_direction_candidate(
+        project_path,
+        state,
+        synthesis=_synthesis(),
+        review=_passing_review(),
+        profile_id="main",
+        review_model_snapshot="review-model",
+        context_snapshot_path=context_path,
+    )
+    original_promote = file_transactions._promote_staged_file
+    promotion_count = 0
+
+    def fail_third_promotion(staged: Path, target: Path, transaction_id: str) -> None:
+        nonlocal promotion_count
+        promotion_count += 1
+        if promotion_count == 3:
+            raise OSError("injected approval failure")
+        original_promote(staged, target, transaction_id)
+
+    monkeypatch.setattr(file_transactions, "_promote_staged_file", fail_third_promotion)
+
+    with pytest.raises(OSError, match="injected approval failure"):
+        approve_setup(project_path, SetupApprovalRequest(candidate_revision=1))
 
     reloaded = read_setup_state(project_path)
-
-    assert reloaded.next_question is not None
-    assert reloaded.next_question.id == "genre_promise"
-    with pytest.raises(ValueError, match="genre_promise"):
-        approve_setup(project_path)
-
-
-def test_approve_setup_requires_all_required_answers(tmp_path) -> None:
-    project_path = tmp_path / "novel"
-    (project_path / "book").mkdir(parents=True)
-    initialize_setup_state(project_path)
-
-    with pytest.raises(ValueError, match="missing required answers"):
-        approve_setup(project_path)
+    assert reloaded.approved is False
+    assert reloaded.candidate is not None
+    assert not (project_path / "book" / "direction.md").exists()
+    assert not (project_path / "book" / "constraints.json").exists()
 
 
-def test_approve_setup_writes_book_artifacts(tmp_path) -> None:
-    project_path = tmp_path / "novel"
-    (project_path / "book").mkdir(parents=True)
-    initialize_setup_state(project_path)
-    (project_path / "book" / "state.json").write_text(
-        '{"schema_version": 1, "version": 1}\n',
+def test_unapproved_legacy_fixed_questions_migrate_to_open_discussion(tmp_path: Path) -> None:
+    project_path = _make_project(tmp_path)
+    legacy = _legacy_setup(approved=False)
+    write_json(project_path / "book" / "setup.json", legacy)
+
+    state = read_setup_state(project_path)
+
+    assert state.schema_version == 2
+    assert state.migrated_from_schema_version == 1
+    assert state.approved is False
+    assert state.phase == "discussing"
+    assert len(state.messages) == 4
+    assert all(message.migrated for message in state.messages)
+    assert "Tense mystery" in state.direction_draft
+    assert state.unresolved_questions
+    assert read_json(project_path / "book" / "legacy" / "setup-v1.json") == legacy
+
+
+def test_legacy_migration_numbers_only_nonblank_answer_turns(tmp_path: Path) -> None:
+    project_path = _make_project(tmp_path)
+    legacy = _legacy_setup(approved=False)
+    answers = legacy["answers"]
+    assert isinstance(answers, list)
+    first = answers[0]
+    assert isinstance(first, dict)
+    first["answer"] = ""
+    write_json(project_path / "book" / "setup.json", legacy)
+
+    state = read_setup_state(project_path)
+
+    assert state.turn_count == 1
+    assert [message.turn for message in state.messages] == [1, 1]
+
+
+def test_approved_legacy_project_remains_runnable_after_migration(tmp_path: Path) -> None:
+    project_path = _make_project(tmp_path)
+    write_json(project_path / "book" / "setup.json", _legacy_setup(approved=True))
+    write_json(project_path / "book" / "state.json", {"schema_version": 1, "version": 1})
+    (project_path / "book" / "direction.md").write_text(
+        "# Stale interrupted migration direction\n",
+        encoding="utf-8",
+    )
+    write_json(
+        project_path / "book" / "constraints.json",
+        {"candidate": False, "confirmed": ["stale constraint"]},
+    )
+    (project_path / "book" / "outline.md").write_text(
+        "# Stale full-book roadmap\n",
         encoding="utf-8",
     )
 
-    for question in DEFAULT_SETUP_QUESTIONS:
-        answer_setup_question(
-            project_path,
-            SetupAnswerRequest(question_id=question.id, answer=f"Answer for {question.id}."),
-        )
-
-    state = approve_setup(project_path)
+    state = read_setup_state(project_path)
     book_state = read_json(project_path / "book" / "state.json")
-    settings = (project_path / "book" / "settings.md").read_text(encoding="utf-8")
 
     assert state.approved is True
-    assert state.next_question is None
-    assert book_state["version"] == 2
+    assert state.phase == "approved"
+    assert (project_path / "book" / "direction.md").exists()
+    assert (project_path / "book" / "constraints.json").exists()
+    assert (project_path / "book" / "outline.md").exists()
     assert book_state["setup_approved"] is True
-    assert "## Genre Promise" in settings
-
-
-def test_replace_setup_question_persists_personalized_question(tmp_path) -> None:
-    project_path = tmp_path / "novel"
-    (project_path / "book").mkdir(parents=True)
-    state = initialize_setup_state(project_path)
-    assert state.next_question is not None
-
-    question = SetupQuestion(
-        id=state.next_question.id,
-        title="A sharper promise",
-        prompt="Which sharper promise should the book make?",
-        options=[
-            SetupOption(id="a", label="A", description="First option."),
-            SetupOption(id="b", label="B", description="Second option."),
-            SetupOption(id="c", label="C", description="Third option."),
-        ],
-        source="llm",
-        profile_id="main",
-        model_snapshot="story-model",
+    assert book_state["migration_source"] == "legacy_fixed_question_setup"
+    assert "Stale interrupted" not in (project_path / "book" / "direction.md").read_text(
+        encoding="utf-8"
     )
-
-    replace_setup_question(project_path, state, question)
-    reloaded = read_setup_state(project_path)
-
-    assert reloaded.next_question is not None
-    assert reloaded.next_question.title == "A sharper promise"
-    assert reloaded.next_question.source == "llm"
-    assert reloaded.next_question.profile_id == "main"
-
-
-def test_read_setup_state_preserves_llm_followup_questions(tmp_path) -> None:
-    project_path = tmp_path / "novel"
-    (project_path / "book").mkdir(parents=True)
-    initialize_setup_state(project_path)
-    for question in DEFAULT_SETUP_QUESTIONS:
-        state = answer_setup_question(
-            project_path,
-            SetupAnswerRequest(question_id=question.id, answer=f"Answer for {question.id}."),
-        )
-
-    followup = SetupQuestion(
-        id="llm_followup_001",
-        title="Missing Constraint",
-        prompt="Which extra constraint matters most?",
-        options=[
-            SetupOption(id="a", label="A", description="First option."),
-            SetupOption(id="b", label="B", description="Second option."),
-            SetupOption(id="c", label="C", description="Third option."),
-        ],
-        source="llm",
-        profile_id="main",
-        model_snapshot="story-model",
+    assert "stale constraint" not in json.dumps(
+        read_json(project_path / "book" / "constraints.json")
     )
-
-    append_setup_question(project_path, state, followup)
-    reloaded = read_setup_state(project_path)
-
-    assert reloaded.questions[-1].id == "llm_followup_001"
-    assert reloaded.next_question is not None
-    assert reloaded.next_question.id == "llm_followup_001"
+    assert (project_path / "book/legacy/pre-open-discussion-migration/direction.md").exists()
+    assert (project_path / "book/legacy/pre-open-discussion-migration/constraints.json").exists()
+    assert (project_path / "book/legacy/pre-open-discussion-migration/outline.md").exists()
 
 
-def test_book_loop_personalizes_setup_question_from_llm(tmp_path, monkeypatch) -> None:
-    project_path = tmp_path / "novel"
-    (project_path / "book").mkdir(parents=True)
-    state = initialize_setup_state(project_path)
-    assert state.next_question is not None
-    profile = LlmProfile(
-        id="main",
-        name="Main",
-        protocol="openai-compatible",
-        base_url="https://api.example.com/v1",
-        api_key=SecretStr("secret"),
-        model="story-model",
-    )
-
-    monkeypatch.setattr(
-        book_loop,
-        "call_llm",
-        lambda _profile, _request: ChatResult(
-            content=(
-                '{"title":"Promise Focus","prompt":"Which promise should dominate?",'
-                '"options":['
-                '{"label":"Puzzle heat","description":"Keep every arc clue-forward."},'
-                '{"label":"Emotional cost","description":"Make every win hurt personally."},'
-                '{"label":"Danger ladder","description":"Escalate visible external risk."}'
-                "]}"
-            ),
-            model_snapshot="story-model",
-            provider_snapshot="openai-compatible",
-        ),
-    )
-
-    question = book_loop.personalize_next_setup_question(profile, state, state.next_question)
-
-    assert question.id == state.next_question.id
-    assert question.title == "Promise Focus"
-    assert question.source == "llm"
-    assert question.profile_id == "main"
-    assert question.model_snapshot == "story-model"
-    assert [option.label for option in question.options] == [
-        "Puzzle heat",
-        "Emotional cost",
-        "Danger ladder",
-    ]
-
-
-def test_book_loop_can_request_setup_followup_question(tmp_path, monkeypatch) -> None:
-    project_path = tmp_path / "novel"
-    (project_path / "book").mkdir(parents=True)
-    initialize_setup_state(project_path)
-    for question in DEFAULT_SETUP_QUESTIONS:
-        state = answer_setup_question(
-            project_path,
-            SetupAnswerRequest(question_id=question.id, answer=f"Answer for {question.id}."),
-        )
-    profile = LlmProfile(
-        id="main",
-        name="Main",
-        protocol="openai-compatible",
-        base_url="https://api.example.com/v1",
-        api_key=SecretStr("secret"),
-        model="story-model",
-    )
-
-    monkeypatch.setattr(
-        book_loop,
-        "call_llm",
-        lambda _profile, _request: ChatResult(
-            content=(
-                '{"status":"needs_more_info","question":{'
-                '"title":"Conflict Boundary",'
-                '"prompt":"Which conflict boundary should the harness preserve?",'
-                '"options":['
-                '{"label":"Personal","description":"Keep conflict personally grounded."},'
-                '{"label":"Political","description":"Keep factions visibly reactive."},'
-                '{"label":"Mystery","description":"Keep clues fair and inspectable."}'
-                "]}}"
-            ),
-            model_snapshot="story-model",
-            provider_snapshot="openai-compatible",
-        ),
-    )
-
-    followup = book_loop.assess_setup_followup_question(profile, state)
-
-    assert followup is not None
-    assert followup.id == "llm_followup_001"
-    assert followup.title == "Conflict Boundary"
-    assert followup.source == "llm"
-    assert [option.label for option in followup.options] == ["Personal", "Political", "Mystery"]
-
-
-def test_setup_api_personalizes_next_question_after_answer(tmp_path, monkeypatch) -> None:
-    from app.api import setup as setup_api
-
-    project_path = tmp_path / "novel"
-    (project_path / "book").mkdir(parents=True)
-    initialize_setup_state(project_path)
-    write_json(project_path / "project.json", ProjectMetadata(title="Novel").model_dump(mode="json"))
-    (project_path / "events.jsonl").write_text("", encoding="utf-8")
-    profile = LlmProfile(
-        id="main",
-        name="Main",
-        protocol="openai-compatible",
-        base_url="https://api.example.com/v1",
-        api_key=SecretStr("secret"),
-        model="story-model",
-    )
-
-    def fake_personalize(_profile, _state, question):
-        return SetupQuestion(
-            id=question.id,
-            title="Personalized protagonist question",
-            prompt="What should change because of the mystery promise?",
-            options=[
-                SetupOption(id="agency", label="Agency", description="Gain agency."),
-                SetupOption(id="cost", label="Cost", description="Pay a cost."),
-                SetupOption(id="belief", label="Belief", description="Change belief."),
-            ],
-            source="llm",
-            profile_id="main",
-            model_snapshot="story-model",
-        )
-
-    monkeypatch.setattr(setup_api, "get_active_project_path", lambda: project_path)
-    monkeypatch.setattr(setup_api, "get_active_profile", lambda: profile)
-    monkeypatch.setattr(setup_api, "personalize_next_setup_question", fake_personalize)
-
-    state = setup_api.answer_setup_question(
-        SetupAnswerRequest(question_id="genre_promise", answer="Tense mystery.")
-    )
-    events = read_events(project_path)
-
-    assert state.next_question is not None
-    assert state.next_question.id == "protagonist_direction"
-    assert state.next_question.title == "Personalized protagonist question"
-    assert state.next_question.source == "llm"
-    assert events[-1].kind == "setup_question_personalized"
-
-
-def test_setup_api_redacts_question_personalization_failure_event(
-    tmp_path,
+def test_setup_api_failure_is_fail_closed_and_redacts_provider_secrets(
+    tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from app.api import setup as setup_api
+    project_path = _make_project(tmp_path)
+    initial = initialize_setup_state(project_path)
+    profile = _profile(api_key="secret-key", base_url="https://api.example.com/v1")
+    monkeypatch.setattr(setup_api, "get_active_project_path", lambda: project_path)
+    monkeypatch.setattr(setup_api, "get_active_profile", lambda: profile)
 
-    project_path = tmp_path / "novel"
-    (project_path / "book").mkdir(parents=True)
-    initialize_setup_state(project_path)
-    write_json(project_path / "project.json", ProjectMetadata(title="Novel").model_dump(mode="json"))
-    (project_path / "events.jsonl").write_text("", encoding="utf-8")
-    profile = LlmProfile(
-        id="main",
-        name="Main",
-        protocol="openai-compatible",
-        base_url="https://api.example.com/v1",
-        api_key=SecretStr("secret-key"),
-        model="story-model",
-    )
-
-    def fail_personalize(_profile, _state, _question):
+    def fail_discussion(*_args):
         raise RuntimeError("provider echoed secret-key at https://api.example.com/v1")
 
-    monkeypatch.setattr(setup_api, "get_active_project_path", lambda: project_path)
-    monkeypatch.setattr(setup_api, "get_active_profile", lambda: profile)
-    monkeypatch.setattr(setup_api, "personalize_next_setup_question", fail_personalize)
+    monkeypatch.setattr(setup_api, "continue_book_discussion", fail_discussion)
 
-    state = setup_api.answer_setup_question(
-        SetupAnswerRequest(question_id="genre_promise", answer="Tense mystery.")
-    )
-    payload = "\n".join(str(event.payload) for event in read_events(project_path))
+    with pytest.raises(HTTPException) as exc:
+        setup_api.continue_setup_discussion(SetupTurnRequest(message="Start the discussion."))
 
-    assert state.next_question is not None
-    assert state.next_question.id == "protagonist_direction"
-    assert "secret-key" not in payload
-    assert "https://api.example.com/v1" not in payload
-    assert "[redacted]" in payload
-
-
-def test_setup_api_adds_followup_after_required_answers(tmp_path, monkeypatch) -> None:
-    from app.api import setup as setup_api
-
-    project_path = tmp_path / "novel"
-    (project_path / "book").mkdir(parents=True)
-    initialize_setup_state(project_path)
-    write_json(project_path / "project.json", ProjectMetadata(title="Novel").model_dump(mode="json"))
-    (project_path / "events.jsonl").write_text("", encoding="utf-8")
-    profile = LlmProfile(
-        id="main",
-        name="Main",
-        protocol="openai-compatible",
-        base_url="https://api.example.com/v1",
-        api_key=SecretStr("secret"),
-        model="story-model",
-    )
-
-    def fake_followup(_profile, _state):
-        return SetupQuestion(
-            id="llm_followup_001",
-            title="Conflict Boundary",
-            prompt="Which conflict boundary should the harness preserve?",
-            options=[
-                SetupOption(id="personal", label="Personal", description="Personal stakes."),
-                SetupOption(id="political", label="Political", description="Faction stakes."),
-                SetupOption(id="mystery", label="Mystery", description="Fair clues."),
-            ],
-            source="llm",
-            profile_id="main",
-            model_snapshot="story-model",
-        )
-
-    monkeypatch.setattr(setup_api, "get_active_project_path", lambda: project_path)
-    monkeypatch.setattr(setup_api, "get_active_profile", lambda: profile)
-    monkeypatch.setattr(
-        setup_api,
-        "personalize_next_setup_question",
-        lambda _profile, _state, question: question,
-    )
-    monkeypatch.setattr(setup_api, "assess_setup_followup_question", fake_followup)
-
-    state = read_setup_state(project_path)
-    for question in DEFAULT_SETUP_QUESTIONS:
-        state = setup_api.answer_setup_question(
-            SetupAnswerRequest(question_id=question.id, answer=f"Answer for {question.id}.")
-        )
+    reloaded = read_setup_state(project_path)
     events = read_events(project_path)
+    rendered = json.dumps([event.model_dump(mode="json") for event in events], ensure_ascii=False)
+    assert exc.value.status_code == 502
+    assert reloaded.revision == initial.revision
+    assert reloaded.messages == []
+    assert events[-1].kind == "book_discussion_turn_failed"
+    assert "secret-key" not in rendered
+    assert "https://api.example.com/v1" not in rendered
+    assert "[redacted]" in rendered
 
-    assert state.next_question is not None
-    assert state.next_question.id == "llm_followup_001"
-    assert state.next_question.source == "llm"
-    assert events[-1].kind == "setup_followup_question_created"
 
-
-def test_setup_api_approve_assesses_followup_after_profile_is_selected(
-    tmp_path,
+def test_setup_api_review_failure_preserves_attempt_and_never_unlocks_approval(
+    tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from app.api import setup as setup_api
-
-    project_path = tmp_path / "novel"
-    (project_path / "book").mkdir(parents=True)
-    initialize_setup_state(project_path)
-    write_json(project_path / "project.json", ProjectMetadata(title="Novel").model_dump(mode="json"))
-    (project_path / "events.jsonl").write_text("", encoding="utf-8")
-    for question in DEFAULT_SETUP_QUESTIONS:
-        answer_setup_question(
-            project_path,
-            SetupAnswerRequest(question_id=question.id, answer=f"Answer for {question.id}."),
-        )
-    profile = LlmProfile(
-        id="main",
-        name="Main",
-        protocol="openai-compatible",
-        base_url="https://api.example.com/v1",
-        api_key=SecretStr("secret"),
-        model="story-model",
-    )
-
-    def fake_followup(_profile, _state):
-        return SetupQuestion(
-            id="llm_followup_001",
-            title="New Profile Constraint",
-            prompt="Which constraint should the selected model preserve?",
-            options=[
-                SetupOption(id="tone", label="Tone", description="Preserve tone."),
-                SetupOption(id="logic", label="Logic", description="Preserve logic."),
-                SetupOption(id="pacing", label="Pacing", description="Preserve pacing."),
-            ],
-            source="llm",
-            profile_id="main",
-            model_snapshot="story-model",
-        )
-
+    project_path, initial = _project_with_discussion(tmp_path)
+    profile = _profile(api_key="secret-key", base_url="https://api.example.com/v1")
     monkeypatch.setattr(setup_api, "get_active_project_path", lambda: project_path)
     monkeypatch.setattr(setup_api, "get_active_profile", lambda: profile)
-    monkeypatch.setattr(setup_api, "assess_setup_followup_question", fake_followup)
 
-    state = setup_api.approve_setup()
-    events = read_events(project_path)
+    def fail_synthesis(*_args):
+        raise RuntimeError("provider echoed secret-key at https://api.example.com/v1")
 
-    assert state.approved is False
-    assert state.next_question is not None
-    assert state.next_question.id == "llm_followup_001"
-    assert not (project_path / "book" / "settings.md").exists()
-    assert events[-1].kind == "setup_followup_question_created"
+    monkeypatch.setattr(setup_api, "synthesize_book_direction", fail_synthesis)
+
+    with pytest.raises(HTTPException) as exc:
+        setup_api.prepare_setup_review()
+
+    failed_state = read_setup_state(project_path)
+    failed_events = read_events(project_path)
+    failed_rendered = json.dumps(
+        [event.model_dump(mode="json") for event in failed_events],
+        ensure_ascii=False,
+    )
+    first_context = (
+        project_path
+        / "book/reviews/review-0001/attempt-001/context_snapshot.json"
+    )
+    assert exc.value.status_code == 502
+    assert failed_state.revision == initial.revision
+    assert failed_state.candidate is None
+    assert failed_state.candidate_revision_counter == 0
+    assert first_context.exists()
+    assert failed_events[-1].kind == "book_direction_review_failed"
+    assert "secret-key" not in failed_rendered
+    assert "https://api.example.com/v1" not in failed_rendered
+
+    monkeypatch.setattr(setup_api, "synthesize_book_direction", lambda *_args: _synthesis())
+    monkeypatch.setattr(
+        setup_api,
+        "review_book_direction",
+        lambda *_args: (_passing_review(), "review-model", {}),
+    )
+    reviewed = setup_api.prepare_setup_review()
+
+    assert reviewed.candidate is not None
+    assert reviewed.candidate.revision == 1
+    assert reviewed.last_context_snapshot_path == (
+        "book/reviews/review-0001/attempt-002/context_snapshot.json"
+    )
+    assert first_context.exists()
 
 
-def test_setup_api_allows_multiple_llm_followups_before_approval(
-    tmp_path,
+def test_setup_api_runs_discussion_review_and_explicit_approval(
+    tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from app.api import setup as setup_api
-
-    project_path = tmp_path / "novel"
-    (project_path / "book").mkdir(parents=True)
+    project_path = _make_project(tmp_path)
     initialize_setup_state(project_path)
-    write_json(project_path / "project.json", ProjectMetadata(title="Novel").model_dump(mode="json"))
-    (project_path / "events.jsonl").write_text("", encoding="utf-8")
-    profile = LlmProfile(
-        id="main",
-        name="Main",
-        protocol="openai-compatible",
-        base_url="https://api.example.com/v1",
-        api_key=SecretStr("secret"),
-        model="story-model",
-    )
-    followups = [
-        SetupQuestion(
-            id="llm_followup_001",
-            title="Conflict Boundary",
-            prompt="Which conflict boundary matters most?",
-            options=[
-                SetupOption(id="personal", label="Personal", description="Personal stakes."),
-                SetupOption(id="political", label="Political", description="Faction stakes."),
-                SetupOption(id="mystery", label="Mystery", description="Fair clues."),
-            ],
-            source="llm",
-            profile_id="main",
-            model_snapshot="story-model",
-        ),
-        SetupQuestion(
-            id="llm_followup_002",
-            title="Narrative Texture",
-            prompt="Which texture should later chapters preserve?",
-            options=[
-                SetupOption(id="spare", label="Spare", description="Lean and tense."),
-                SetupOption(id="lyrical", label="Lyrical", description="Image-rich prose."),
-                SetupOption(id="wry", label="Wry", description="Dry observational humor."),
-            ],
-            source="llm",
-            profile_id="main",
-            model_snapshot="story-model",
-        ),
-        None,
-    ]
-
-    def fake_followup(_profile, _state):
-        return followups.pop(0)
-
+    profile = _profile()
     monkeypatch.setattr(setup_api, "get_active_project_path", lambda: project_path)
     monkeypatch.setattr(setup_api, "get_active_profile", lambda: profile)
     monkeypatch.setattr(
         setup_api,
-        "personalize_next_setup_question",
-        lambda _profile, _state, question: question,
+        "continue_book_discussion",
+        lambda *_args: _turn_result(),
     )
-    monkeypatch.setattr(setup_api, "assess_setup_followup_question", fake_followup)
-
-    state = read_setup_state(project_path)
-    for question in DEFAULT_SETUP_QUESTIONS:
-        state = setup_api.answer_setup_question(
-            SetupAnswerRequest(question_id=question.id, answer=f"Answer for {question.id}.")
-        )
-    assert state.next_question is not None
-    assert state.next_question.id == "llm_followup_001"
-
-    state = setup_api.answer_setup_question(
-        SetupAnswerRequest(question_id="llm_followup_001", answer="Keep conflict personal.")
-    )
-    assert state.next_question is not None
-    assert state.next_question.id == "llm_followup_002"
-
-    state = setup_api.answer_setup_question(
-        SetupAnswerRequest(question_id="llm_followup_002", answer="Keep the prose spare.")
-    )
-    assert state.next_question is None
-    assert state.ready_for_approval is True
-    assert state.readiness_profile_id == "main"
-
+    monkeypatch.setattr(setup_api, "synthesize_book_direction", lambda *_args: _synthesis())
     monkeypatch.setattr(
         setup_api,
-        "assess_setup_followup_question",
-        lambda _profile, _state: pytest.fail("readiness should not be reassessed"),
+        "review_book_direction",
+        lambda *_args: (_passing_review(), "review-model", {"total_tokens": 20}),
     )
-    approved = setup_api.approve_setup()
 
+    discussed = setup_api.continue_setup_discussion(
+        SetupTurnRequest(message="A fair mystery with personal consequences.")
+    )
+    reviewed = setup_api.prepare_setup_review()
+    assert discussed.approved is False
+    assert reviewed.candidate is not None
+    assert reviewed.candidate.approval_allowed is True
+    assert not (project_path / "book" / "direction.md").exists()
+
+    with pytest.raises(HTTPException) as duplicate_review:
+        setup_api.prepare_setup_review()
+    assert duplicate_review.value.status_code == 409
+
+    approved = setup_api.approve_setup(
+        SetupApprovalRequest(candidate_revision=reviewed.candidate.revision)
+    )
+    event_kinds = [event.kind for event in read_events(project_path)]
     assert approved.approved is True
-    assert approved.ready_for_approval is True
-    assert followups == []
+    assert "book_discussion_context_assembled" in event_kinds
+    assert "book_direction_candidate_reviewed" in event_kinds
+    assert "book_loop_approved" in event_kinds
+    assert event_kinds.count("approved_book_artifact_written") == 4
+
+    with pytest.raises(HTTPException) as duplicate_approval:
+        setup_api.approve_setup(SetupApprovalRequest(candidate_revision=1))
+    assert duplicate_approval.value.status_code == 409
+    assert len(read_events(project_path)) == len(event_kinds)
 
 
-def test_setup_api_redacts_followup_assessment_failure_event(
-    tmp_path,
+def test_setup_api_queues_events_when_durable_append_temporarily_fails(
+    tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from app.api import setup as setup_api
-
-    project_path = tmp_path / "novel"
-    (project_path / "book").mkdir(parents=True)
+    project_path = _make_project(tmp_path)
     initialize_setup_state(project_path)
-    write_json(project_path / "project.json", ProjectMetadata(title="Novel").model_dump(mode="json"))
-    (project_path / "events.jsonl").write_text("", encoding="utf-8")
-    for question in DEFAULT_SETUP_QUESTIONS:
-        answer_setup_question(
-            project_path,
-            SetupAnswerRequest(question_id=question.id, answer=f"Answer for {question.id}."),
+    profile = _profile()
+    real_append_event = setup_api.append_event
+    monkeypatch.setattr(setup_api, "get_active_project_path", lambda: project_path)
+    monkeypatch.setattr(setup_api, "get_active_profile", lambda: profile)
+    monkeypatch.setattr(
+        setup_api,
+        "continue_book_discussion",
+        lambda *_args: _turn_result(),
+    )
+    monkeypatch.setattr(
+        setup_api,
+        "append_event",
+        lambda *_args: (_ for _ in ()).throw(OSError("temporary event failure")),
+    )
+
+    state = setup_api.continue_setup_discussion(
+        SetupTurnRequest(message="A fair mystery with personal consequences.")
+    )
+    outbox = project_path / "book" / ".event-outbox"
+
+    assert state.turn_count == 1
+    assert list(outbox.glob("*.json"))
+
+    monkeypatch.setattr(setup_api, "append_event", real_append_event)
+    setup_api.get_setup_state()
+
+    assert not outbox.exists()
+    assert any(event.kind == "book_discussion_turn_completed" for event in read_events(project_path))
+
+
+def test_setup_api_redacts_secrets_from_user_discussion_before_storage(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_path = _make_project(tmp_path)
+    initialize_setup_state(project_path)
+    profile = _profile(api_key="secret-key", base_url="https://api.example.com/v1")
+    captured_messages: list[str] = []
+    monkeypatch.setattr(setup_api, "get_active_project_path", lambda: project_path)
+    monkeypatch.setattr(setup_api, "get_active_profile", lambda: profile)
+
+    def fake_discussion(_profile, _state, message, _assembly):
+        captured_messages.append(message)
+        return _turn_result()
+
+    monkeypatch.setattr(setup_api, "continue_book_discussion", fake_discussion)
+
+    state = setup_api.continue_setup_discussion(
+        SetupTurnRequest(
+            message="Do not store secret-key or https://api.example.com/v1 in this project."
         )
-    profile = LlmProfile(
+    )
+    persisted = json.dumps(state.model_dump(mode="json"), ensure_ascii=False)
+    transcript = (project_path / "book" / "discussion" / "transcript.jsonl").read_text(
+        encoding="utf-8"
+    )
+
+    assert captured_messages == ["Do not store [redacted] or [redacted] in this project."]
+    assert "secret-key" not in persisted + transcript
+    assert "https://api.example.com/v1" not in persisted + transcript
+
+
+def _make_project(tmp_path: Path) -> Path:
+    project_path = tmp_path / "novel"
+    (project_path / "book").mkdir(parents=True, exist_ok=True)
+    write_json(
+        project_path / "project.json",
+        ProjectMetadata(title="Novel").model_dump(mode="json"),
+    )
+    (project_path / "events.jsonl").write_text("", encoding="utf-8")
+    return project_path
+
+
+def _project_with_discussion(tmp_path: Path) -> tuple[Path, SetupStateDocument]:
+    project_path = _make_project(tmp_path)
+    state = initialize_setup_state(project_path)
+    context_path = write_discussion_context_snapshot(
+        project_path,
+        turn=1,
+        snapshot={"sources": ["book/setup.json"]},
+    )
+    state = record_discussion_turn(
+        project_path,
+        state,
+        user_message="A fair mystery with personal consequences.",
+        result=_turn_result(),
+        context_snapshot_path=context_path,
+        profile_id="main",
+    )
+    return project_path, state
+
+
+def _profile(
+    *,
+    api_key: str = "secret",
+    base_url: str = "https://provider.invalid/v1",
+) -> LlmProfile:
+    return LlmProfile(
         id="main",
         name="Main",
         protocol="openai-compatible",
-        base_url="https://api.example.com/v1",
-        api_key=SecretStr("secret-key"),
+        base_url=base_url,
+        api_key=SecretStr(api_key),
         model="story-model",
     )
 
-    def fail_followup(_profile, _state):
-        raise RuntimeError("provider echoed secret-key at https://api.example.com/v1")
 
-    monkeypatch.setattr(setup_api, "get_active_project_path", lambda: project_path)
-    monkeypatch.setattr(setup_api, "get_active_profile", lambda: profile)
-    monkeypatch.setattr(setup_api, "assess_setup_followup_question", fail_followup)
+def _turn_result(*, reply: str = "Which relationship must carry the emotional cost?") -> BookDiscussionTurnResult:
+    return BookDiscussionTurnResult(
+        reply=reply,
+        direction_draft=_long_direction(),
+        discussion_summary="A fair mystery about trust in a grounded coastal city.",
+        confirmed_decisions=["Clues must remain fair", "Trust is the central change"],
+        superseded_decisions=[],
+        unresolved_questions=["Which relationship bears the final cost?"],
+        assumptions=["The final cost will be personal"],
+        contradictions=[],
+        suggestions=[
+            SetupSuggestion(
+                id="turn-0001-suggestion-1",
+                label="Mentor",
+                message="Let the mentor relationship carry the cost.",
+            )
+        ],
+        readiness=SetupReadinessSignal(
+            status="ready",
+            reason="The stable direction can be reviewed, but discussion may continue.",
+        ),
+        model_snapshot="story-model",
+        provider_snapshot="openai-compatible",
+        usage={"total_tokens": 100},
+    )
 
-    state = setup_api.approve_setup()
-    payload = "\n".join(str(event.payload) for event in read_events(project_path))
 
-    assert state.approved is True
-    assert "secret-key" not in payload
-    assert "https://api.example.com/v1" not in payload
-    assert "[redacted]" in payload
+def _synthesis() -> BookDirectionSynthesis:
+    return BookDirectionSynthesis(
+        direction_markdown=_long_direction(),
+        constraints=BookDirectionConstraints(
+            confirmed=[
+                "Clues must remain fair",
+                "Trust is the central change",
+                "The central mystery uses fair clues.",
+            ],
+            must_preserve=["Every major reveal changes a relationship."],
+            must_avoid=["No arbitrary supernatural solution."],
+            creative_freedoms=["The current arc may choose its own local antagonist."],
+            open_decisions=["The exact final relationship cost remains open."],
+        ),
+        confirmed_decision_coverage=[
+            ConfirmedDecisionCoverage(
+                decision="Clues must remain fair",
+                candidate_evidence="visible clues",
+            ),
+            ConfirmedDecisionCoverage(
+                decision="Trust is the central change",
+                candidate_evidence="earned trust",
+            ),
+        ],
+        rolling_plan_markdown=_long_rolling_contract(),
+        model_snapshot="story-model",
+        provider_snapshot="openai-compatible",
+        usage={"total_tokens": 200},
+    )
+
+
+def _passing_review() -> BookDirectionReview:
+    return BookDirectionReview(
+        status="passed",
+        summary="The candidate preserves confirmed decisions and leaves open decisions explicit.",
+        issues=[
+            BookDirectionReviewIssue(
+                severity="warning",
+                kind="open_decision",
+                message="The final relationship cost remains intentionally open.",
+                evidence=["constraints.open_decisions"],
+            )
+        ],
+        signals=["confirmed_decisions_preserved:passed", "rolling_scope:passed"],
+    )
+
+
+def _long_direction() -> str:
+    return (
+        "# Book Direction\n\n"
+        "The novel is a grounded coastal-city mystery about earned trust. Every reveal must be "
+        "supported by visible clues and must alter a meaningful relationship, so plot knowledge "
+        "and emotional consequence advance together. The protagonist begins strategically capable "
+        "but isolated, and gains agency by learning which alliances deserve trust. Victories should "
+        "carry durable personal costs without making hope feel false. Speculative technology stays "
+        "limited, socially consequential, and unable to erase prior choices. The exact final cost, "
+        "local antagonists, and later arc routes remain open for rolling planning from committed canon."
+    )
+
+
+def _long_rolling_contract() -> str:
+    return (
+        "# Rolling Story Arc Contract\n\n"
+        "Plan only the current story arc from the approved direction and committed canon. Give the "
+        "arc one concrete mystery advance, one relationship change, and one test of earned trust. "
+        "After its chapters commit, reconcile observations and state patches, then plan the next arc "
+        "from that new canon. Return to the book loop only when a proposed route conflicts with an "
+        "approved constraint or requires changing a highest-level user decision."
+    )
+
+
+def _legacy_setup(*, approved: bool) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "approved": approved,
+        "approved_at": "2026-01-01T00:00:00Z" if approved else None,
+        "questions": [
+            {"id": "genre_promise", "title": "Genre", "prompt": "What is the promise?"},
+            {
+                "id": "protagonist_direction",
+                "title": "Protagonist",
+                "prompt": "How should the protagonist change?",
+            },
+        ],
+        "answers": [
+            {"question_id": "genre_promise", "answer": "Tense mystery"},
+            {"question_id": "protagonist_direction", "answer": "Learn earned trust"},
+        ],
+    }

@@ -52,6 +52,10 @@ def test_orchestrator_waits_for_unapproved_book_setup(tmp_path) -> None:
 
 def test_orchestrator_plans_initial_arc_with_active_profile(tmp_path, monkeypatch) -> None:
     project_path = _make_project(tmp_path, setup_approved=True)
+    (project_path / "book" / "outline.md").write_text(
+        "# Rolling Contract\n\nOnly plan the current arc and return on constraint conflict.",
+        encoding="utf-8",
+    )
     profile = LlmProfile(
         id="main",
         name="Main",
@@ -62,15 +66,17 @@ def test_orchestrator_plans_initial_arc_with_active_profile(tmp_path, monkeypatc
     )
 
     monkeypatch.setattr(orchestrator, "get_active_profile", lambda: profile)
-    monkeypatch.setattr(
-        orchestrator,
-        "call_llm",
-        lambda _profile, _request: ChatResult(
+    captured_prompts: list[str] = []
+
+    def fake_call_llm(_profile, request):
+        captured_prompts.append(request.messages[-1].content)
+        return ChatResult(
             content="# Arc 1\n\nA focused first arc.",
             model_snapshot="story-model",
             provider_snapshot="openai-compatible",
-        ),
-    )
+        )
+
+    monkeypatch.setattr(orchestrator, "call_llm", fake_call_llm)
 
     HarnessOrchestrator(
         HarnessRunContext(project_path=project_path, run_id="run-1")
@@ -85,6 +91,8 @@ def test_orchestrator_plans_initial_arc_with_active_profile(tmp_path, monkeypatc
     assert metadata["run_status"] == "idle"
     assert arc_state["model_snapshot"] == "story-model"
     assert plan.startswith("# Arc 1")
+    assert "Approved rolling story arc contract" in captured_prompts[-1]
+    assert "该项目从旧版全书设定迁移而来" in captured_prompts[-1]
     assert any(
         event.kind == "llm_output_delta"
         and event.payload.get("text_delta") == "# Arc 1\n\nA focused first arc."
@@ -398,6 +406,10 @@ def test_chapter_goal_prompt_uses_context_snapshot_sources(
         "# Book Settings\n\nSpecial premise for direct injection.",
         encoding="utf-8",
     )
+    (project_path / "book" / "outline.md").write_text(
+        "# Rolling Contract\n\nReturn to the book loop on constraint conflict.",
+        encoding="utf-8",
+    )
     write_json(
         project_path / "book" / "state.json",
         {
@@ -451,6 +463,7 @@ def test_chapter_goal_prompt_uses_context_snapshot_sources(
 
     assert "Assembled context" in prompt
     assert "Special premise for direct injection." in prompt
+    assert "该项目从旧版全书设定迁移而来" in prompt
     assert "keep pressure rising" in prompt
     assert "# Arc 1" in prompt
     assert '"target_chapter_count": 3' in prompt

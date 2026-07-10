@@ -5,8 +5,9 @@ from pydantic import BaseModel, Field
 from app.schemas.completion import GateStatus
 
 RunNextActionId = Literal[
-    "answer_book_setup",
-    "approve_book_setup",
+    "continue_book_discussion",
+    "review_book_direction",
+    "approve_book_direction",
     "configure_llm_profile",
     "repair_project_state",
     "wait_for_safe_checkpoint",

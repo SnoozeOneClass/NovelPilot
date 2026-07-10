@@ -15,6 +15,8 @@ from app.storage.setup import read_setup_state
 
 APPROVED_BOOK_ARTIFACTS = [
     "book/setup.json",
+    "book/direction.md",
+    "book/constraints.json",
     "book/settings.md",
     "book/outline.md",
     "book/state.json",
@@ -68,14 +70,23 @@ def _book_setup_gate(project_path: Path) -> ReadinessGate:
             message="Book setup is approved.",
             evidence=APPROVED_BOOK_ARTIFACTS,
         )
-    missing = [question.id for question in setup_state.questions if question.required]
-    answered = {answer.question_id for answer in setup_state.answers}
-    missing = [question_id for question_id in missing if question_id not in answered]
+    evidence = [
+        f"phase:{setup_state.phase}",
+        f"turns:{setup_state.turn_count}",
+        f"direction_draft:{'present' if setup_state.direction_draft.strip() else 'missing'}",
+    ]
+    if setup_state.candidate is not None:
+        evidence.extend(
+            [
+                f"candidate_revision:{setup_state.candidate.revision}",
+                f"candidate_review:{setup_state.candidate.review.status}",
+            ]
+        )
     return ReadinessGate(
         id="book_setup",
         status="pending",
-        message="Book setup must be completed and approved before the harness can run.",
-        evidence=missing,
+        message="Book direction must be discussed, reviewed, and explicitly approved.",
+        evidence=evidence,
     )
 
 
@@ -194,25 +205,61 @@ def _next_action(
     book_gate = gate_by_id["book_setup"]
     if book_gate.status != "passed":
         setup_state = read_setup_state(project_path)
-        required_ids = [question.id for question in setup_state.questions if question.required]
-        answered_ids = {answer.question_id for answer in setup_state.answers}
-        missing_required = [
-            question_id for question_id in required_ids if question_id not in answered_ids
-        ]
-        if missing_required:
+        candidate = setup_state.candidate
+        if candidate is not None and candidate.approval_allowed:
             return RunNextAction(
-                id="answer_book_setup",
-                command="POST /api/setup/answers",
+                id="approve_book_direction",
+                command="POST /api/setup/approve",
                 requires_user=True,
-                message="Answer the remaining required book setup questions.",
-                evidence=missing_required,
+                message="Explicitly approve the reviewed candidate Book Direction.",
+                evidence=[
+                    f"candidate_revision:{candidate.revision}",
+                    candidate.verification_path,
+                ],
+            )
+        profile_gate = gate_by_id["active_llm_profile"]
+        if profile_gate.status != "passed":
+            return RunNextAction(
+                id="configure_llm_profile",
+                command="POST /api/profiles",
+                requires_user=True,
+                message="Select an enabled LLM profile with a stored API key.",
+                evidence=profile_gate.evidence,
+            )
+        if candidate is not None:
+            return RunNextAction(
+                id="continue_book_discussion",
+                command="POST /api/setup/turn",
+                requires_user=True,
+                message="Continue the open-ended Book Direction discussion.",
+                evidence=[
+                    f"candidate_revision:{candidate.revision}",
+                    f"candidate_review:{candidate.review.status}",
+                    *[
+                        issue.message
+                        for issue in candidate.review.issues
+                        if issue.severity == "blocking"
+                    ][:3],
+                ],
+            )
+        if setup_state.direction_draft.strip() and setup_state.readiness.status == "ready":
+            return RunNextAction(
+                id="review_book_direction",
+                command="POST /api/setup/prepare-review",
+                requires_user=True,
+                message="Prepare the current Book Direction draft for review.",
+                evidence=[f"turns:{setup_state.turn_count}", setup_state.readiness.reason],
             )
         return RunNextAction(
-            id="approve_book_setup",
-            command="POST /api/setup/approve",
+            id="continue_book_discussion",
+            command="POST /api/setup/turn",
             requires_user=True,
-            message="Approve the collected book setup before the harness starts.",
-            evidence=book_gate.evidence,
+            message="Continue the open-ended Book Direction discussion.",
+            evidence=[
+                f"phase:{setup_state.phase}",
+                f"turns:{setup_state.turn_count}",
+                *setup_state.unresolved_questions[:3],
+            ],
         )
 
     profile_gate = gate_by_id["active_llm_profile"]

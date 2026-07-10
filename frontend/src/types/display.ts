@@ -6,9 +6,7 @@ import type {
   LlmProtocol,
   OperationMode,
   RunNextAction,
-  RunStatus,
-  SetupOption,
-  SetupQuestion
+  RunStatus
 } from "./domain";
 
 const operationModeLabels: Record<OperationMode, string> = {
@@ -65,13 +63,17 @@ const loopLayerLabels: Record<HarnessEvent["loop_layer"], string> = {
 const atomicActionLabels: Record<string, string> = {
   advance_run_until_stop: "推进运行到停止点",
   advance_to_next_checkpoint: "推进到下一安全检查点",
+  approve_book_direction: "批准全书方向",
   approve_book_loop: "批准全书流程",
   approve_current_arc: "批准当前故事弧",
   assemble_context: "装配章节上下文",
+  assemble_book_direction_review_context: "装配全书方向审阅上下文",
+  assemble_book_discussion_context: "装配全书讨论上下文",
   assess_setup_readiness: "评估设定是否充分",
   chapter_complete: "章节完成检查点",
   collect_book_settings: "收集全书设定",
   commit_state_patch: "提交状态补丁",
+  continue_book_discussion: "继续全书方向讨论",
   draft_chapter: "写作候选正文",
   extract_candidate_observations: "抽取候选观测",
   generate_candidate_state_patch: "生成候选状态补丁",
@@ -88,6 +90,9 @@ const atomicActionLabels: Record<string, string> = {
   safe_checkpoint: "安全检查点",
   select_llm_profile: "选择 LLM 配置",
   semantic_review: "语义审查",
+  synthesize_and_review_book_direction: "整理并审阅全书方向",
+  synthesize_book_direction: "整理全书方向候选",
+  review_book_direction: "审阅全书方向候选",
   verify_chapter: "验证章节",
   write_final_chapter: "提交正式章节"
 };
@@ -95,7 +100,20 @@ const atomicActionLabels: Record<string, string> = {
 const eventKindLabels: Record<string, string> = {
   artifact_written: "产物已写入",
   atomic_action_started: "原子动作开始",
+  approved_book_artifact_written: "已批准全书产物已写入",
+  book_direction_candidate_reviewed: "全书方向候选已审阅",
+  book_direction_stale_review_discarded: "过期的全书方向审阅结果已丢弃",
+  book_direction_constraints_written: "候选全书约束已写入",
+  book_direction_draft_updated: "全书方向草稿已更新",
+  book_direction_candidate_written: "候选全书方向已写入",
+  book_direction_review_context_assembled: "全书方向审阅上下文已装配",
+  book_direction_review_failed: "全书方向整理或审阅失败",
+  book_discussion_context_assembled: "全书讨论上下文已装配",
+  book_discussion_stale_result_discarded: "过期的全书讨论结果已丢弃",
+  book_discussion_turn_completed: "全书讨论轮次已完成",
+  book_discussion_turn_failed: "全书讨论轮次失败",
   book_loop_approved: "全书流程已批准",
+  book_rolling_contract_candidate_written: "候选滚动规划契约已写入",
   book_setup_required: "需要全书设定",
   chapter_retry_prepared: "章节重试已准备",
   export_completed: "导出完成",
@@ -133,24 +151,41 @@ const routingDecisionLabels: Record<string, string> = {
   apply_to_current_chapter_context: "注入当前章节上下文",
   approve_book_loop: "等待批准全书流程",
   ask_user: "询问用户",
+  await_user_approval: "等待用户明确批准",
+  call_book_discussion_model: "调用全书讨论模型",
   commit: "提交",
   continue: "继续",
+  continue_discussion: "继续全书讨论",
   escalate_to_book_loop: "升级到全书 loop",
   fallback_to_default_question: "回退到默认问题",
   none: "无路由",
   pause: "暂停",
   plan_next_arc: "规划下一故事弧",
   ready_for_approval: "等待批准",
+  review_available: "可以整理并审阅",
+  review_book_direction: "审阅全书方向候选",
+  reload_book_discussion: "重新载入最新全书讨论",
+  retry_book_direction_review: "重试全书方向整理与审阅",
+  retry_book_discussion_turn: "重试本轮全书讨论",
   retry: "重试",
   revise: "修订",
   revise_current_arc_plan: "修订当前故事弧计划",
+  start_or_resume_harness: "启动或继续 harness",
+  synthesize_book_direction: "整理全书方向候选",
   rewrite: "重写"
 };
 
 const artifactKindLabels: Record<string, string> = {
   arc_plan: "故事弧计划",
   arc_revision: "故事弧修订",
+  book_direction: "全书方向",
+  book_direction_candidate: "候选全书方向",
+  book_direction_constraints: "全书约束",
+  book_direction_draft: "全书方向草稿",
+  book_discussion_transcript: "全书讨论记录",
   book_feedback: "全书反馈",
+  book_rolling_contract: "滚动规划契约",
+  book_rolling_contract_candidate: "候选滚动规划契约",
   candidate_observations: "候选观测",
   candidate_state_patch: "候选状态补丁",
   committed_state_patch: "已提交状态补丁",
@@ -176,8 +211,9 @@ const gateIdLabels: Record<string, string> = {
 };
 
 const runNextActionLabels: Record<RunNextAction["id"], string> = {
-  answer_book_setup: "回答全书设定",
-  approve_book_setup: "批准全书设定",
+  continue_book_discussion: "继续全书方向讨论",
+  review_book_direction: "整理并审阅全书方向",
+  approve_book_direction: "批准全书方向候选",
   configure_llm_profile: "配置 LLM",
   repair_project_state: "修复项目状态",
   wait_for_safe_checkpoint: "等待安全检查点",
@@ -187,106 +223,6 @@ const runNextActionLabels: Record<RunNextAction["id"], string> = {
   approve_story_arc: "批准当前故事弧",
   start_run: "启动 harness",
   resume_run: "继续 harness"
-};
-
-const setupQuestionCopy: Record<
-  string,
-  {
-    title: string;
-    prompt: string;
-    options: Record<string, { label: string; description: string }>;
-  }
-> = {
-  genre_promise: {
-    title: "类型承诺",
-    prompt: "这本小说应该稳定兑现哪一种读者承诺？",
-    options: {
-      tense_mystery: {
-        label: "紧张悬疑",
-        description: "以线索、反转和清晰揭示路径驱动的悬疑故事。"
-      },
-      character_growth: {
-        label: "人物成长",
-        description: "以关系推进和内在变化承载主要回报的故事。"
-      },
-      epic_adventure: {
-        label: "史诗冒险",
-        description: "包含持续升级的风险、地点、势力和发现的广阔旅程。"
-      }
-    }
-  },
-  protagonist_direction: {
-    title: "主角方向",
-    prompt: "主角长期应该朝什么方向变化？",
-    options: {
-      recover_agency: {
-        label: "夺回主动权",
-        description: "主角一开始受限，逐步成为能做关键决定的人。"
-      },
-      pay_a_cost: {
-        label: "付出代价",
-        description: "主角得到想要的东西，但必须放弃真正有分量的事物。"
-      },
-      change_belief: {
-        label: "信念转变",
-        description: "主角的核心世界观会被情节挑战并重塑。"
-      }
-    }
-  },
-  world_constraints: {
-    title: "世界约束",
-    prompt: "写作时 harness 必须稳定维护哪些世界约束？",
-    options: {
-      low_magic: {
-        label: "低魔设定",
-        description: "异常事件存在，但稀少、有代价，并会造成真实后果。"
-      },
-      grounded_modern: {
-        label: "现实现代",
-        description: "世界遵守当代社会、技术和物理约束。"
-      },
-      political_factions: {
-        label: "势力政治",
-        description: "权力集团有明确利益，并且需要长期一致地反应。"
-      }
-    }
-  },
-  reader_promise: {
-    title: "读者回报",
-    prompt: "每个故事弧都应该让读者稳定得到什么？",
-    options: {
-      emotional_turn: {
-        label: "情感转折",
-        description: "每个故事弧都会改变一段关键关系或自我信念的意义。"
-      },
-      strategic_win: {
-        label: "策略胜利",
-        description: "每个故事弧解决一个具体战术问题，并打开更尖锐的新问题。"
-      },
-      revelation: {
-        label: "真相揭示",
-        description: "每个故事弧揭示一个会改变旧事件理解方式的真相。"
-      }
-    }
-  },
-  ending_tendency: {
-    title: "结局倾向",
-    prompt: "不提前写死全书的前提下，长期决策应该受哪种结局倾向牵引？",
-    options: {
-      hopeful: {
-        label: "有希望",
-        description: "结局应当来之不易、经历困难，但最终有修复感。"
-      },
-      bittersweet: {
-        label: "苦甜参半",
-        description: "结局给予意义或胜利，同时保留真实损失。"
-      },
-      tragic: {
-        label: "悲剧性",
-        description: "结局通过不可逆后果兑现故事前提。"
-      }
-    }
-  }
 };
 
 export function formatOperationMode(mode: OperationMode): string {
@@ -369,6 +305,14 @@ export function formatArtifactDetail(detail: string): string {
   if (bytesMatch) {
     return `${bytesMatch[1]} 字节`;
   }
+  const messageCountMatch = detail.match(/^(\d+) messages$/);
+  if (messageCountMatch) {
+    return `${messageCountMatch[1]} 条消息`;
+  }
+  const constraintCountMatch = detail.match(/^(\d+) structured constraints$/);
+  if (constraintCountMatch) {
+    return `${constraintCountMatch[1]} 项结构化约束`;
+  }
   return detail;
 }
 
@@ -392,6 +336,12 @@ export function formatRunNextActionMessage(message: string): string {
       "检测到可能是后端停止后遗留的运行锁。先恢复为 paused，再从已提交状态继续。",
     "A required project readiness gate failed and must be repaired before running.":
       "必要的项目准备门失败，需要先修复再运行。",
+    "Continue the open-ended Book Direction discussion.":
+      "继续开放式全书方向讨论。",
+    "Explicitly approve the reviewed candidate Book Direction.":
+      "明确批准已审阅的全书方向候选。",
+    "Prepare the current Book Direction draft for review.":
+      "将当前全书方向草稿整理为候选并进行独立审阅。",
     "Answer the remaining required book setup questions.": "请回答剩余的必填全书设定问题。",
     "Approve the collected book setup before the harness starts.":
       "请先批准已收集的全书设定，再启动 harness。",
@@ -421,6 +371,8 @@ export function formatGateMessage(message: string): string {
     "Book setup is approved.": "全书设定已批准。",
     "Book setup is approved but required book artifacts are incomplete.":
       "全书设定已批准，但必要的全书产物不完整。",
+    "Book direction must be discussed, reviewed, and explicitly approved.":
+      "全书方向需要经过讨论、候选审阅和用户明确批准。",
     "Book setup must be completed and approved before the harness can run.":
       "需要先完成并批准全书设定，harness 才能运行。",
     "Completion audit summarizes live-provider and literary-review evidence.":
@@ -469,6 +421,37 @@ export function formatEvidence(value: string): string {
 
 export function formatEventMessage(message: string): string {
   const exact: Record<string, string> = {
+    "Approved book-level artifact committed after explicit user approval.":
+      "用户明确批准后，正式全书产物已提交。",
+    "Book direction discussion failed; no candidate state was advanced.":
+      "全书方向讨论失败，候选状态没有推进。",
+    "Book direction discussion model started.": "全书方向讨论模型已开始工作。",
+    "Book discussion state changed; the stale model result was discarded.":
+      "全书讨论状态已经更新，本次过期的模型结果已丢弃。",
+    "Book discussion state changed; the stale review result was discarded.":
+      "全书讨论状态已经更新，本次过期的审阅结果已丢弃。",
+    "Book direction discussion turn completed and the candidate draft was updated.":
+      "本轮全书方向讨论已完成，候选草稿已更新。",
+    "Book direction synthesis or review failed; approval remains locked.":
+      "全书方向整理或审阅失败，批准入口仍保持锁定。",
+    "Candidate book direction review context assembled.":
+      "候选全书方向的审阅上下文已装配。",
+    "Candidate book-level artifact written for review.":
+      "候选全书产物已写入，等待审阅。",
+    "Candidate Book Direction has blocking issues and remains unapproved.":
+      "候选全书方向存在阻断问题，仍未获批准。",
+    "Candidate Book Direction is ready for explicit user approval.":
+      "候选全书方向已通过审阅，等待用户明确批准。",
+    "Controlled context assembled for the next book discussion turn.":
+      "下一轮全书讨论的受控上下文已装配。",
+    "Independently reviewing the candidate Book Direction.":
+      "正在独立审阅候选全书方向。",
+    "Synthesizing a candidate Book Direction for user review.":
+      "正在整理供用户审阅的全书方向候选。",
+    "The complete candidate Book Direction draft was updated.":
+      "完整的候选全书方向草稿已更新。",
+    "User explicitly approved the reviewed Book Direction.":
+      "用户已明确批准经过审阅的全书方向。",
     "Book loop approved by user.": "用户已批准全书流程。",
     "Book setup answer recorded.": "全书设定回答已记录。",
     "Book setup has enough information for approval.": "全书设定信息已足够，可以批准。",
@@ -534,43 +517,6 @@ export function formatSummaryFlags(summary: ArtifactSummary): string[] {
 
 export function formatLiteraryDecision(decision: LiteraryReviewDecision): string {
   return decision === "approved" ? "通过" : "不通过";
-}
-
-export function formatSetupQuestionTitle(question: SetupQuestion): string {
-  return setupQuestionCopy[question.id]?.title ?? question.title;
-}
-
-export function formatSetupQuestionPrompt(question: SetupQuestion): string {
-  return setupQuestionCopy[question.id]?.prompt ?? question.prompt;
-}
-
-export function formatSetupOption(
-  question: SetupQuestion,
-  option: SetupOption
-): { label: string; description: string } {
-  return setupQuestionCopy[question.id]?.options[option.id] ?? option;
-}
-
-export function formatSetupSource(source: SetupQuestion["source"]): string {
-  return source === "llm" ? "模型追问" : "内置问题";
-}
-
-export function composeSetupOptionAnswer(question: SetupQuestion, option: SetupOption): string {
-  const display = formatSetupOption(question, option);
-  return `${display.label}: ${display.description}`;
-}
-
-export function formatSetupAnswer(question: SetupQuestion, answer: string | undefined): string {
-  if (!answer) {
-    return "待回答";
-  }
-  const option = question.options.find((candidate) =>
-    answer.startsWith(`${candidate.label}:`)
-  );
-  if (!option) {
-    return answer;
-  }
-  return composeSetupOptionAnswer(question, option);
 }
 
 export function formatOptionalId(value: string | null | undefined): string {

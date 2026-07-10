@@ -56,8 +56,8 @@ npm.cmd run profile:test -- --profile-id main
 1. 在项目选择器中新建或打开项目。
 2. 选择 `full_auto` 或 `participatory`。
 3. 配置并选择 LLM profile。
-4. 完成全书 setup 对话。
-5. 批准全书 setup。
+4. 在全书方向页面自由讨论。模型会持续维护完整草稿、已确认决定、已取代决定、待定项、假设和矛盾；讨论轮数不受限制。推荐回复会追加到未发送输入，不会覆盖已经写下的内容。
+5. 方向成熟后点击整理并审阅。候选必须逐项覆盖并结构化保留已确认决定；审阅通过后明确批准当前候选版本，有阻断问题时继续讨论后重新审阅。
 6. 启动或恢复 harness。
 7. 在三栏工作台中观察 loop 状态、模型可见输出、产物、上下文快照、审查、验证信号、patch 状态和路由决策。
 8. 需要时随时提交反馈。反馈会在下一个安全 checkpoint 被处理。
@@ -81,6 +81,21 @@ output/<小说名>/
 
 这个目录会被 git 忽略。它可能包含草稿、正式章节、审查结果、状态补丁、事件、导出文件和 smoke 报告。
 
+全书讨论的主要文件是：
+
+```text
+book/setup.json                         # 当前讨论状态
+book/direction_draft.md                 # 最新候选方向草稿
+book/discussion/transcript.jsonl        # 完整本地讨论记录
+book/discussion/turn-*/attempt-*/       # 上下文、响应及不可变状态/草稿/transcript
+book/reviews/review-*/                  # 版本化候选、约束与审阅结论
+book/direction.md                       # 明确批准后的正式方向
+book/constraints.json                   # 明确批准后的结构化约束
+book/outline.md                         # 滚动故事弧规划契约
+```
+
+讨论草稿和 `book/reviews/` 不会自动成为正式方向。继续讨论会使当前待批准候选失效，但旧审阅目录保留用于追溯。另一个进程产生的过期结果会因 revision 冲突被丢弃；批准时正式全书文件会一起事务提交，不会留下半套已批准状态。
+
 ## 质量门禁
 
 发布变更前运行完整本地质量门禁：
@@ -94,7 +109,7 @@ npm.cmd run acceptance
 npm.cmd run audit:secrets
 ```
 
-基于 fixture 的测试覆盖项目存储、profile 安全、LLM 适配器、事件 replay、运行控制、反馈路由、产物摘要、章节验证、状态补丁提交/拒绝、重试准备和全书导出。
+基于 fixture 的测试覆盖开放式全书讨论、上下文预算与版本追溯、确认决定覆盖、候选隔离、审阅阻断、并发冲突、多文件事务回滚、版本化批准、旧项目迁移、profile 安全、LLM 适配器、事件 replay、运行控制、章节验证、状态补丁提交/拒绝、重试准备和全书导出。
 
 ## 真实 Provider Smoke 与文学审查
 
@@ -104,11 +119,13 @@ npm.cmd run audit:secrets
 npm.cmd run smoke:live -- --profile-id main
 ```
 
-该命令会在 `output/` 下创建带时间戳的 smoke 项目，完成 setup，运行一个有界的全自动章节 loop，导出 manuscript，并写入：
+该命令会在 `output/` 下创建带时间戳的 smoke 项目，提交一份完整创作意图，执行开放讨论、候选综合、独立审阅和明确批准，然后运行一个有界的全自动章节 loop，导出 manuscript，并写入：
 
 ```text
 exports/live_smoke_report.json
 ```
+
+候选审阅阻断时，Smoke 会把问题重新注入讨论并重试，最多进行三次整理审阅。这个上限只用于自动化 smoke；应用内的真实全书讨论没有轮数上限。
 
 检查生成的 `final.md`、`review.md`、`verification.json` 和状态补丁文件后，记录人工审查结果：
 

@@ -6,11 +6,18 @@ from fastapi import HTTPException
 from app.api import readiness as readiness_api
 from app.core import config as core_config
 from app.core import paths as core_paths
+from app.harness.loops.book import BookDirectionSynthesis
 from app.harness.run_control import begin_active_runner, end_active_runner
 from app.schemas.events import HarnessEvent
 from app.schemas.profiles import LlmProfileUpsert
 from app.schemas.projects import CreateProjectRequest, ProjectMetadata
-from app.schemas.setup import SetupAnswerRequest
+from app.schemas.setup import (
+    BookDirectionConstraints,
+    BookDirectionReview,
+    BookDirectionReviewIssue,
+    SetupApprovalRequest,
+    SetupReadinessSignal,
+)
 from app.storage import profiles as profile_storage
 from app.storage import projects as project_storage
 from app.storage import setup as setup_storage
@@ -43,8 +50,8 @@ def test_readiness_blocks_run_without_setup_and_profile(
     assert by_id["book_setup"].status == "pending"
     assert by_id["active_llm_profile"].status == "pending"
     assert by_id["run_control"].status == "passed"
-    assert readiness.next_action.id == "answer_book_setup"
-    assert readiness.next_action.command == "POST /api/setup/answers"
+    assert readiness.next_action.id == "configure_llm_profile"
+    assert readiness.next_action.command == "POST /api/profiles"
     assert readiness.next_action.requires_user is True
 
 
@@ -83,7 +90,7 @@ def test_readiness_allows_run_when_required_gates_pass(
     assert readiness.next_action.can_auto_continue is True
 
 
-def test_readiness_recommends_setup_approval_when_required_answers_exist(
+def test_readiness_recommends_review_when_discussion_draft_is_ready(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -93,17 +100,55 @@ def test_readiness_recommends_setup_approval_when_required_answers_exist(
     )
     project_path = Path(project.path)
     state = setup_storage.read_setup_state(project_path)
-    for question in state.questions:
-        setup_storage.answer_setup_question(
-            project_path,
-            SetupAnswerRequest(question_id=question.id, answer=f"{question.title} answer"),
-        )
+    state.direction_draft = _direction()
+    state.readiness = SetupReadinessSignal(status="ready", reason="Ready for review.")
+    write_json(project_path / "book" / "setup.json", state.model_dump(mode="json"))
+    _create_profile()
 
     readiness = readiness_api.get_readiness()
 
-    assert readiness.next_action.id == "approve_book_setup"
+    assert readiness.next_action.id == "review_book_direction"
+    assert readiness.next_action.command == "POST /api/setup/prepare-review"
+    assert readiness.next_action.requires_user is True
+
+
+def test_readiness_recommends_explicit_approval_for_reviewed_candidate(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _isolate_runtime_paths(tmp_path, monkeypatch)
+    project = project_storage.create_project(
+        CreateProjectRequest(title="Reviewed Novel", operation_mode="full_auto")
+    )
+    project_path = Path(project.path)
+    _prepare_candidate(project_path)
+
+    readiness = readiness_api.get_readiness()
+
+    assert readiness.next_action.id == "approve_book_direction"
     assert readiness.next_action.command == "POST /api/setup/approve"
     assert readiness.next_action.requires_user is True
+    assert "candidate_revision:1" in readiness.next_action.evidence
+
+
+def test_readiness_routes_blocked_candidate_back_to_discussion(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _isolate_runtime_paths(tmp_path, monkeypatch)
+    project = project_storage.create_project(
+        CreateProjectRequest(title="Blocked Novel", operation_mode="full_auto")
+    )
+    project_path = Path(project.path)
+    _prepare_candidate(project_path, blocked=True)
+    _create_profile()
+
+    readiness = readiness_api.get_readiness()
+
+    assert readiness.next_action.id == "continue_book_discussion"
+    assert readiness.next_action.command == "POST /api/setup/turn"
+    assert "candidate_review:blocked" in readiness.next_action.evidence
+    assert "The candidate contradicts a confirmed decision." in readiness.next_action.evidence
 
 
 def test_readiness_recommends_arc_approval_in_participatory_mode(
@@ -289,13 +334,85 @@ def test_readiness_fails_when_approved_setup_artifact_is_missing(
 
 
 def _approve_setup(project_path: Path) -> None:
+    state = _prepare_candidate(project_path)
+    assert state.candidate is not None
+    setup_storage.approve_setup(
+        project_path,
+        SetupApprovalRequest(candidate_revision=state.candidate.revision),
+    )
+
+
+def _prepare_candidate(project_path: Path, *, blocked: bool = False):
     state = setup_storage.read_setup_state(project_path)
-    for question in state.questions:
-        setup_storage.answer_setup_question(
-            project_path,
-            SetupAnswerRequest(question_id=question.id, answer=f"{question.title} answer"),
-        )
-    setup_storage.approve_setup(project_path)
+    state.direction_draft = _direction()
+    context_path = setup_storage.write_review_context_snapshot(
+        project_path,
+        candidate_revision=state.candidate_revision_counter + 1,
+        snapshot={"sources": ["book/direction_draft.md"]},
+    )
+    return setup_storage.save_book_direction_candidate(
+        project_path,
+        state,
+        synthesis=BookDirectionSynthesis(
+            direction_markdown=_direction(),
+            constraints=BookDirectionConstraints(
+                confirmed=["Use fair clues."],
+                must_preserve=["Reveals change relationships."],
+                must_avoid=["No arbitrary solution."],
+                creative_freedoms=["Plan only the current arc."],
+                open_decisions=[],
+            ),
+            confirmed_decision_coverage=[],
+            rolling_plan_markdown=_rolling_contract(),
+            model_snapshot="fixture-model",
+            provider_snapshot="openai-compatible",
+            usage={},
+        ),
+        review=(
+            BookDirectionReview(
+                status="blocked",
+                summary="Candidate must return to discussion.",
+                issues=[
+                    BookDirectionReviewIssue(
+                        severity="blocking",
+                        kind="contradiction",
+                        message="The candidate contradicts a confirmed decision.",
+                        evidence=["confirmed direction"],
+                    )
+                ],
+                signals=[],
+            )
+            if blocked
+            else BookDirectionReview(
+                status="passed",
+                summary="Candidate is usable.",
+                issues=[],
+                signals=["rolling_scope:passed"],
+            )
+        ),
+        profile_id="main",
+        review_model_snapshot="fixture-model",
+        context_snapshot_path=context_path,
+    )
+
+
+def _direction() -> str:
+    return (
+        "# Book Direction\n\nA grounded mystery about earned trust. Every reveal uses fair clues "
+        "and changes a relationship. The protagonist gains agency through difficult alliances, "
+        "while every victory carries a visible personal cost. Later antagonists and the exact ending "
+        "remain open so each story arc can be planned from committed canon without rewriting these "
+        "stable promises."
+    )
+
+
+def _rolling_contract() -> str:
+    return (
+        "# Rolling Contract\n\nPlan only the current story arc from approved direction and committed "
+        "canon. After its chapters commit, reconcile observations and state patches before choosing "
+        "the next arc. Return to book discussion only if a route requires changing an approved "
+        "highest-level decision."
+    )
 
 
 def _create_profile() -> None:

@@ -63,39 +63,107 @@ export interface LlmProfileMutation {
   enabled: boolean;
 }
 
-export interface SetupOption {
+export interface SetupMessage {
   id: string;
-  label: string;
-  description: string;
-}
-
-export interface SetupQuestion {
-  id: string;
-  title: string;
-  prompt: string;
-  options: SetupOption[];
-  required: boolean;
-  source: "default" | "llm";
+  turn: number;
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
   profile_id: string | null;
   model_snapshot: string | null;
+  migrated: boolean;
 }
 
-export interface SetupAnswer {
-  question_id: string;
-  answer: string;
-  answered_at: string;
+export interface SetupSuggestion {
+  id: string;
+  label: string;
+  message: string;
+}
+
+export interface SetupReadinessSignal {
+  status: "continue" | "ready";
+  reason: string;
+}
+
+export interface SupersededDecision {
+  turn: number;
+  decision: string;
+  replacement: string | null;
+  reason: string;
+  user_evidence: string;
+}
+
+export interface ConfirmedDecisionCoverage {
+  decision: string;
+  candidate_evidence: string;
+}
+
+export interface BookDirectionConstraints {
+  confirmed: string[];
+  must_preserve: string[];
+  must_avoid: string[];
+  creative_freedoms: string[];
+  open_decisions: string[];
+}
+
+export interface BookDirectionReviewIssue {
+  severity: "warning" | "blocking";
+  kind: string;
+  message: string;
+  evidence: string[];
+  suggested_question: string | null;
+}
+
+export interface BookDirectionReview {
+  status: "passed" | "blocked";
+  summary: string;
+  issues: BookDirectionReviewIssue[];
+  signals: string[];
+}
+
+export interface BookDirectionCandidate {
+  revision: number;
+  created_at: string;
+  direction_markdown: string;
+  constraints: BookDirectionConstraints;
+  confirmed_decision_coverage: ConfirmedDecisionCoverage[];
+  rolling_plan_markdown: string;
+  review: BookDirectionReview;
+  direction_path: string;
+  constraints_path: string;
+  rolling_plan_path: string;
+  verification_path: string;
+  profile_id: string;
+  model_snapshot: string;
+  review_model_snapshot: string;
 }
 
 export interface SetupStateDocument {
   schema_version: number;
+  revision: number;
+  phase: "discussing" | "review_ready" | "review_blocked" | "approved";
   approved: boolean;
   approved_at: string | null;
-  ready_for_approval: boolean;
-  readiness_assessed_at: string | null;
-  readiness_profile_id: string | null;
-  questions: SetupQuestion[];
-  answers: SetupAnswer[];
-  next_question: SetupQuestion | null;
+  migrated_from_schema_version: number | null;
+  turn_count: number;
+  candidate_revision_counter: number;
+  messages: SetupMessage[];
+  direction_draft: string;
+  discussion_summary: string;
+  confirmed_decisions: string[];
+  superseded_decisions: SupersededDecision[];
+  unresolved_questions: string[];
+  assumptions: string[];
+  contradictions: string[];
+  suggestions: SetupSuggestion[];
+  readiness: SetupReadinessSignal;
+  candidate: BookDirectionCandidate | null;
+  direction_draft_version_path: string | null;
+  discussion_state_version_path: string | null;
+  discussion_transcript_version_path: string | null;
+  last_context_snapshot_path: string | null;
+  last_profile_id: string | null;
+  last_model_snapshot: string | null;
 }
 
 export type ArcReviewStatus = "not_required" | "awaiting_review" | "approved";
@@ -266,8 +334,9 @@ export interface ReadinessGate {
 }
 
 export type RunNextActionId =
-  | "answer_book_setup"
-  | "approve_book_setup"
+  | "continue_book_discussion"
+  | "review_book_direction"
+  | "approve_book_direction"
   | "configure_llm_profile"
   | "repair_project_state"
   | "wait_for_safe_checkpoint"

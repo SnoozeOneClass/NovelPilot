@@ -126,6 +126,53 @@ def test_project_artifacts_ignore_internal_temp_files(tmp_path) -> None:
     assert [summary.path for summary in summaries] == ["chapters/chapter-001/draft.md"]
 
 
+def test_book_direction_artifacts_preserve_candidate_and_committed_boundaries(tmp_path) -> None:
+    project_path = tmp_path / "novel"
+    book_path = project_path / "book"
+    review_path = book_path / "reviews" / "review-0001"
+    discussion_path = book_path / "discussion"
+    review_path.mkdir(parents=True)
+    discussion_path.mkdir(parents=True)
+    (book_path / "direction_draft.md").write_text("# Draft direction\n", encoding="utf-8")
+    (book_path / "direction.md").write_text("# Approved direction\n", encoding="utf-8")
+    (book_path / "outline.md").write_text("# Rolling contract\n", encoding="utf-8")
+    (review_path / "candidate_direction.md").write_text(
+        "# Candidate direction\n", encoding="utf-8"
+    )
+    (review_path / "rolling_plan.md").write_text(
+        "# Candidate rolling contract\n", encoding="utf-8"
+    )
+    (discussion_path / "transcript.jsonl").write_text(
+        '{"role":"user","content":"start"}\n', encoding="utf-8"
+    )
+    write_json(
+        book_path / "constraints.json",
+        {"candidate": False, "confirmed": ["Fair clues"]},
+    )
+    write_json(
+        review_path / "candidate_constraints.json",
+        {"candidate": True, "confirmed": ["Fair clues"]},
+    )
+
+    summaries = summarize_project_artifacts(project_path)
+    by_path = {summary.path: summary for summary in summaries}
+
+    assert by_path["book/direction_draft.md"].candidate is True
+    assert by_path["book/direction.md"].committed is True
+    assert by_path["book/constraints.json"].committed is True
+    assert by_path["book/reviews/review-0001/candidate_direction.md"].kind == (
+        "book_direction_candidate"
+    )
+    assert by_path["book/reviews/review-0001/candidate_direction.md"].candidate is True
+    assert by_path["book/reviews/review-0001/rolling_plan.md"].kind == (
+        "book_rolling_contract_candidate"
+    )
+    assert by_path["book/discussion/transcript.jsonl"].kind == (
+        "book_discussion_transcript"
+    )
+    assert by_path["book/discussion/transcript.jsonl"].event_status == "untracked"
+
+
 def test_artifact_content_api_reads_current_project_file(tmp_path, monkeypatch) -> None:
     from app.api import artifacts
 

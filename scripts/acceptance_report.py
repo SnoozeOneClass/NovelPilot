@@ -61,12 +61,68 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
     ),
     AcceptanceCriterion(
         id="book_setup",
-        requirement="Book setup collects required settings and requires approval before activation.",
+        requirement=(
+            "Book direction uses open-ended co-creation, reviewed candidates, and explicit "
+            "version-bound approval before activation."
+        ),
         probes=(
-            EvidenceProbe("backend/app/api/setup.py", ("approve_setup", "answer_setup_question")),
-            EvidenceProbe("backend/app/storage/setup.py", ("DEFAULT_SETUP_QUESTIONS", "_write_approved_book_artifacts")),
-            EvidenceProbe("backend/tests/test_setup.py", ("test_approve_setup_requires_all_required_answers",)),
-            EvidenceProbe("frontend/src/features/setup-conversation/SetupConversation.tsx"),
+            EvidenceProbe(
+                "backend/app/api/setup.py",
+                ("continue_setup_discussion", "prepare_setup_review", "approve_setup"),
+            ),
+            EvidenceProbe(
+                "backend/app/harness/loops/book.py",
+                (
+                    "assemble_discussion_context",
+                    "confirmed_decision_coverage",
+                    "review_book_direction",
+                ),
+            ),
+            EvidenceProbe(
+                "backend/app/storage/setup.py",
+                ("candidate_revision", "SetupRevisionConflict", "_migrate_legacy_setup"),
+            ),
+            EvidenceProbe(
+                "backend/tests/test_setup.py",
+                (
+                    "test_explicit_approval_requires_latest_revision",
+                    "test_review_blocks_candidate_without_confirmed_decision_coverage",
+                    "test_setup_api_failure_is_fail_closed",
+                ),
+            ),
+            EvidenceProbe(
+                "frontend/src/features/setup-conversation/SetupConversation.tsx",
+                ("prepareSetupReview", "candidate.revision"),
+            ),
+        ),
+    ),
+    AcceptanceCriterion(
+        id="book_setup_durability",
+        requirement=(
+            "Book discussion and approval resist stale concurrent results, partial writes, "
+            "and duplicate event replay."
+        ),
+        probes=(
+            EvidenceProbe(
+                "backend/app/storage/transactions.py",
+                ("commit_file_transaction", "recover_file_transactions"),
+            ),
+            EvidenceProbe(
+                "backend/app/storage/events.py",
+                ("exclusive_file_lock", "existing.event_id == event.event_id"),
+            ),
+            EvidenceProbe(
+                "backend/tests/test_transactions.py",
+                ("rolls_back_all_targets", "recovers_after_process_stops_mid_commit"),
+            ),
+            EvidenceProbe(
+                "backend/tests/test_setup.py",
+                (
+                    "test_stale_discussion_result_cannot_overwrite_newer_revision",
+                    "test_approval_transaction_rolls_back_partial_formal_artifacts",
+                    "test_setup_api_queues_events_when_durable_append_temporarily_fails",
+                ),
+            ),
         ),
     ),
     AcceptanceCriterion(
@@ -133,7 +189,7 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
             ),
             EvidenceProbe(
                 "frontend/src/features/workspace/TraceConsole.tsx",
-                ("事件时间线", "Artifacts", "Validation"),
+                ("事件时间线", "运行轨迹", "验证"),
             ),
             EvidenceProbe("frontend/src/styles.css", (".cockpit-grid", "grid-template-columns")),
         ),

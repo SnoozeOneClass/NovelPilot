@@ -172,6 +172,7 @@ code {
 }
 
 .gold-button,
+.green-button,
 .outline-button,
 .quiet-button,
 .pause-button,
@@ -197,6 +198,24 @@ code {
 
 .gold-button:hover:not(:disabled) {
   background: var(--gold-dark);
+}
+
+.green-button {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border-radius: 6px;
+  background: var(--green);
+  color: #fff;
+  padding: 0 16px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.green-button:hover:not(:disabled) {
+  background: #1f7550;
 }
 
 .outline-button,
@@ -1133,6 +1152,427 @@ textarea::placeholder {
   align-items: center;
   justify-content: center;
   gap: 10px;
+}
+
+.book-discovery-layout {
+  grid-template-columns: minmax(560px, 1.55fr) minmax(380px, 0.92fr);
+}
+
+.book-discussion-panel {
+  overflow: hidden;
+}
+
+.book-discussion-statuses {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.book-conversation {
+  min-height: 260px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 12px 8px 18px;
+  overflow: auto;
+  scroll-behavior: smooth;
+}
+
+.book-conversation-empty {
+  min-height: 250px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.book-conversation-empty h2 {
+  color: var(--ink);
+  font-size: 20px;
+}
+
+.book-conversation-empty p {
+  max-width: 520px;
+  line-height: 1.6;
+}
+
+.book-message {
+  width: min(86%, 720px);
+  padding: 12px 15px;
+}
+
+.book-message.user {
+  align-self: flex-end;
+  border-right: 3px solid var(--gold);
+  background: #fff7df;
+}
+
+.book-message.assistant {
+  align-self: flex-start;
+  border-left: 3px solid var(--green);
+  background: var(--surface-soft);
+}
+
+.book-message.pending {
+  opacity: 0.74;
+}
+
+.book-message header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.book-message header strong {
+  font-size: 13px;
+}
+
+.book-message header span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.book-message p {
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.book-suggestions {
+  display: grid;
+  gap: 7px;
+  padding: 10px 8px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.book-suggestions > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.book-suggestions > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.book-suggestions .quiet-button {
+  min-height: 32px;
+  padding: 0 11px;
+  font-size: 11px;
+}
+
+.book-composer {
+  position: relative;
+  margin: 6px 8px 0;
+}
+
+.book-composer textarea {
+  width: 100%;
+  min-height: 88px;
+  padding: 13px 54px 13px 14px;
+  resize: vertical;
+}
+
+.send-book-message {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  background: var(--gold);
+  color: #fff;
+}
+
+.book-discussion-actions {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 14px 8px 0;
+}
+
+.book-discussion-actions > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  margin-right: auto;
+}
+
+.book-discussion-actions strong,
+.book-discussion-actions small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+}
+
+.book-discussion-actions strong {
+  color: var(--ink);
+}
+
+.book-candidate-review {
+  margin: 10px 8px 2px;
+  padding: 14px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: #fbfaf5;
+}
+
+.book-candidate-review.passed {
+  border-color: #a8d4bb;
+  background: var(--green-soft);
+}
+
+.book-candidate-review.blocked {
+  border-color: #e8b0a6;
+  background: var(--red-soft);
+}
+
+.book-candidate-review > header {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+}
+
+.book-candidate-review > header > span {
+  color: var(--green);
+}
+
+.book-candidate-review.blocked > header > span {
+  color: var(--red);
+}
+
+.book-candidate-review h2 {
+  font-size: 15px;
+}
+
+.book-candidate-review header p {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.book-review-issues {
+  display: grid;
+  gap: 7px;
+  margin-top: 11px;
+  padding-left: 38px;
+}
+
+.book-review-issues article {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.book-review-issues article > span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.book-review-issues article.blocking > span {
+  color: var(--red);
+}
+
+.book-review-issues article > div {
+  display: grid;
+  gap: 3px;
+}
+
+.book-review-issues small {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.book-review-issues .text-button {
+  justify-self: start;
+  font-size: 11px;
+}
+
+.book-review-signals {
+  display: grid;
+  gap: 5px;
+  margin-top: 11px;
+  padding-left: 38px;
+}
+
+.book-review-signals strong {
+  font-size: 11px;
+}
+
+.book-review-signals ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 14px;
+  margin: 0;
+  padding: 0;
+  color: var(--muted);
+  font-size: 10px;
+  list-style: none;
+}
+
+.book-decision-coverage {
+  display: grid;
+  gap: 6px;
+  margin-top: 11px;
+  padding-left: 38px;
+}
+
+.book-decision-coverage > strong {
+  font-size: 11px;
+}
+
+.book-decision-coverage ul,
+.book-decision-coverage li {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.book-decision-coverage li {
+  padding-left: 9px;
+  border-left: 2px solid var(--green);
+  font-size: 11px;
+}
+
+.book-decision-coverage small {
+  color: var(--muted);
+}
+
+.book-direction-panel {
+  gap: 14px;
+  overflow: auto;
+}
+
+.book-direction-markdown,
+.candidate-contract > pre {
+  margin: 0;
+  color: #47372a;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.book-direction-markdown {
+  min-height: 230px;
+  max-height: 46%;
+  padding: 15px 2px 18px;
+  border-bottom: 1px solid var(--line-soft);
+  overflow: auto;
+}
+
+.book-direction-markdown.empty {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.direction-ledger {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 18px;
+}
+
+.direction-ledger section {
+  min-width: 0;
+  border-top: 2px solid var(--line);
+  padding-top: 8px;
+}
+
+.direction-ledger section.confirmed {
+  border-color: var(--green);
+}
+
+.direction-ledger section.conflict {
+  border-color: var(--red);
+}
+
+.direction-ledger h3 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.direction-ledger h3 span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.direction-ledger ul,
+.candidate-constraints ul {
+  display: grid;
+  gap: 5px;
+  margin-top: 7px;
+  padding-left: 17px;
+}
+
+.direction-ledger li,
+.candidate-constraints li {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.direction-ledger p {
+  margin-top: 7px;
+  color: #b1a28e;
+  font-size: 11px;
+}
+
+.candidate-contract {
+  display: grid;
+  gap: 12px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.candidate-contract > h3 {
+  font-size: 14px;
+}
+
+.candidate-contract > pre {
+  max-height: 260px;
+  overflow: auto;
+}
+
+.candidate-constraints {
+  display: grid;
+  gap: 11px;
+}
+
+.candidate-constraints section {
+  border-left: 2px solid var(--line);
+  padding-left: 10px;
+}
+
+.candidate-constraints strong {
+  color: var(--gold-dark);
+  font-size: 11px;
 }
 
 /* Cockpit */
@@ -2988,6 +3428,22 @@ textarea::placeholder {
     max-height: 620px;
   }
 
+  .book-discussion-panel {
+    min-height: 860px;
+  }
+
+  .book-direction-panel {
+    max-height: none;
+  }
+
+  .book-discussion-actions {
+    flex-wrap: wrap;
+  }
+
+  .book-discussion-actions > div {
+    flex-basis: 100%;
+  }
+
   .cockpit-grid > * {
     max-height: none;
     overflow: visible;
@@ -3090,6 +3546,39 @@ textarea::placeholder {
 
   .plan-question-stage {
     padding: 18px 0 0;
+  }
+
+  .book-discussion-panel {
+    min-height: 780px;
+  }
+
+  .book-message {
+    width: 100%;
+  }
+
+  .book-discussion-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .book-discussion-actions > div {
+    margin-right: 0;
+  }
+
+  .direction-ledger {
+    grid-template-columns: 1fr;
+  }
+
+  .book-review-issues {
+    padding-left: 0;
+  }
+
+  .book-review-signals {
+    padding-left: 0;
+  }
+
+  .book-decision-coverage {
+    padding-left: 0;
   }
 
   .question-heading-row,

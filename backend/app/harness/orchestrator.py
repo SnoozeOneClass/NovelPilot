@@ -52,11 +52,7 @@ class HarnessRunContext:
 
 
 class HarnessOrchestrator:
-    """Coordinates loop actions.
-
-    The first implementation wires storage and run control before filling in
-    full LLM-driven loop behavior.
-    """
+    """Coordinates durable book, story-arc, and chapter loop actions."""
 
     def __init__(self, context: HarnessRunContext) -> None:
         self.context = context
@@ -71,7 +67,7 @@ class HarnessOrchestrator:
                 metadata,
                 kind="book_setup_required",
                 loop_layer="book",
-                atomic_action="collect_book_settings",
+                atomic_action="continue_book_discussion",
                 status="completed",
                 routing_decision="pause",
                 message="Book setup must be approved before the harness can continue.",
@@ -220,6 +216,7 @@ class HarnessOrchestrator:
         )
 
         settings = _read_text(self.context.project_path / "book" / "settings.md")
+        rolling_contract = _read_text(self.context.project_path / "book" / "outline.md")
         book_state = read_json(self.context.project_path / "book" / "state.json", default={})
         canon_summary = _read_canon_summary(self.context.project_path)
         feedback_block = self._feedback_prompt_block(
@@ -234,6 +231,7 @@ class HarnessOrchestrator:
                     "Return a concise Markdown plan with arc goal, conflicts, chapter direction, "
                     "pacing signal, foreshadowing movement, and stop conditions.",
                     f"Book settings:\n{settings}",
+                    f"Approved rolling story arc contract:\n{rolling_contract}",
                     f"Book state:\n{book_state}",
                     f"Canon summary:\n{canon_summary}",
                     f"Book feedback memo:\n{book_feedback}",
@@ -359,11 +357,37 @@ class HarnessOrchestrator:
                     included_fields=["full_text"],
                 ),
                 ContextSource(
+                    id="book-rolling-contract",
+                    path="book/outline.md",
+                    usage="direct",
+                    included_fields=["full_text"],
+                ),
+                ContextSource(
                     id="book-state",
                     path="book/state.json",
                     version=_state_version(self.context.project_path / "book" / "state.json"),
                     usage="direct",
-                    included_fields=["answers", "current_strategy"],
+                    included_fields=[
+                        "book_direction_version",
+                        "confirmed_decisions",
+                        "must_preserve",
+                        "must_avoid",
+                        "creative_freedoms",
+                        "open_decisions",
+                        "current_strategy",
+                    ],
+                ),
+                ContextSource(
+                    id="book-constraints",
+                    path="book/constraints.json",
+                    usage="direct",
+                    included_fields=[
+                        "confirmed",
+                        "must_preserve",
+                        "must_avoid",
+                        "creative_freedoms",
+                        "open_decisions",
+                    ],
                 ),
                 ContextSource(
                     id="current-arc-plan",
@@ -518,6 +542,8 @@ class HarnessOrchestrator:
                     f"User feedback:\n{feedback}",
                     f"Current arc plan:\n{current_plan}",
                     f"Book settings:\n{_read_text(self.context.project_path / 'book' / 'settings.md')}",
+                    "Approved rolling story arc contract:\n"
+                    + _read_text(self.context.project_path / "book" / "outline.md"),
                     f"Canon summary:\n{_read_canon_summary(self.context.project_path)}",
                 ]
             )

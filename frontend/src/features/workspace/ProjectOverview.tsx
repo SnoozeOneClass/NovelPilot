@@ -7,6 +7,7 @@ import {
   formatGenericStatus,
   formatOperationMode,
   formatOptionalId,
+  formatRunNextActionMessage,
   formatRunStatus
 } from "../../types/display";
 import type {
@@ -72,7 +73,7 @@ export function ProjectOverview({
       </header>
 
       <div className="overview-stat-grid">
-        <article><span>运行状态</span><strong>{formatRunStatus(metadata.run_status)}</strong><small>{readiness?.next_action.message ?? "等待状态检查"}</small></article>
+        <article><span>运行状态</span><strong>{formatRunStatus(metadata.run_status)}</strong><small>{readiness ? formatRunNextActionMessage(readiness.next_action.message) : "等待状态检查"}</small></article>
         <article><span>当前故事弧</span><strong>{formatOptionalId(currentArc?.arc_id ?? metadata.active_arc_id)}</strong><small>{currentArc ? `${currentArc.completed_chapter_ids.length}/${currentArc.target_chapter_count} 章` : "尚未规划"}</small></article>
         <article><span>当前章节</span><strong>{formatOptionalId(metadata.active_chapter_id)}</strong><small>候选产物验证后提交</small></article>
         <article><span>正史条目</span><strong>{Object.values(canonCounts).reduce((total, count) => total + count, 0)}</strong><small>角色、关系、事实与伏笔</small></article>
@@ -84,7 +85,7 @@ export function ProjectOverview({
           {readiness ? (
             <>
               <article className="next-action-card">
-                <strong>{readiness.next_action.message}</strong>
+                <strong>{formatRunNextActionMessage(readiness.next_action.message)}</strong>
                 <span className={`soft-badge ${readiness.status}`}>{formatGateStatus(readiness.status)}</span>
               </article>
               <div className="compact-gates">

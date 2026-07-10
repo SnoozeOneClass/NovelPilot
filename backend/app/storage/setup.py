@@ -1,347 +1,767 @@
+from __future__ import annotations
+
+import json
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from app.schemas.setup import (
-    SetupAnswer,
-    SetupAnswerRequest,
-    SetupOption,
-    SetupQuestion,
+    BookDirectionCandidate,
+    BookDirectionConstraints,
+    BookDirectionReview,
+    SetupApprovalRequest,
+    SetupMessage,
+    SetupReadinessSignal,
     SetupStateDocument,
 )
+from app.schemas.events import HarnessEvent
+from app.storage.events import append_event as append_durable_event
+from app.storage.file_lock import exclusive_file_lock
 from app.storage.json_files import read_json, write_json
-from app.storage.text_files import write_text_file
+from app.storage.text_files import read_text_file
+from app.storage.transactions import commit_file_transaction, recover_file_transactions
+
+if TYPE_CHECKING:
+    from app.harness.loops.book import BookDirectionSynthesis, BookDiscussionTurnResult
 
 
-DEFAULT_SETUP_QUESTIONS = [
-    SetupQuestion(
-        id="genre_promise",
-        title="Genre Promise",
-        prompt="What kind of reader promise should this novel keep?",
-        options=[
-            SetupOption(
-                id="tense_mystery",
-                label="Tense mystery",
-                description="A suspense-driven story with clues, reversals, and a clear reveal path.",
-            ),
-            SetupOption(
-                id="character_growth",
-                label="Character growth",
-                description="A relationship-forward story where inner change carries the main payoff.",
-            ),
-            SetupOption(
-                id="epic_adventure",
-                label="Epic adventure",
-                description="A broad journey with escalating stakes, places, factions, and discoveries.",
-            ),
-        ],
-    ),
-    SetupQuestion(
-        id="protagonist_direction",
-        title="Protagonist Direction",
-        prompt="What long-term direction should the protagonist move toward?",
-        options=[
-            SetupOption(
-                id="recover_agency",
-                label="Recover agency",
-                description="The protagonist starts constrained and gradually becomes a decisive actor.",
-            ),
-            SetupOption(
-                id="pay_a_cost",
-                label="Pay a cost",
-                description="The protagonist gains what they want but must give up something meaningful.",
-            ),
-            SetupOption(
-                id="change_belief",
-                label="Change belief",
-                description="The protagonist's core worldview is challenged and reshaped by the plot.",
-            ),
-        ],
-    ),
-    SetupQuestion(
-        id="world_constraints",
-        title="World Constraints",
-        prompt="Which world constraints must the harness preserve while writing?",
-        options=[
-            SetupOption(
-                id="low_magic",
-                label="Low magic",
-                description="Unusual events exist, but they stay rare, costly, and consequential.",
-            ),
-            SetupOption(
-                id="grounded_modern",
-                label="Grounded modern",
-                description="The world follows present-day social, technical, and physical constraints.",
-            ),
-            SetupOption(
-                id="political_factions",
-                label="Political factions",
-                description="Power groups have visible interests and must react consistently over time.",
-            ),
-        ],
-    ),
-    SetupQuestion(
-        id="reader_promise",
-        title="Reader Promise",
-        prompt="What should readers reliably get from each story arc?",
-        options=[
-            SetupOption(
-                id="emotional_turn",
-                label="Emotional turn",
-                description="Each arc changes what a key relationship or self-belief means.",
-            ),
-            SetupOption(
-                id="strategic_win",
-                label="Strategic win",
-                description="Each arc resolves a concrete tactical problem and opens a sharper one.",
-            ),
-            SetupOption(
-                id="revelation",
-                label="Revelation",
-                description="Each arc reveals a truth that changes how earlier events are understood.",
-            ),
-        ],
-    ),
-    SetupQuestion(
-        id="ending_tendency",
-        title="Ending Tendency",
-        prompt="What ending tendency should guide long-term decisions without prewriting the whole book?",
-        options=[
-            SetupOption(
-                id="hopeful",
-                label="Hopeful",
-                description="The ending should feel earned, difficult, and ultimately restorative.",
-            ),
-            SetupOption(
-                id="bittersweet",
-                label="Bittersweet",
-                description="The ending should grant meaning or victory while preserving real loss.",
-            ),
-            SetupOption(
-                id="tragic",
-                label="Tragic",
-                description="The ending should fulfill the premise through irreversible consequence.",
-            ),
-        ],
-    ),
-]
+class SetupRevisionConflict(ValueError):
+    pass
+
+
+def enqueue_pending_setup_event(project_path: Path, event: HarnessEvent) -> None:
+    with exclusive_file_lock(project_path / "book" / ".event-outbox.lock"):
+        path = project_path / "book" / ".event-outbox" / f"{event.event_id}.json"
+        write_json(path, event.model_dump(mode="json"))
+
+
+def flush_pending_setup_events(project_path: Path) -> None:
+    with exclusive_file_lock(project_path / "book" / ".event-outbox.lock"):
+        outbox = project_path / "book" / ".event-outbox"
+        if not outbox.exists():
+            return
+        for path in sorted(outbox.glob("*.json")):
+            try:
+                event = HarnessEvent.model_validate(read_json(path))
+                append_durable_event(project_path, event)
+                path.unlink()
+            except (OSError, ValueError):
+                return
+        try:
+            outbox.rmdir()
+        except OSError:
+            pass
 
 
 def initialize_setup_state(project_path: Path) -> SetupStateDocument:
-    state = _new_setup_state()
-    _write_setup_state(project_path, state)
-    return state
+    with _setup_project_lock(project_path):
+        recover_file_transactions(project_path)
+        state = _initial_setup_state()
+        commit_file_transaction(
+            project_path,
+            kind="setup-initialize",
+            files=_initial_setup_files(state),
+        )
+        return state
 
 
 def read_setup_state(project_path: Path) -> SetupStateDocument:
+    with _setup_project_lock(project_path):
+        recover_file_transactions(project_path)
+        return _read_setup_state_unlocked(project_path)
+
+
+def _read_setup_state_unlocked(project_path: Path) -> SetupStateDocument:
     data = read_json(_setup_path(project_path))
     if data is None:
-        return initialize_setup_state(project_path)
-
-    state = SetupStateDocument.model_validate(data)
-    state.questions = _merge_stored_questions(state.questions)
-    state.next_question = _next_unanswered_question(state)
-    if state.approved:
-        state.next_question = None
-        state.ready_for_approval = True
-    elif state.next_question is not None:
-        _clear_readiness_assessment(state)
-    return state
-
-
-def answer_setup_question(
-    project_path: Path,
-    request: SetupAnswerRequest,
-) -> SetupStateDocument:
-    state = read_setup_state(project_path)
-    if state.approved:
-        raise ValueError("Book setup is already approved.")
-
-    question_ids = {question.id for question in state.questions}
-    if request.question_id not in question_ids:
-        raise ValueError(f"Unknown setup question: {request.question_id}")
-
-    answer = SetupAnswer(
-        question_id=request.question_id,
-        answer=request.answer,
-    )
-    state.answers = [
-        existing for existing in state.answers if existing.question_id != request.question_id
-    ]
-    state.answers.append(answer)
-    _clear_readiness_assessment(state)
-    state.next_question = _next_unanswered_question(state)
-    _write_setup_state(project_path, state)
-    return state
-
-
-def approve_setup(project_path: Path) -> SetupStateDocument:
-    state = read_setup_state(project_path)
-    if state.approved:
+        state = _initial_setup_state()
+        commit_file_transaction(
+            project_path,
+            kind="setup-initialize",
+            files=_initial_setup_files(state),
+        )
         return state
-
-    missing = _missing_required_question_ids(state)
-    if missing:
-        raise ValueError(f"Book setup is missing required answers: {', '.join(missing)}")
-
-    state.approved = True
-    state.approved_at = datetime.now(UTC)
-    state.ready_for_approval = True
-    if state.readiness_assessed_at is None:
-        state.readiness_assessed_at = state.approved_at
-    state.next_question = None
-    _write_setup_state(project_path, state)
-    _write_approved_book_artifacts(project_path, state)
-    return state
+    if not isinstance(data, dict):
+        raise ValueError("Book setup state must be a JSON object.")
+    if int(data.get("schema_version", 1)) < 2 or "questions" in data:
+        return _migrate_legacy_setup(project_path, data)
+    return SetupStateDocument.model_validate(data)
 
 
-def replace_setup_question(
+def write_discussion_context_snapshot(
+    project_path: Path,
+    *,
+    turn: int,
+    snapshot: dict[str, Any],
+) -> str:
+    with _setup_project_lock(project_path):
+        recover_file_transactions(project_path)
+        attempt_dir = _next_turn_attempt_dir(project_path, turn)
+        relative_path = attempt_dir / "context_snapshot.json"
+        write_json(project_path / relative_path, snapshot)
+        return relative_path.as_posix()
+
+
+def record_discussion_turn(
     project_path: Path,
     state: SetupStateDocument,
-    question: SetupQuestion,
+    *,
+    user_message: str,
+    result: BookDiscussionTurnResult,
+    context_snapshot_path: str,
+    profile_id: str,
 ) -> SetupStateDocument:
-    state.questions = [
-        question if existing.id == question.id else existing
-        for existing in state.questions
-    ]
-    state.next_question = _next_unanswered_question(state)
-    _write_setup_state(project_path, state)
-    return state
+    with _setup_project_lock(project_path):
+        recover_file_transactions(project_path)
+        _assert_current_revision_unlocked(project_path, state)
+        if state.approved:
+            raise ValueError("Approved book direction cannot return to setup discussion.")
+
+        updated = state.model_copy(deep=True)
+        turn = updated.turn_count + 1
+        now = datetime.now(UTC)
+        updated.messages.extend(
+            [
+                SetupMessage(turn=turn, role="user", content=user_message, created_at=now),
+                SetupMessage(
+                    turn=turn,
+                    role="assistant",
+                    content=result.reply,
+                    profile_id=profile_id,
+                    model_snapshot=result.model_snapshot,
+                ),
+            ]
+        )
+        updated.turn_count = turn
+        updated.revision += 1
+        updated.phase = "discussing"
+        updated.direction_draft = result.direction_draft
+        updated.discussion_summary = result.discussion_summary
+        updated.confirmed_decisions = _merge_confirmed_decisions(state, result)
+        updated.superseded_decisions.extend(result.superseded_decisions)
+        updated.unresolved_questions = result.unresolved_questions
+        updated.assumptions = result.assumptions
+        updated.contradictions = result.contradictions
+        updated.suggestions = result.suggestions
+        updated.readiness = result.readiness
+        updated.candidate = None
+        updated.last_context_snapshot_path = context_snapshot_path
+        updated.direction_draft_version_path = (
+            Path(context_snapshot_path).parent / "direction_draft.md"
+        ).as_posix()
+        updated.discussion_state_version_path = (
+            Path(context_snapshot_path).parent / "state.json"
+        ).as_posix()
+        updated.discussion_transcript_version_path = (
+            Path(context_snapshot_path).parent / "transcript.jsonl"
+        ).as_posix()
+        updated.last_profile_id = profile_id
+        updated.last_model_snapshot = result.model_snapshot
+        if len(
+            _json_document(
+                {
+                    "confirmed_decisions": updated.confirmed_decisions,
+                    "unresolved_questions": updated.unresolved_questions,
+                    "assumptions": updated.assumptions,
+                    "contradictions": updated.contradictions,
+                }
+            )
+        ) > 25_000:
+            raise ValueError("Active book discussion decisions exceed their context budget.")
+
+        attempt_dir = Path(context_snapshot_path).parent
+        commit_file_transaction(
+            project_path,
+            kind=f"book-discussion-turn-{turn:04d}",
+            files={
+                (attempt_dir / "response.json").as_posix(): _json_document(
+                    _discussion_response_payload(updated, result)
+                ),
+                (attempt_dir / "direction_draft.md").as_posix(): (
+                    result.direction_draft.rstrip() + "\n"
+                ),
+                (attempt_dir / "transcript.jsonl").as_posix(): _transcript_content(
+                    updated
+                ),
+                (attempt_dir / "state.json").as_posix(): _json_document(
+                    updated.model_dump(mode="json")
+                ),
+                "book/direction_draft.md": result.direction_draft.rstrip() + "\n",
+                "book/discussion/transcript.jsonl": _transcript_content(updated),
+                "book/setup.json": _json_document(updated.model_dump(mode="json")),
+            },
+        )
+        return updated
 
 
-def append_setup_question(
+def write_review_context_snapshot(
+    project_path: Path,
+    *,
+    candidate_revision: int,
+    snapshot: dict[str, Any],
+) -> str:
+    with _setup_project_lock(project_path):
+        recover_file_transactions(project_path)
+        review_root = (
+            project_path / "book" / "reviews" / f"review-{candidate_revision:04d}"
+        )
+        attempt = 1
+        while (review_root / f"attempt-{attempt:03d}").exists():
+            attempt += 1
+        relative_path = (
+            Path("book")
+            / "reviews"
+            / f"review-{candidate_revision:04d}"
+            / f"attempt-{attempt:03d}"
+            / "context_snapshot.json"
+        )
+        write_json(project_path / relative_path, snapshot)
+        return relative_path.as_posix()
+
+
+def save_book_direction_candidate(
     project_path: Path,
     state: SetupStateDocument,
-    question: SetupQuestion,
+    *,
+    synthesis: BookDirectionSynthesis,
+    review: BookDirectionReview,
+    profile_id: str,
+    review_model_snapshot: str,
+    context_snapshot_path: str,
 ) -> SetupStateDocument:
-    if any(existing.id == question.id for existing in state.questions):
-        raise ValueError(f"Setup question already exists: {question.id}")
-    state.questions.append(question)
-    _clear_readiness_assessment(state)
-    state.next_question = _next_unanswered_question(state)
-    _write_setup_state(project_path, state)
-    return state
+    with _setup_project_lock(project_path):
+        recover_file_transactions(project_path)
+        _assert_current_revision_unlocked(project_path, state)
+        if state.approved:
+            raise ValueError("Book direction is already approved.")
+        if not state.direction_draft.strip():
+            raise ValueError("Book direction discussion has not produced a draft.")
+
+        updated = state.model_copy(deep=True)
+        revision = updated.candidate_revision_counter + 1
+        review_root = Path("book") / "reviews" / f"review-{revision:04d}"
+        direction_path = review_root / "candidate_direction.md"
+        constraints_path = review_root / "candidate_constraints.json"
+        rolling_plan_path = review_root / "rolling_plan.md"
+        verification_path = review_root / "verification.json"
+
+        updated.candidate_revision_counter = revision
+        updated.candidate = BookDirectionCandidate(
+            revision=revision,
+            direction_markdown=synthesis.direction_markdown,
+            constraints=synthesis.constraints,
+            confirmed_decision_coverage=synthesis.confirmed_decision_coverage,
+            rolling_plan_markdown=synthesis.rolling_plan_markdown,
+            review=review,
+            direction_path=direction_path.as_posix(),
+            constraints_path=constraints_path.as_posix(),
+            rolling_plan_path=rolling_plan_path.as_posix(),
+            verification_path=verification_path.as_posix(),
+            profile_id=profile_id,
+            model_snapshot=synthesis.model_snapshot,
+            review_model_snapshot=review_model_snapshot,
+        )
+        updated.phase = "review_ready" if review.commit_allowed else "review_blocked"
+        updated.direction_draft = synthesis.direction_markdown
+        updated.revision += 1
+        updated.last_context_snapshot_path = context_snapshot_path
+        updated.direction_draft_version_path = direction_path.as_posix()
+        updated.discussion_state_version_path = (review_root / "state.json").as_posix()
+        updated.discussion_transcript_version_path = (
+            review_root / "transcript.jsonl"
+        ).as_posix()
+        updated.last_profile_id = profile_id
+        updated.last_model_snapshot = review_model_snapshot
+
+        commit_file_transaction(
+            project_path,
+            kind=f"book-direction-review-{revision:04d}",
+            files={
+                direction_path.as_posix(): synthesis.direction_markdown.rstrip() + "\n",
+                constraints_path.as_posix(): _json_document(
+                    {
+                        "schema_version": 1,
+                        "candidate": True,
+                        "confirmed_decision_coverage": [
+                            item.model_dump(mode="json")
+                            for item in synthesis.confirmed_decision_coverage
+                        ],
+                        **synthesis.constraints.model_dump(mode="json"),
+                    }
+                ),
+                rolling_plan_path.as_posix(): (
+                    synthesis.rolling_plan_markdown.rstrip() + "\n"
+                ),
+                verification_path.as_posix(): _json_document(
+                    _verification_payload(review)
+                ),
+                "book/direction_draft.md": synthesis.direction_markdown.rstrip() + "\n",
+                (review_root / "transcript.jsonl").as_posix(): _transcript_content(
+                    updated
+                ),
+                (review_root / "state.json").as_posix(): _json_document(
+                    updated.model_dump(mode="json")
+                ),
+                "book/discussion/transcript.jsonl": _transcript_content(updated),
+                "book/setup.json": _json_document(updated.model_dump(mode="json")),
+            },
+        )
+        return updated
 
 
-def mark_ready_for_approval(
+def approve_setup(
     project_path: Path,
-    state: SetupStateDocument,
-    profile_id: str | None = None,
+    request: SetupApprovalRequest,
 ) -> SetupStateDocument:
-    state.next_question = _next_unanswered_question(state)
-    if state.next_question is not None:
-        raise ValueError("Book setup still has unanswered required questions.")
-    state.ready_for_approval = True
-    state.readiness_assessed_at = datetime.now(UTC)
-    state.readiness_profile_id = profile_id
-    _write_setup_state(project_path, state)
-    return state
+    with _setup_project_lock(project_path):
+        recover_file_transactions(project_path)
+        state = _read_setup_state_unlocked(project_path)
+        if state.approved:
+            raise ValueError("Book direction is already approved.")
+        candidate = state.candidate
+        if candidate is None:
+            raise ValueError("Book direction must be synthesized and reviewed before approval.")
+        if candidate.revision != request.candidate_revision:
+            raise ValueError("Book direction candidate is stale; review the latest candidate.")
+        if not candidate.approval_allowed:
+            raise ValueError("Book direction review has blocking issues.")
+        missing_decisions = _candidate_missing_confirmed_decisions(state, candidate)
+        if missing_decisions:
+            raise ValueError(
+                "Book direction candidate does not preserve every confirmed decision."
+            )
 
-
-def _new_setup_state() -> SetupStateDocument:
-    state = SetupStateDocument(questions=DEFAULT_SETUP_QUESTIONS)
-    state.next_question = _next_unanswered_question(state)
-    return state
-
-
-def _clear_readiness_assessment(state: SetupStateDocument) -> None:
-    state.ready_for_approval = False
-    state.readiness_assessed_at = None
-    state.readiness_profile_id = None
-
-
-def _merge_stored_questions(stored_questions: list[SetupQuestion]) -> list[SetupQuestion]:
-    stored_by_id = {question.id: question for question in stored_questions}
-    default_ids = {question.id for question in DEFAULT_SETUP_QUESTIONS}
-    merged_defaults = [
-        stored_by_id.get(default_question.id, default_question)
-        for default_question in DEFAULT_SETUP_QUESTIONS
-    ]
-    stored_followups = [
-        question for question in stored_questions if question.id not in default_ids
-    ]
-    return merged_defaults + stored_followups
+        updated = state.model_copy(deep=True)
+        updated.approved = True
+        updated.approved_at = datetime.now(UTC)
+        updated.phase = "approved"
+        updated.revision += 1
+        updated.suggestions = []
+        files = _approved_book_files(project_path, updated, candidate)
+        files["book/discussion/transcript.jsonl"] = _transcript_content(updated)
+        files["book/setup.json"] = _json_document(updated.model_dump(mode="json"))
+        commit_file_transaction(
+            project_path,
+            kind=f"book-direction-approval-{candidate.revision:04d}",
+            files=files,
+        )
+        return updated
 
 
 def _setup_path(project_path: Path) -> Path:
     return project_path / "book" / "setup.json"
 
 
-def _write_setup_state(project_path: Path, state: SetupStateDocument) -> None:
-    write_json(_setup_path(project_path), state.model_dump(mode="json"))
+def _initial_setup_state() -> SetupStateDocument:
+    version_root = Path("book") / "discussion" / "versions" / "revision-0001"
+    return SetupStateDocument(
+        direction_draft_version_path=(version_root / "direction_draft.md").as_posix(),
+        discussion_state_version_path=(version_root / "state.json").as_posix(),
+        discussion_transcript_version_path=(version_root / "transcript.jsonl").as_posix(),
+    )
 
 
-def _next_unanswered_question(state: SetupStateDocument) -> SetupQuestion | None:
-    answered = {
-        answer.question_id for answer in state.answers if answer.answer.strip()
+def _initial_setup_files(state: SetupStateDocument) -> dict[str, str | bytes]:
+    assert state.direction_draft_version_path is not None
+    assert state.discussion_state_version_path is not None
+    assert state.discussion_transcript_version_path is not None
+    state_document = _json_document(state.model_dump(mode="json"))
+    return {
+        state.direction_draft_version_path: "",
+        state.discussion_state_version_path: state_document,
+        state.discussion_transcript_version_path: "",
+        "book/discussion/transcript.jsonl": "",
+        "book/setup.json": state_document,
     }
-    for question in state.questions:
-        if question.required and question.id not in answered:
-            return question
-    return None
 
 
-def _missing_required_question_ids(state: SetupStateDocument) -> list[str]:
-    answered = {
-        answer.question_id for answer in state.answers if answer.answer.strip()
+def _setup_project_lock(project_path: Path) -> AbstractContextManager[None]:
+    return exclusive_file_lock(project_path / "book" / ".setup.lock")
+
+
+def _assert_current_revision_unlocked(
+    project_path: Path,
+    expected: SetupStateDocument,
+) -> None:
+    current = read_json(_setup_path(project_path), default={}) or {}
+    current_revision = current.get("revision")
+    if current_revision != expected.revision:
+        raise SetupRevisionConflict(
+            "Book discussion state changed while the model was working; discard the stale result."
+        )
+
+
+def _transcript_content(state: SetupStateDocument) -> str:
+    lines = [message.model_dump_json() for message in state.messages]
+    content = "\n".join(lines)
+    if content:
+        content += "\n"
+    return content
+
+
+def _json_document(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, indent=2) + "\n"
+
+
+def _next_turn_attempt_dir(project_path: Path, turn: int) -> Path:
+    turn_root = project_path / "book" / "discussion" / f"turn-{turn:04d}"
+    attempt = 1
+    while (turn_root / f"attempt-{attempt:03d}").exists():
+        attempt += 1
+    return (
+        Path("book")
+        / "discussion"
+        / f"turn-{turn:04d}"
+        / f"attempt-{attempt:03d}"
+    )
+
+
+def _discussion_response_payload(
+    state: SetupStateDocument,
+    result: BookDiscussionTurnResult,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "turn": state.turn_count,
+        "reply": result.reply,
+        "discussion_summary": result.discussion_summary,
+        "confirmed_decisions": state.confirmed_decisions,
+        "superseded_decisions": [
+            item.model_dump(mode="json") for item in state.superseded_decisions
+        ],
+        "unresolved_questions": result.unresolved_questions,
+        "assumptions": result.assumptions,
+        "contradictions": result.contradictions,
+        "suggestions": [item.model_dump(mode="json") for item in result.suggestions],
+        "readiness": result.readiness.model_dump(mode="json"),
+        "profile_id": state.last_profile_id,
+        "model_snapshot": result.model_snapshot,
+        "usage": result.usage,
+    }
+
+
+def _merge_confirmed_decisions(
+    state: SetupStateDocument,
+    result: BookDiscussionTurnResult,
+) -> list[str]:
+    existing = list(state.confirmed_decisions)
+    superseded = {item.decision for item in result.superseded_decisions}
+    unknown = [decision for decision in superseded if decision not in existing]
+    if unknown:
+        raise ValueError(
+            "Model tried to supersede decisions that are not currently confirmed: "
+            + "; ".join(unknown)
+        )
+    missing_replacements = [
+        item.replacement
+        for item in result.superseded_decisions
+        if item.replacement and item.replacement not in result.confirmed_decisions
+    ]
+    if missing_replacements:
+        raise ValueError(
+            "Replacement decisions must appear in confirmed_decisions: "
+            + "; ".join(missing_replacements)
+        )
+    merged = [decision for decision in existing if decision not in superseded]
+    merged.extend(
+        decision for decision in result.confirmed_decisions if decision not in superseded
+    )
+    return list(dict.fromkeys(merged))
+
+
+def _approved_book_files(
+    project_path: Path,
+    state: SetupStateDocument,
+    candidate: BookDirectionCandidate,
+) -> dict[str, str | bytes]:
+    direction = candidate.direction_markdown.rstrip() + "\n"
+    rolling_plan = candidate.rolling_plan_markdown.rstrip() + "\n"
+    previous_state = read_json(project_path / "book" / "state.json", default={}) or {}
+    previous_version = int(previous_state.get("version", 1))
+    return {
+        "book/direction.md": direction,
+        "book/settings.md": direction,
+        "book/outline.md": rolling_plan,
+        "book/constraints.json": _json_document(
+            {
+                "schema_version": 1,
+                "candidate": False,
+                "approved_at": state.approved_at.isoformat() if state.approved_at else None,
+                "source_candidate_revision": candidate.revision,
+                "confirmed_decision_coverage": [
+                    item.model_dump(mode="json")
+                    for item in candidate.confirmed_decision_coverage
+                ],
+                **candidate.constraints.model_dump(mode="json"),
+            }
+        ),
+        "book/state.json": _json_document(
+            {
+                "schema_version": 2,
+                "version": previous_version + 1,
+                "setup_approved": True,
+                "approved_at": state.approved_at.isoformat() if state.approved_at else None,
+                "book_direction_version": candidate.revision,
+                "approved_direction_path": "book/direction.md",
+                "approved_constraints_path": "book/constraints.json",
+                "rolling_plan_path": "book/outline.md",
+                "confirmed_decisions": candidate.constraints.confirmed,
+                "must_preserve": candidate.constraints.must_preserve,
+                "must_avoid": candidate.constraints.must_avoid,
+                "creative_freedoms": candidate.constraints.creative_freedoms,
+                "open_decisions": candidate.constraints.open_decisions,
+                "current_strategy": "rolling_story_arc_planning",
+            }
+        ),
+    }
+
+
+def _verification_payload(review: BookDirectionReview) -> dict[str, Any]:
+    reasons = [issue.message for issue in review.issues if issue.severity == "blocking"]
+    signals = [_verification_signal_payload(signal) for signal in review.signals]
+    return {
+        "schema_version": 1,
+        "commit_allowed": review.commit_allowed,
+        "routing_decision": (
+            "await_user_approval" if review.commit_allowed else "continue_book_discussion"
+        ),
+        "reasons": reasons,
+        "signals": signals,
+        "summary": review.summary,
+        "issues": [issue.model_dump(mode="json") for issue in review.issues],
+    }
+
+
+def _verification_signal_payload(signal: str) -> dict[str, Any]:
+    name, separator, value = signal.partition(":")
+    status = "observed"
+    if separator and value in {"passed", "failed", "warning"}:
+        status = value
+    elif separator and "/" in value:
+        numerator, _, denominator = value.partition("/")
+        if numerator.isdigit() and denominator.isdigit():
+            status = "passed" if numerator == denominator else "failed"
+    return {"name": name, "status": status, "evidence": [signal]}
+
+
+def _candidate_missing_confirmed_decisions(
+    state: SetupStateDocument,
+    candidate: BookDirectionCandidate,
+) -> list[str]:
+    constraints = candidate.constraints
+    candidate_text = "\n".join(
+        [
+            candidate.direction_markdown,
+            candidate.rolling_plan_markdown,
+            *constraints.confirmed,
+            *constraints.must_preserve,
+            *constraints.must_avoid,
+            *constraints.creative_freedoms,
+            *constraints.open_decisions,
+        ]
+    )
+    covered = {
+        item.decision
+        for item in candidate.confirmed_decision_coverage
+        if item.candidate_evidence.strip() in candidate_text
     }
     return [
-        question.id
-        for question in state.questions
-        if question.required and question.id not in answered
+        decision
+        for decision in state.confirmed_decisions
+        if decision not in constraints.confirmed or decision not in covered
     ]
 
 
-def _answers_by_question(state: SetupStateDocument) -> dict[str, SetupAnswer]:
-    return {answer.question_id: answer for answer in state.answers}
+def _migrate_legacy_setup(
+    project_path: Path,
+    legacy: dict[str, Any],
+) -> SetupStateDocument:
+    backup_path = project_path / "book" / "legacy" / "setup-v1.json"
+    if not backup_path.exists():
+        write_json(backup_path, legacy)
 
-
-def _write_approved_book_artifacts(project_path: Path, state: SetupStateDocument) -> None:
-    answers = _answers_by_question(state)
-    write_text_file(
-        project_path / "book" / "settings.md",
-        _render_settings_markdown(state, answers),
-    )
-    write_text_file(project_path / "book" / "outline.md", _render_outline_markdown())
-
-    previous_state = read_json(project_path / "book" / "state.json", default={}) or {}
-    previous_version = int(previous_state.get("version", 1))
-    write_json(
-        project_path / "book" / "state.json",
-        {
-            "schema_version": 1,
-            "version": previous_version + 1,
-            "setup_approved": True,
-            "approved_at": state.approved_at.isoformat() if state.approved_at else None,
-            "answers": {
-                question.id: answers[question.id].answer
-                for question in state.questions
-                if question.id in answers
-            },
-            "current_strategy": "rolling_story_arc_planning",
-        },
-    )
-
-
-def _render_settings_markdown(
-    state: SetupStateDocument,
-    answers: dict[str, SetupAnswer],
-) -> str:
-    lines = ["# Book Settings", ""]
-    for question in state.questions:
-        answer = answers.get(question.id)
-        if answer is None:
+    questions = {
+        str(item.get("id")): item
+        for item in legacy.get("questions", [])
+        if isinstance(item, dict) and item.get("id")
+    }
+    answers = [item for item in legacy.get("answers", []) if isinstance(item, dict)]
+    messages: list[SetupMessage] = []
+    confirmed: list[str] = []
+    for answer in answers:
+        question_id = str(answer.get("question_id", "legacy_question"))
+        question = questions.get(question_id, {})
+        prompt = str(question.get("prompt") or question.get("title") or question_id).strip()
+        answer_text = str(answer.get("answer", "")).strip()
+        if not answer_text:
             continue
-        lines.extend([f"## {question.title}", "", answer.answer, ""])
+        turn = len(messages) // 2 + 1
+        messages.append(
+            SetupMessage(
+                turn=turn,
+                role="assistant",
+                content=prompt,
+                profile_id=_optional_string(question.get("profile_id")),
+                model_snapshot=_optional_string(question.get("model_snapshot")),
+                migrated=True,
+            )
+        )
+        messages.append(
+            SetupMessage(
+                turn=turn,
+                role="user",
+                content=answer_text,
+                migrated=True,
+            )
+        )
+        title = str(question.get("title") or question_id).strip()
+        confirmed.append(f"{title}: {answer_text}")
+
+    approved = bool(legacy.get("approved"))
+    direction = _legacy_direction(project_path, questions, answers)
+    state = SetupStateDocument(
+        revision=1,
+        phase="approved" if approved else "discussing",
+        approved=approved,
+        approved_at=legacy.get("approved_at"),
+        migrated_from_schema_version=1,
+        turn_count=len(messages) // 2,
+        messages=messages,
+        direction_draft=direction,
+        discussion_summary=(
+            "已从旧版固定问答导入。后续讨论应以这些历史决定为起点，继续开放澄清。"
+        ),
+        confirmed_decisions=confirmed,
+        unresolved_questions=(
+            [] if approved else ["旧版问答已导入，请确认是否还需要补充或修正全书方向。"]
+        ),
+        readiness=SetupReadinessSignal(
+            status="ready" if approved else "continue",
+            reason=(
+                "旧版全书设定已经批准。"
+                if approved
+                else "旧版问答不再作为完成门槛，可以继续开放讨论。"
+            ),
+        ),
+        direction_draft_version_path=(
+            "book/legacy/open-discussion-migration/direction_draft.md"
+        ),
+        discussion_state_version_path=(
+            "book/legacy/open-discussion-migration/state.json"
+        ),
+        discussion_transcript_version_path=(
+            "book/legacy/open-discussion-migration/transcript.jsonl"
+        ),
+    )
+    assert state.direction_draft_version_path is not None
+    assert state.discussion_state_version_path is not None
+    assert state.discussion_transcript_version_path is not None
+    files: dict[str, str | bytes] = _legacy_artifact_backups(project_path)
+    if approved:
+        files.update(_legacy_approved_files(project_path, state, confirmed))
+    files.update(
+        {
+            state.direction_draft_version_path: state.direction_draft.rstrip() + "\n",
+            state.discussion_state_version_path: _json_document(
+                state.model_dump(mode="json")
+            ),
+            state.discussion_transcript_version_path: _transcript_content(state),
+            "book/direction_draft.md": state.direction_draft.rstrip() + "\n",
+            "book/discussion/transcript.jsonl": _transcript_content(state),
+            "book/setup.json": _json_document(state.model_dump(mode="json")),
+        }
+    )
+    commit_file_transaction(
+        project_path,
+        kind="legacy-book-setup-migration",
+        files=files,
+    )
+    return state
+
+
+def _legacy_direction(
+    project_path: Path,
+    questions: dict[str, dict[str, Any]],
+    answers: list[dict[str, Any]],
+) -> str:
+    settings_path = project_path / "book" / "settings.md"
+    if settings_path.exists():
+        settings = read_text_file(settings_path).strip()
+        if settings and settings not in {"# Book Settings", "# Book Outline"}:
+            return settings
+
+    lines = ["# 迁移的全书方向", "", "> 以下内容来自旧版固定问答，尚未经过新版开放讨论综合。", ""]
+    for answer in answers:
+        question_id = str(answer.get("question_id", "legacy_question"))
+        question = questions.get(question_id, {})
+        answer_text = str(answer.get("answer", "")).strip()
+        if not answer_text:
+            continue
+        title = str(question.get("title") or question_id).strip()
+        lines.extend([f"## {title}", "", answer_text, ""])
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _render_outline_markdown() -> str:
-    return "\n".join(
-        [
-            "# Book Outline",
-            "",
-            "The book uses rolling story arc planning.",
-            "Only the current arc is planned from committed state, feedback, and book direction.",
-            "",
-        ]
+def _legacy_artifact_backups(project_path: Path) -> dict[str, str | bytes]:
+    backups: dict[str, str | bytes] = {}
+    for relative_path in [
+        "book/direction.md",
+        "book/constraints.json",
+        "book/settings.md",
+        "book/outline.md",
+        "book/state.json",
+    ]:
+        source = project_path / relative_path
+        backup_relative = "book/legacy/pre-open-discussion-migration/" + Path(
+            relative_path
+        ).name
+        if source.exists() and not (project_path / backup_relative).exists():
+            backups[backup_relative] = source.read_bytes()
+    return backups
+
+
+def _legacy_approved_files(
+    project_path: Path,
+    state: SetupStateDocument,
+    confirmed: list[str],
+) -> dict[str, str | bytes]:
+    direction = state.direction_draft.rstrip() + "\n"
+    rolling_contract = (
+        "# 滚动故事弧规划契约\n\n"
+        "该项目从旧版全书设定迁移而来。后续只根据已批准方向与已提交正史规划当前故事弧。\n"
     )
+    previous_state = read_json(project_path / "book" / "state.json", default={}) or {}
+    return {
+        "book/direction.md": direction,
+        "book/settings.md": direction,
+        "book/outline.md": rolling_contract,
+        "book/constraints.json": _json_document(
+            {
+                "schema_version": 1,
+                "candidate": False,
+                "migration_source": "legacy_fixed_question_setup",
+                **BookDirectionConstraints(confirmed=confirmed).model_dump(mode="json"),
+            }
+        ),
+        "book/state.json": _json_document(
+            {
+                **previous_state,
+                "schema_version": max(int(previous_state.get("schema_version", 1)), 2),
+                "version": int(previous_state.get("version", 1)) + 1,
+                "setup_approved": True,
+                "approved_at": state.approved_at.isoformat() if state.approved_at else None,
+                "approved_direction_path": "book/direction.md",
+                "approved_constraints_path": "book/constraints.json",
+                "rolling_plan_path": "book/outline.md",
+                "current_strategy": previous_state.get(
+                    "current_strategy", "rolling_story_arc_planning"
+                ),
+                "migration_source": "legacy_fixed_question_setup",
+            }
+        ),
+    }
+
+
+def _optional_string(value: Any) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None

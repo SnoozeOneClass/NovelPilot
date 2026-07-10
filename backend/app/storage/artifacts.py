@@ -10,6 +10,12 @@ EVENT_TRACKED_ARTIFACT_KINDS = {
     "arc_plan",
     "arc_revision",
     "book_feedback",
+    "book_direction",
+    "book_direction_candidate",
+    "book_direction_draft",
+    "book_direction_constraints",
+    "book_rolling_contract",
+    "book_rolling_contract_candidate",
     "candidate_observations",
     "candidate_state_patch",
     "committed_state_patch",
@@ -23,7 +29,8 @@ EVENT_TRACKED_ARTIFACT_KINDS = {
     "verification",
 }
 
-INTERNAL_ARTIFACT_SUFFIXES = (".tmp",)
+INTERNAL_ARTIFACT_SUFFIXES = (".tmp", ".lock")
+INTERNAL_ARTIFACT_DIRECTORIES = {".event-outbox", ".transactions"}
 
 
 def list_project_artifacts(project_path: Path) -> list[str]:
@@ -35,7 +42,9 @@ def list_project_artifacts(project_path: Path) -> list[str]:
 
 
 def is_internal_artifact_path(path: Path) -> bool:
-    return path.name.endswith(INTERNAL_ARTIFACT_SUFFIXES)
+    return path.name.endswith(INTERNAL_ARTIFACT_SUFFIXES) or any(
+        part in INTERNAL_ARTIFACT_DIRECTORIES for part in path.parts
+    )
 
 
 def summarize_project_artifacts(project_path: Path) -> list[ArtifactSummary]:
@@ -98,6 +107,78 @@ def summarize_artifact(project_path: Path, relative_path: str) -> ArtifactSummar
             "book_feedback",
             "Book Feedback",
             "recorded",
+        )
+    if name == "direction_draft.md" and relative_path == "book/direction_draft.md":
+        return _summarize_markdown(
+            path,
+            relative_path,
+            "book_direction_draft",
+            "Book Direction Draft",
+            "candidate",
+            candidate=True,
+        )
+    if name == "candidate_direction.md" and relative_path.startswith("book/reviews/"):
+        return _summarize_markdown(
+            path,
+            relative_path,
+            "book_direction_candidate",
+            "Candidate Book Direction",
+            "candidate",
+            candidate=True,
+        )
+    if name == "candidate_constraints.json" and relative_path.startswith("book/reviews/"):
+        return ArtifactSummary(
+            path=relative_path,
+            kind="book_direction_constraints",
+            title="Candidate Book Constraints",
+            status="candidate",
+            detail=_constraint_detail(path),
+            candidate=True,
+        )
+    if name == "rolling_plan.md" and relative_path.startswith("book/reviews/"):
+        return _summarize_markdown(
+            path,
+            relative_path,
+            "book_rolling_contract_candidate",
+            "Candidate Rolling Story Arc Contract",
+            "candidate",
+            candidate=True,
+        )
+    if name == "direction.md" and relative_path == "book/direction.md":
+        return _summarize_markdown(
+            path,
+            relative_path,
+            "book_direction",
+            "Approved Book Direction",
+            "committed",
+            committed=True,
+        )
+    if name == "constraints.json" and relative_path == "book/constraints.json":
+        return ArtifactSummary(
+            path=relative_path,
+            kind="book_direction_constraints",
+            title="Approved Book Constraints",
+            status="committed",
+            detail=_constraint_detail(path),
+            committed=True,
+        )
+    if name == "outline.md" and relative_path == "book/outline.md":
+        return _summarize_markdown(
+            path,
+            relative_path,
+            "book_rolling_contract",
+            "Rolling Story Arc Contract",
+            "committed",
+            committed=True,
+        )
+    if name == "transcript.jsonl" and relative_path == "book/discussion/transcript.jsonl":
+        line_count = len([line for line in read_text_file(path).splitlines() if line.strip()])
+        return ArtifactSummary(
+            path=relative_path,
+            kind="book_discussion_transcript",
+            title="Book Discussion Transcript",
+            status="audited",
+            detail=f"{line_count} messages",
         )
     if name == "manuscript.md":
         return _summarize_markdown(path, relative_path, "export", "Export", "generated", committed=True)
@@ -317,6 +398,21 @@ def _reason_detail(reasons: list[Any]) -> str:
     if not reasons:
         return "No reason recorded."
     return str(reasons[0])
+
+
+def _constraint_detail(path: Path) -> str:
+    payload = _read_dict(path)
+    count = sum(
+        len(_as_list(payload.get(key)))
+        for key in [
+            "confirmed",
+            "must_preserve",
+            "must_avoid",
+            "creative_freedoms",
+            "open_decisions",
+        ]
+    )
+    return f"{count} structured constraints"
 
 
 def _file_size_detail(path: Path) -> str:

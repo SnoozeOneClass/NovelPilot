@@ -19,7 +19,7 @@ import type {
 
 const jsonHeaders = { "Content-Type": "application/json" };
 const configuredApiBase = import.meta.env.VITE_API_BASE_URL?.trim().replace(/\/$/, "");
-const apiBase = configuredApiBase || (import.meta.env.DEV ? "http://127.0.0.1:8000" : "");
+const apiBase = configuredApiBase || "";
 
 export function apiUrl(path: string): string {
   return `${apiBase}${path}`;
@@ -114,13 +114,20 @@ export const api = {
       method: "POST"
     }),
   setupState: () => request<SetupStateDocument>("/api/setup/state"),
-  answerSetup: (question_id: string, answer: string) =>
-    request<SetupStateDocument>("/api/setup/answer", {
+  continueSetupDiscussion: (message: string) =>
+    request<SetupStateDocument>("/api/setup/turn", {
       method: "POST",
       headers: jsonHeaders,
-      body: JSON.stringify({ question_id, answer })
+      body: JSON.stringify({ message })
     }),
-  approveSetup: () => request<SetupStateDocument>("/api/setup/approve", { method: "POST" }),
+  prepareSetupReview: () =>
+    request<SetupStateDocument>("/api/setup/prepare-review", { method: "POST" }),
+  approveSetup: (candidate_revision: number) =>
+    request<SetupStateDocument>("/api/setup/approve", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ candidate_revision })
+    }),
   currentArc: () => request<CurrentArcState | null>("/api/arcs/current"),
   approveCurrentArc: () =>
     request<CurrentArcApprovalResponse>("/api/arcs/current/approve", { method: "POST" }),

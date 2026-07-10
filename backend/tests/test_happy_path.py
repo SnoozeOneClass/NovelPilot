@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from app.api import exports as exports_api
@@ -13,12 +14,11 @@ from app.llm.gateway import ChatRequest, ChatResult
 from app.schemas.profiles import LlmProfileUpsert
 from app.schemas.projects import CreateProjectRequest
 from app.schemas.runs import RunAdvanceRequest
-from app.schemas.setup import SetupAnswerRequest
+from app.schemas.setup import SetupApprovalRequest, SetupTurnRequest
 from app.storage import profiles as profile_storage
 from app.storage import projects as project_storage
 from app.storage.events import read_events
 from app.storage.json_files import read_json
-from app.storage.setup import DEFAULT_SETUP_QUESTIONS
 
 
 def test_local_happy_path_creates_writes_commits_and_exports(
@@ -44,14 +44,14 @@ def test_local_happy_path_creates_writes_commits_and_exports(
     )
     profiles_api.select_profile(profile.id)
 
-    for question in DEFAULT_SETUP_QUESTIONS:
-        setup_api.answer_setup_question(
-            SetupAnswerRequest(
-                question_id=question.id,
-                answer=f"Selected direction for {question.id}.",
-            )
-        )
-    setup_state = setup_api.approve_setup()
+    setup_api.continue_setup_discussion(
+        SetupTurnRequest(message="Build a fair mystery about earned trust and visible costs.")
+    )
+    candidate_state = setup_api.prepare_setup_review()
+    assert candidate_state.candidate is not None
+    setup_state = setup_api.approve_setup(
+        SetupApprovalRequest(candidate_revision=candidate_state.candidate.revision)
+    )
 
     run_result = runs_api.start_run(RunAdvanceRequest(stop_after_chapter=True))
     export_result = exports_api.export_current_manuscript()
@@ -67,7 +67,9 @@ def test_local_happy_path_creates_writes_commits_and_exports(
     assert profile.has_api_key is True
     assert run_result["status"] == "idle"
     assert export_result["artifact_path"] == "exports/manuscript.md"
-    assert (project_path / "book" / "settings.md").read_text(encoding="utf-8").count("## ") >= 5
+    assert "earned trust" in (project_path / "book" / "settings.md").read_text(
+        encoding="utf-8"
+    )
     assert (project_path / "arcs" / "arc-001" / "plan.md").exists()
     assert (chapter_path / "context_snapshot.json").exists()
     assert (chapter_path / "goal.md").exists()
@@ -106,13 +108,47 @@ def _isolate_runtime_paths(tmp_path: Path, monkeypatch) -> None:
 def _fixture_call_llm(_profile: object, request: ChatRequest) -> ChatResult:
     action = str(request.metadata.get("atomic_action", "unknown"))
     content_by_action = {
-        "personalize_setup_question": (
-            '{"title":"Focused decision","prompt":"Choose the next stable book constraint.",'
-            '"options":['
-            '{"label":"A","description":"Keep pressure personal."},'
-            '{"label":"B","description":"Keep clues visible."},'
-            '{"label":"C","description":"Keep the ending hopeful."}'
-            "]}"
+        "continue_book_discussion": json.dumps(
+            {
+                "reply": "The direction is concrete enough to review, and discussion may continue.",
+                "direction_draft": _fixture_direction(),
+                "discussion_summary": "A fair mystery about earned trust and visible costs.",
+                "confirmed_decisions": ["Fair clues", "Earned trust", "Visible costs"],
+                "superseded_decisions": [],
+                "unresolved_questions": [],
+                "assumptions": [],
+                "contradictions": [],
+                "suggestions": [
+                    {"label": "Review", "message": "Prepare this direction for review."}
+                ],
+                "ready_status": "ready",
+                "readiness_reason": "Stable promises and rolling freedoms are explicit.",
+            }
+        ),
+        "synthesize_book_direction": json.dumps(
+            {
+                "direction_markdown": _fixture_direction(),
+                "constraints": {
+                    "confirmed": ["Fair clues", "Earned trust", "Visible costs"],
+                    "must_preserve": ["Reveals alter meaningful relationships."],
+                    "must_avoid": ["No arbitrary solution."],
+                    "creative_freedoms": ["Choose the current arc antagonist from committed canon."],
+                    "open_decisions": [],
+                },
+                "confirmed_decision_coverage": [
+                    {"decision": "Fair clues", "candidate_evidence": "visible clues"},
+                    {"decision": "Earned trust", "candidate_evidence": "earned trust"},
+                    {"decision": "Visible costs", "candidate_evidence": "personal costs"},
+                ],
+                "rolling_plan_markdown": _fixture_rolling_contract(),
+            }
+        ),
+        "review_book_direction": json.dumps(
+            {
+                "summary": "The candidate preserves confirmed intent and rolling scope.",
+                "issues": [],
+                "signals": ["confirmed_decisions_preserved:passed", "rolling_scope:passed"],
+            }
         ),
         "plan_current_arc": "# Arc 1\n\nA rolling first arc focused on earned trust.",
         "generate_chapter_goal": (
@@ -149,6 +185,26 @@ def _fixture_call_llm(_profile: object, request: ChatRequest) -> ChatResult:
         content=content_by_action.get(action, f"# {action}\n"),
         model_snapshot="fixture-model",
         provider_snapshot="openai-compatible",
+    )
+
+
+def _fixture_direction() -> str:
+    return (
+        "# Book Direction\n\nThe novel is a grounded mystery about earned trust. Every reveal must "
+        "follow visible clues and change a meaningful relationship, keeping plot knowledge and "
+        "emotional consequence together. The protagonist begins capable but isolated and gains "
+        "agency through difficult alliances. Victories carry durable personal costs without making "
+        "hope feel false. Speculative tools cannot erase earlier choices. Later antagonists, local "
+        "conflicts, and the exact final cost remain open for rolling planning from committed canon."
+    )
+
+
+def _fixture_rolling_contract() -> str:
+    return (
+        "# Rolling Story Arc Contract\n\nPlan only the current story arc from approved direction and "
+        "committed canon. Give it one mystery advance, one relationship change, and one test of "
+        "earned trust. After chapters commit, reconcile observations and patches before planning the "
+        "next arc. Return to the book loop only when an approved highest-level decision must change."
     )
 
 

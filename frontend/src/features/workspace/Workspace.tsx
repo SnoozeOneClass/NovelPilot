@@ -52,7 +52,7 @@ const viewLabels: Record<WorkspaceView, string> = {
   plan: "开书规划",
   cockpit: "创作工作台",
   arcs: "故事弧与章节",
-  canon: "正史状态 Canon",
+  canon: "正史状态",
   trace: "运行证据与产物",
   settings: "设置与模型"
 };
@@ -385,6 +385,7 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
       case "plan":
         return (
           <SetupConversation
+            key={metadata.project_id}
             projectId={metadata.project_id}
             onSetupChanged={() => { void Promise.all([refreshReadiness(), refreshWorkspaceState(), refreshArtifacts()]); }}
             onExit={() => setActiveView("overview")}

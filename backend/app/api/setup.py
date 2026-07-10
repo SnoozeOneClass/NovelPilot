@@ -1,227 +1,427 @@
 from pathlib import Path
+from threading import Lock
+from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
 from app.harness.loops.book import (
-    assess_setup_followup_question,
-    personalize_next_setup_question,
+    assemble_discussion_context,
+    build_review_context_snapshot,
+    continue_book_discussion,
+    review_book_direction,
+    synthesize_book_direction,
 )
 from app.llm.profiles import get_active_profile
 from app.llm.redaction import redact_profile_secrets
-from app.schemas.events import HarnessEvent
+from app.schemas.events import EventStatus, HarnessEvent
 from app.schemas.profiles import LlmProfile
 from app.schemas.projects import ProjectMetadata
-from app.schemas.setup import SetupAnswerRequest, SetupStateDocument
+from app.schemas.setup import (
+    SetupApprovalRequest,
+    SetupStateDocument,
+    SetupTurnRequest,
+)
+from app.storage import setup as setup_storage
 from app.storage.events import append_event
 from app.storage.projects import get_active_project_path, read_project_metadata
-from app.storage import setup as setup_storage
 
 router = APIRouter()
+_setup_lock = Lock()
 
 
 @router.get("/state", response_model=SetupStateDocument)
 def get_setup_state() -> SetupStateDocument:
-    project_path = get_active_project_path()
-    if project_path is None:
-        raise HTTPException(status_code=404, detail="No active project.")
-    return setup_storage.read_setup_state(project_path)
-
-
-@router.post("/answer", response_model=SetupStateDocument)
-def answer_setup_question(request: SetupAnswerRequest) -> SetupStateDocument:
-    project_path = get_active_project_path()
-    if project_path is None:
-        raise HTTPException(status_code=404, detail="No active project.")
-    metadata = read_project_metadata(project_path)
+    project_path = _active_project_path()
+    setup_storage.flush_pending_setup_events(project_path)
     try:
-        state = setup_storage.answer_setup_question(project_path, request)
+        return setup_storage.read_setup_state(project_path)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    append_event(
-        project_path,
-        HarnessEvent(
-            project_id=metadata.project_id,
-            kind="setup_answered",
-            loop_layer="book",
-            atomic_action="collect_book_settings",
+
+@router.post("/turn", response_model=SetupStateDocument)
+def continue_setup_discussion(request: SetupTurnRequest) -> SetupStateDocument:
+    with _setup_lock:
+        project_path = _active_project_path()
+        setup_storage.flush_pending_setup_events(project_path)
+        metadata = read_project_metadata(project_path)
+        state = setup_storage.read_setup_state(project_path)
+        if state.approved:
+            raise HTTPException(status_code=409, detail="Book direction is already approved.")
+        profile = _active_profile_or_409()
+        safe_message = redact_profile_secrets(request.message, profile)
+
+        assembly = assemble_discussion_context(state, safe_message)
+        snapshot = {
+            **assembly.snapshot,
+            "project_id": metadata.project_id,
+            "turn": state.turn_count + 1,
+            "profile_id": profile.id,
+            "model": profile.model,
+        }
+        context_path = setup_storage.write_discussion_context_snapshot(
+            project_path,
+            turn=state.turn_count + 1,
+            snapshot=snapshot,
+        )
+        _append_event(
+            project_path,
+            metadata,
+            kind="book_discussion_context_assembled",
+            action="assemble_book_discussion_context",
             status="completed",
-            message="Book setup answer recorded.",
-            payload=request.model_dump(),
-        ),
-    )
-    return _advance_setup_question_if_possible(project_path, metadata, state)
+            artifact_path=context_path,
+            routing="call_book_discussion_model",
+            message="Controlled context assembled for the next book discussion turn.",
+            payload={"profile_id": profile.id, "turn": state.turn_count + 1},
+        )
+        _append_event(
+            project_path,
+            metadata,
+            kind="atomic_action_started",
+            action="continue_book_discussion",
+            status="started",
+            message="Book direction discussion model started.",
+            payload={"profile_id": profile.id, "turn": state.turn_count + 1},
+        )
+
+        try:
+            result = continue_book_discussion(profile, state, safe_message, assembly)
+        except Exception as exc:
+            reason = redact_profile_secrets(str(exc), profile)
+            _append_event(
+                project_path,
+                metadata,
+                kind="book_discussion_turn_failed",
+                action="continue_book_discussion",
+                status="failed",
+                artifact_path=context_path,
+                routing="retry_book_discussion_turn",
+                message="Book direction discussion failed; no candidate state was advanced.",
+                payload={"profile_id": profile.id, "reason": reason},
+            )
+            raise HTTPException(status_code=502, detail=reason) from exc
+
+        try:
+            updated = setup_storage.record_discussion_turn(
+                project_path,
+                state,
+                user_message=safe_message,
+                result=result,
+                context_snapshot_path=context_path,
+                profile_id=profile.id,
+            )
+        except setup_storage.SetupRevisionConflict as exc:
+            _append_event(
+                project_path,
+                metadata,
+                kind="book_discussion_stale_result_discarded",
+                action="continue_book_discussion",
+                status="failed",
+                artifact_path=context_path,
+                routing="reload_book_discussion",
+                message="Book discussion state changed; the stale model result was discarded.",
+                payload={"profile_id": profile.id, "expected_revision": state.revision},
+            )
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        response_path = (Path(context_path).parent / "response.json").as_posix()
+        _append_event(
+            project_path,
+            metadata,
+            kind="book_direction_draft_updated",
+            action="continue_book_discussion",
+            status="completed",
+            artifact_path="book/direction_draft.md",
+            routing="continue_discussion",
+            message="The complete candidate Book Direction draft was updated.",
+            payload={
+                "profile_id": profile.id,
+                "model_snapshot": result.model_snapshot,
+                "turn": updated.turn_count,
+                "candidate": True,
+            },
+        )
+        _append_event(
+            project_path,
+            metadata,
+            kind="book_discussion_turn_completed",
+            action="continue_book_discussion",
+            status="completed",
+            artifact_path=response_path,
+            routing=(
+                "review_available" if result.readiness.status == "ready" else "continue_discussion"
+            ),
+            message="Book direction discussion turn completed and the candidate draft was updated.",
+            payload={
+                "profile_id": profile.id,
+                "model_snapshot": result.model_snapshot,
+                "turn": updated.turn_count,
+                "readiness": result.readiness.status,
+                "direction_draft_path": "book/direction_draft.md",
+            },
+        )
+        return updated
+
+
+@router.post("/prepare-review", response_model=SetupStateDocument)
+def prepare_setup_review() -> SetupStateDocument:
+    with _setup_lock:
+        project_path = _active_project_path()
+        setup_storage.flush_pending_setup_events(project_path)
+        metadata = read_project_metadata(project_path)
+        state = setup_storage.read_setup_state(project_path)
+        if state.approved:
+            return state
+        if not state.direction_draft.strip():
+            raise HTTPException(
+                status_code=409,
+                detail="Discuss the novel direction before requesting a review.",
+            )
+        if state.candidate is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "The current Book Direction candidate has already been reviewed. "
+                    "Approve it or continue the discussion before preparing another candidate."
+                ),
+            )
+        profile = _active_profile_or_409()
+        candidate_revision = state.candidate_revision_counter + 1
+        context_snapshot = {
+            **build_review_context_snapshot(state),
+            "project_id": metadata.project_id,
+            "candidate_revision": candidate_revision,
+            "profile_id": profile.id,
+            "model": profile.model,
+        }
+        context_path = setup_storage.write_review_context_snapshot(
+            project_path,
+            candidate_revision=candidate_revision,
+            snapshot=context_snapshot,
+        )
+        _append_event(
+            project_path,
+            metadata,
+            kind="book_direction_review_context_assembled",
+            action="assemble_book_direction_review_context",
+            status="completed",
+            artifact_path=context_path,
+            routing="synthesize_book_direction",
+            message="Candidate book direction review context assembled.",
+            payload={"profile_id": profile.id, "candidate_revision": candidate_revision},
+        )
+
+        try:
+            _append_event(
+                project_path,
+                metadata,
+                kind="atomic_action_started",
+                action="synthesize_book_direction",
+                status="started",
+                message="Synthesizing a candidate Book Direction for user review.",
+                payload={"profile_id": profile.id, "candidate_revision": candidate_revision},
+            )
+            synthesis = synthesize_book_direction(profile, state)
+            _append_event(
+                project_path,
+                metadata,
+                kind="atomic_action_started",
+                action="review_book_direction",
+                status="started",
+                message="Independently reviewing the candidate Book Direction.",
+                payload={"profile_id": profile.id, "candidate_revision": candidate_revision},
+            )
+            review, review_model_snapshot, _review_usage = review_book_direction(
+                profile,
+                state,
+                synthesis,
+            )
+        except Exception as exc:
+            reason = redact_profile_secrets(str(exc), profile)
+            _append_event(
+                project_path,
+                metadata,
+                kind="book_direction_review_failed",
+                action="synthesize_and_review_book_direction",
+                status="failed",
+                artifact_path=context_path,
+                routing="retry_book_direction_review",
+                message="Book direction synthesis or review failed; approval remains locked.",
+                payload={"profile_id": profile.id, "reason": reason},
+            )
+            raise HTTPException(status_code=502, detail=reason) from exc
+
+        try:
+            updated = setup_storage.save_book_direction_candidate(
+                project_path,
+                state,
+                synthesis=synthesis,
+                review=review,
+                profile_id=profile.id,
+                review_model_snapshot=review_model_snapshot,
+                context_snapshot_path=context_path,
+            )
+        except setup_storage.SetupRevisionConflict as exc:
+            _append_event(
+                project_path,
+                metadata,
+                kind="book_direction_stale_review_discarded",
+                action="synthesize_and_review_book_direction",
+                status="failed",
+                artifact_path=context_path,
+                routing="reload_book_discussion",
+                message="Book discussion state changed; the stale review result was discarded.",
+                payload={"profile_id": profile.id, "expected_revision": state.revision},
+            )
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        candidate = updated.candidate
+        if candidate is None:
+            raise HTTPException(status_code=500, detail="Candidate book direction was not stored.")
+        for artifact_path, artifact_kind in [
+            (candidate.direction_path, "book_direction_candidate_written"),
+            (candidate.constraints_path, "book_direction_constraints_written"),
+            (candidate.rolling_plan_path, "book_rolling_contract_candidate_written"),
+        ]:
+            _append_event(
+                project_path,
+                metadata,
+                kind=artifact_kind,
+                action="synthesize_book_direction",
+                status="completed",
+                artifact_path=artifact_path,
+                routing="review_book_direction",
+                message="Candidate book-level artifact written for review.",
+                payload={
+                    "profile_id": profile.id,
+                    "model_snapshot": synthesis.model_snapshot,
+                    "candidate_revision": candidate.revision,
+                    "candidate": True,
+                },
+            )
+        _append_event(
+            project_path,
+            metadata,
+            kind="book_direction_candidate_reviewed",
+            action="review_book_direction",
+            status="completed",
+            artifact_path=candidate.verification_path,
+            routing=("await_user_approval" if candidate.approval_allowed else "continue_discussion"),
+            message=(
+                "Candidate Book Direction is ready for explicit user approval."
+                if candidate.approval_allowed
+                else "Candidate Book Direction has blocking issues and remains unapproved."
+            ),
+            payload={
+                "profile_id": profile.id,
+                "model_snapshot": review_model_snapshot,
+                "candidate_revision": candidate.revision,
+                "approval_allowed": candidate.approval_allowed,
+                "direction_path": candidate.direction_path,
+                "constraints_path": candidate.constraints_path,
+                "rolling_plan_path": candidate.rolling_plan_path,
+            },
+        )
+        return updated
 
 
 @router.post("/approve", response_model=SetupStateDocument)
-def approve_setup() -> SetupStateDocument:
+def approve_setup(request: SetupApprovalRequest) -> SetupStateDocument:
+    with _setup_lock:
+        project_path = _active_project_path()
+        setup_storage.flush_pending_setup_events(project_path)
+        metadata = read_project_metadata(project_path)
+        try:
+            state = setup_storage.approve_setup(project_path, request)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        candidate = state.candidate
+        _append_event(
+            project_path,
+            metadata,
+            kind="book_loop_approved",
+            action="approve_book_direction",
+            status="completed",
+            artifact_path="book/direction.md",
+            routing="start_or_resume_harness",
+            message="User explicitly approved the reviewed Book Direction.",
+            payload={
+                "candidate_revision": candidate.revision if candidate else None,
+                "profile_id": candidate.profile_id if candidate else None,
+                "model_snapshot": candidate.model_snapshot if candidate else None,
+                "committed_artifacts": [
+                    "book/direction.md",
+                    "book/constraints.json",
+                    "book/settings.md",
+                    "book/outline.md",
+                    "book/state.json",
+                ],
+            },
+        )
+        for artifact_path in [
+            "book/constraints.json",
+            "book/settings.md",
+            "book/outline.md",
+            "book/state.json",
+        ]:
+            _append_event(
+                project_path,
+                metadata,
+                kind="approved_book_artifact_written",
+                action="approve_book_direction",
+                status="completed",
+                artifact_path=artifact_path,
+                routing="start_or_resume_harness",
+                message="Approved book-level artifact committed after explicit user approval.",
+                payload={
+                    "candidate_revision": candidate.revision if candidate else None,
+                    "committed": True,
+                },
+            )
+        return state
+
+
+def _active_project_path() -> Path:
     project_path = get_active_project_path()
     if project_path is None:
         raise HTTPException(status_code=404, detail="No active project.")
-    metadata = read_project_metadata(project_path)
-    try:
-        state = setup_storage.read_setup_state(project_path)
-        state = _ensure_setup_ready_for_approval(project_path, metadata, state)
-        if not state.approved and state.next_question is not None:
-            return state
-        state = setup_storage.approve_setup(project_path)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    append_event(
-        project_path,
-        HarnessEvent(
-            project_id=metadata.project_id,
-            kind="book_loop_approved",
-            loop_layer="book",
-            atomic_action="approve_book_loop",
-            status="completed",
-            artifact_path="book/settings.md",
-            message="Book loop approved by user.",
-        ),
-    )
-    return state
+    return project_path
 
 
-def _ensure_setup_ready_for_approval(
-    project_path: Path,
-    metadata: ProjectMetadata,
-    state: SetupStateDocument,
-) -> SetupStateDocument:
-    if state.approved or state.next_question is not None:
-        return state
-
+def _active_profile_or_409() -> LlmProfile:
     profile = get_active_profile()
     if profile is None:
-        return state
-    if state.ready_for_approval and state.readiness_profile_id == profile.id:
-        return state
-    return _add_followup_question_if_needed(project_path, metadata, profile, state)
+        raise HTTPException(
+            status_code=409,
+            detail="Select an enabled LLM profile before continuing the book discussion.",
+        )
+    return profile
 
 
-def _advance_setup_question_if_possible(
+def _append_event(
     project_path: Path,
     metadata: ProjectMetadata,
-    state: SetupStateDocument,
-) -> SetupStateDocument:
-    next_question = state.next_question
-    if next_question is not None and next_question.source == "llm":
-        return state
-
-    profile = get_active_profile()
-    if profile is None:
-        return state
-
-    if next_question is None:
-        return _add_followup_question_if_needed(project_path, metadata, profile, state)
-
+    *,
+    kind: str,
+    action: str,
+    status: EventStatus,
+    message: str,
+    artifact_path: str | None = None,
+    routing: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    event = HarnessEvent(
+        project_id=metadata.project_id,
+        kind=kind,
+        loop_layer="book",
+        atomic_action=action,
+        status=status,
+        artifact_path=artifact_path,
+        routing_decision=routing,
+        message=message,
+        payload=payload or {},
+    )
     try:
-        personalized_question = personalize_next_setup_question(profile, state, next_question)
-    except Exception as exc:
-        append_event(
-            project_path,
-            HarnessEvent(
-                project_id=metadata.project_id,
-                kind="setup_question_personalization_failed",
-                loop_layer="book",
-                atomic_action="personalize_setup_question",
-                status="failed",
-                routing_decision="fallback_to_default_question",
-                message="Book setup question personalization failed; using default question.",
-                payload={
-                    "question_id": next_question.id,
-                    "reason": redact_profile_secrets(str(exc), profile),
-                },
-            ),
-        )
-        return state
-
-    updated_state = setup_storage.replace_setup_question(
-        project_path,
-        state,
-        personalized_question,
-    )
-    append_event(
-        project_path,
-        HarnessEvent(
-            project_id=metadata.project_id,
-            kind="setup_question_personalized",
-            loop_layer="book",
-            atomic_action="personalize_setup_question",
-            status="completed",
-            routing_decision="ask_user",
-            message="Book setup next question personalized from prior answers.",
-            payload={
-                "question_id": personalized_question.id,
-                "profile_id": profile.id,
-                "model_snapshot": personalized_question.model_snapshot,
-            },
-        ),
-    )
-    return updated_state
-
-
-def _add_followup_question_if_needed(
-    project_path: Path,
-    metadata: ProjectMetadata,
-    profile: LlmProfile,
-    state: SetupStateDocument,
-) -> SetupStateDocument:
-    try:
-        followup_question = assess_setup_followup_question(profile, state)
-    except Exception as exc:
-        append_event(
-            project_path,
-            HarnessEvent(
-                project_id=metadata.project_id,
-                kind="setup_followup_assessment_failed",
-                loop_layer="book",
-                atomic_action="assess_setup_readiness",
-                status="failed",
-                routing_decision="ready_for_approval",
-                message="Book setup follow-up assessment failed; setup can proceed to approval.",
-                payload={"reason": redact_profile_secrets(str(exc), profile)},
-            ),
-        )
-        return setup_storage.mark_ready_for_approval(project_path, state, profile.id)
-
-    if followup_question is None:
-        updated_state = setup_storage.mark_ready_for_approval(project_path, state, profile.id)
-        append_event(
-            project_path,
-            HarnessEvent(
-                project_id=metadata.project_id,
-                kind="setup_ready_for_approval",
-                loop_layer="book",
-                atomic_action="assess_setup_readiness",
-                status="completed",
-                routing_decision="approve_book_loop",
-                message="Book setup has enough information for approval.",
-                payload={"profile_id": profile.id},
-            ),
-        )
-        return updated_state
-
-    updated_state = setup_storage.append_setup_question(
-        project_path,
-        state,
-        followup_question,
-    )
-    append_event(
-        project_path,
-        HarnessEvent(
-            project_id=metadata.project_id,
-            kind="setup_followup_question_created",
-            loop_layer="book",
-            atomic_action="assess_setup_readiness",
-            status="completed",
-            routing_decision="ask_user",
-            message="Book setup needs one more user decision before approval.",
-            payload={
-                "question_id": followup_question.id,
-                "profile_id": profile.id,
-                "model_snapshot": followup_question.model_snapshot,
-            },
-        ),
-    )
-    return updated_state
+        append_event(project_path, event)
+    except (OSError, ValueError):
+        setup_storage.enqueue_pending_setup_event(project_path, event)

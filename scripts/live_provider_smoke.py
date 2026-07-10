@@ -26,7 +26,11 @@ from app.llm.redaction import profile_secret_values, redact_sensitive_values  # 
 from app.schemas.profiles import LlmProfile, LlmProfileTestResult  # noqa: E402
 from app.schemas.projects import CreateProjectRequest  # noqa: E402
 from app.schemas.runs import RunAdvanceRequest  # noqa: E402
-from app.schemas.setup import SetupAnswerRequest, SetupStateDocument  # noqa: E402
+from app.schemas.setup import (  # noqa: E402
+    SetupApprovalRequest,
+    SetupStateDocument,
+    SetupTurnRequest,
+)
 from app.storage import profiles as profile_storage  # noqa: E402
 from app.storage import projects as project_storage  # noqa: E402
 from app.storage.events import read_events  # noqa: E402
@@ -35,6 +39,10 @@ from app.storage.secret_audit import audit_path_for_profile_secrets  # noqa: E40
 
 
 REQUIRED_ARTIFACTS = {
+    "book_direction": "book/direction.md",
+    "book_constraints": "book/constraints.json",
+    "book_rolling_contract": "book/outline.md",
+    "book_discussion_transcript": "book/discussion/transcript.jsonl",
     "context_snapshot": "chapters/chapter-001/context_snapshot.json",
     "goal": "chapters/chapter-001/goal.md",
     "draft": "chapters/chapter-001/draft.md",
@@ -47,28 +55,16 @@ REQUIRED_ARTIFACTS = {
 }
 T = TypeVar("T")
 
-SMOKE_SETUP_ANSWERS = {
-    "genre_promise": (
-        "A compact mystery-adventure with visible clues, escalating reversals, and a clear "
-        "emotional payoff."
-    ),
-    "protagonist_direction": (
-        "The protagonist starts cautious and isolated, then learns to trust earned allies while "
-        "remaining clever under pressure."
-    ),
-    "world_constraints": (
-        "A grounded near-future coastal city with limited speculative technology, consistent "
-        "social consequences, and no arbitrary magic fixes."
-    ),
-    "reader_promise": (
-        "Each arc should deliver one tactical discovery, one emotional turn, and one new question "
-        "that matters to the next arc."
-    ),
-    "ending_tendency": (
-        "Hopeful but costly: the protagonist wins agency and community, while some losses remain "
-        "visible."
-    ),
-}
+SMOKE_BOOK_DIRECTION_BRIEF = """请基于以下意图开始全书方向讨论，并维护一份完整、具体的 Book Direction 草稿：
+
+- 作品是一部紧凑的近未来海滨城市悬疑冒险，线索必须公平可见，反转要同时改变人物关系。
+- 主角聪明但孤立，长期变化是学会辨认值得信任的盟友，并为主动权付出真实代价。
+- 推想技术有限、有社会后果，不能充当任意解题工具；世界保持现实因果。
+- 每个故事弧应兑现一次策略发现、一次情感转折，并留下由已提交正史自然产生的新问题。
+- 长期结局倾向是艰难但有希望：主角获得能动性和共同体，同时保留不可抹去的损失。
+- 禁止提前列出未来全部故事弧或章节，只为后续滚动规划保留稳定方向和边界。
+
+这些是我明确确认的创作决定。具体的局部反派、每个故事弧路线和最终损失对象保持开放。你可以指出真正影响创作的矛盾或缺口，但不要把覆盖清单变成固定问卷。"""
 
 
 class LiveProviderSmokeError(RuntimeError):
@@ -238,33 +234,52 @@ def _complete_book_setup(redaction_values: Sequence[str]) -> SetupStateDocument:
         setup_api.get_setup_state,
         redaction_values,
     )
-    setup_answer_count = 0
-    while not setup_state.approved:
-        question = setup_state.next_question
-        if question is None:
-            setup_state = _call_user_action(
-                "approve book setup",
-                setup_api.approve_setup,
-                redaction_values,
-            )
-            continue
-        setup_answer_count += 1
-        if setup_answer_count > 10:
-            raise LiveProviderSmokeError("Book setup asked too many follow-up questions.")
+    if setup_state.approved:
+        return setup_state
+
+    next_message = SMOKE_BOOK_DIRECTION_BRIEF
+    for review_attempt in range(1, 4):
         setup_state = _call_user_action(
-            "answer book setup question",
-            lambda: setup_api.answer_setup_question(
-                SetupAnswerRequest(
-                    question_id=question.id,
-                    answer=SMOKE_SETUP_ANSWERS.get(
-                        question.id,
-                        f"Live provider smoke answer for {question.title}.",
-                    ),
-                )
+            "continue book direction discussion",
+            lambda message=next_message: setup_api.continue_setup_discussion(
+                SetupTurnRequest(message=message)
             ),
             redaction_values,
         )
-    return setup_state
+        setup_state = _call_user_action(
+            "prepare book direction review",
+            setup_api.prepare_setup_review,
+            redaction_values,
+        )
+        candidate = setup_state.candidate
+        if candidate is None:
+            raise LiveProviderSmokeError("Book direction review produced no candidate.")
+        if candidate.approval_allowed:
+            return _call_user_action(
+                "approve reviewed book direction",
+                lambda revision=candidate.revision: setup_api.approve_setup(
+                    SetupApprovalRequest(candidate_revision=revision)
+                ),
+                redaction_values,
+            )
+
+        blocking_issues = [
+            issue for issue in candidate.review.issues if issue.severity == "blocking"
+        ]
+        issue_text = "\n".join(
+            f"- {issue.message}"
+            + (f" 建议澄清：{issue.suggested_question}" if issue.suggested_question else "")
+            for issue in blocking_issues
+        )
+        next_message = (
+            f"第 {review_attempt} 次候选审阅发现以下阻断问题，请据此继续讨论并修订完整草稿。"
+            "不要替我改变已经确认的决定；如果问题只是表达过薄，请把现有决定具体化。\n"
+            + issue_text
+        )
+
+    raise LiveProviderSmokeError(
+        "Book direction remained blocked after three synthesis/review attempts."
+    )
 
 
 def _call_user_action(

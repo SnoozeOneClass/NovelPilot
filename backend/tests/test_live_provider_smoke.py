@@ -183,13 +183,13 @@ def test_live_provider_smoke_failure_reports_setup_action_errors(
         )
     )
 
-    def fail_answer(_request):
+    def fail_discussion(_request):
         raise HTTPException(
             status_code=502,
             detail="setup failed with secret-key at https://api.example.com/v1",
         )
 
-    monkeypatch.setattr(setup_api, "answer_setup_question", fail_answer)
+    monkeypatch.setattr(setup_api, "continue_setup_discussion", fail_discussion)
 
     with pytest.raises(LiveProviderSmokeError) as exc:
         run_smoke(LiveProviderSmokeOptions(profile_id="main", title="Smoke Setup Failure Fixture"))
@@ -201,12 +201,12 @@ def test_live_provider_smoke_failure_reports_setup_action_errors(
     report_payload = json.dumps(report, ensure_ascii=False)
     events = read_events(project_path)
 
-    assert "Failed to answer book setup question" in message
+    assert "Failed to continue book direction discussion" in message
     assert "[redacted]" in message
     assert "secret-key" not in message
     assert "https://api.example.com/v1" not in message
     assert report["status"] == "failed"
-    assert "Failed to answer book setup question" in report["failure"]["message"]
+    assert "Failed to continue book direction discussion" in report["failure"]["message"]
     assert "secret-key" not in report_payload
     assert "https://api.example.com/v1" not in report_payload
     assert not any(event.kind in {"run_started", "run_resumed"} for event in events)
@@ -233,12 +233,47 @@ def _fixture_call_llm(_profile: object, request: ChatRequest) -> ChatResult:
     action = str(request.metadata.get("atomic_action", "profile_test"))
     content_by_action = {
         "profile_test": "Profile works.",
-        "personalize_setup_question": (
-            '{"title":"Focused decision","prompt":"Choose the next stable book constraint.",'
-            '"options":['
-            '{"label":"A","description":"Keep pressure personal."},'
-            '{"label":"B","description":"Keep clues visible."},'
-            '{"label":"C","description":"Keep the ending hopeful."}]}'
+        "continue_book_discussion": json.dumps(
+            {
+                "reply": "The direction is concrete and remains open to further discussion.",
+                "direction_draft": _fixture_direction(),
+                "discussion_summary": "A fair near-future mystery about earned trust.",
+                "confirmed_decisions": ["Fair clues", "Earned trust", "Costly hope"],
+                "superseded_decisions": [],
+                "unresolved_questions": [],
+                "assumptions": [],
+                "contradictions": [],
+                "suggestions": [
+                    {"label": "Review", "message": "Prepare the direction for review."}
+                ],
+                "ready_status": "ready",
+                "readiness_reason": "Stable direction and rolling freedoms are explicit.",
+            }
+        ),
+        "synthesize_book_direction": json.dumps(
+            {
+                "direction_markdown": _fixture_direction(),
+                "constraints": {
+                    "confirmed": ["Fair clues", "Earned trust", "Costly hope"],
+                    "must_preserve": ["Reveals change relationships."],
+                    "must_avoid": ["No arbitrary technology solution."],
+                    "creative_freedoms": ["Choose local arc routes from committed canon."],
+                    "open_decisions": ["The exact final loss remains open."],
+                },
+                "confirmed_decision_coverage": [
+                    {"decision": "Fair clues", "candidate_evidence": "visible clues"},
+                    {"decision": "Earned trust", "candidate_evidence": "earned trust"},
+                    {"decision": "Costly hope", "candidate_evidence": "hard-won hope"},
+                ],
+                "rolling_plan_markdown": _fixture_rolling_contract(),
+            }
+        ),
+        "review_book_direction": json.dumps(
+            {
+                "summary": "The candidate preserves confirmed intent and rolling scope.",
+                "issues": [],
+                "signals": ["confirmed_decisions_preserved:passed", "rolling_scope:passed"],
+            }
         ),
         "plan_current_arc": "# Arc 1\n\nA rolling first arc focused on earned trust.",
         "generate_chapter_goal": (
@@ -286,6 +321,28 @@ def _fixture_call_llm_with_bad_patch(_profile: object, request: ChatRequest) -> 
             provider_snapshot="openai-compatible",
         )
     return _fixture_call_llm(_profile, request)
+
+
+def _fixture_direction() -> str:
+    return (
+        "# Book Direction\n\nThe novel is a grounded near-future coastal mystery about earned "
+        "trust. Every reveal must follow visible clues and alter a meaningful relationship, so plot "
+        "knowledge and emotional consequence advance together. The protagonist begins capable but "
+        "isolated, then gains agency through difficult alliances. Victories carry durable personal "
+        "costs while preserving hard-won hope. Technology remains limited, socially consequential, "
+        "and unable to erase earlier choices. Later antagonists, local conflicts, and the exact final "
+        "loss remain open for rolling planning from committed canon."
+    )
+
+
+def _fixture_rolling_contract() -> str:
+    return (
+        "# Rolling Story Arc Contract\n\nPlan only the current story arc from approved direction and "
+        "committed canon. Give it one mystery advance, one relationship change, and one test of "
+        "earned trust. After chapters commit, reconcile observations and state patches before "
+        "planning the next arc. Return to the book loop only when an approved highest-level decision "
+        "must change."
+    )
 
 
 def _project_tree_contains(project_path: Path, needle: str) -> bool:

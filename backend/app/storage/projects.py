@@ -57,9 +57,15 @@ def create_project(request: CreateProjectRequest) -> ProjectSummary:
 
     write_project_metadata(project_path, metadata)
     write_text_file(project_path / "events.jsonl", "")
-    write_text_file(project_path / "book" / "settings.md", "# Book Settings\n")
-    write_text_file(project_path / "book" / "outline.md", "# Book Outline\n")
-    write_json(project_path / "book" / "state.json", {"schema_version": 1, "version": 1})
+    write_text_file(
+        project_path / "book" / "settings.md",
+        "# Book Direction\n\nPending explicit user approval.\n",
+    )
+    write_text_file(
+        project_path / "book" / "outline.md",
+        "# Rolling Story Arc Contract\n\nPending explicit user approval.\n",
+    )
+    write_json(project_path / "book" / "state.json", {"schema_version": 2, "version": 1})
     initialize_setup_state(project_path)
     for relative, payload in INITIAL_CANON_FILES.items():
         write_json(project_path / relative, payload)

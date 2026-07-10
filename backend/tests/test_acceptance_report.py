@@ -22,11 +22,11 @@ def test_acceptance_report_marks_manual_gates_as_manual_required() -> None:
 
     assert report["scope"].startswith("Static repository evidence map.")
     assert report["summary"] == {
-        "covered": 15,
+        "covered": 16,
         "partial": 0,
         "manual_required": 2,
         "missing": 0,
-        "total": 17,
+        "total": 18,
     }
     assert manual_gate_ids == {"live_provider_smoke", "literary_quality_review"}
     assert by_id["project_lifecycle"]["status"] == "covered"
@@ -49,5 +49,5 @@ def test_acceptance_report_markdown_contains_summary() -> None:
 
     assert "# Novelpilot Acceptance Report" in completed.stdout
     assert "Static repository evidence map." in completed.stdout
-    assert "Summary: 15 covered, 0 partial, 2 manual required, 0 missing, 17 total." in completed.stdout
+    assert "Summary: 16 covered, 0 partial, 2 manual required, 0 missing, 18 total." in completed.stdout
     assert "manual required" in completed.stdout

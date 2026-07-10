@@ -56,10 +56,10 @@ interface TraceConsoleProps {
 }
 
 const traceTabs: Array<{ id: TraceTab; label: string }> = [
-  { id: "trace", label: "Run Trace" },
-  { id: "artifacts", label: "Artifacts" },
-  { id: "validation", label: "Validation" },
-  { id: "events", label: "Events" }
+  { id: "trace", label: "运行轨迹" },
+  { id: "artifacts", label: "产物" },
+  { id: "validation", label: "验证" },
+  { id: "events", label: "原始事件" }
 ];
 
 function statusTone(status: string): string {
@@ -115,7 +115,7 @@ export function TraceConsole({
       <header className="view-heading">
         <div>
           <h1>运行证据与产物 · Trace Console</h1>
-          <p>面向 reviewer 的 Harness Trace：事件、Artifact 与 Validation 全部可追踪。</p>
+          <p>面向审阅者的 Harness 追踪：事件、产物与验证均可追溯。</p>
         </div>
       </header>
 

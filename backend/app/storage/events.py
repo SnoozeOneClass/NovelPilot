@@ -3,18 +3,29 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from app.schemas.events import HarnessEvent
+from app.storage.file_lock import exclusive_file_lock
 
 
 def append_event(project_path: Path, event: HarnessEvent) -> None:
     events_path = project_path / "events.jsonl"
     events_path.parent.mkdir(parents=True, exist_ok=True)
-    event_to_write = event.model_copy(update={"seq": _next_event_seq(project_path)})
-    with events_path.open("a", encoding="utf-8") as handle:
-        handle.write(event_to_write.model_dump_json() + "\n")
+    with exclusive_file_lock(project_path / ".events.lock"):
+        events = _read_events_unlocked(events_path)
+        if any(existing.event_id == event.event_id for existing in events):
+            return
+        event_to_write = event.model_copy(update={"seq": _next_event_seq(events)})
+        with events_path.open("a", encoding="utf-8") as handle:
+            handle.write(event_to_write.model_dump_json() + "\n")
+            handle.flush()
 
 
 def read_events(project_path: Path) -> list[HarnessEvent]:
     events_path = project_path / "events.jsonl"
+    with exclusive_file_lock(project_path / ".events.lock"):
+        return _read_events_unlocked(events_path)
+
+
+def _read_events_unlocked(events_path: Path) -> list[HarnessEvent]:
     if not events_path.exists():
         return []
 
@@ -29,8 +40,7 @@ def read_events(project_path: Path) -> list[HarnessEvent]:
     return events
 
 
-def _next_event_seq(project_path: Path) -> int:
-    events = read_events(project_path)
+def _next_event_seq(events: list[HarnessEvent]) -> int:
     if not events:
         return 1
 

@@ -120,7 +120,7 @@ export function LlmProfilesPanel({ onProfilesChanged }: LlmProfilesPanelProps) {
 
       <div className="llm-settings-grid">
         <section className="profile-catalog">
-          <h2>LLM Profiles</h2>
+          <h2>模型配置</h2>
           <div>
             {profiles?.profiles.map((profile) => {
               const active = profile.id === profiles.active_profile_id;

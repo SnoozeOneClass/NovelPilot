@@ -38,6 +38,18 @@ def test_append_event_assigns_monotonic_seq(tmp_path) -> None:
     assert [event.seq for event in events] == [1, 2]
 
 
+def test_append_event_is_idempotent_for_replayed_event_id(tmp_path) -> None:
+    project_path = tmp_path / "novel"
+    event = HarnessEvent(project_id="project", kind="one", message="One.")
+
+    append_event(project_path, event)
+    append_event(project_path, event)
+
+    events = read_events(project_path)
+    assert [item.event_id for item in events] == [event.event_id]
+    assert [item.seq for item in events] == [1]
+
+
 def test_read_events_accepts_legacy_events_without_seq(tmp_path) -> None:
     project_path = tmp_path / "novel"
     event = HarnessEvent(project_id="project", kind="legacy", message="Legacy.")
