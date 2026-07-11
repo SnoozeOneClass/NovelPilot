@@ -30,7 +30,7 @@ def test_completion_api_records_literary_review_for_active_project(
 ) -> None:
     _isolate_runtime_paths(tmp_path, monkeypatch)
     project = project_storage.create_project(
-        CreateProjectRequest(title="Smoke Project", operation_mode="full_auto")
+        CreateProjectRequest(operation_mode="full_auto")
     )
     project_path = Path(project.path)
     _write_smoke_artifacts(project_path)
@@ -65,7 +65,7 @@ def test_completion_api_refuses_literary_review_before_live_smoke_passes(
 ) -> None:
     _isolate_runtime_paths(tmp_path, monkeypatch)
     project = project_storage.create_project(
-        CreateProjectRequest(title="Failed Smoke Project", operation_mode="full_auto")
+        CreateProjectRequest(operation_mode="full_auto")
     )
     _write_smoke_artifacts(Path(project.path), status="failed")
 
@@ -90,7 +90,7 @@ def test_completion_api_accepts_bom_completion_evidence(
 ) -> None:
     _isolate_runtime_paths(tmp_path, monkeypatch)
     project = project_storage.create_project(
-        CreateProjectRequest(title="Bom Smoke Project", operation_mode="full_auto")
+        CreateProjectRequest(operation_mode="full_auto")
     )
     project_path = Path(project.path)
     _write_smoke_artifacts(project_path)
@@ -119,7 +119,7 @@ def test_completion_api_fails_when_active_project_contains_profile_secret(
 ) -> None:
     _isolate_runtime_paths(tmp_path, monkeypatch)
     project = project_storage.create_project(
-        CreateProjectRequest(title="Leaky Smoke Project", operation_mode="full_auto")
+        CreateProjectRequest(operation_mode="full_auto")
     )
     project_path = Path(project.path)
     _write_smoke_artifacts(project_path)

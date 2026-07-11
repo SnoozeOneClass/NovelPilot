@@ -85,11 +85,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   listProjects: () => request<ProjectSummary[]>("/api/projects"),
   activeProject: () => request<ProjectSummary | null>("/api/projects/active"),
-  createProject: (title: string, operation_mode: OperationMode) =>
+  createProject: (operation_mode: OperationMode) =>
     request<ProjectSummary>("/api/projects", {
       method: "POST",
       headers: jsonHeaders,
-      body: JSON.stringify({ title, operation_mode })
+      body: JSON.stringify({ operation_mode })
     }),
   openProject: (name: string) =>
     request<ProjectSummary>("/api/projects/open", {
@@ -98,6 +98,12 @@ export const api = {
       body: JSON.stringify({ name })
     }),
   closeProject: () => request<{ closed: boolean }>("/api/projects/close", { method: "POST" }),
+  updateProjectMode: (operation_mode: OperationMode) =>
+    request<ProjectSummary>("/api/projects/active/mode", {
+      method: "PATCH",
+      headers: jsonHeaders,
+      body: JSON.stringify({ operation_mode })
+    }),
   profiles: () => request<LlmProfilesDocument>("/api/profiles"),
   upsertProfile: (payload: LlmProfileMutation) =>
     request<LlmProfilePublic>("/api/profiles", {
@@ -122,11 +128,11 @@ export const api = {
     }),
   prepareSetupReview: () =>
     request<SetupStateDocument>("/api/setup/prepare-review", { method: "POST" }),
-  approveSetup: (candidate_revision: number) =>
+  approveSetup: (candidate_revision: number, title: string) =>
     request<SetupStateDocument>("/api/setup/approve", {
       method: "POST",
       headers: jsonHeaders,
-      body: JSON.stringify({ candidate_revision })
+      body: JSON.stringify({ candidate_revision, title })
     }),
   currentArc: () => request<CurrentArcState | null>("/api/arcs/current"),
   approveCurrentArc: () =>

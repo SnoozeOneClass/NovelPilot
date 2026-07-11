@@ -16,6 +16,7 @@ from app.schemas.setup import (
     SetupStateDocument,
 )
 from app.schemas.events import HarnessEvent
+from app.schemas.projects import ProjectMetadata
 from app.storage.events import append_event as append_durable_event
 from app.storage.file_lock import exclusive_file_lock
 from app.storage.json_files import read_json, write_json
@@ -243,6 +244,7 @@ def save_book_direction_candidate(
         review_root = Path("book") / "reviews" / f"review-{revision:04d}"
         direction_path = review_root / "candidate_direction.md"
         constraints_path = review_root / "candidate_constraints.json"
+        title_suggestions_path = review_root / "candidate_titles.json"
         rolling_plan_path = review_root / "rolling_plan.md"
         verification_path = review_root / "verification.json"
 
@@ -252,10 +254,12 @@ def save_book_direction_candidate(
             direction_markdown=synthesis.direction_markdown,
             constraints=synthesis.constraints,
             confirmed_decision_coverage=synthesis.confirmed_decision_coverage,
+            recommended_titles=synthesis.recommended_titles,
             rolling_plan_markdown=synthesis.rolling_plan_markdown,
             review=review,
             direction_path=direction_path.as_posix(),
             constraints_path=constraints_path.as_posix(),
+            title_suggestions_path=title_suggestions_path.as_posix(),
             rolling_plan_path=rolling_plan_path.as_posix(),
             verification_path=verification_path.as_posix(),
             profile_id=profile_id,
@@ -290,6 +294,16 @@ def save_book_direction_candidate(
                         **synthesis.constraints.model_dump(mode="json"),
                     }
                 ),
+                title_suggestions_path.as_posix(): _json_document(
+                    {
+                        "schema_version": 1,
+                        "candidate": True,
+                        "recommended_titles": [
+                            item.model_dump(mode="json")
+                            for item in synthesis.recommended_titles
+                        ],
+                    }
+                ),
                 rolling_plan_path.as_posix(): (
                     synthesis.rolling_plan_markdown.rstrip() + "\n"
                 ),
@@ -315,38 +329,56 @@ def approve_setup(
     request: SetupApprovalRequest,
 ) -> SetupStateDocument:
     with _setup_project_lock(project_path):
-        recover_file_transactions(project_path)
-        state = _read_setup_state_unlocked(project_path)
-        if state.approved:
-            raise ValueError("Book direction is already approved.")
-        candidate = state.candidate
-        if candidate is None:
-            raise ValueError("Book direction must be synthesized and reviewed before approval.")
-        if candidate.revision != request.candidate_revision:
-            raise ValueError("Book direction candidate is stale; review the latest candidate.")
-        if not candidate.approval_allowed:
-            raise ValueError("Book direction review has blocking issues.")
-        missing_decisions = _candidate_missing_confirmed_decisions(state, candidate)
-        if missing_decisions:
-            raise ValueError(
-                "Book direction candidate does not preserve every confirmed decision."
-            )
+        with exclusive_file_lock(project_path / ".project.lock"):
+            recover_file_transactions(project_path)
+            state = _read_setup_state_unlocked(project_path)
+            if state.approved:
+                raise ValueError("Book direction is already approved.")
+            candidate = state.candidate
+            if candidate is None:
+                raise ValueError(
+                    "Book direction must be synthesized and reviewed before approval."
+                )
+            if candidate.revision != request.candidate_revision:
+                raise ValueError("Book direction candidate is stale; review the latest candidate.")
+            if not candidate.approval_allowed:
+                raise ValueError("Book direction review has blocking issues.")
+            missing_decisions = _candidate_missing_confirmed_decisions(state, candidate)
+            if missing_decisions:
+                raise ValueError(
+                    "Book direction candidate does not preserve every confirmed decision."
+                )
 
-        updated = state.model_copy(deep=True)
-        updated.approved = True
-        updated.approved_at = datetime.now(UTC)
-        updated.phase = "approved"
-        updated.revision += 1
-        updated.suggestions = []
-        files = _approved_book_files(project_path, updated, candidate)
-        files["book/discussion/transcript.jsonl"] = _transcript_content(updated)
-        files["book/setup.json"] = _json_document(updated.model_dump(mode="json"))
-        commit_file_transaction(
-            project_path,
-            kind=f"book-direction-approval-{candidate.revision:04d}",
-            files=files,
-        )
-        return updated
+            metadata_payload = read_json(project_path / "project.json")
+            if metadata_payload is None:
+                raise FileNotFoundError("Project metadata is missing.")
+            metadata = ProjectMetadata.model_validate(metadata_payload)
+            approved_at = datetime.now(UTC)
+            metadata.title = request.title
+            metadata.updated_at = approved_at
+
+            updated = state.model_copy(deep=True)
+            updated.approved = True
+            updated.approved_at = approved_at
+            updated.approved_title = request.title
+            updated.title_selection_source = (
+                "recommended"
+                if any(item.title == request.title for item in candidate.recommended_titles)
+                else "custom"
+            )
+            updated.phase = "approved"
+            updated.revision += 1
+            updated.suggestions = []
+            files = _approved_book_files(project_path, updated, candidate)
+            files["project.json"] = _json_document(metadata.model_dump(mode="json"))
+            files["book/discussion/transcript.jsonl"] = _transcript_content(updated)
+            files["book/setup.json"] = _json_document(updated.model_dump(mode="json"))
+            commit_file_transaction(
+                project_path,
+                kind=f"book-direction-approval-{candidate.revision:04d}",
+                files=files,
+            )
+            return updated
 
 
 def _setup_path(project_path: Path) -> Path:
@@ -502,6 +534,8 @@ def _approved_book_files(
                 "version": previous_version + 1,
                 "setup_approved": True,
                 "approved_at": state.approved_at.isoformat() if state.approved_at else None,
+                "title": state.approved_title,
+                "title_selection_source": state.title_selection_source,
                 "book_direction_version": candidate.revision,
                 "approved_direction_path": "book/direction.md",
                 "approved_constraints_path": "book/constraints.json",

@@ -2,12 +2,13 @@ from datetime import UTC, datetime
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 SetupPhase = Literal["discussing", "review_ready", "review_blocked", "approved"]
 SetupReadinessStatus = Literal["continue", "ready"]
 SetupReviewSeverity = Literal["warning", "blocking"]
+TitleSelectionSource = Literal["recommended", "custom"]
 
 
 class SetupMessage(BaseModel):
@@ -74,6 +75,19 @@ class BookDirectionReview(BaseModel):
         )
 
 
+class BookTitleSuggestion(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    rationale: str = Field(min_length=1, max_length=1_000)
+
+    @field_validator("title", "rationale")
+    @classmethod
+    def strip_non_blank_text(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Title suggestions must not contain blank text.")
+        return stripped
+
+
 class BookDirectionCandidate(BaseModel):
     revision: int = Field(ge=1)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -82,15 +96,24 @@ class BookDirectionCandidate(BaseModel):
     confirmed_decision_coverage: list[ConfirmedDecisionCoverage] = Field(
         default_factory=list
     )
+    recommended_titles: list[BookTitleSuggestion] = Field(min_length=3, max_length=5)
     rolling_plan_markdown: str
     review: BookDirectionReview
     direction_path: str
     constraints_path: str
+    title_suggestions_path: str
     rolling_plan_path: str
     verification_path: str
     profile_id: str
     model_snapshot: str
     review_model_snapshot: str
+
+    @model_validator(mode="after")
+    def recommended_titles_must_be_unique(self) -> "BookDirectionCandidate":
+        normalized = [item.title.casefold() for item in self.recommended_titles]
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("Recommended book titles must be unique.")
+        return self
 
     @property
     def approval_allowed(self) -> bool:
@@ -103,6 +126,8 @@ class SetupStateDocument(BaseModel):
     phase: SetupPhase = "discussing"
     approved: bool = False
     approved_at: datetime | None = None
+    approved_title: str | None = None
+    title_selection_source: TitleSelectionSource | None = None
     migrated_from_schema_version: int | None = None
     turn_count: int = Field(default=0, ge=0)
     candidate_revision_counter: int = Field(default=0, ge=0)
@@ -139,3 +164,12 @@ class SetupTurnRequest(BaseModel):
 
 class SetupApprovalRequest(BaseModel):
     candidate_revision: int = Field(ge=1)
+    title: str = Field(min_length=1, max_length=200)
+
+    @field_validator("title")
+    @classmethod
+    def title_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Approved book title must not be blank.")
+        return stripped

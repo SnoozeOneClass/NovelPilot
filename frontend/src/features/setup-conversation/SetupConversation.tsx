@@ -17,13 +17,17 @@ import type {
 
 interface SetupConversationProps {
   projectId: string;
-  onApproved: () => void;
+  onApproved: () => void | Promise<void>;
   onExit: () => void;
   onSetupChanged?: (state: SetupStateDocument) => void;
 }
 
 type BusyAction = "turn" | "review" | "approve" | null;
 type Notice = { kind: "success" | "error"; text: string };
+type TitleChoice =
+  | { kind: "recommended"; title: string }
+  | { kind: "custom"; title: string }
+  | null;
 
 const setupErrorCopy: Record<string, string> = {
   "Book direction is already approved.": "全书方向已经批准，不能再写入候选讨论。",
@@ -40,6 +44,8 @@ const setupErrorCopy: Record<string, string> = {
     "请先讨论小说方向并形成草稿，再请求审阅。",
   "Select an enabled LLM profile before continuing the book discussion.":
     "请先在“设置与模型”中选择一个可用的 LLM 配置。",
+  "Book title contains configured provider credentials or endpoint data. Choose a different title.":
+    "书名中包含已配置的 Provider 凭据或接口地址，请换一个书名。",
   "The current Book Direction candidate has already been reviewed. Approve it or continue the discussion before preparing another candidate.":
     "当前候选已经审阅。请批准它，或继续讨论使它失效后再整理新候选。"
 };
@@ -67,6 +73,7 @@ export function SetupConversation({
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [titleChoice, setTitleChoice] = useState<TitleChoice>(null);
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -96,6 +103,12 @@ export function SetupConversation({
   }, [draftStorageKey, input]);
 
   const candidate = state?.candidate ?? null;
+  const finalTitle = titleChoice?.title.trim() ?? "";
+
+  useEffect(() => {
+    setTitleChoice(null);
+  }, [projectId, candidate?.revision]);
+
   const approvalAllowed = Boolean(
     candidate
       && candidate.review.status === "passed"
@@ -104,6 +117,7 @@ export function SetupConversation({
   const canSend = Boolean(input.trim()) && busyAction === null && !state?.approved;
   const canApprove = approvalAllowed
     && candidate !== null
+    && Boolean(finalTitle)
     && !input.trim()
     && busyAction === null;
   const canReview = Boolean(state?.direction_draft.trim())
@@ -185,10 +199,10 @@ export function SetupConversation({
     setBusyAction("approve");
     setNotice(null);
     try {
-      const nextState = await api.approveSetup(candidate.revision);
+      const nextState = await api.approveSetup(candidate.revision, finalTitle);
       applyState(nextState);
-      setNotice({ kind: "success", text: "全书方向已正式批准并提交。" });
-      onApproved();
+      setNotice({ kind: "success", text: `《${finalTitle}》与全书方向已正式批准并提交。` });
+      await onApproved();
     } catch (error) {
       setNotice({ kind: "error", text: formatSetupError(error) });
     } finally {
@@ -225,9 +239,13 @@ export function SetupConversation({
         {state.approved ? (
           <div className="plan-approved-state">
             <span className="approval-mark"><Check size={28} /></span>
-            <h2>全书方向已经批准</h2>
+            <h2>
+              {state.approved_title
+                ? `《${state.approved_title}》与全书方向已经批准`
+                : "全书方向已经批准"}
+            </h2>
             <p>后续只滚动规划当前故事弧，讨论草稿不会再覆盖已批准设定。</p>
-            <button className="gold-button" onClick={onApproved}>
+            <button className="gold-button" onClick={() => void onApproved()}>
               进入创作工作台
             </button>
           </div>
@@ -285,6 +303,15 @@ export function SetupConversation({
               <CandidateReview candidate={candidate} onUseQuestion={useSuggestedText} />
             )}
 
+            {candidate && (
+              <BookTitlePicker
+                candidate={candidate}
+                choice={titleChoice}
+                disabled={busyAction !== null}
+                onChange={setTitleChoice}
+              />
+            )}
+
             <div className="book-composer">
               <textarea
                 value={input}
@@ -325,7 +352,13 @@ export function SetupConversation({
                 <button
                   className="green-button"
                   disabled={!canApprove}
-                  title={input.trim() ? "请先发送或清空尚未提交的讨论内容" : "批准当前候选版本"}
+                  title={
+                    input.trim()
+                      ? "请先发送或清空尚未提交的讨论内容"
+                      : !finalTitle
+                        ? "请先选择推荐书名或输入自定义书名"
+                        : "批准当前候选版本与正式书名"
+                  }
                   onClick={() => void approve()}
                 >
                   <ShieldCheck size={17} />
@@ -388,6 +421,70 @@ export function SetupConversation({
         )}
       </aside>
     </div>
+  );
+}
+
+function BookTitlePicker({
+  candidate,
+  choice,
+  disabled,
+  onChange
+}: {
+  candidate: BookDirectionCandidate;
+  choice: TitleChoice;
+  disabled: boolean;
+  onChange: (choice: TitleChoice) => void;
+}) {
+  const customTitle = choice?.kind === "custom" ? choice.title : "";
+
+  return (
+    <section className="book-title-picker">
+      <header>
+        <div>
+          <h2>为这本书确定正式书名</h2>
+          <p>书名会与当前候选全书方向一起批准；继续讨论不会提前改动项目名称。</p>
+        </div>
+        <span className={`soft-badge ${choice?.title.trim() ? "green" : "gold"}`}>
+          {choice?.title.trim() ? "已选择" : "批准前必填"}
+        </span>
+      </header>
+
+      <div className="recommended-title-list">
+        {candidate.recommended_titles.map((option, index) => {
+          const selected = choice?.kind === "recommended" && choice.title === option.title;
+          return (
+            <button
+              key={`${option.title}-${index}`}
+              type="button"
+              className={selected ? "selected" : ""}
+              aria-pressed={selected}
+              disabled={disabled}
+              onClick={() => onChange({ kind: "recommended", title: option.title })}
+            >
+              <span>{index + 1}</span>
+              <div>
+                <strong>《{option.title}》</strong>
+                <small>{option.rationale}</small>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      <label className={`custom-book-title ${choice?.kind === "custom" ? "selected" : ""}`}>
+        <span>自定义书名</span>
+        <input
+          value={customTitle}
+          maxLength={200}
+          disabled={disabled}
+          placeholder="输入你希望采用的正式书名"
+          onFocus={() => {
+            if (choice?.kind !== "custom") onChange({ kind: "custom", title: "" });
+          }}
+          onChange={(event) => onChange({ kind: "custom", title: event.target.value })}
+        />
+      </label>
+    </section>
   );
 }
 

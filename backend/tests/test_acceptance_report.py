@@ -30,6 +30,18 @@ def test_acceptance_report_marks_manual_gates_as_manual_required() -> None:
     }
     assert manual_gate_ids == {"live_provider_smoke", "literary_quality_review"}
     assert by_id["project_lifecycle"]["status"] == "covered"
+    assert "stable internal storage identities" in by_id["project_lifecycle"]["requirement"]
+    assert by_id["book_setup"]["status"] == "covered"
+    assert "title recommendations" in by_id["book_setup"]["requirement"]
+    assert by_id["operation_modes"]["status"] == "covered"
+    assert "bypassing pending story-arc review gates" in (
+        by_id["operation_modes"]["requirement"]
+    )
+    assert all(
+        evidence["ok"]
+        for criterion_id in {"project_lifecycle", "book_setup", "operation_modes"}
+        for evidence in by_id[criterion_id]["evidence"]
+    )
     assert by_id["llm_profiles"]["status"] == "covered"
     assert by_id["live_provider_smoke"]["status"] == "manual_required"
     assert by_id["literary_quality_review"]["status"] == "manual_required"
@@ -50,4 +62,7 @@ def test_acceptance_report_markdown_contains_summary() -> None:
     assert "# Novelpilot Acceptance Report" in completed.stdout
     assert "Static repository evidence map." in completed.stdout
     assert "Summary: 16 covered, 0 partial, 2 manual required, 0 missing, 18 total." in completed.stdout
+    assert "stable internal storage identities" in completed.stdout
+    assert "reviewed title recommendations" in completed.stdout
+    assert "bypassing pending story-arc review gates" in completed.stdout
     assert "manual required" in completed.stdout

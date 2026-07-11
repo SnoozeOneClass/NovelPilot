@@ -705,10 +705,17 @@ class HarnessOrchestrator:
         return f"chapters/{metadata.active_chapter_id}/context_snapshot.json"
 
     def _current_arc_requires_human_review(self, metadata: ProjectMetadata) -> bool:
-        if metadata.operation_mode != "participatory" or metadata.active_arc_id is None:
+        if metadata.active_arc_id is None:
             return False
         arc_state = arc_storage.read_current_arc_state(self.context.project_path)
-        return arc_state is None or arc_state.human_review != "approved"
+        if arc_state is None:
+            return metadata.operation_mode == "participatory"
+        if arc_state.human_review == "awaiting_review":
+            return True
+        return (
+            metadata.operation_mode == "participatory"
+            and arc_state.human_review != "approved"
+        )
 
     def _feedback_context_sources(self) -> list[ContextSource]:
         processed_feedback = [
@@ -896,9 +903,12 @@ class HarnessOrchestrator:
         if metadata.operation_mode == "participatory":
             state["human_review"] = "awaiting_review"
             state["approved_at"] = None
+        elif state.get("human_review") == "awaiting_review":
+            # A mode change cannot silently clear a gate that was already presented.
+            state["approved_at"] = None
         else:
-            state.setdefault("human_review", "not_required")
-            state.setdefault("approved_at", None)
+            state["human_review"] = "not_required"
+            state["approved_at"] = None
         write_json(state_path, state)
 
     def _bump_book_feedback_state(self) -> None:

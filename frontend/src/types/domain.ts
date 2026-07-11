@@ -12,7 +12,7 @@ export type LlmProtocol = "openai-compatible" | "anthropic-compatible";
 export interface ProjectMetadata {
   schema_version: number;
   project_id: string;
-  title: string;
+  title: string | null;
   operation_mode: OperationMode;
   active_profile_id: string | null;
   active_arc_id: string | null;
@@ -24,7 +24,7 @@ export interface ProjectMetadata {
 
 export interface ProjectSummary {
   name: string;
-  title: string;
+  title: string | null;
   path: string;
   metadata: ProjectMetadata;
 }
@@ -121,16 +121,23 @@ export interface BookDirectionReview {
   signals: string[];
 }
 
+export interface RecommendedBookTitle {
+  title: string;
+  rationale: string;
+}
+
 export interface BookDirectionCandidate {
   revision: number;
   created_at: string;
   direction_markdown: string;
   constraints: BookDirectionConstraints;
   confirmed_decision_coverage: ConfirmedDecisionCoverage[];
+  recommended_titles: RecommendedBookTitle[];
   rolling_plan_markdown: string;
   review: BookDirectionReview;
   direction_path: string;
   constraints_path: string;
+  title_suggestions_path: string;
   rolling_plan_path: string;
   verification_path: string;
   profile_id: string;
@@ -144,6 +151,8 @@ export interface SetupStateDocument {
   phase: "discussing" | "review_ready" | "review_blocked" | "approved";
   approved: boolean;
   approved_at: string | null;
+  approved_title: string | null;
+  title_selection_source: "recommended" | "custom" | null;
   migrated_from_schema_version: number | null;
   turn_count: number;
   candidate_revision_counter: number;

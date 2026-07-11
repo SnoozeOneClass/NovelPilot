@@ -14,10 +14,12 @@ from app.api import (
     setup,
 )
 from app.core.config import ensure_runtime_dirs
+from app.storage.projects import recover_all_project_transactions
 
 
 def create_app() -> FastAPI:
     ensure_runtime_dirs()
+    recover_all_project_transactions()
 
     app = FastAPI(title="Novelpilot", version="0.1.0")
     app.add_middleware(

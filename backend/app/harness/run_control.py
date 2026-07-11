@@ -1,9 +1,19 @@
+from contextlib import contextmanager
 from pathlib import Path
 from threading import Lock
+from typing import Iterator
 
 
 _ACTIVE_RUNNERS: set[str] = set()
 _ACTIVE_RUNNERS_LOCK = Lock()
+_ACTIVE_PROJECT_TRANSITION_LOCK = Lock()
+
+
+@contextmanager
+def active_project_transition_lock() -> Iterator[None]:
+    """Serializes active-pointer reads with runner lease acquisition and transitions."""
+    with _ACTIVE_PROJECT_TRANSITION_LOCK:
+        yield
 
 
 def begin_active_runner(project_path: Path) -> bool:

@@ -30,7 +30,7 @@ def build_project_readiness(
 ) -> ProjectReadiness:
     metadata = read_project_metadata(project_path)
     gates = [
-        _book_setup_gate(project_path),
+        _book_setup_gate(project_path, metadata),
         _active_profile_gate(),
         _run_control_gate(metadata.run_status),
         _completion_gate(project_path),
@@ -46,7 +46,7 @@ def build_project_readiness(
     )
 
 
-def _book_setup_gate(project_path: Path) -> ReadinessGate:
+def _book_setup_gate(project_path: Path, metadata: ProjectMetadata) -> ReadinessGate:
     setup_state = read_setup_state(project_path)
     if setup_state.approved:
         missing = [
@@ -57,6 +57,8 @@ def _book_setup_gate(project_path: Path) -> ReadinessGate:
         book_state = read_json(project_path / "book" / "state.json", default={}) or {}
         if book_state.get("setup_approved") is not True:
             missing.append("book/state.json:setup_approved")
+        if not metadata.title:
+            missing.append("project.json:title")
         if missing:
             return ReadinessGate(
                 id="book_setup",
@@ -342,19 +344,30 @@ def _story_arc_review_next_action(
     project_path: Path,
     metadata: ProjectMetadata,
 ) -> RunNextAction | None:
-    if metadata.operation_mode != "participatory" or metadata.active_arc_id is None:
+    if metadata.active_arc_id is None:
         return None
 
     arc = arc_storage.read_current_arc_state(project_path)
-    if arc is None or arc.human_review == "approved":
+    if arc is None:
+        if metadata.operation_mode != "participatory":
+            return None
+        evidence = [metadata.active_arc_id, "missing_arc_state"]
+    elif arc.human_review == "approved":
         return None
+    elif (
+        arc.human_review != "awaiting_review"
+        and metadata.operation_mode != "participatory"
+    ):
+        return None
+    else:
+        evidence = [arc.arc_id, arc.plan_path, arc.human_review]
 
     return RunNextAction(
         id="approve_story_arc",
         command="POST /api/arcs/current/approve",
         requires_user=True,
-        message="Participatory mode is waiting for approval of the current story arc plan.",
-        evidence=[arc.arc_id, arc.plan_path, arc.human_review],
+        message="The current story arc plan has a pending human-review gate.",
+        evidence=evidence,
     )
 
 

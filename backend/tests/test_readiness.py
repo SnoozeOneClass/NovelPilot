@@ -10,11 +10,12 @@ from app.harness.loops.book import BookDirectionSynthesis
 from app.harness.run_control import begin_active_runner, end_active_runner
 from app.schemas.events import HarnessEvent
 from app.schemas.profiles import LlmProfileUpsert
-from app.schemas.projects import CreateProjectRequest, ProjectMetadata
+from app.schemas.projects import CreateProjectRequest
 from app.schemas.setup import (
     BookDirectionConstraints,
     BookDirectionReview,
     BookDirectionReviewIssue,
+    BookTitleSuggestion,
     SetupApprovalRequest,
     SetupReadinessSignal,
 )
@@ -40,7 +41,7 @@ def test_readiness_blocks_run_without_setup_and_profile(
     monkeypatch,
 ) -> None:
     _isolate_runtime_paths(tmp_path, monkeypatch)
-    project_storage.create_project(CreateProjectRequest(title="Novel", operation_mode="full_auto"))
+    project_storage.create_project(CreateProjectRequest(operation_mode="full_auto"))
 
     readiness = readiness_api.get_readiness()
     by_id = {gate.id: gate for gate in readiness.gates}
@@ -61,7 +62,7 @@ def test_readiness_allows_run_when_required_gates_pass(
 ) -> None:
     _isolate_runtime_paths(tmp_path, monkeypatch)
     project = project_storage.create_project(
-        CreateProjectRequest(title="Ready Novel", operation_mode="full_auto")
+        CreateProjectRequest(operation_mode="full_auto")
     )
     project_path = Path(project.path)
     _approve_setup(project_path)
@@ -90,13 +91,35 @@ def test_readiness_allows_run_when_required_gates_pass(
     assert readiness.next_action.can_auto_continue is True
 
 
+def test_readiness_fails_closed_when_approved_setup_has_no_title(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _isolate_runtime_paths(tmp_path, monkeypatch)
+    project = project_storage.create_project(
+        CreateProjectRequest(operation_mode="full_auto")
+    )
+    project_path = Path(project.path)
+    _approve_setup(project_path)
+    metadata = project_storage.read_project_metadata(project_path)
+    metadata.title = None
+    project_storage.write_project_metadata(project_path, metadata)
+
+    readiness = readiness_api.get_readiness()
+    book_setup = next(gate for gate in readiness.gates if gate.id == "book_setup")
+
+    assert readiness.can_start_run is False
+    assert book_setup.status == "failed"
+    assert "project.json:title" in book_setup.evidence
+
+
 def test_readiness_recommends_review_when_discussion_draft_is_ready(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     _isolate_runtime_paths(tmp_path, monkeypatch)
     project = project_storage.create_project(
-        CreateProjectRequest(title="Answered Novel", operation_mode="full_auto")
+        CreateProjectRequest(operation_mode="full_auto")
     )
     project_path = Path(project.path)
     state = setup_storage.read_setup_state(project_path)
@@ -118,7 +141,7 @@ def test_readiness_recommends_explicit_approval_for_reviewed_candidate(
 ) -> None:
     _isolate_runtime_paths(tmp_path, monkeypatch)
     project = project_storage.create_project(
-        CreateProjectRequest(title="Reviewed Novel", operation_mode="full_auto")
+        CreateProjectRequest(operation_mode="full_auto")
     )
     project_path = Path(project.path)
     _prepare_candidate(project_path)
@@ -137,7 +160,7 @@ def test_readiness_routes_blocked_candidate_back_to_discussion(
 ) -> None:
     _isolate_runtime_paths(tmp_path, monkeypatch)
     project = project_storage.create_project(
-        CreateProjectRequest(title="Blocked Novel", operation_mode="full_auto")
+        CreateProjectRequest(operation_mode="full_auto")
     )
     project_path = Path(project.path)
     _prepare_candidate(project_path, blocked=True)
@@ -157,12 +180,12 @@ def test_readiness_recommends_arc_approval_in_participatory_mode(
 ) -> None:
     _isolate_runtime_paths(tmp_path, monkeypatch)
     project = project_storage.create_project(
-        CreateProjectRequest(title="Review Novel", operation_mode="participatory")
+        CreateProjectRequest(operation_mode="participatory")
     )
     project_path = Path(project.path)
     _approve_setup(project_path)
     _create_profile()
-    metadata = ProjectMetadata.model_validate(project.metadata.model_dump(mode="json"))
+    metadata = project_storage.read_project_metadata(project_path)
     metadata.operation_mode = "participatory"
     metadata.active_arc_id = "arc-001"
     metadata.run_status = "waiting_for_user"
@@ -188,6 +211,13 @@ def test_readiness_recommends_arc_approval_in_participatory_mode(
     assert readiness.next_action.requires_user is True
     assert "arcs/arc-001/plan.md" in readiness.next_action.evidence
 
+    metadata.operation_mode = "full_auto"
+    project_storage.write_project_metadata(project_path, metadata)
+    after_mode_change = readiness_api.get_readiness()
+
+    assert after_mode_change.next_action.id == "approve_story_arc"
+    assert after_mode_change.next_action.requires_user is True
+
 
 def test_readiness_recommends_retry_for_rejected_state_patch(
     tmp_path: Path,
@@ -195,12 +225,12 @@ def test_readiness_recommends_retry_for_rejected_state_patch(
 ) -> None:
     _isolate_runtime_paths(tmp_path, monkeypatch)
     project = project_storage.create_project(
-        CreateProjectRequest(title="Retry Novel", operation_mode="full_auto")
+        CreateProjectRequest(operation_mode="full_auto")
     )
     project_path = Path(project.path)
     _approve_setup(project_path)
     _create_profile()
-    metadata = ProjectMetadata.model_validate(project.metadata.model_dump(mode="json"))
+    metadata = project_storage.read_project_metadata(project_path)
     metadata.active_chapter_id = "chapter-001"
     metadata.run_status = "waiting_for_user"
     project_storage.write_project_metadata(project_path, metadata)
@@ -231,12 +261,12 @@ def test_readiness_recommends_failure_inspection_for_failed_runs(
 ) -> None:
     _isolate_runtime_paths(tmp_path, monkeypatch)
     project = project_storage.create_project(
-        CreateProjectRequest(title="Failed Novel", operation_mode="full_auto")
+        CreateProjectRequest(operation_mode="full_auto")
     )
     project_path = Path(project.path)
     _approve_setup(project_path)
     _create_profile()
-    metadata = ProjectMetadata.model_validate(project.metadata.model_dump(mode="json"))
+    metadata = project_storage.read_project_metadata(project_path)
     metadata.run_status = "failed"
     project_storage.write_project_metadata(project_path, metadata)
     append_event(
@@ -267,12 +297,12 @@ def test_readiness_recommends_recovering_stale_run_lock(
 ) -> None:
     _isolate_runtime_paths(tmp_path, monkeypatch)
     project = project_storage.create_project(
-        CreateProjectRequest(title="Stale Novel", operation_mode="full_auto")
+        CreateProjectRequest(operation_mode="full_auto")
     )
     project_path = Path(project.path)
     _approve_setup(project_path)
     _create_profile()
-    metadata = ProjectMetadata.model_validate(project.metadata.model_dump(mode="json"))
+    metadata = project_storage.read_project_metadata(project_path)
     metadata.run_status = "running"
     project_storage.write_project_metadata(project_path, metadata)
 
@@ -294,12 +324,12 @@ def test_readiness_waits_when_runner_is_active(
 ) -> None:
     _isolate_runtime_paths(tmp_path, monkeypatch)
     project = project_storage.create_project(
-        CreateProjectRequest(title="Active Novel", operation_mode="full_auto")
+        CreateProjectRequest(operation_mode="full_auto")
     )
     project_path = Path(project.path)
     _approve_setup(project_path)
     _create_profile()
-    metadata = ProjectMetadata.model_validate(project.metadata.model_dump(mode="json"))
+    metadata = project_storage.read_project_metadata(project_path)
     metadata.run_status = "running"
     project_storage.write_project_metadata(project_path, metadata)
 
@@ -318,7 +348,7 @@ def test_readiness_fails_when_approved_setup_artifact_is_missing(
 ) -> None:
     _isolate_runtime_paths(tmp_path, monkeypatch)
     project = project_storage.create_project(
-        CreateProjectRequest(title="Corrupt Novel", operation_mode="full_auto")
+        CreateProjectRequest(operation_mode="full_auto")
     )
     project_path = Path(project.path)
     _approve_setup(project_path)
@@ -338,7 +368,10 @@ def _approve_setup(project_path: Path) -> None:
     assert state.candidate is not None
     setup_storage.approve_setup(
         project_path,
-        SetupApprovalRequest(candidate_revision=state.candidate.revision),
+        SetupApprovalRequest(
+            candidate_revision=state.candidate.revision,
+            title="Readiness Fixture",
+        ),
     )
 
 
@@ -363,6 +396,11 @@ def _prepare_candidate(project_path: Path, *, blocked: bool = False):
                 open_decisions=[],
             ),
             confirmed_decision_coverage=[],
+            recommended_titles=[
+                BookTitleSuggestion(title="Readiness Fixture", rationale="Primary option."),
+                BookTitleSuggestion(title="Ready Arc", rationale="Arc-focused option."),
+                BookTitleSuggestion(title="Prepared Story", rationale="Harness-focused option."),
+            ],
             rolling_plan_markdown=_rolling_contract(),
             model_snapshot="fixture-model",
             provider_snapshot="openai-compatible",

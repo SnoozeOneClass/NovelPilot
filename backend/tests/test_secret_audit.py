@@ -1,10 +1,17 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from app.core import config as core_config
 from app.schemas.profiles import LlmProfileUpsert
 from app.storage import profiles as profile_storage
-from app.storage.secret_audit import audit_output_for_profile_secrets
+from app.storage import secret_audit
+from app.storage.file_lock import exclusive_file_lock
+from app.storage.secret_audit import (
+    audit_output_for_profile_secrets,
+    audit_path_for_profile_secrets,
+)
 from scripts import audit_output_secrets
 
 
@@ -52,6 +59,115 @@ def test_secret_audit_passes_when_output_only_has_sanitized_metadata(
     assert result.status == "passed"
     assert result.findings == []
     assert result.scanned_file_count == 1
+
+
+def test_secret_audit_scans_active_lock_file_without_touching_locked_byte(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    output_dir = _isolate_runtime_paths(tmp_path, monkeypatch)
+    project_path = output_dir / "Clean Novel"
+    project_path.mkdir(parents=True)
+    (project_path / "project.json").write_text("{}", encoding="utf-8")
+    lock_path = project_path / ".events.lock"
+    lock_path.write_bytes(b"\0secret-key")
+    _create_profile()
+
+    with exclusive_file_lock(lock_path):
+        result = audit_output_for_profile_secrets()
+
+    assert result.status == "failed"
+    assert result.scanned_file_count == 2
+    assert any(
+        finding.path == "Clean Novel/.events.lock" and finding.kind == "api_key"
+        for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize("error_type", [FileNotFoundError, PermissionError])
+def test_secret_audit_retries_the_complete_scan_after_transient_file_error(
+    tmp_path: Path,
+    monkeypatch,
+    error_type: type[OSError],
+) -> None:
+    output_dir = _isolate_runtime_paths(tmp_path, monkeypatch)
+    project_path = output_dir / "Changing Novel"
+    project_path.mkdir(parents=True)
+    artifact_path = project_path / "artifact.json.tmp"
+    artifact_path.write_text("secret-key", encoding="utf-8")
+    _create_profile()
+    original_read = secret_audit._read_audited_text
+    read_attempts = 0
+
+    def flaky_read(path: Path) -> str:
+        nonlocal read_attempts
+        if path == artifact_path:
+            read_attempts += 1
+            if read_attempts == 1:
+                raise error_type("transient transaction race")
+        return original_read(path)
+
+    monkeypatch.setattr(secret_audit, "_read_audited_text", flaky_read)
+    monkeypatch.setattr(secret_audit.time, "sleep", lambda _seconds: None)
+
+    result = audit_output_for_profile_secrets()
+
+    assert result.status == "failed"
+    assert result.scanned_file_count == 1
+    assert read_attempts == 2
+    assert any(finding.path.endswith("artifact.json.tmp") for finding in result.findings)
+
+
+def test_secret_audit_persistent_permission_error_fails_closed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    artifact_path = tmp_path / "unreadable.txt"
+    artifact_path.write_text("clean", encoding="utf-8")
+    read_attempts = 0
+
+    def unreadable(_path: Path) -> str:
+        nonlocal read_attempts
+        read_attempts += 1
+        raise PermissionError("persistently unreadable")
+
+    monkeypatch.setattr(secret_audit, "_read_audited_text", unreadable)
+    monkeypatch.setattr(secret_audit.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(PermissionError, match="persistently unreadable"):
+        audit_path_for_profile_secrets(tmp_path, profiles=[])
+
+    assert read_attempts == len(secret_audit.SCAN_RETRY_DELAYS_SECONDS) + 1
+
+
+def test_secret_audit_scans_transaction_and_temporary_files(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    output_dir = _isolate_runtime_paths(tmp_path, monkeypatch)
+    project_path = output_dir / "Transaction Novel"
+    staged_path = (
+        project_path
+        / "book"
+        / ".transactions"
+        / "tx-001"
+        / "staged"
+        / "book"
+        / "setup.json"
+    )
+    temporary_path = project_path / "project.json.tmp"
+    staged_path.parent.mkdir(parents=True)
+    staged_path.write_text("secret-key", encoding="utf-8")
+    temporary_path.write_text("secret-key", encoding="utf-8")
+    _create_profile()
+
+    result = audit_output_for_profile_secrets()
+    finding_paths = {finding.path for finding in result.findings if finding.kind == "api_key"}
+
+    assert result.status == "failed"
+    assert result.scanned_file_count == 2
+    assert "Transaction Novel/book/.transactions/tx-001/staged/book/setup.json" in finding_paths
+    assert "Transaction Novel/project.json.tmp" in finding_paths
 
 
 def test_secret_audit_redacts_profile_values_from_finding_paths(

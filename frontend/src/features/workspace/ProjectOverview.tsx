@@ -1,4 +1,4 @@
-import { ArrowRight, BookOpen, FileDown, Play, RotateCw, ShieldCheck } from "lucide-react";
+import { ArrowRight, BookOpen, Bot, FileDown, Play, RotateCw, ShieldCheck, UserRound } from "lucide-react";
 import {
   formatArtifactTitle,
   formatGateId,
@@ -7,12 +7,14 @@ import {
   formatGenericStatus,
   formatOperationMode,
   formatOptionalId,
+  formatProjectTitle,
   formatRunNextActionMessage,
   formatRunStatus
 } from "../../types/display";
 import type {
   ArtifactSummary,
   CurrentArcState,
+  OperationMode,
   ProjectReadiness,
   ProjectSummary
 } from "../../types/domain";
@@ -26,9 +28,11 @@ interface ProjectOverviewProps {
   canStart: boolean;
   canResume: boolean;
   busy: boolean;
+  modeChanging: boolean;
   onStart: () => Promise<void>;
   onResume: () => Promise<void>;
   onExport: () => Promise<void>;
+  onModeChange: (mode: OperationMode) => Promise<void>;
   onNavigate: (view: "plan" | "cockpit" | "arcs" | "canon" | "trace") => void;
   onSelectArtifact: (path: string) => void;
 }
@@ -42,21 +46,26 @@ export function ProjectOverview({
   canStart,
   canResume,
   busy,
+  modeChanging,
   onStart,
   onResume,
   onExport,
+  onModeChange,
   onNavigate,
   onSelectArtifact
 }: ProjectOverviewProps) {
   const metadata = project.metadata;
   const recentArtifacts = summaries.slice(-6).reverse();
+  const modeLockedByRun = metadata.run_status === "running" || metadata.run_status === "pause_requested";
+  const pendingArcApproval = currentArc?.human_review === "awaiting_review";
+  const arcStateUnavailable = Boolean(metadata.active_arc_id) && currentArc === null;
 
   return (
     <section className="np-surface overview-view">
       <header className="view-heading overview-heading">
         <div>
           <p className="eyebrow">当前小说项目</p>
-          <h1>{project.title}</h1>
+          <h1>{formatProjectTitle(project.title)}</h1>
           <p>本地单用户项目 · {formatOperationMode(metadata.operation_mode)}</p>
         </div>
         <div className="overview-actions">
@@ -78,6 +87,64 @@ export function ProjectOverview({
         <article><span>当前章节</span><strong>{formatOptionalId(metadata.active_chapter_id)}</strong><small>候选产物验证后提交</small></article>
         <article><span>正史条目</span><strong>{Object.values(canonCounts).reduce((total, count) => total + count, 0)}</strong><small>角色、关系、事实与伏笔</small></article>
       </div>
+
+      <section className="overview-mode-panel">
+        <header>
+          <div>
+            <h2>运行模式</h2>
+            <p>模式只改变后续创作的人工门禁，不会重置已有方向、章节或正史。</p>
+          </div>
+          <span className="soft-badge amber">当前：{formatOperationMode(metadata.operation_mode)}</span>
+        </header>
+        <div className="overview-mode-options">
+          <button
+            type="button"
+            className={metadata.operation_mode === "full_auto" ? "selected" : ""}
+            disabled={
+              busy
+              || modeLockedByRun
+              || (metadata.operation_mode === "participatory" && arcStateUnavailable)
+              || metadata.operation_mode === "full_auto"
+            }
+            onClick={() => void onModeChange("full_auto")}
+          >
+            <Bot size={18} />
+            <span>
+              <strong>{modeChanging ? "正在切换..." : "全自动"}</strong>
+              <small>故事弧和章节连续推进；你仍可随时反馈或在安全检查点暂停。</small>
+            </span>
+          </button>
+          <button
+            type="button"
+            className={metadata.operation_mode === "participatory" ? "selected" : ""}
+            disabled={busy || modeLockedByRun || metadata.operation_mode === "participatory"}
+            onClick={() => void onModeChange("participatory")}
+          >
+            <UserRound size={18} />
+            <span>
+              <strong>{modeChanging ? "正在切换..." : "参与模式"}</strong>
+              <small>每个故事弧计划先由你确认，再进入章节创作。</small>
+            </span>
+          </button>
+        </div>
+        {modeLockedByRun && (
+          <p className="mode-switch-note warning">
+            {metadata.run_status === "pause_requested"
+              ? "已请求暂停，请等待当前原子动作抵达安全检查点后再切换。"
+              : "运行中不能切换模式；请先在运行证据页请求暂停。"}
+          </p>
+        )}
+        {pendingArcApproval && (
+          <p className="mode-switch-note warning">
+            当前故事弧仍保留人工审批门禁。你可以切换模式，但该门禁不会被取消，仍需批准或要求修改。
+          </p>
+        )}
+        {metadata.operation_mode === "participatory" && arcStateUnavailable && (
+          <p className="mode-switch-note warning">
+            当前故事弧状态尚未加载或已经缺失；为避免绕过人工门禁，暂不能切换到全自动模式。
+          </p>
+        )}
+      </section>
 
       <div className="overview-columns">
         <section className="overview-readiness">

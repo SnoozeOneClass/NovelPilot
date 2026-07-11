@@ -9,13 +9,15 @@ from pydantic import SecretStr, ValidationError
 from app.api import setup as setup_api
 from app.harness.loops import book as book_loop
 from app.harness.loops.book import BookDirectionSynthesis, BookDiscussionTurnResult
+from app.harness.run_control import begin_active_runner, end_active_runner
 from app.llm.gateway import ChatResult
-from app.schemas.profiles import LlmProfile
+from app.schemas.profiles import LlmProfile, LlmProfilesDocument
 from app.schemas.projects import ProjectMetadata
 from app.schemas.setup import (
     BookDirectionConstraints,
     BookDirectionReview,
     BookDirectionReviewIssue,
+    BookTitleSuggestion,
     ConfirmedDecisionCoverage,
     SetupApprovalRequest,
     SetupMessage,
@@ -28,6 +30,7 @@ from app.schemas.setup import (
 from app.storage import transactions as file_transactions
 from app.storage.events import read_events
 from app.storage.json_files import read_json, write_json
+from app.storage.projects import read_project_metadata
 from app.storage.setup import (
     SetupRevisionConflict,
     approve_setup,
@@ -67,6 +70,11 @@ def test_setup_state_initializes_as_open_unapproved_discussion(tmp_path: Path) -
 def test_setup_turn_request_rejects_blank_message() -> None:
     with pytest.raises(ValidationError, match="must not be blank"):
         SetupTurnRequest(message="   ")
+
+
+def test_setup_approval_request_rejects_blank_title() -> None:
+    with pytest.raises(ValidationError):
+        SetupApprovalRequest(candidate_revision=1, title="   ")
 
     with pytest.raises(ValidationError, match="at most 32000 characters"):
         SetupTurnRequest(message="x" * 32_001)
@@ -434,6 +442,8 @@ def test_blocking_review_persists_candidate_but_keeps_approval_locked(
     assert updated.phase == "review_blocked"
     assert updated.candidate is not None
     assert updated.candidate.approval_allowed is False
+    assert len(updated.candidate.recommended_titles) == 3
+    assert (project_path / updated.candidate.title_suggestions_path).exists()
     assert (project_path / updated.candidate.verification_path).exists()
     verification = read_json(project_path / updated.candidate.verification_path)
     coverage_signal = next(
@@ -443,7 +453,10 @@ def test_blocking_review_persists_candidate_but_keeps_approval_locked(
     )
     assert coverage_signal["status"] == "failed"
     with pytest.raises(ValueError, match="blocking issues"):
-        approve_setup(project_path, SetupApprovalRequest(candidate_revision=1))
+        approve_setup(
+            project_path,
+            SetupApprovalRequest(candidate_revision=1, title="Harbor of Trust"),
+        )
     assert not (project_path / "book" / "direction.md").exists()
 
 
@@ -468,15 +481,24 @@ def test_explicit_approval_requires_latest_revision_and_commits_exact_candidate(
     )
 
     with pytest.raises(ValueError, match="stale"):
-        approve_setup(project_path, SetupApprovalRequest(candidate_revision=99))
+        approve_setup(
+            project_path,
+            SetupApprovalRequest(candidate_revision=99, title="Harbor of Trust"),
+        )
     assert not (project_path / "book" / "direction.md").exists()
 
-    approved = approve_setup(project_path, SetupApprovalRequest(candidate_revision=1))
+    approved = approve_setup(
+        project_path,
+        SetupApprovalRequest(candidate_revision=1, title="Harbor of Trust"),
+    )
     constraints = read_json(project_path / "book" / "constraints.json")
     book_state = read_json(project_path / "book" / "state.json")
+    metadata = read_json(project_path / "project.json")
 
     assert approved.approved is True
     assert approved.phase == "approved"
+    assert approved.approved_title == "Harbor of Trust"
+    assert approved.title_selection_source == "recommended"
     assert (project_path / "book" / "direction.md").read_text(encoding="utf-8") == (
         synthesis.direction_markdown.rstrip() + "\n"
     )
@@ -490,7 +512,36 @@ def test_explicit_approval_requires_latest_revision_and_commits_exact_candidate(
     assert constraints["source_candidate_revision"] == 1
     assert constraints["must_preserve"] == synthesis.constraints.must_preserve
     assert book_state["book_direction_version"] == 1
+    assert book_state["title"] == "Harbor of Trust"
+    assert metadata["title"] == "Harbor of Trust"
     assert book_state["current_strategy"] == "rolling_story_arc_planning"
+
+
+def test_explicit_approval_accepts_custom_title(tmp_path: Path) -> None:
+    project_path, state = _project_with_discussion(tmp_path)
+    context_path = write_review_context_snapshot(
+        project_path,
+        candidate_revision=1,
+        snapshot={"sources": ["book/direction_draft.md"]},
+    )
+    state = save_book_direction_candidate(
+        project_path,
+        state,
+        synthesis=_synthesis(),
+        review=_passing_review(),
+        profile_id="main",
+        review_model_snapshot="review-model",
+        context_snapshot_path=context_path,
+    )
+
+    approved = approve_setup(
+        project_path,
+        SetupApprovalRequest(candidate_revision=1, title="Saltwater Testimony"),
+    )
+
+    assert approved.approved_title == "Saltwater Testimony"
+    assert approved.title_selection_source == "custom"
+    assert read_json(project_path / "project.json")["title"] == "Saltwater Testimony"
 
 
 def test_approval_rechecks_confirmed_decisions_even_if_review_claims_passed(
@@ -520,7 +571,10 @@ def test_approval_rechecks_confirmed_decisions_even_if_review_claims_passed(
     with pytest.raises(ValueError, match="does not preserve every confirmed decision"):
         approve_setup(
             project_path,
-            SetupApprovalRequest(candidate_revision=reviewed.candidate_revision_counter),
+            SetupApprovalRequest(
+                candidate_revision=reviewed.candidate_revision_counter,
+                title="Harbor of Trust",
+            ),
         )
 
     assert not (project_path / "book" / "direction.md").exists()
@@ -566,7 +620,10 @@ def test_new_discussion_turn_invalidates_candidate_without_deleting_review_bundl
     assert updated.candidate_revision_counter == 1
     assert archived_verification.exists()
     with pytest.raises(ValueError, match="synthesized and reviewed"):
-        approve_setup(project_path, SetupApprovalRequest(candidate_revision=1))
+        approve_setup(
+            project_path,
+            SetupApprovalRequest(candidate_revision=1, title="Harbor of Trust"),
+        )
 
 
 def test_discussion_preserves_confirmed_decisions_until_user_supersedes_them(
@@ -688,13 +745,54 @@ def test_approval_transaction_rolls_back_partial_formal_artifacts(
     monkeypatch.setattr(file_transactions, "_promote_staged_file", fail_third_promotion)
 
     with pytest.raises(OSError, match="injected approval failure"):
-        approve_setup(project_path, SetupApprovalRequest(candidate_revision=1))
+        approve_setup(
+            project_path,
+            SetupApprovalRequest(candidate_revision=1, title="Harbor of Trust"),
+        )
 
     reloaded = read_setup_state(project_path)
+    metadata = read_json(project_path / "project.json")
     assert reloaded.approved is False
     assert reloaded.candidate is not None
     assert not (project_path / "book" / "direction.md").exists()
     assert not (project_path / "book" / "constraints.json").exists()
+    assert metadata["title"] == "Novel"
+
+
+def test_setup_approval_rejects_active_runner_before_committing_title(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_path, state = _project_with_discussion(tmp_path)
+    context_path = write_review_context_snapshot(
+        project_path,
+        candidate_revision=1,
+        snapshot={"sources": ["book/direction_draft.md"]},
+    )
+    save_book_direction_candidate(
+        project_path,
+        state,
+        synthesis=_synthesis(),
+        review=_passing_review(),
+        profile_id="main",
+        review_model_snapshot="review-model",
+        context_snapshot_path=context_path,
+    )
+    monkeypatch.setattr(setup_api, "get_active_project_path", lambda: project_path)
+
+    assert begin_active_runner(project_path) is True
+    try:
+        with pytest.raises(HTTPException) as caught:
+            setup_api.approve_setup(
+                SetupApprovalRequest(candidate_revision=1, title="Harbor of Trust")
+            )
+    finally:
+        end_active_runner(project_path)
+
+    assert caught.value.status_code == 409
+    assert read_project_metadata(project_path).title == "Novel"
+    assert read_setup_state(project_path).approved is False
+    assert not (project_path / "book" / "direction.md").exists()
 
 
 def test_unapproved_legacy_fixed_questions_migrate_to_open_discussion(tmp_path: Path) -> None:
@@ -886,7 +984,10 @@ def test_setup_api_runs_discussion_review_and_explicit_approval(
     assert duplicate_review.value.status_code == 409
 
     approved = setup_api.approve_setup(
-        SetupApprovalRequest(candidate_revision=reviewed.candidate.revision)
+        SetupApprovalRequest(
+            candidate_revision=reviewed.candidate.revision,
+            title="Harbor of Trust",
+        )
     )
     event_kinds = [event.kind for event in read_events(project_path)]
     assert approved.approved is True
@@ -896,9 +997,52 @@ def test_setup_api_runs_discussion_review_and_explicit_approval(
     assert event_kinds.count("approved_book_artifact_written") == 4
 
     with pytest.raises(HTTPException) as duplicate_approval:
-        setup_api.approve_setup(SetupApprovalRequest(candidate_revision=1))
+        setup_api.approve_setup(
+            SetupApprovalRequest(candidate_revision=1, title="Harbor of Trust")
+        )
     assert duplicate_approval.value.status_code == 409
     assert len(read_events(project_path)) == len(event_kinds)
+
+
+def test_setup_api_rejects_title_containing_configured_profile_secret(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_path, state = _project_with_discussion(tmp_path)
+    reviewed = save_book_direction_candidate(
+        project_path,
+        state,
+        synthesis=_synthesis(),
+        review=_passing_review(),
+        profile_id="main",
+        review_model_snapshot="review-model",
+        context_snapshot_path="book/reviews/review-0001/attempt-001/context_snapshot.json",
+    )
+    profile = _profile(api_key="secret-key", base_url="https://api.example.com/v1")
+    monkeypatch.setattr(setup_api, "get_active_project_path", lambda: project_path)
+    monkeypatch.setattr(
+        setup_api,
+        "load_profiles",
+        lambda: LlmProfilesDocument(active_profile_id=profile.id, profiles=[profile]),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        setup_api.approve_setup(
+            SetupApprovalRequest(
+                candidate_revision=reviewed.candidate_revision_counter,
+                title="secret-key",
+            )
+        )
+
+    assert exc.value.status_code == 409
+    assert read_setup_state(project_path).approved is False
+    assert ProjectMetadata.model_validate(read_json(project_path / "project.json")).title == "Novel"
+    rendered = "\n".join(
+        path.read_text(encoding="utf-8", errors="replace")
+        for path in project_path.rglob("*")
+        if path.is_file()
+    )
+    assert "secret-key" not in rendered
 
 
 def test_setup_api_queues_events_when_durable_append_temporarily_fails(
@@ -1063,6 +1207,20 @@ def _synthesis() -> BookDirectionSynthesis:
             ConfirmedDecisionCoverage(
                 decision="Trust is the central change",
                 candidate_evidence="earned trust",
+            ),
+        ],
+        recommended_titles=[
+            BookTitleSuggestion(
+                title="Harbor of Trust",
+                rationale="Connects the coastal setting to the protagonist's emotional arc.",
+            ),
+            BookTitleSuggestion(
+                title="The Fair-Clue Harbor",
+                rationale="Signals the mystery's promise of visible, earned clues.",
+            ),
+            BookTitleSuggestion(
+                title="What the Tide Reveals",
+                rationale="Links each revelation to the story's coastal atmosphere.",
             ),
         ],
         rolling_plan_markdown=_long_rolling_contract(),

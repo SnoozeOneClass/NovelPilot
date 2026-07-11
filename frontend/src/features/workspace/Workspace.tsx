@@ -18,6 +18,7 @@ import {
   formatLoopLayer,
   formatOperationMode,
   formatOptionalId,
+  formatProjectTitle,
   formatRunStatus
 } from "../../types/display";
 import { LlmProfilesPanel } from "../llm-profiles/LlmProfilesPanel";
@@ -27,6 +28,7 @@ import type {
   CurrentArcState,
   HarnessEvent,
   LlmProfilesDocument,
+  OperationMode,
   ProjectCompletionAudit,
   ProjectReadiness,
   ProjectSummary
@@ -44,7 +46,7 @@ interface WorkspaceProps {
 }
 
 type WorkspaceView = "overview" | "plan" | "cockpit" | "arcs" | "canon" | "trace" | "settings";
-type WorkspaceCommand = "start" | "resume" | "pause" | "export" | "approve" | "retry" | "recover" | "revision";
+type WorkspaceCommand = "start" | "resume" | "pause" | "export" | "approve" | "retry" | "recover" | "revision" | "mode";
 type WorkspaceNotice = { kind: "success" | "error"; text: string };
 
 const viewLabels: Record<WorkspaceView, string> = {
@@ -327,6 +329,41 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
     await runCommand("recover", async () => { await api.recoverStaleRun(); });
   }
 
+  async function changeOperationMode(nextMode: OperationMode) {
+    if (nextMode === metadata.operation_mode) return;
+    if (runInFlight) {
+      setWorkspaceNotice({
+        kind: "error",
+        text: runStatus === "pause_requested"
+          ? "正在等待安全暂停，暂停完成后才能更换创作模式。"
+          : "运行中不能更换创作模式，请先请求暂停并等待安全检查点。"
+      });
+      return;
+    }
+    if (
+      metadata.operation_mode === "participatory"
+      && nextMode === "full_auto"
+      && metadata.active_arc_id !== null
+      && currentArc === null
+    ) {
+      setWorkspaceNotice({
+        kind: "error",
+        text: "暂时无法确认当前故事弧的审批状态。请刷新或恢复故事弧状态后再切换到全自动模式。"
+      });
+      return;
+    }
+
+    const ok = await runCommand("mode", async () => {
+      setProjectState(await api.updateProjectMode(nextMode));
+    });
+    if (ok) {
+      setWorkspaceNotice({
+        kind: "success",
+        text: `已切换为${formatOperationMode(nextMode)}，已有创作内容和审批记录保持不变。`
+      });
+    }
+  }
+
   async function sendFeedback() {
     if (!feedback.trim() || sendingFeedback) return;
     setSendingFeedback(true);
@@ -375,9 +412,11 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
             canStart={canStart}
             canResume={canResume}
             busy={commandBusy}
+            modeChanging={pendingCommands.has("mode")}
             onStart={startRun}
             onResume={resumeRun}
             onExport={exportManuscript}
+            onModeChange={changeOperationMode}
             onNavigate={setActiveView}
             onSelectArtifact={openArtifact}
           />
@@ -389,7 +428,10 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
             projectId={metadata.project_id}
             onSetupChanged={() => { void Promise.all([refreshReadiness(), refreshWorkspaceState(), refreshArtifacts()]); }}
             onExit={() => setActiveView("overview")}
-            onApproved={() => setActiveView("cockpit")}
+            onApproved={async () => {
+              await Promise.all([refreshWorkspaceState(), refreshReadiness(), refreshArtifacts()]);
+              setActiveView("cockpit");
+            }}
           />
         );
       case "cockpit":
@@ -471,9 +513,9 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
         </nav>
         <footer>
           <span>当前书籍</span>
-          <button className="current-book-button" title={projectState.title} onClick={() => setActiveView("overview")}>
+          <button className="current-book-button" title={formatProjectTitle(projectState.title)} onClick={() => setActiveView("overview")}>
             <span className="book-gem" />
-            <strong>{projectState.title}</strong>
+            <strong>{formatProjectTitle(projectState.title)}</strong>
             <small>⌄</small>
           </button>
           <div className="sidebar-utilities">
@@ -492,7 +534,7 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
             <i className={currentProfile?.has_api_key ? "ready" : ""} />
           </div>
           <div className="project-location">
-            <strong>《{projectState.title}》</strong>
+            <strong>《{formatProjectTitle(projectState.title)}》</strong>
             <span>/ {viewLabels[activeView]}</span>
           </div>
           <div className="topbar-statuses">

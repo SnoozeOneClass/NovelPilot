@@ -205,7 +205,7 @@ export function StoryArcsView({
           <div>
             <span className="soft-badge amber"><span className="status-dot amber" /> 等待你的确认</span>
             <h2>第 {displayArcNumber(selectedArcId)} 故事弧计划 · 审批中</h2>
-            <p>AI 已完成当前故事弧计划。参与模式下，批准后才会开始章节创作。</p>
+            <p>AI 已完成当前故事弧计划。该人工门禁必须批准后，才会开始章节创作。</p>
           </div>
           <div className="arc-review-actions">
             <button className="gold-button" disabled={approving} onClick={() => void onApprove()}>

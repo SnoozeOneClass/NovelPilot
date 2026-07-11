@@ -9,12 +9,22 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
 from app.harness.orchestrator import HarnessOrchestrator, HarnessRunContext
-from app.harness.run_control import begin_active_runner, end_active_runner, has_active_runner
+from app.harness.run_control import (
+    active_project_transition_lock,
+    begin_active_runner,
+    end_active_runner,
+    has_active_runner,
+)
 from app.schemas.events import HarnessEvent
 from app.schemas.runs import RunAdvanceRequest
 from app.storage.json_files import write_json
 from app.storage.events import append_event, read_events
-from app.storage.projects import get_active_project_path, read_project_metadata, write_project_metadata
+from app.storage.projects import (
+    get_active_project_path,
+    project_metadata_lock,
+    read_project_metadata,
+    write_project_metadata,
+)
 from app.storage.readiness import build_project_readiness
 from app.storage.retries import retry_scope_for_chapter
 
@@ -52,16 +62,19 @@ def _build_run_archive(project_path: Path) -> bytes:
 @router.post("/start")
 def start_run(run_request: RunAdvanceRequest | None = None) -> dict[str, str]:
     advance_request = run_request or RunAdvanceRequest()
-    project_path = _active_project_or_404()
-    _begin_active_runner_or_409(project_path)
+    project_path = _begin_active_runner_or_409()
     run_id = str(uuid4())
     try:
         metadata = read_project_metadata(project_path)
         _ensure_run_can_start(metadata.run_status)
         _ensure_run_can_start_new(project_path, metadata.run_status)
         _ensure_project_is_ready_to_run(project_path)
-        metadata.run_status = "running"
-        write_project_metadata(project_path, metadata)
+        with project_metadata_lock(project_path):
+            metadata = read_project_metadata(project_path)
+            _ensure_run_can_start(metadata.run_status)
+            _ensure_run_can_start_new(project_path, metadata.run_status)
+            metadata.run_status = "running"
+            write_project_metadata(project_path, metadata)
         append_event(
             project_path,
             HarnessEvent(
@@ -121,15 +134,17 @@ def pause_run() -> dict[str, str]:
 @router.post("/resume")
 def resume_run(run_request: RunAdvanceRequest | None = None) -> dict[str, str]:
     advance_request = run_request or RunAdvanceRequest()
-    project_path = _active_project_or_404()
-    _begin_active_runner_or_409(project_path)
+    project_path = _begin_active_runner_or_409()
     run_id = str(uuid4())
     try:
         metadata = read_project_metadata(project_path)
         _ensure_run_can_start(metadata.run_status)
         _ensure_project_is_ready_to_run(project_path)
-        metadata.run_status = "running"
-        write_project_metadata(project_path, metadata)
+        with project_metadata_lock(project_path):
+            metadata = read_project_metadata(project_path)
+            _ensure_run_can_start(metadata.run_status)
+            metadata.run_status = "running"
+            write_project_metadata(project_path, metadata)
         append_event(
             project_path,
             HarnessEvent(
@@ -150,108 +165,125 @@ def resume_run(run_request: RunAdvanceRequest | None = None) -> dict[str, str]:
 
 @router.post("/recover-stale")
 def recover_stale_run() -> dict[str, str]:
-    project_path = _active_project_or_404()
-    if has_active_runner(project_path):
-        raise HTTPException(
-            status_code=400,
-            detail="A harness runner is still active; request pause and wait for a safe checkpoint.",
+    project_path = _begin_active_runner_or_409(
+        detail=(
+            "A harness runner is still active; request pause and wait for a safe checkpoint."
         )
-
-    metadata = read_project_metadata(project_path)
-    if metadata.run_status not in {"running", "pause_requested"}:
-        append_event(
-            project_path,
-            HarnessEvent(
-                project_id=metadata.project_id,
-                kind="run_recovery_ignored",
-                loop_layer="system",
-                atomic_action="recover_stale_run",
-                status="completed",
-                routing_decision="none",
-                message="Stale run recovery ignored because no run lock is present.",
-                payload={"run_status": metadata.run_status},
-            ),
-        )
-        return {"status": metadata.run_status, "previous_status": metadata.run_status}
-
-    previous_status = metadata.run_status
-    metadata.run_status = "paused"
-    write_project_metadata(project_path, metadata)
-    append_event(
-        project_path,
-        HarnessEvent(
-            project_id=metadata.project_id,
-            kind="run_recovered",
-            loop_layer="system",
-            atomic_action="recover_stale_run",
-            status="completed",
-            routing_decision="pause",
-            message=(
-                "Recovered stale run lock; harness is paused and can resume from committed state."
-            ),
-            payload={"previous_status": previous_status, "run_status": metadata.run_status},
-        ),
     )
-    return {"status": metadata.run_status, "previous_status": previous_status}
+    try:
+        with project_metadata_lock(project_path):
+            metadata = read_project_metadata(project_path)
+            if metadata.run_status not in {"running", "pause_requested"}:
+                append_event(
+                    project_path,
+                    HarnessEvent(
+                        project_id=metadata.project_id,
+                        kind="run_recovery_ignored",
+                        loop_layer="system",
+                        atomic_action="recover_stale_run",
+                        status="completed",
+                        routing_decision="none",
+                        message="Stale run recovery ignored because no run lock is present.",
+                        payload={"run_status": metadata.run_status},
+                    ),
+                )
+                return {
+                    "status": metadata.run_status,
+                    "previous_status": metadata.run_status,
+                }
+
+            previous_status = metadata.run_status
+            metadata.run_status = "paused"
+            write_project_metadata(project_path, metadata)
+            append_event(
+                project_path,
+                HarnessEvent(
+                    project_id=metadata.project_id,
+                    kind="run_recovered",
+                    loop_layer="system",
+                    atomic_action="recover_stale_run",
+                    status="completed",
+                    routing_decision="pause",
+                    message=(
+                        "Recovered stale run lock; harness is paused and can resume from "
+                        "committed state."
+                    ),
+                    payload={
+                        "previous_status": previous_status,
+                        "run_status": metadata.run_status,
+                    },
+                ),
+            )
+            return {"status": metadata.run_status, "previous_status": previous_status}
+    finally:
+        end_active_runner(project_path)
 
 
 @router.post("/retry-current-chapter")
 def retry_current_chapter() -> dict[str, str]:
-    project_path = _active_project_or_404()
-    metadata = read_project_metadata(project_path)
-    if metadata.run_status in {"running", "pause_requested"}:
-        raise HTTPException(status_code=400, detail="A harness run is already in progress.")
-    if metadata.active_chapter_id is None:
-        raise HTTPException(status_code=400, detail="No active chapter to retry.")
+    project_path = _begin_active_runner_or_409()
+    try:
+        return _retry_current_chapter(project_path)
+    finally:
+        end_active_runner(project_path)
 
-    chapter_id = metadata.active_chapter_id
-    chapter_path = project_path / "chapters" / chapter_id
-    if not chapter_path.exists():
-        raise HTTPException(status_code=400, detail="Active chapter directory is missing.")
 
-    retry_scope, artifact_names = retry_scope_for_chapter(chapter_path)
-    if retry_scope is None:
-        raise HTTPException(status_code=400, detail="No retryable chapter failure was found.")
+def _retry_current_chapter(project_path: Path) -> dict[str, str]:
+    with project_metadata_lock(project_path):
+        metadata = read_project_metadata(project_path)
+        if metadata.run_status in {"running", "pause_requested"}:
+            raise HTTPException(status_code=400, detail="A harness run is already in progress.")
+        if metadata.active_chapter_id is None:
+            raise HTTPException(status_code=400, detail="No active chapter to retry.")
 
-    attempt_path = _next_attempt_path(chapter_path)
-    attempt_path.mkdir(parents=True, exist_ok=False)
-    archived = _archive_retry_artifacts(chapter_path, attempt_path, artifact_names)
-    manifest_path = attempt_path / "retry_manifest.json"
-    manifest_relative = manifest_path.relative_to(project_path).as_posix()
-    write_json(
-        manifest_path,
-        {
-            "schema_version": 1,
-            "chapter_id": chapter_id,
-            "retry_scope": retry_scope,
-            "archived_artifacts": archived,
-        },
-    )
-    metadata.run_status = "idle"
-    write_project_metadata(project_path, metadata)
-    append_event(
-        project_path,
-        HarnessEvent(
-            project_id=metadata.project_id,
-            kind="chapter_retry_prepared",
-            loop_layer="chapter",
-            atomic_action="prepare_chapter_retry",
-            status="completed",
-            artifact_path=manifest_relative,
-            routing_decision="retry",
-            message=f"Prepared retry for {chapter_id}: {retry_scope}.",
-            payload={
+        chapter_id = metadata.active_chapter_id
+        chapter_path = project_path / "chapters" / chapter_id
+        if not chapter_path.exists():
+            raise HTTPException(status_code=400, detail="Active chapter directory is missing.")
+
+        retry_scope, artifact_names = retry_scope_for_chapter(chapter_path)
+        if retry_scope is None:
+            raise HTTPException(status_code=400, detail="No retryable chapter failure was found.")
+
+        attempt_path = _next_attempt_path(chapter_path)
+        attempt_path.mkdir(parents=True, exist_ok=False)
+        archived = _archive_retry_artifacts(chapter_path, attempt_path, artifact_names)
+        manifest_path = attempt_path / "retry_manifest.json"
+        manifest_relative = manifest_path.relative_to(project_path).as_posix()
+        write_json(
+            manifest_path,
+            {
+                "schema_version": 1,
                 "chapter_id": chapter_id,
                 "retry_scope": retry_scope,
                 "archived_artifacts": archived,
             },
-        ),
-    )
-    return {
-        "status": metadata.run_status,
-        "retry_scope": retry_scope,
-        "artifact_path": manifest_relative,
-    }
+        )
+        metadata.run_status = "idle"
+        write_project_metadata(project_path, metadata)
+        append_event(
+            project_path,
+            HarnessEvent(
+                project_id=metadata.project_id,
+                kind="chapter_retry_prepared",
+                loop_layer="chapter",
+                atomic_action="prepare_chapter_retry",
+                status="completed",
+                artifact_path=manifest_relative,
+                routing_decision="retry",
+                message=f"Prepared retry for {chapter_id}: {retry_scope}.",
+                payload={
+                    "chapter_id": chapter_id,
+                    "retry_scope": retry_scope,
+                    "archived_artifacts": archived,
+                },
+            ),
+        )
+        return {
+            "status": metadata.run_status,
+            "retry_scope": retry_scope,
+            "artifact_path": manifest_relative,
+        }
 
 
 def _advance_run_until_stop(
@@ -316,10 +348,15 @@ def _ensure_run_can_start_new(project_path: Path, run_status: str) -> None:
         )
 
 
-def _begin_active_runner_or_409(project_path: Path) -> None:
-    if begin_active_runner(project_path):
-        return
-    raise HTTPException(status_code=400, detail="A harness run is already in progress.")
+def _begin_active_runner_or_409(
+    *,
+    detail: str = "A harness run is already in progress.",
+) -> Path:
+    with active_project_transition_lock():
+        project_path = _active_project_or_404()
+        if begin_active_runner(project_path):
+            return project_path
+        raise HTTPException(status_code=400, detail=detail)
 
 
 def _ensure_project_is_ready_to_run(project_path: Path) -> None:

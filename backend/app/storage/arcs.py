@@ -3,7 +3,11 @@ from pathlib import Path
 
 from app.schemas.arcs import CurrentArcState
 from app.storage.json_files import read_json, write_json
-from app.storage.projects import read_project_metadata, write_project_metadata
+from app.storage.projects import (
+    project_metadata_lock,
+    read_project_metadata,
+    write_project_metadata,
+)
 
 
 def current_arc_state_path(project_path: Path) -> Path | None:
@@ -24,26 +28,27 @@ def read_current_arc_state(project_path: Path) -> CurrentArcState | None:
 
 
 def approve_current_arc(project_path: Path) -> CurrentArcState:
-    state_path = current_arc_state_path(project_path)
-    if state_path is None or not state_path.exists():
-        raise FileNotFoundError("No current story arc plan exists.")
+    with project_metadata_lock(project_path):
+        state_path = current_arc_state_path(project_path)
+        if state_path is None or not state_path.exists():
+            raise FileNotFoundError("No current story arc plan exists.")
 
-    payload = read_json(state_path)
-    if payload is None:
-        raise FileNotFoundError("No current story arc plan exists.")
+        payload = read_json(state_path)
+        if payload is None:
+            raise FileNotFoundError("No current story arc plan exists.")
 
-    payload = _normalize_arc_payload(payload)
-    payload["human_review"] = "approved"
-    payload["status"] = "approved"
-    payload["approved_at"] = datetime.now(UTC).isoformat()
-    write_json(state_path, payload)
+        payload = _normalize_arc_payload(payload)
+        payload["human_review"] = "approved"
+        payload["status"] = "approved"
+        payload["approved_at"] = datetime.now(UTC).isoformat()
+        write_json(state_path, payload)
 
-    metadata = read_project_metadata(project_path)
-    if metadata.run_status == "waiting_for_user":
-        metadata.run_status = "idle"
-        write_project_metadata(project_path, metadata)
+        metadata = read_project_metadata(project_path)
+        if metadata.run_status == "waiting_for_user":
+            metadata.run_status = "idle"
+            write_project_metadata(project_path, metadata)
 
-    return CurrentArcState.model_validate(payload)
+        return CurrentArcState.model_validate(payload)
 
 
 def record_chapter_committed(project_path: Path, chapter_id: str) -> CurrentArcState | None:

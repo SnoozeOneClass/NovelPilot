@@ -146,19 +146,17 @@ def run_smoke(options: LiveProviderSmokeOptions) -> LiveProviderSmokeResult:
     profile = _load_enabled_profile(profile_id)
     redaction_values = profile_secret_values(profile)
     project_path: Path | None = None
+    final_title = options.title or _default_project_title()
 
     try:
         project = projects_api.create_project(
-            CreateProjectRequest(
-                title=options.title or _default_project_title(),
-                operation_mode="full_auto",
-            )
+            CreateProjectRequest(operation_mode="full_auto")
         )
         project_path = Path(project.path)
         profiles_api.select_profile(profile.id)
         profile_test = _test_profile(profile.id, options.skip_profile_test, redaction_values)
 
-        setup_state = _complete_book_setup(redaction_values)
+        setup_state = _complete_book_setup(redaction_values, final_title)
         if not setup_state.approved:
             raise LiveProviderSmokeError("Book setup did not reach approved state.")
 
@@ -228,7 +226,10 @@ def run_smoke(options: LiveProviderSmokeOptions) -> LiveProviderSmokeResult:
             _restore_runtime_state(previous_project_path, previous_profile_id)
 
 
-def _complete_book_setup(redaction_values: Sequence[str]) -> SetupStateDocument:
+def _complete_book_setup(
+    redaction_values: Sequence[str],
+    final_title: str,
+) -> SetupStateDocument:
     setup_state = _call_user_action(
         "read book setup state",
         setup_api.get_setup_state,
@@ -257,8 +258,8 @@ def _complete_book_setup(redaction_values: Sequence[str]) -> SetupStateDocument:
         if candidate.approval_allowed:
             return _call_user_action(
                 "approve reviewed book direction",
-                lambda revision=candidate.revision: setup_api.approve_setup(
-                    SetupApprovalRequest(candidate_revision=revision)
+                lambda revision=candidate.revision, title=final_title: setup_api.approve_setup(
+                    SetupApprovalRequest(candidate_revision=revision, title=title)
                 ),
                 redaction_values,
             )
@@ -574,7 +575,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         description="Run a real LLM provider smoke test through the local Novelpilot harness."
     )
     parser.add_argument("--profile-id", help="LLM profile id to test. Defaults to the active profile.")
-    parser.add_argument("--title", help="Novel project title for the generated smoke project.")
+    parser.add_argument(
+        "--title",
+        help="Final novel title selected when approving the generated Book Direction.",
+    )
     parser.add_argument(
         "--skip-profile-test",
         action="store_true",

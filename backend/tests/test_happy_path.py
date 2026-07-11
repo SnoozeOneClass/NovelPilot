@@ -30,7 +30,7 @@ def test_local_happy_path_creates_writes_commits_and_exports(
     monkeypatch.setattr(orchestrator, "call_llm", _fixture_call_llm)
 
     project = projects_api.create_project(
-        CreateProjectRequest(title="Fixture Novel", operation_mode="full_auto")
+        CreateProjectRequest(operation_mode="full_auto")
     )
     profile = profiles_api.upsert_profile(
         LlmProfileUpsert(
@@ -50,7 +50,10 @@ def test_local_happy_path_creates_writes_commits_and_exports(
     candidate_state = setup_api.prepare_setup_review()
     assert candidate_state.candidate is not None
     setup_state = setup_api.approve_setup(
-        SetupApprovalRequest(candidate_revision=candidate_state.candidate.revision)
+        SetupApprovalRequest(
+            candidate_revision=candidate_state.candidate.revision,
+            title="Fixture Novel",
+        )
     )
 
     run_result = runs_api.start_run(RunAdvanceRequest(stop_after_chapter=True))
@@ -139,6 +142,11 @@ def _fixture_call_llm(_profile: object, request: ChatRequest) -> ChatResult:
                     {"decision": "Fair clues", "candidate_evidence": "visible clues"},
                     {"decision": "Earned trust", "candidate_evidence": "earned trust"},
                     {"decision": "Visible costs", "candidate_evidence": "personal costs"},
+                ],
+                "recommended_titles": [
+                    {"title": "Fixture Novel", "rationale": "Names the fixture clearly."},
+                    {"title": "Visible Costs", "rationale": "Highlights the core promise."},
+                    {"title": "Earned Trust", "rationale": "Centers the emotional arc."},
                 ],
                 "rolling_plan_markdown": _fixture_rolling_contract(),
             }

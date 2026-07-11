@@ -12,6 +12,7 @@ export function App() {
     api
       .activeProject()
       .then(setActiveProject)
+      .catch(() => setActiveProject(null))
       .finally(() => setLoading(false));
   }, []);
 

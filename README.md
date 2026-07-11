@@ -7,9 +7,9 @@ Novelpilot 是一个本地、单用户的长篇 AI 小说创作工作台。
 - 故事弧 loop：滚动规划当前故事弧，可按模式决定是否需要人工审查。
 - 章节 loop：装配上下文，生成草稿，提取候选观测，进行语义审查、验证、正式章节提交、候选状态补丁生成，并由 harness 校验后提交到正史状态。
 
-项目刻意保持 local-first。小说数据以文档和 JSON 文件的形式保存在 `output/<小说名>/` 下；LLM 密钥只存在被 git 忽略的本地配置文件里。
+项目刻意保持 local-first。小说数据以文档和 JSON 文件的形式保存在 `output/project-<项目 ID>/` 下；项目目录是稳定的内部身份，不随正式书名变化。LLM 密钥只存在被 git 忽略的本地配置文件里。
 
-全书方向不是固定问卷。用户与模型可以持续自由讨论，模型每轮维护完整的 Book Direction 草稿、已确认决定、待定项、假设和矛盾，并给出可选回复方向。已确认决定不能被模型静默删除，只能依据用户当前输入中的明确证据被取代。模型的“信息已充分”只是一条建议；只有用户主动整理候选、候选逐项覆盖确认决定并通过独立审阅，再明确批准对应版本后，正式全书产物才会写入。
+全书方向不是固定问卷。新书先以“未命名新书”进入共创，用户与模型可以持续自由讨论；模型每轮维护完整的 Book Direction 草稿、已确认决定、待定项、假设和矛盾，并给出可选回复方向。已确认决定不能被模型静默删除，只能依据用户当前输入中的明确证据被取代。模型的“信息已充分”只是一条建议；只有用户主动整理候选、候选逐项覆盖确认决定并通过独立审阅，再从候选推荐书名中选择或输入自定义书名并明确批准，正式标题与全书产物才会一起写入。
 
 ## 技术栈
 
@@ -107,7 +107,7 @@ npm.cmd run audit:secrets
 npm.cmd run smoke:live -- --profile-id <profile-id>
 ```
 
-该命令会创建一个带时间戳的 `output/Novelpilot Live Smoke .../` 项目，选择指定 profile，提交一份完整创作意图，依次执行开放讨论、候选综合、独立审阅和明确批准，再运行一个全自动章节 loop，导出 `exports/manuscript.md`，并写入 `exports/live_smoke_report.json`。除非传入 `--keep-active`，否则命令会恢复之前激活的项目和 profile。
+该命令会创建一个稳定内部 ID 的 smoke 项目，选择指定 profile，提交一份完整创作意图，依次执行开放讨论、包含推荐书名的候选综合、独立审阅和明确批准，再运行一个全自动章节 loop，导出 `exports/manuscript.md`，并写入 `exports/live_smoke_report.json`。可用 `--title` 指定批准时采用的正式标题；除非传入 `--keep-active`，否则命令会恢复之前激活的项目和 profile。
 
 如果候选审阅发现阻断问题，Smoke 会把具体问题注入下一轮讨论后重新整理；三次仍未通过时会失败并保留证据。这个尝试上限只属于自动化 smoke，不限制应用里的真实讨论轮数。
 
@@ -131,11 +131,11 @@ npm.cmd run audit:completion -- --project "<smoke-project-path>"
 
 ## 使用流程
 
-1. 新建或打开一个小说项目。
-2. 选择 `full_auto` 或 `participatory` 模式。
+1. 在首页选择“开始新书”或“继续创作”。继续创作会恢复已有项目的内容、进度和模式。
+2. 开始新书时只选择 `full_auto` 或 `participatory` 初始模式，不需要预先确定书名。
 3. 配置并选择 LLM profile。
 4. 在全书方向页面自由讨论。模型会持续维护完整草稿和当前决策状态；推荐回复只是参考，也可以始终自由输入。
-5. 用户认为方向成熟后，点击整理并审阅。审阅通过后，明确批准当前候选版本；存在阻断问题时继续讨论和修订。
+5. 用户认为方向成熟后，点击整理并审阅。审阅通过后，选择推荐书名或输入自定义书名，再明确批准当前候选版本；正式标题与全书方向在同一事务中提交。存在阻断问题时继续讨论和修订。
 6. 启动或恢复 harness。
    全自动推进会跨过章节完成 checkpoint 继续运行，直到遇到人工门禁、失败、协作式暂停，或有界步数预算用尽，并停在安全 checkpoint。
    如果本地后端重启时项目元数据仍显示 `running` 或 `pause_requested`，可以使用 stale run recovery 把项目恢复到 `paused`，再从已提交状态继续。
@@ -145,9 +145,11 @@ npm.cmd run audit:completion -- --project "<smoke-project-path>"
 9. 如果验证或状态补丁校验失败，可以 retry 当前章节。Novelpilot 会先把失败候选产物归档到 `attempts/`，再重新生成。
 10. 需要时导出全书。导出只使用已经提交的 `final.md` 章节。
 
+项目打开后可以在安全状态切换运行模式。`running` 或 `pause_requested` 时必须先等待安全 checkpoint；已经挂起的故事弧人工审批不会因为切换到全自动而被静默取消。若当前故事弧状态缺失或无法验证，系统会拒绝切到全自动，避免门禁被意外绕过。
+
 ## 存储模型
 
-每个小说项目保存在 `output/<小说名>/` 下：
+每个小说项目保存在稳定的 `output/project-<项目 ID>/` 目录下，正式书名只保存在项目元数据和已批准全书状态中：
 
 ```text
 project.json
@@ -169,6 +171,7 @@ book/
         context_snapshot.json
       candidate_direction.md
       candidate_constraints.json
+      candidate_titles.json
       rolling_plan.md
       verification.json
       state.json
@@ -207,7 +210,7 @@ exports/
 
 `events.jsonl` 是持久化的 harness 审计流。新追加的事件包含项目内局部递增的 `seq` 编号，并以 `event_id` 保证失败重放不会重复记账；旧的无序号事件仍然可以读取。
 
-`book/setup.json`、`direction_draft.md` 和 `book/reviews/` 都是全书讨论的候选状态或审阅证据；每个成功轮次还保存不可变的状态、草稿和 transcript 版本，供上下文快照按哈希追溯。`book/direction.md` 与 `constraints.json` 只有在用户明确批准最新候选后才会与 `settings.md`、`outline.md`、`state.json` 一起事务提交。`outline.md` 保存“只滚动规划当前故事弧”的契约，不是全书故事弧列表；该契约会实际注入后续故事弧规划与章节上下文。
+`book/setup.json`、`direction_draft.md` 和 `book/reviews/` 都是全书讨论的候选状态或审阅证据；每个成功轮次还保存不可变的状态、草稿和 transcript 版本，供上下文快照按哈希追溯。`book/direction.md`、`constraints.json`、正式标题与项目元数据只有在用户明确批准最新候选后才会与 `settings.md`、`outline.md`、`state.json` 一起事务提交。`outline.md` 保存“只滚动规划当前故事弧”的契约，不是全书故事弧列表；该契约会实际注入后续故事弧规划与章节上下文。
 
 `draft.md`、`observations.json`、`candidate_state_patch.json` 等候选文件不是正史。只有通过 harness 校验并提交的 committed state patch 才会改变正史状态。
 
@@ -224,7 +227,7 @@ npm.cmd run acceptance
 npm.cmd run audit:secrets
 ```
 
-当前基于 fixture 的测试覆盖开放式全书讨论、受控上下文预算与版本追溯、决策取代证据、候选审阅、失败封闭、并发版本冲突、多文件事务回滚、事件重放、旧项目迁移、项目存储、profile 安全、LLM 适配器、SSE replay、运行控制、反馈路由、章节验证、状态补丁提交/拒绝和全书导出。Acceptance report 会把已实现行为映射回规划需求，并把真实 provider 和文学审查保留为人工门禁。输出密钥审计由 `audit:secrets` 自动完成，并包含在 `audit:completion` 中。
+当前基于 fixture 的测试覆盖开放式全书讨论、延迟命名与候选书名、受控上下文预算与版本追溯、决策取代证据、候选审阅、失败封闭、并发版本冲突、多文件事务回滚、安全模式切换、事件重放、项目存储、profile 安全、LLM 适配器、SSE replay、运行控制、反馈路由、章节验证、状态补丁提交/拒绝和全书导出。Acceptance report 会把已实现行为映射回规划需求，并把真实 provider 和文学审查保留为人工门禁。输出密钥审计由 `audit:secrets` 自动完成，并包含在 `audit:completion` 中。
 
 当有可用的真实 LLM profile 时，运行：
 

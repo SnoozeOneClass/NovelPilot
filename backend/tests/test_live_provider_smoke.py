@@ -35,7 +35,7 @@ def test_live_provider_smoke_runs_fixture_flow_and_restores_active_state(
     monkeypatch.setattr(orchestrator, "call_llm", _fixture_call_llm)
 
     previous_project = projects_api.create_project(
-        CreateProjectRequest(title="Existing Novel", operation_mode="participatory")
+        CreateProjectRequest(operation_mode="participatory")
     )
     profile_storage.upsert_profile(
         LlmProfileUpsert(
@@ -142,7 +142,7 @@ def test_live_provider_smoke_failure_reports_harness_context(
         run_smoke(LiveProviderSmokeOptions(profile_id="main", title="Smoke Failure Fixture"))
 
     message = str(exc.value)
-    project_path = next((tmp_path / "output").glob("Smoke Failure Fixture*"))
+    project_path = next((tmp_path / "output").glob("project-*"))
     report_path = project_path / "exports" / "live_smoke_report.json"
     report = json.loads(report_path.read_text(encoding="utf-8"))
 
@@ -195,7 +195,7 @@ def test_live_provider_smoke_failure_reports_setup_action_errors(
         run_smoke(LiveProviderSmokeOptions(profile_id="main", title="Smoke Setup Failure Fixture"))
 
     message = str(exc.value)
-    project_path = next((tmp_path / "output").glob("Smoke Setup Failure Fixture*"))
+    project_path = next((tmp_path / "output").glob("project-*"))
     report_path = project_path / "exports" / "live_smoke_report.json"
     report = json.loads(report_path.read_text(encoding="utf-8"))
     report_payload = json.dumps(report, ensure_ascii=False)
@@ -264,6 +264,11 @@ def _fixture_call_llm(_profile: object, request: ChatRequest) -> ChatResult:
                     {"decision": "Fair clues", "candidate_evidence": "visible clues"},
                     {"decision": "Earned trust", "candidate_evidence": "earned trust"},
                     {"decision": "Costly hope", "candidate_evidence": "hard-won hope"},
+                ],
+                "recommended_titles": [
+                    {"title": "Smoke Fixture", "rationale": "Names the smoke fixture."},
+                    {"title": "Hard-Won Hope", "rationale": "Centers the emotional promise."},
+                    {"title": "Visible Clues", "rationale": "Signals the fair mystery."},
                 ],
                 "rolling_plan_markdown": _fixture_rolling_contract(),
             }

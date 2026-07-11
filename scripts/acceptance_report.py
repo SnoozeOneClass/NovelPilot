@@ -31,11 +31,32 @@ class AcceptanceCriterion:
 CRITERIA: tuple[AcceptanceCriterion, ...] = (
     AcceptanceCriterion(
         id="project_lifecycle",
-        requirement="Users can create and open local novel projects under output/.",
+        requirement=(
+            "Users can start untitled novels with stable internal storage identities or "
+            "continue existing local projects."
+        ),
         probes=(
-            EvidenceProbe("backend/app/api/projects.py", ("create_project", "open_project")),
-            EvidenceProbe("backend/tests/test_projects.py", ("test_create_project", "test_open_project")),
-            EvidenceProbe("frontend/src/features/project-selector/ProjectSelector.tsx"),
+            EvidenceProbe(
+                "backend/app/api/projects.py",
+                ("create_project", "open_project", "update_operation_mode"),
+            ),
+            EvidenceProbe(
+                "backend/app/storage/projects.py",
+                ("project-{metadata.project_id}", "summarize_project"),
+            ),
+            EvidenceProbe(
+                "backend/tests/test_projects.py",
+                (
+                    "test_multiple_untitled_projects_have_unique_stable_directories",
+                    "test_open_project_switches_single_active_project",
+                    "test_reopen_project_restores_content_progress_and_mode",
+                    "test_project_lifecycle_rejects_active_runner_before_status_transition",
+                ),
+            ),
+            EvidenceProbe(
+                "frontend/src/features/project-selector/ProjectSelector.tsx",
+                ("开始新书", "继续创作", "未命名新书"),
+            ),
         ),
     ),
     AcceptanceCriterion(
@@ -62,8 +83,8 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
     AcceptanceCriterion(
         id="book_setup",
         requirement=(
-            "Book direction uses open-ended co-creation, reviewed candidates, and explicit "
-            "version-bound approval before activation."
+            "Book direction uses open-ended co-creation, reviewed title recommendations, and "
+            "atomic version-bound approval of the final title and direction."
         ),
         probes=(
             EvidenceProbe(
@@ -75,24 +96,41 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
                 (
                     "assemble_discussion_context",
                     "confirmed_decision_coverage",
+                    "recommended_titles",
                     "review_book_direction",
                 ),
             ),
             EvidenceProbe(
                 "backend/app/storage/setup.py",
-                ("candidate_revision", "SetupRevisionConflict", "_migrate_legacy_setup"),
+                (
+                    "candidate_revision",
+                    "title_suggestions_path",
+                    'files["project.json"]',
+                    "SetupRevisionConflict",
+                ),
             ),
             EvidenceProbe(
                 "backend/tests/test_setup.py",
                 (
                     "test_explicit_approval_requires_latest_revision",
+                    "test_explicit_approval_accepts_custom_title",
+                    "test_approval_transaction_rolls_back_partial_formal_artifacts",
                     "test_review_blocks_candidate_without_confirmed_decision_coverage",
                     "test_setup_api_failure_is_fail_closed",
                 ),
             ),
             EvidenceProbe(
+                "backend/tests/test_readiness.py",
+                ("test_readiness_fails_closed_when_approved_setup_has_no_title",),
+            ),
+            EvidenceProbe(
                 "frontend/src/features/setup-conversation/SetupConversation.tsx",
-                ("prepareSetupReview", "candidate.revision"),
+                (
+                    "prepareSetupReview",
+                    "candidate.recommended_titles",
+                    "option.rationale",
+                    "approveSetup(candidate.revision, finalTitle)",
+                ),
             ),
         ),
     ),
@@ -127,11 +165,45 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
     ),
     AcceptanceCriterion(
         id="operation_modes",
-        requirement="Each novel stores full-auto or participatory mode and enforces arc review gates.",
+        requirement=(
+            "Users can safely change a novel's operation mode without racing active runs or "
+            "bypassing pending story-arc review gates."
+        ),
         probes=(
-            EvidenceProbe("backend/app/schemas/projects.py", ("OperationMode", "participatory")),
-            EvidenceProbe("backend/tests/test_orchestrator.py", ("test_participatory_arc_waits_for_approval",)),
-            EvidenceProbe("backend/app/harness/orchestrator.py", ("_current_arc_requires_human_review",)),
+            EvidenceProbe(
+                "backend/app/api/projects.py",
+                ("update_operation_mode", "begin_active_runner"),
+            ),
+            EvidenceProbe(
+                "backend/app/storage/projects.py",
+                ("operation_mode_changed", "project_metadata_lock", ".event-outbox"),
+            ),
+            EvidenceProbe(
+                "backend/tests/test_projects.py",
+                (
+                    "test_mode_change_marks_existing_unapproved_arc_for_review",
+                    "test_mode_change_to_full_auto_preserves_pending_arc_gate",
+                    "test_mode_change_rejects_run_lock",
+                    "test_mode_change_rejects_active_runner_before_status_transition",
+                    "test_participatory_to_full_auto_fails_closed_when_active_arc_state_is_missing",
+                    "test_profile_sync_and_mode_change_preserve_each_others_metadata",
+                ),
+            ),
+            EvidenceProbe(
+                "backend/tests/test_orchestrator.py",
+                (
+                    "test_participatory_arc_waits_for_approval",
+                    "test_pending_arc_review_is_not_bypassed_after_switch_to_full_auto",
+                ),
+            ),
+            EvidenceProbe(
+                "backend/app/harness/orchestrator.py",
+                ("_current_arc_requires_human_review", 'human_review == "awaiting_review"'),
+            ),
+            EvidenceProbe(
+                "frontend/src/features/workspace/ProjectOverview.tsx",
+                ("onModeChange", "modeLockedByRun", "pendingArcApproval"),
+            ),
         ),
     ),
     AcceptanceCriterion(

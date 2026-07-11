@@ -433,6 +433,11 @@ textarea::placeholder {
   color: var(--muted);
 }
 
+.selector-notice {
+  max-width: 1320px;
+  margin: 0 auto 16px;
+}
+
 .project-selector-grid {
   max-width: 1320px;
   min-height: min(720px, calc(100vh - 130px));
@@ -1370,6 +1375,115 @@ textarea::placeholder {
   line-height: 1.45;
 }
 
+.book-title-picker {
+  display: grid;
+  gap: 12px;
+  margin: 10px 8px 2px;
+  padding: 15px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: var(--surface-soft);
+}
+
+.book-title-picker > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.book-title-picker > header h2 {
+  font-size: 15px;
+}
+
+.book-title-picker > header p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.recommended-title-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.recommended-title-list > button {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 25px minmax(0, 1fr);
+  align-items: start;
+  gap: 9px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 11px;
+  text-align: left;
+}
+
+.recommended-title-list > button:hover:not(:disabled),
+.recommended-title-list > button.selected {
+  border-color: var(--gold);
+  background: #fff7df;
+}
+
+.recommended-title-list > button > span {
+  width: 23px;
+  height: 23px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--gold-soft);
+  color: var(--gold-dark);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.recommended-title-list > button > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.recommended-title-list strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recommended-title-list small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.custom-book-title {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 12px;
+}
+
+.custom-book-title > span {
+  color: #6f5b43;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.custom-book-title input {
+  min-width: 0;
+  border-color: var(--line-soft);
+}
+
+.custom-book-title.selected input {
+  border-color: var(--gold);
+  background: #fffdf8;
+}
+
 .book-review-issues {
   display: grid;
   gap: 7px;
@@ -2082,6 +2196,83 @@ textarea::placeholder {
   font-size: 20px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.overview-mode-panel {
+  display: grid;
+  gap: 12px;
+  margin-top: 20px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: var(--surface-soft);
+  padding: 16px;
+}
+
+.overview-mode-panel > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.overview-mode-panel h2 {
+  font-size: 15px;
+}
+
+.overview-mode-panel header p,
+.mode-switch-note {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.overview-mode-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.overview-mode-options > button {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 12px;
+  text-align: left;
+}
+
+.overview-mode-options > button:hover:not(:disabled),
+.overview-mode-options > button.selected {
+  border-color: var(--gold);
+  background: #fff7df;
+  color: var(--gold-dark);
+}
+
+.overview-mode-options > button:disabled:not(.selected) {
+  opacity: 0.55;
+}
+
+.overview-mode-options > button span {
+  display: grid;
+  gap: 4px;
+}
+
+.overview-mode-options small {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.mode-switch-note.warning {
+  margin: 0;
+  border-left: 2px solid var(--gold);
+  padding-left: 9px;
+  color: var(--gold-dark);
 }
 
 .overview-columns {
@@ -3601,7 +3792,24 @@ textarea::placeholder {
   .overview-stat-grid,
   .overview-shortcuts,
   .canon-count-grid,
-  .profile-form-grid {
+  .profile-form-grid,
+  .recommended-title-list,
+  .overview-mode-options {
+    grid-template-columns: 1fr;
+  }
+
+  .book-title-picker > header,
+  .overview-mode-panel > header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .book-title-picker > header .soft-badge,
+  .overview-mode-panel > header .soft-badge {
+    align-self: flex-start;
+  }
+
+  .custom-book-title {
     grid-template-columns: 1fr;
   }
 

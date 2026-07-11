@@ -92,6 +92,7 @@ const atomicActionLabels: Record<string, string> = {
   semantic_review: "语义审查",
   synthesize_and_review_book_direction: "整理并审阅全书方向",
   synthesize_book_direction: "整理全书方向候选",
+  update_operation_mode: "更换运行模式",
   review_book_direction: "审阅全书方向候选",
   verify_chapter: "验证章节",
   write_final_chapter: "提交正式章节"
@@ -121,6 +122,7 @@ const eventKindLabels: Record<string, string> = {
   feedback_processed: "反馈已处理",
   llm_output_delta: "模型可见输出",
   llm_profile_required: "需要 LLM 配置",
+  operation_mode_changed: "运行模式已更换",
   pause_ignored: "暂停请求已忽略",
   pause_requested: "已请求暂停",
   routing_decision: "路由决策",
@@ -149,6 +151,7 @@ const eventKindLabels: Record<string, string> = {
 
 const routingDecisionLabels: Record<string, string> = {
   apply_to_current_chapter_context: "注入当前章节上下文",
+  apply_at_next_safe_checkpoint: "从下一安全检查点生效",
   approve_book_loop: "等待批准全书流程",
   ask_user: "询问用户",
   await_user_approval: "等待用户明确批准",
@@ -227,6 +230,10 @@ const runNextActionLabels: Record<RunNextAction["id"], string> = {
 
 export function formatOperationMode(mode: OperationMode): string {
   return operationModeLabels[mode];
+}
+
+export function formatProjectTitle(title: string | null | undefined): string {
+  return title?.trim() || "未命名新书";
 }
 
 export function formatProtocol(protocol: LlmProtocol): string {

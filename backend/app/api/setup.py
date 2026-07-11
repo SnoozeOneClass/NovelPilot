@@ -4,6 +4,11 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
+from app.harness.run_control import (
+    active_project_transition_lock,
+    begin_active_runner,
+    end_active_runner,
+)
 from app.harness.loops.book import (
     assemble_discussion_context,
     build_review_context_snapshot,
@@ -12,7 +17,7 @@ from app.harness.loops.book import (
     synthesize_book_direction,
 )
 from app.llm.profiles import get_active_profile
-from app.llm.redaction import redact_profile_secrets
+from app.llm.redaction import profile_secret_values, redact_profile_secrets
 from app.schemas.events import EventStatus, HarnessEvent
 from app.schemas.profiles import LlmProfile
 from app.schemas.projects import ProjectMetadata
@@ -23,6 +28,7 @@ from app.schemas.setup import (
 )
 from app.storage import setup as setup_storage
 from app.storage.events import append_event
+from app.storage.profiles import load_profiles
 from app.storage.projects import get_active_project_path, read_project_metadata
 
 router = APIRouter()
@@ -280,6 +286,7 @@ def prepare_setup_review() -> SetupStateDocument:
         for artifact_path, artifact_kind in [
             (candidate.direction_path, "book_direction_candidate_written"),
             (candidate.constraints_path, "book_direction_constraints_written"),
+            (candidate.title_suggestions_path, "book_title_candidates_written"),
             (candidate.rolling_plan_path, "book_rolling_contract_candidate_written"),
         ]:
             _append_event(
@@ -318,6 +325,7 @@ def prepare_setup_review() -> SetupStateDocument:
                 "approval_allowed": candidate.approval_allowed,
                 "direction_path": candidate.direction_path,
                 "constraints_path": candidate.constraints_path,
+                "title_suggestions_path": candidate.title_suggestions_path,
                 "rolling_plan_path": candidate.rolling_plan_path,
             },
         )
@@ -327,58 +335,86 @@ def prepare_setup_review() -> SetupStateDocument:
 @router.post("/approve", response_model=SetupStateDocument)
 def approve_setup(request: SetupApprovalRequest) -> SetupStateDocument:
     with _setup_lock:
-        project_path = _active_project_path()
-        setup_storage.flush_pending_setup_events(project_path)
-        metadata = read_project_metadata(project_path)
+        if _contains_configured_profile_secret(request.title):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Book title contains configured provider credentials or endpoint data. "
+                    "Choose a different title."
+                ),
+            )
+        project_path: Path | None = None
         try:
-            state = setup_storage.approve_setup(project_path, request)
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            project_path = _begin_setup_approval_lease()
+            setup_storage.flush_pending_setup_events(project_path)
+            metadata = read_project_metadata(project_path)
+            try:
+                state = setup_storage.approve_setup(project_path, request)
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-        candidate = state.candidate
-        _append_event(
-            project_path,
-            metadata,
-            kind="book_loop_approved",
-            action="approve_book_direction",
-            status="completed",
-            artifact_path="book/direction.md",
-            routing="start_or_resume_harness",
-            message="User explicitly approved the reviewed Book Direction.",
-            payload={
-                "candidate_revision": candidate.revision if candidate else None,
-                "profile_id": candidate.profile_id if candidate else None,
-                "model_snapshot": candidate.model_snapshot if candidate else None,
-                "committed_artifacts": [
-                    "book/direction.md",
-                    "book/constraints.json",
-                    "book/settings.md",
-                    "book/outline.md",
-                    "book/state.json",
-                ],
-            },
-        )
-        for artifact_path in [
-            "book/constraints.json",
-            "book/settings.md",
-            "book/outline.md",
-            "book/state.json",
-        ]:
+            candidate = state.candidate
             _append_event(
                 project_path,
                 metadata,
-                kind="approved_book_artifact_written",
+                kind="book_loop_approved",
                 action="approve_book_direction",
                 status="completed",
-                artifact_path=artifact_path,
+                artifact_path="book/direction.md",
                 routing="start_or_resume_harness",
-                message="Approved book-level artifact committed after explicit user approval.",
+                message="User explicitly approved the reviewed Book Direction.",
                 payload={
                     "candidate_revision": candidate.revision if candidate else None,
-                    "committed": True,
+                    "profile_id": candidate.profile_id if candidate else None,
+                    "model_snapshot": candidate.model_snapshot if candidate else None,
+                    "title": state.approved_title,
+                    "title_selection_source": state.title_selection_source,
+                    "committed_artifacts": [
+                        "project.json",
+                        "book/direction.md",
+                        "book/constraints.json",
+                        "book/settings.md",
+                        "book/outline.md",
+                        "book/state.json",
+                    ],
                 },
             )
-        return state
+            for artifact_path in [
+                "book/constraints.json",
+                "book/settings.md",
+                "book/outline.md",
+                "book/state.json",
+            ]:
+                _append_event(
+                    project_path,
+                    metadata,
+                    kind="approved_book_artifact_written",
+                    action="approve_book_direction",
+                    status="completed",
+                    artifact_path=artifact_path,
+                    routing="start_or_resume_harness",
+                    message=(
+                        "Approved book-level artifact committed after explicit user approval."
+                    ),
+                    payload={
+                        "candidate_revision": candidate.revision if candidate else None,
+                        "committed": True,
+                        "title": state.approved_title,
+                    },
+                )
+            return state
+        finally:
+            if project_path is not None:
+                end_active_runner(project_path)
+
+
+def _contains_configured_profile_secret(title: str) -> bool:
+    return any(
+        value in title
+        for profile in load_profiles().profiles
+        for value in profile_secret_values(profile)
+        if value
+    )
 
 
 def _active_project_path() -> Path:
@@ -386,6 +422,19 @@ def _active_project_path() -> Path:
     if project_path is None:
         raise HTTPException(status_code=404, detail="No active project.")
     return project_path
+
+
+def _begin_setup_approval_lease() -> Path:
+    with active_project_transition_lock():
+        project_path = _active_project_path()
+        if begin_active_runner(project_path):
+            return project_path
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Cannot approve the book direction while a harness runner is active."
+            ),
+        )
 
 
 def _active_profile_or_409() -> LlmProfile:

@@ -1,7 +1,23 @@
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException
 
-from app.schemas.projects import CreateProjectRequest, OpenProjectRequest, ProjectSummary
+from app.core.paths import resolve_project_path
+from app.harness.run_control import (
+    active_project_transition_lock,
+    begin_active_runner,
+    end_active_runner,
+)
+from app.schemas.projects import (
+    CreateProjectRequest,
+    OpenProjectRequest,
+    ProjectSummary,
+    UpdateOperationModeRequest,
+)
 from app.storage import projects as project_storage
+from app.storage import setup as setup_storage
 
 router = APIRouter()
 
@@ -14,7 +30,8 @@ def list_projects() -> list[ProjectSummary]:
 @router.post("", response_model=ProjectSummary)
 def create_project(request: CreateProjectRequest) -> ProjectSummary:
     try:
-        return project_storage.create_project(request)
+        with _active_project_change():
+            return project_storage.create_project(request)
     except project_storage.ActiveProjectBusyError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (FileExistsError, ValueError) as exc:
@@ -24,7 +41,9 @@ def create_project(request: CreateProjectRequest) -> ProjectSummary:
 @router.post("/open", response_model=ProjectSummary)
 def open_project(request: OpenProjectRequest) -> ProjectSummary:
     try:
-        return project_storage.open_project(request.name)
+        target_path = resolve_project_path(request.name)
+        with _active_project_change(target_path=target_path):
+            return project_storage.open_project(request.name)
     except project_storage.ActiveProjectBusyError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (FileNotFoundError, ValueError) as exc:
@@ -34,7 +53,8 @@ def open_project(request: OpenProjectRequest) -> ProjectSummary:
 @router.post("/close")
 def close_project() -> dict[str, bool]:
     try:
-        project_storage.close_active_project()
+        with _active_project_change():
+            project_storage.close_active_project()
     except project_storage.ActiveProjectBusyError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"closed": True}
@@ -43,3 +63,66 @@ def close_project() -> dict[str, bool]:
 @router.get("/active", response_model=ProjectSummary | None)
 def get_active_project() -> ProjectSummary | None:
     return project_storage.get_active_project()
+
+
+@router.patch("/active/mode", response_model=ProjectSummary)
+def update_operation_mode(request: UpdateOperationModeRequest) -> ProjectSummary:
+    # Storage commits the operation_mode_changed audit outbox record atomically with metadata.
+    with active_project_transition_lock():
+        project_path = project_storage.get_active_project_path()
+        if project_path is None:
+            raise HTTPException(status_code=404, detail="No active project.")
+        if not begin_active_runner(project_path):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "A harness runner is active; request pause and wait for a safe checkpoint "
+                    "before changing operation mode."
+                ),
+            )
+
+    try:
+        try:
+            summary = project_storage.update_operation_mode(
+                project_path,
+                request.operation_mode,
+            )
+        except project_storage.ActiveProjectBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        try:
+            setup_storage.flush_pending_setup_events(project_path)
+        except (OSError, ValueError):
+            # The mode transaction durably stored the event in the outbox. A later
+            # setup read or mode request will retry the append without losing audit data.
+            pass
+        return summary
+    finally:
+        end_active_runner(project_path)
+
+
+@contextmanager
+def _active_project_change(
+    *,
+    target_path: Path | None = None,
+) -> Iterator[None]:
+    with active_project_transition_lock():
+        current_path = project_storage.get_active_project_path()
+        lease_paths: list[Path] = []
+        try:
+            for path in [current_path, target_path]:
+                if path is None or any(
+                    existing.resolve() == path.resolve() for existing in lease_paths
+                ):
+                    continue
+                if not begin_active_runner(path):
+                    raise project_storage.ActiveProjectBusyError(
+                        "Cannot change the active project while a harness runner is active."
+                    )
+                lease_paths.append(path)
+            yield
+        finally:
+            for path in reversed(lease_paths):
+                end_active_runner(path)

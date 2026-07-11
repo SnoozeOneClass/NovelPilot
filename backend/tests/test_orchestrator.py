@@ -270,6 +270,54 @@ def test_approving_participatory_arc_allows_chapter_loop(tmp_path, monkeypatch) 
     assert (project_path / "chapters" / "chapter-001" / "context_snapshot.json").exists()
 
 
+def test_pending_arc_review_is_not_bypassed_after_switch_to_full_auto(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    project_path = _make_project(tmp_path, setup_approved=True)
+    metadata = ProjectMetadata(
+        title="Novel",
+        operation_mode="full_auto",
+        active_arc_id="arc-001",
+        run_status="idle",
+    )
+    write_json(project_path / "project.json", metadata.model_dump(mode="json"))
+    (project_path / "arcs" / "arc-001").mkdir(parents=True)
+    write_json(
+        project_path / "arcs" / "arc-001" / "state.json",
+        {
+            "arc_id": "arc-001",
+            "status": "planned",
+            "plan_path": "arcs/arc-001/plan.md",
+            "human_review": "awaiting_review",
+            "approved_at": None,
+        },
+    )
+    (project_path / "arcs" / "arc-001" / "plan.md").write_text(
+        "# Arc 1\n",
+        encoding="utf-8",
+    )
+    profile = LlmProfile(
+        id="main",
+        name="Main",
+        protocol="openai-compatible",
+        base_url="https://api.example.com/v1",
+        api_key=SecretStr("secret"),
+        model="story-model",
+    )
+    monkeypatch.setattr(orchestrator, "get_active_profile", lambda: profile)
+
+    HarnessOrchestrator(
+        HarnessRunContext(project_path=project_path, run_id="run-1")
+    ).advance_to_next_checkpoint()
+
+    metadata_payload = read_json(project_path / "project.json")
+    events = read_events(project_path)
+    assert metadata_payload["run_status"] == "waiting_for_user"
+    assert events[-1].kind == "story_arc_review_required"
+    assert not (project_path / "chapters" / "chapter-001").exists()
+
+
 def test_orchestrator_writes_chapter_context_snapshot(tmp_path, monkeypatch) -> None:
     project_path = _make_project(tmp_path, setup_approved=True)
     metadata = ProjectMetadata(title="Novel", active_arc_id="arc-001")
@@ -429,6 +477,8 @@ def test_chapter_goal_prompt_uses_context_snapshot_sources(
         {
             "schema_version": 1,
             "version": 7,
+            "arc_id": "arc-001",
+            "plan_path": "arcs/arc-001/plan.md",
             "status": "planned",
             "target_chapter_count": 3,
             "completed_chapter_ids": [],
