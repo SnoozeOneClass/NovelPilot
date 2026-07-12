@@ -201,8 +201,8 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
                 ("_current_arc_requires_human_review", 'human_review == "awaiting_review"'),
             ),
             EvidenceProbe(
-                "frontend/src/features/workspace/ProjectOverview.tsx",
-                ("onModeChange", "modeLockedByRun", "pendingArcApproval"),
+                "frontend/src/features/project-selector/ProjectSelector.tsx",
+                ("continueProject", "api.updateProjectMode", "modeLocked"),
             ),
         ),
     ),
