@@ -12,6 +12,7 @@
     "tsBuildInfoFile": "../.tmp/frontend.tsbuildinfo",
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "types": ["vite/client", "vitest/globals"],
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,

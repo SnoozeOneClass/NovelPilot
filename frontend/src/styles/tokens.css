@@ -1,0 +1,85 @@
+:root {
+  --np-bg: #f2f3f1;
+  --np-surface: #fafbf9;
+  --np-surface-raised: #ffffff;
+  --np-surface-muted: #e9ebe7;
+  --np-sidebar: #e5e7e3;
+  --np-line: #d1d4cf;
+  --np-line-strong: #b7bbb4;
+  --np-text: #252723;
+  --np-text-secondary: #5e635b;
+  --np-text-muted: #7a8076;
+  --np-accent: #ad7208;
+  --np-accent-hover: #8f5d05;
+  --np-accent-soft: #f5e8c7;
+  --np-success: #2d7f55;
+  --np-success-soft: #dceee4;
+  --np-warning: #a86412;
+  --np-warning-soft: #f4e3c8;
+  --np-danger: #b3443a;
+  --np-danger-soft: #f4deda;
+  --np-info: #31769a;
+  --np-info-soft: #dbeaf1;
+  --np-focus: rgba(173, 114, 8, 0.38);
+  --np-shadow: 0 10px 28px rgba(26, 29, 25, 0.07);
+  --np-radius-sm: 4px;
+  --np-radius-md: 6px;
+  --np-radius-lg: 8px;
+  --np-space-1: 4px;
+  --np-space-2: 8px;
+  --np-space-3: 12px;
+  --np-space-4: 16px;
+  --np-space-5: 20px;
+  --np-space-6: 24px;
+  --np-sidebar-expanded: 220px;
+  --np-sidebar-collapsed: 64px;
+  --np-topbar-height: 56px;
+  --np-font-ui: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", ui-sans-serif, system-ui, sans-serif;
+  --np-font-mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+
+  /* Temporary aliases keep unchanged views readable while they are migrated. */
+  --bg: var(--np-bg);
+  --surface: var(--np-surface-raised);
+  --surface-soft: var(--np-surface);
+  --sidebar: var(--np-sidebar);
+  --line: var(--np-line);
+  --line-soft: var(--np-line);
+  --ink: var(--np-text);
+  --muted: var(--np-text-muted);
+  --gold: var(--np-accent);
+  --gold-dark: var(--np-accent-hover);
+  --gold-soft: var(--np-accent-soft);
+  --brown: var(--np-text);
+  --green: var(--np-success);
+  --green-soft: var(--np-success-soft);
+  --purple: #6d5bd0;
+  --red: var(--np-danger);
+  --red-soft: var(--np-danger-soft);
+  --blue: var(--np-info);
+}
+
+:root[data-theme="dark"] {
+  --np-bg: #141614;
+  --np-surface: #1a1d1a;
+  --np-surface-raised: #202320;
+  --np-surface-muted: #292d29;
+  --np-sidebar: #181b18;
+  --np-line: #343934;
+  --np-line-strong: #4a5049;
+  --np-text: #ecefe9;
+  --np-text-secondary: #b8bdb4;
+  --np-text-muted: #8f968b;
+  --np-accent: #e2ac47;
+  --np-accent-hover: #f0bd5b;
+  --np-accent-soft: #3b3020;
+  --np-success: #75bc8e;
+  --np-success-soft: #20382a;
+  --np-warning: #dfa357;
+  --np-warning-soft: #3d2f20;
+  --np-danger: #e0786f;
+  --np-danger-soft: #402522;
+  --np-info: #72acd0;
+  --np-info-soft: #20323e;
+  --np-focus: rgba(226, 172, 71, 0.42);
+  --np-shadow: 0 12px 32px rgba(0, 0, 0, 0.22);
+}

@@ -7,9 +7,13 @@
     "dev": "vite --configLoader runner",
     "build": "tsc -b && vite build --configLoader runner",
     "typecheck": "tsc -b",
-    "lint": "tsc -b --pretty false"
+    "lint": "tsc -b --pretty false",
+    "test": "vitest run --configLoader runner",
+    "test:watch": "vitest --configLoader runner"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.101.2",
+    "@tanstack/react-virtual": "^3.14.6",
     "@vitejs/plugin-react": "^5.1.0",
     "lucide-react": "^0.561.0",
     "react": "^19.2.0",
@@ -18,7 +22,12 @@
     "vite": "^7.2.0"
   },
   "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/react": "^19.2.17",
-    "@types/react-dom": "^19.2.3"
+    "@types/react-dom": "^19.2.3",
+    "jsdom": "^29.1.1",
+    "vitest": "^4.1.10"
   }
 }
