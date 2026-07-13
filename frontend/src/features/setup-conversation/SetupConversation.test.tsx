@@ -50,8 +50,14 @@ function setupState(withCandidate = false): SetupStateDocument {
     unresolved_questions: [],
     assumptions: [],
     contradictions: [],
-    suggestions: [{ id: "s1", label: "补充禁区", message: "不要使用临时设定解围。" }],
-    readiness: { status: "ready", reason: "方向已经足够具体。" },
+    question: withCandidate ? null : "退休档案员是否计入六名核心人物？",
+    suggestions: withCandidate ? [] : [
+      { id: "s1", label: "计入六人", message: "退休档案员计入六名核心人物，岛上共有六名旧案相关者。" },
+      { id: "s2", label: "六人之外", message: "退休档案员不计入六名核心人物，岛上共有七名旧案相关者。" }
+    ],
+    readiness: withCandidate
+      ? { status: "ready", reason: "方向已经足够具体。" }
+      : { status: "continue", reason: "还需要确认一项创作原则。" },
     candidate: withCandidate ? candidate : null,
     direction_draft_version_path: "book/versions/direction.md",
     discussion_state_version_path: "book/versions/state.json",
@@ -68,16 +74,63 @@ describe("SetupConversation", () => {
     window.sessionStorage.clear();
   });
 
-  it("appends a suggested direction without replacing an unsent draft", async () => {
+  it("presents one question with model choices and a custom-answer option", async () => {
     const user = userEvent.setup();
     vi.spyOn(api, "setupState").mockResolvedValue(setupState());
     render(<SetupConversation projectId="project-1" onApproved={() => undefined} onExit={() => undefined} />);
 
-    const input = await screen.findByPlaceholderText("继续描述、纠正、否定或提出新的方向...");
+    expect(await screen.findByRole("heading", { name: "退休档案员是否计入六名核心人物？" })).toBeInTheDocument();
+    const input = screen.getByPlaceholderText("选择上方建议，或者在这里输入你自己的回答...");
     await user.type(input, "已有补充");
-    await user.click(screen.getByRole("button", { name: "补充禁区" }));
+    await user.click(screen.getByRole("button", { name: /计入六人/ }));
 
-    expect(input).toHaveValue("已有补充\n\n不要使用临时设定解围。");
+    expect(input).toHaveValue("退休档案员计入六名核心人物，岛上共有六名旧案相关者。");
+    await user.click(screen.getByRole("button", { name: /自己输入/ }));
+    expect(input).toHaveValue("");
+    expect(input).toHaveFocus();
+  });
+
+  it("does not turn legacy topic suggestions into a choose-the-next-topic question", async () => {
+    const legacyState = setupState();
+    legacyState.question = null;
+    vi.spyOn(api, "setupState").mockResolvedValue(legacyState);
+    render(<SetupConversation projectId="project-1" onApproved={() => undefined} onExit={() => undefined} />);
+
+    await screen.findByRole("textbox");
+    expect(screen.queryByText("请选择下一步优先确认的方向")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /计入六人/ })).not.toBeInTheDocument();
+  });
+
+  it("clears the composer immediately after send", async () => {
+    const user = userEvent.setup();
+    let resolveTurn!: (state: SetupStateDocument) => void;
+    const pendingTurn = new Promise<SetupStateDocument>((resolve) => { resolveTurn = resolve; });
+    vi.spyOn(api, "setupState").mockResolvedValue(setupState());
+    vi.spyOn(api, "continueSetupDiscussion").mockReturnValue(pendingTurn);
+    render(<SetupConversation projectId="project-1" onApproved={() => undefined} onExit={() => undefined} />);
+
+    const input = await screen.findByPlaceholderText("选择上方建议，或者在这里输入你自己的回答...");
+    await user.type(input, "我的回答");
+    await user.click(screen.getByRole("button", { name: "发送本轮讨论" }));
+
+    expect(input).toHaveValue("");
+    expect(window.sessionStorage.getItem("novelpilot:book-direction-input:project-1")).toBeNull();
+    resolveTurn(setupState());
+    await waitFor(() => expect(api.continueSetupDiscussion).toHaveBeenCalledWith("我的回答"));
+  });
+
+  it("restores the submitted text when sending fails", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, "setupState").mockResolvedValue(setupState());
+    vi.spyOn(api, "continueSetupDiscussion").mockRejectedValue(new Error("request failed"));
+    render(<SetupConversation projectId="project-1" onApproved={() => undefined} onExit={() => undefined} />);
+
+    const input = await screen.findByRole("textbox");
+    await user.type(input, "retry this answer");
+    await user.click(screen.getByTitle("发送本轮讨论"));
+
+    await waitFor(() => expect(input).toHaveValue("retry this answer"));
+    expect(window.sessionStorage.getItem("novelpilot:book-direction-input:project-1")).toBe("retry this answer");
   });
 
   it("switches the main stage to review after synthesis", async () => {

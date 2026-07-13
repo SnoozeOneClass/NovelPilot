@@ -10,6 +10,7 @@ import { harnessVisibleOutputForLatestAction } from "../../types/domain";
 import { formatRunStatus } from "../../types/display";
 import type { LlmProfilesDocument, ProjectSummary } from "../../types/domain";
 import { EvidenceCenter } from "../evidence/EvidenceCenter";
+import { ExperimentLab } from "../experiments/ExperimentLab";
 import { SettingsView } from "../settings/SettingsView";
 import { SetupConversation } from "../setup-conversation/SetupConversation";
 import { StoryWorldView } from "../story-world/StoryWorldView";
@@ -24,13 +25,13 @@ interface WorkspaceProps {
 }
 
 type WorkspaceLocation = TaskDomain | "settings";
-type WorkspaceCommand = "start" | "resume" | "pause" | "export" | "approve" | "retry" | "recover" | "revision";
+type WorkspaceCommand = "start" | "resume" | "pause" | "export" | "approve" | "retry" | "recover" | "revision" | "freeze";
 type WorkspaceNotice = { kind: "success" | "error"; text: string };
 
 function initialLocation(project: ProjectSummary): WorkspaceLocation {
   try {
     const stored = window.sessionStorage.getItem(`novelpilot.location.${project.metadata.project_id}`);
-    if (["cocreate", "workbench", "story", "evidence", "settings"].includes(stored ?? "")) {
+    if (["cocreate", "workbench", "story", "evidence", "experiments", "settings"].includes(stored ?? "")) {
       return stored as WorkspaceLocation;
     }
   } catch {
@@ -56,6 +57,7 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
   const projectState = queries.activeProject.data ?? project;
   const metadata = projectState.metadata;
   const currentArc = queries.currentArc.data ?? null;
+  const experimentFixture = queries.experimentFixture.data ?? null;
   const readiness = queries.readiness.data ?? null;
   const profiles = queries.profiles.data ?? null;
   const artifactPaths = queries.artifactPaths.data ?? [];
@@ -145,9 +147,18 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
     if (ok) setFeedbackNotice({ kind: "success", text: `已导出：${path}` });
   }
 
-  async function approveArc(): Promise<boolean> {
-    const ok = await runCommand("approve", async () => { await api.approveCurrentArc(); });
+  async function approveArc(targetChapterCount: number): Promise<boolean> {
+    const ok = await runCommand("approve", async () => { await api.approveCurrentArc(targetChapterCount); });
     if (ok) setFeedbackNotice({ kind: "success", text: "当前故事弧已批准，可以继续章节写作。" });
+    return ok;
+  }
+
+  async function freezeExperimentFixture(): Promise<boolean> {
+    let fixtureId = "";
+    const ok = await runCommand("freeze", async () => {
+      fixtureId = (await api.freezeExperimentFixture()).fixture.fixture_id;
+    });
+    if (ok) setFeedbackNotice({ kind: "success", text: `实验母本已就绪：${fixtureId}` });
     return ok;
   }
 
@@ -280,6 +291,17 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
             onResume={resumeRun}
             onRetry={retryCurrentChapter}
             onRefreshAudit={async () => { await queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.completion(projectId) }); }}
+          />
+        );
+      case "experiments":
+        return (
+          <ExperimentLab
+            status={experimentFixture}
+            operationMode={metadata.operation_mode}
+            loading={queries.experimentFixture.isLoading}
+            busy={pendingCommands.has("freeze")}
+            onFreeze={freezeExperimentFixture}
+            onOpenSettings={() => setLocation("settings")}
           />
         );
       case "settings":

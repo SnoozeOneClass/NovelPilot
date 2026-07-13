@@ -66,4 +66,18 @@ describe("ProjectSelector", () => {
     await waitFor(() => expect(opened).toHaveBeenCalled());
     expect(create).toHaveBeenCalledWith("full_auto");
   });
+
+  it("offers an in-page reconnect when the initial project request fails", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.listProjects)
+      .mockRejectedValueOnce(new Error("本地服务尚未就绪。"))
+      .mockResolvedValueOnce([project]);
+    renderSelector();
+
+    expect(await screen.findByText("本地服务尚未就绪。")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "重新连接" }));
+
+    expect(await screen.findByRole("button", { name: /测试小说/ })).toBeInTheDocument();
+    expect(api.listProjects).toHaveBeenCalledTimes(2);
+  });
 });

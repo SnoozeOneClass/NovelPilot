@@ -24,7 +24,7 @@ const project: ProjectSummary = {
 };
 
 describe("AppShell", () => {
-  it("exposes only the four task domains in primary navigation", async () => {
+  it("keeps the experiment lab in primary navigation", async () => {
     const user = userEvent.setup();
     const navigate = vi.fn();
     render(
@@ -46,8 +46,8 @@ describe("AppShell", () => {
     );
 
     const primary = screen.getAllByRole("navigation", { name: "任务域" })[0];
-    expect(primary).toHaveTextContent("共创工作台故事世界证据中心");
-    await user.click(screen.getAllByRole("button", { name: "证据中心" })[0]);
-    expect(navigate).toHaveBeenCalledWith("evidence");
+    expect(primary).toHaveTextContent("共创工作台故事世界证据中心实验室");
+    await user.click(screen.getAllByRole("button", { name: "实验室" })[0]);
+    expect(navigate).toHaveBeenCalledWith("experiments");
   });
 });

@@ -16,6 +16,7 @@ export const workspaceQueryKeys = {
   setup: (projectId: string) => ["workspace", projectId, "setup"] as const,
   readiness: (projectId: string) => ["workspace", projectId, "readiness"] as const,
   arc: (projectId: string) => ["workspace", projectId, "arc"] as const,
+  experimentFixture: (projectId: string) => ["workspace", projectId, "experiment-fixture"] as const,
   profiles: () => ["profiles"] as const,
   artifactPaths: (projectId: string) => ["workspace", projectId, "artifact-paths"] as const,
   artifactSummaries: (projectId: string) => ["workspace", projectId, "artifact-summaries"] as const,
@@ -30,6 +31,10 @@ export function useWorkspaceQueries(projectId: string) {
   const setup = useQuery({ queryKey: workspaceQueryKeys.setup(projectId), queryFn: api.setupState });
   const readiness = useQuery({ queryKey: workspaceQueryKeys.readiness(projectId), queryFn: api.readiness });
   const currentArc = useQuery({ queryKey: workspaceQueryKeys.arc(projectId), queryFn: api.currentArc });
+  const experimentFixture = useQuery({
+    queryKey: workspaceQueryKeys.experimentFixture(projectId),
+    queryFn: api.experimentFixtureStatus
+  });
   const profiles = useQuery({ queryKey: workspaceQueryKeys.profiles(), queryFn: api.profiles });
   const artifactPaths = useQuery({ queryKey: workspaceQueryKeys.artifactPaths(projectId), queryFn: api.listArtifacts });
   const artifactSummaries = useQuery({ queryKey: workspaceQueryKeys.artifactSummaries(projectId), queryFn: api.artifactSummaries });
@@ -50,7 +55,7 @@ export function useWorkspaceQueries(projectId: string) {
   const canonContents = Object.fromEntries(
     (Object.keys(canonFiles) as CanonKind[]).map((kind, index) => [kind, canonQueries[index]?.data ?? emptyCanonContents[kind]])
   ) as Record<CanonKind, string>;
-  const error = [activeProject, setup, readiness, currentArc, profiles, artifactPaths, artifactSummaries, completionAudit]
+  const error = [activeProject, setup, readiness, currentArc, experimentFixture, profiles, artifactPaths, artifactSummaries, completionAudit]
     .find((query) => query.error)?.error ?? null;
 
   return {
@@ -58,6 +63,7 @@ export function useWorkspaceQueries(projectId: string) {
     setup,
     readiness,
     currentArc,
+    experimentFixture,
     profiles,
     artifactPaths,
     artifactSummaries,

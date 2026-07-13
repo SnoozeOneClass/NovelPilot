@@ -127,12 +127,27 @@
 }
 
 .errorNotice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   margin-bottom: 14px;
   border-left: 3px solid var(--np-danger);
   padding: 10px 12px;
   background: var(--np-danger-soft);
   color: var(--np-danger);
   font-size: 13px;
+}
+
+.errorNotice button {
+  flex: 0 0 auto;
+  border: 1px solid var(--np-danger);
+  border-radius: var(--np-radius-sm);
+  padding: 5px 9px;
+  background: transparent;
+  color: var(--np-danger);
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .projectPanel {

@@ -189,7 +189,7 @@ def test_review_context_records_versioned_sources_hashes_and_total_budget() -> N
     )
 
 
-def test_book_discussion_parses_cumulative_draft_and_advisory_readiness(
+def test_book_discussion_parses_one_question_and_answer_options(
     monkeypatch,
 ) -> None:
     profile = _profile()
@@ -200,7 +200,7 @@ def test_book_discussion_parses_cumulative_draft_and_advisory_readiness(
         return ChatResult(
             content=json.dumps(
                 {
-                    "reply": "The emotional cost is now clear. What must remain unresolved?",
+                    "reply": "The emotional cost is now clear, so the next decision should identify its focus.",
                     "direction_draft": _long_direction(),
                     "discussion_summary": "A fair mystery with a costly hopeful ending.",
                     "confirmed_decisions": ["Fair clues", "Costly hopeful ending"],
@@ -208,14 +208,14 @@ def test_book_discussion_parses_cumulative_draft_and_advisory_readiness(
                     "unresolved_questions": ["The final relationship outcome"],
                     "assumptions": ["The city remains politically stable"],
                     "contradictions": [],
+                    "question": "Which relationship must carry the emotional cost?",
                     "suggestions": [
                         {"label": "Leave it open", "message": "Keep that relationship open."},
                         {"label": "Reconcile", "message": "Let them reconcile at a cost."},
                         {"label": "Separate", "message": "They should separate permanently."},
-                        {"label": "Ignored", "message": "This fourth suggestion is discarded."},
                     ],
-                    "ready_status": "ready",
-                    "readiness_reason": "The stable direction is sufficiently concrete.",
+                    "ready_status": "continue",
+                    "readiness_reason": "The final relationship outcome remains open.",
                 },
                 ensure_ascii=False,
             ),
@@ -236,11 +236,16 @@ def test_book_discussion_parses_cumulative_draft_and_advisory_readiness(
     )
 
     assert result.direction_draft == _long_direction()
-    assert result.readiness.status == "ready"
+    assert result.readiness.status == "continue"
+    assert result.question == "Which relationship must carry the emotional cost?"
     assert len(result.suggestions) == 3
     assert result.suggestions[0].id == "turn-0001-suggestion-1"
     assert captured["request"].metadata["atomic_action"] == "continue_book_discussion"
     assert captured["request"].response_format == {"type": "json_object"}
+    system_prompt = captured["request"].messages[0].content
+    assert "决定“下一步问什么”是全书 Loop 的职责" in system_prompt
+    assert "人物身份、人数范围、角色关系" in system_prompt
+    assert "suggestions 是同一个问题的答案" in system_prompt
 
 
 def test_book_discussion_rejects_invalid_model_state(monkeypatch) -> None:
@@ -258,6 +263,7 @@ def test_book_discussion_rejects_invalid_model_state(monkeypatch) -> None:
                     "unresolved_questions": [],
                     "assumptions": [],
                     "contradictions": [],
+                    "question": None,
                     "suggestions": [],
                     "ready_status": "approved",
                     "readiness_reason": "The model tried to approve it.",
@@ -272,6 +278,67 @@ def test_book_discussion_rejects_invalid_model_state(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="invalid ready_status"):
         book_loop.continue_book_discussion(_profile(), state, "Continue.", assembly)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error"),
+    [
+        (
+            {"question": "Which cost matters? Which relationship bears it?"},
+            "exactly one question",
+        ),
+        (
+            {
+                "suggestions": [
+                    {"label": "Personal", "message": "Make the cost personal."}
+                ]
+            },
+            "2 to 3 answer options",
+        ),
+        (
+            {"ready_status": "ready", "question": "Continue anyway?", "suggestions": []},
+            "must not contain a question",
+        ),
+        (
+            {"question": "Which issue should we discuss first?"},
+            "must choose the next concrete decision",
+        ),
+    ],
+)
+def test_book_discussion_rejects_non_plan_question_shapes(
+    overrides: dict[str, object],
+    error: str,
+) -> None:
+    payload: dict[str, object] = {
+        "reply": "The latest answer establishes the central cost.",
+        "direction_draft": _long_direction(),
+        "discussion_summary": "A fair mystery with a costly hopeful ending.",
+        "confirmed_decisions": ["Fair clues"],
+        "superseded_decisions": [],
+        "unresolved_questions": ["The final relationship outcome"],
+        "assumptions": [],
+        "contradictions": [],
+        "question": "Which relationship must carry the emotional cost?",
+        "suggestions": [
+            {"label": "Mentor", "message": "Let the mentor relationship bear it."},
+            {"label": "Sibling", "message": "Let the sibling relationship bear it."},
+        ],
+        "ready_status": "continue",
+        "readiness_reason": "One high-impact decision remains.",
+    }
+    payload.update(overrides)
+
+    with pytest.raises(ValueError, match=error):
+        book_loop._discussion_result_from_payload(
+            payload,
+            ChatResult(
+                content="{}",
+                model_snapshot="story-model",
+                provider_snapshot="openai-compatible",
+            ),
+            1,
+            "Continue.",
+        )
 
 
 def test_book_discussion_redacts_provider_secrets_from_model_content(monkeypatch) -> None:
@@ -290,7 +357,11 @@ def test_book_discussion_redacts_provider_secrets_from_model_content(monkeypatch
                     "unresolved_questions": [],
                     "assumptions": [],
                     "contradictions": [],
-                    "suggestions": [],
+                    "question": "Which consequence matters most?",
+                    "suggestions": [
+                        {"label": "Personal", "message": "Make the consequence personal."},
+                        {"label": "Public", "message": "Make the consequence public."},
+                    ],
                     "ready_status": "continue",
                     "readiness_reason": "Continue.",
                 }
@@ -367,6 +438,7 @@ def test_record_discussion_turn_persists_trace_without_committing_book_direction
     attempt_dir = project_path / Path(context_path).parent
     assert updated.turn_count == 1
     assert updated.revision == 2
+    assert updated.question == "Which relationship must carry the emotional cost?"
     assert [message.role for message in updated.messages] == ["user", "assistant"]
     assert "A fair mystery" in transcript
     assert (attempt_dir / "response.json").exists()
@@ -1158,7 +1230,7 @@ def _profile(
     )
 
 
-def _turn_result(*, reply: str = "Which relationship must carry the emotional cost?") -> BookDiscussionTurnResult:
+def _turn_result(*, reply: str = "The next decision should identify the relationship cost.") -> BookDiscussionTurnResult:
     return BookDiscussionTurnResult(
         reply=reply,
         direction_draft=_long_direction(),
@@ -1168,16 +1240,22 @@ def _turn_result(*, reply: str = "Which relationship must carry the emotional co
         unresolved_questions=["Which relationship bears the final cost?"],
         assumptions=["The final cost will be personal"],
         contradictions=[],
+        question="Which relationship must carry the emotional cost?",
         suggestions=[
             SetupSuggestion(
                 id="turn-0001-suggestion-1",
                 label="Mentor",
                 message="Let the mentor relationship carry the cost.",
-            )
+            ),
+            SetupSuggestion(
+                id="turn-0001-suggestion-2",
+                label="Sibling",
+                message="Let the sibling relationship carry the cost.",
+            ),
         ],
         readiness=SetupReadinessSignal(
-            status="ready",
-            reason="The stable direction can be reviewed, but discussion may continue.",
+            status="continue",
+            reason="The final relationship cost still needs one decision.",
         ),
         model_snapshot="story-model",
         provider_snapshot="openai-compatible",

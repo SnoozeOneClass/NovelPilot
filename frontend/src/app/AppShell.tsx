@@ -2,6 +2,7 @@ import {
   BookHeart,
   ChevronsLeft,
   ChevronsRight,
+  FlaskConical,
   GitBranch,
   LibraryBig,
   MessagesSquare,
@@ -24,7 +25,8 @@ const domainItems: Array<{ id: TaskDomain; label: string; icon: typeof MessagesS
   { id: "cocreate", label: "共创", icon: MessagesSquare },
   { id: "workbench", label: "工作台", icon: SquareTerminal },
   { id: "story", label: "故事世界", icon: LibraryBig },
-  { id: "evidence", label: "证据中心", icon: GitBranch }
+  { id: "evidence", label: "证据中心", icon: GitBranch },
+  { id: "experiments", label: "实验室", icon: FlaskConical }
 ];
 
 const locationLabels: Record<ShellLocation, string> = {
@@ -32,6 +34,7 @@ const locationLabels: Record<ShellLocation, string> = {
   workbench: "创作工作台",
   story: "故事世界",
   evidence: "证据中心",
+  experiments: "实验室",
   settings: "设置"
 };
 

@@ -15,7 +15,7 @@ interface StoryWorldViewProps {
   summaries: ArtifactSummary[];
   canonContents: Record<CanonKind, string>;
   approving: boolean;
-  onApprove: () => Promise<boolean>;
+  onApprove: (targetChapterCount: number) => Promise<boolean>;
   onRequestRevision: (message: string) => Promise<boolean>;
   onSelectArtifact: (path: string) => void;
   onRefresh: () => Promise<void>;

@@ -8,6 +8,9 @@
 .reviewBadge { display: inline-flex; align-items: center; gap: 5px; color: var(--np-warning); font-size: 9px; font-weight: 700; }
 .reviewBadge > span { width: 7px; height: 7px; border-radius: 50%; background: var(--np-warning); }
 .reviewActions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.chapterCountField { display: grid; grid-template-columns: auto 58px; align-items: center; gap: 2px 6px; margin-right: 4px; color: var(--np-text-secondary); font-size: 9px; }
+.chapterCountField input { width: 58px; height: 32px; border: 1px solid var(--np-line-strong); border-radius: var(--np-radius-sm); padding: 0 7px; background: var(--np-surface-raised); color: var(--np-text); font: 10px var(--np-font-mono); }
+.chapterCountField small { grid-column: 1 / 3; color: var(--np-text-muted); font-size: 8px; }
 .primaryButton, .secondaryButton, .quietButton, .textLink { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; border-radius: var(--np-radius-sm); padding: 0 10px; font-size: 10px; }
 .primaryButton { border: 1px solid var(--np-accent); background: var(--np-accent); color: #fff; }
 .secondaryButton { border: 1px solid var(--np-line-strong); background: var(--np-surface-raised); color: var(--np-text); }
@@ -41,4 +44,4 @@
 .textLink { margin: 8px; }
 .empty { display: grid; gap: 6px; place-items: center; margin: 18px; color: var(--np-text-muted); font-size: 10px; text-align: center; }
 @media (max-width: 1100px) { .columns { grid-template-columns: 190px minmax(0, 1fr); } .chapterList { display: none; } }
-@media (max-width: 767px) { .heading { display: none; } .reviewBanner { align-items: stretch; flex-direction: column; } .reviewActions { justify-content: stretch; } .reviewActions button { flex: 1; } .revisionBox { grid-template-columns: 1fr; } .columns { min-height: 0; grid-template-columns: 1fr; } .listPanel { border-right: 0; border-bottom: 1px solid var(--np-line); } .arcList { max-height: 180px; overflow: auto; } .planSummary { border-right: 0; } }
+@media (max-width: 767px) { .heading { display: none; } .reviewBanner { align-items: stretch; flex-direction: column; } .reviewActions { justify-content: stretch; } .reviewActions button { flex: 1; } .chapterCountField { width: 100%; grid-template-columns: 1fr 70px; } .chapterCountField input { width: 70px; } .revisionBox { grid-template-columns: 1fr; } .columns { min-height: 0; grid-template-columns: 1fr; } .listPanel { border-right: 0; border-bottom: 1px solid var(--np-line); } .arcList { max-height: 180px; overflow: auto; } .planSummary { border-right: 0; } }

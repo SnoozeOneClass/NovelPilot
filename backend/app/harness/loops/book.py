@@ -33,6 +33,24 @@ MAX_DIRECTION_DRAFT_CHARACTERS = 24_000
 MAX_DISCUSSION_SUMMARY_CHARACTERS = 8_000
 MAX_DECISION_STATE_CHARACTERS = 20_000
 SUPERSEDED_HISTORY_CHARACTER_BUDGET = 8_000
+META_PRIORITY_QUESTION_FRAGMENTS = (
+    "先讨论哪个",
+    "先确认哪个",
+    "优先讨论哪个",
+    "优先确认哪个",
+    "接下来讨论哪个",
+    "接下来确认哪个",
+    "下一步讨论哪个",
+    "下一步确认哪个",
+    "选择下一步",
+    "选择哪个问题",
+    "选择哪个方向",
+    "which issue should we",
+    "which topic should we",
+    "which question should we",
+    "what should we discuss first",
+    "what should we confirm first",
+)
 
 
 @dataclass(frozen=True)
@@ -51,6 +69,7 @@ class BookDiscussionTurnResult:
     unresolved_questions: list[str]
     assumptions: list[str]
     contradictions: list[str]
+    question: str | None
     suggestions: list[SetupSuggestion]
     readiness: SetupReadinessSignal
     model_snapshot: str
@@ -457,17 +476,19 @@ def build_review_context_snapshot(state: SetupStateDocument) -> dict[str, Any]:
 def _discussion_system_prompt() -> str:
     return """你是 NovelPilot 全书 Loop 的共创访谈模型。你当前只负责和用户深入讨论整本小说的长期方向，不写正文，不规划所有故事弧或章节，也不替用户批准最高层目标。
 
-这是一场开放式讨论：没有固定题库、固定顺序、最低轮数、最高轮数或预设问题数量。先理解并回应用户本轮输入，再根据已有内容聚焦当前少量真正关键的问题，让用户可以自然深入回答，不要一次抛出检查清单。问题必须来自这本具体小说的真实缺口、矛盾或创作机会，禁止机械遍历检查表。
+这是一场开放式讨论：没有固定题库、固定顺序、最低轮数、最高轮数或预设问题数量。先理解并简短回应用户本轮输入，再由你根据完整上下文自主判断并选择当前影响最大的一个未决事项，直接提出关于该事项的具体问题。决定“下一步问什么”是全书 Loop 的职责，不能反过来询问用户想先讨论哪个问题、优先确认哪个方向，也不能把若干讨论主题做成选项让用户选择。每轮最多一个问题，禁止复合提问、连续追问或一次抛出检查清单；其余待定项只保留在 unresolved_questions，留到后续轮次逐一处理。
+
+选择下一问时，优先处理会阻塞大量下游设计的基础口径：人物身份、人数范围、角色关系、对象指代、术语定义和已经出现的硬矛盾；其次是客观规则、时间线与因果链；最后才是在这些基础上展开主题、证据、反转和结局取舍。这只是根据依赖关系判断优先级，不是固定题库。每收到一次用户回答，都要把新信息合并进当前状态，再重新判断下一项最高影响缺口。例如，如果“召集另外六人”和“六名核心人物”造成召集者是否计入六人的歧义，应直接询问召集者是否计入六人，而不是让用户在“澄清人数范围”和其他议题之间选择。
 
 每轮都要重写一份完整、可独立阅读的 Book Direction 草稿。草稿只能把用户明确确认的内容写成确定事实；未确认但有用的推断必须明确标为假设；矛盾和待定项必须保留，不能悄悄替用户决定。模型认为信息充分时，ready_status 可以是 ready，但这只是提示，用户仍可无限继续讨论。
 
 confirmed_decisions 是本轮结束后的完整有效决定列表。不得静默删除已有决定；只有用户本轮明确改变或撤销旧决定时，才能同时在 superseded_decisions 中记录旧决定的完整原文、替代决定、原因，以及来自“用户本轮输入”的逐字短引文。没有被合法取代的旧决定必须继续保留。
 
-suggestions 提供 1 到 3 条用户可能想说的话，每条包含简短 label 和可直接放入输入框的 message；它们只用于启发，不能缩窄自由回答空间。所有用户可见内容使用中文，不输出私有思维链。
+当 ready_status 为 continue 时，reply 只写简短的承接和提问理由，不得包含问句；question 必须是你已经选定的唯一一个具体问题，并且只包含一个问号；suggestions 必须提供 2 到 3 个针对这个问题、结合当前上下文且相互有区分度的候选回答，每条包含简短 label 和可直接作为用户回答的 message。suggestions 是同一个问题的答案，不是“先讨论什么”“下一步做什么”或“比较哪些方案”的会话动作。不要在 suggestions 中加入“其他”选项，界面会固定提供“自己输入”。当 ready_status 为 ready 时，question 必须为 null，suggestions 必须为空数组。所有用户可见内容使用中文，不输出私有思维链。
 
 严格只返回一个 JSON 对象，字段必须完整：
 {
-  "reply": "自然回复，并在需要时提出当前真正关键的问题",
+  "reply": "对用户本轮输入的简短承接，以及为什么下一项决定重要；这里不能包含问句",
   "direction_draft": "完整 Markdown 草稿",
   "discussion_summary": "供后续上下文压缩使用的完整而紧凑的讨论摘要",
   "confirmed_decisions": ["已确认决定"],
@@ -475,7 +496,8 @@ suggestions 提供 1 到 3 条用户可能想说的话，每条包含简短 labe
   "unresolved_questions": ["待澄清问题"],
   "assumptions": ["明确标注的假设"],
   "contradictions": ["尚未解决的矛盾"],
-  "suggestions": [{"label":"简短标签","message":"用户口吻的候选回复"}],
+  "question": "本轮唯一的直接问题；信息充分时为 null",
+  "suggestions": [{"label":"简短选项名","message":"可直接提交的用户口吻候选回答"}],
   "ready_status": "continue 或 ready",
   "readiness_reason": "简短说明"
 }"""
@@ -590,8 +612,17 @@ def _discussion_result_from_payload(
     if ready_status not in {"continue", "ready"}:
         raise ValueError("Book discussion response has an invalid ready_status.")
     validated_ready_status = cast(Literal["continue", "ready"], ready_status)
+    reply = _required_string(payload.get("reply"), "reply")
+    question = _discussion_question_from_payload(
+        payload.get("question"), ready_status=validated_ready_status
+    )
+    suggestions = _suggestions_from_payload(
+        payload.get("suggestions"), turn, ready_status=validated_ready_status
+    )
+    if "?" in reply or "？" in reply:
+        raise ValueError("Book discussion reply must not contain additional questions.")
     turn_result = BookDiscussionTurnResult(
-        reply=_required_string(payload.get("reply"), "reply"),
+        reply=reply,
         direction_draft=_required_string(
             payload.get("direction_draft"),
             "direction_draft",
@@ -617,7 +648,8 @@ def _discussion_result_from_payload(
         contradictions=_required_string_list(
             payload.get("contradictions"), "contradictions"
         ),
-        suggestions=_suggestions_from_payload(payload.get("suggestions"), turn),
+        question=question,
+        suggestions=suggestions,
         readiness=SetupReadinessSignal(
             status=validated_ready_status,
             reason=_required_string(payload.get("readiness_reason"), "readiness_reason"),
@@ -725,11 +757,45 @@ def _superseded_decisions_from_payload(
     return decisions
 
 
-def _suggestions_from_payload(value: Any, turn: int) -> list[SetupSuggestion]:
+def _discussion_question_from_payload(
+    value: Any,
+    *,
+    ready_status: Literal["continue", "ready"],
+) -> str | None:
+    if ready_status == "ready":
+        if value is not None:
+            raise ValueError("Ready book discussion response must not contain a question.")
+        return None
+    question = _required_string(value, "question", max_characters=600)
+    if question.count("?") + question.count("？") != 1:
+        raise ValueError("Book discussion response must contain exactly one question.")
+    if not question.endswith(("?", "？")):
+        raise ValueError("Book discussion question must end with a question mark.")
+    normalized = question.casefold()
+    if any(fragment in normalized for fragment in META_PRIORITY_QUESTION_FRAGMENTS):
+        raise ValueError(
+            "Book discussion must choose the next concrete decision instead of "
+            "delegating topic prioritization to the user."
+        )
+    return question
+
+
+def _suggestions_from_payload(
+    value: Any,
+    turn: int,
+    *,
+    ready_status: Literal["continue", "ready"],
+) -> list[SetupSuggestion]:
     if not isinstance(value, list):
         raise ValueError("Book discussion response is missing suggestions.")
+    if ready_status == "ready":
+        if value:
+            raise ValueError("Ready book discussion response must not contain suggestions.")
+        return []
+    if not 2 <= len(value) <= 3:
+        raise ValueError("Book discussion response must provide 2 to 3 answer options.")
     suggestions: list[SetupSuggestion] = []
-    for index, item in enumerate(value[:3]):
+    for index, item in enumerate(value):
         if not isinstance(item, dict):
             raise ValueError("Book discussion suggestion must be an object.")
         suggestions.append(
@@ -739,6 +805,10 @@ def _suggestions_from_payload(value: Any, turn: int) -> list[SetupSuggestion]:
                 message=_required_string(item.get("message"), "suggestion.message"),
             )
         )
+    labels = [item.label.casefold() for item in suggestions]
+    messages = [item.message.casefold() for item in suggestions]
+    if len(labels) != len(set(labels)) or len(messages) != len(set(messages)):
+        raise ValueError("Book discussion answer options must be unique.")
     return suggestions
 
 

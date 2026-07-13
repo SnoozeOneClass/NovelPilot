@@ -7,6 +7,8 @@ import type {
   LiteraryReviewRequest,
   CurrentArcApprovalResponse,
   CurrentArcState,
+  ExperimentFixtureCreateResponse,
+  ExperimentFixtureStatus,
   ChapterRetryResponse,
   ArtifactSummary,
   OperationMode,
@@ -18,6 +20,7 @@ import type {
 } from "../types/domain";
 
 const jsonHeaders = { "Content-Type": "application/json" };
+const projectListTimeoutMs = 5_000;
 const configuredApiBase = import.meta.env.VITE_API_BASE_URL?.trim().replace(/\/$/, "");
 const apiBase = configuredApiBase || "";
 
@@ -47,9 +50,11 @@ function extractErrorDetail(value: unknown): string | null {
   if (detail) {
     return detail;
   }
-  if (typeof value.message === "string") {
-    return value.message;
-  }
+  const message = typeof value.message === "string" ? value.message : null;
+  const issues = extractErrorDetail(value.issues);
+  if (message && issues) return `${message} ${issues}`;
+  if (message) return message;
+  if (issues) return issues;
   if (typeof value.msg === "string") {
     return value.msg;
   }
@@ -74,16 +79,32 @@ export function formatApiError(error: unknown): string {
   return error instanceof Error ? error.message : "Request failed.";
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(apiUrl(path), init);
-  if (!response.ok) {
-    throw new Error(await readErrorMessage(response));
+async function request<T>(path: string, init?: RequestInit, timeoutMs?: number): Promise<T> {
+  const timeoutController = timeoutMs ? new AbortController() : null;
+  const timeoutId = timeoutController
+    ? window.setTimeout(() => timeoutController.abort(), timeoutMs)
+    : null;
+  try {
+    const response = await fetch(apiUrl(path), {
+      ...init,
+      signal: timeoutController?.signal ?? init?.signal
+    });
+    if (!response.ok) {
+      throw new Error(await readErrorMessage(response));
+    }
+    return (await response.json()) as T;
+  } catch (error) {
+    if (timeoutController?.signal.aborted) {
+      throw new Error("连接本地服务超时，请确认后端已经启动。", { cause: error });
+    }
+    throw error;
+  } finally {
+    if (timeoutId !== null) window.clearTimeout(timeoutId);
   }
-  return (await response.json()) as T;
 }
 
 export const api = {
-  listProjects: () => request<ProjectSummary[]>("/api/projects"),
+  listProjects: () => request<ProjectSummary[]>("/api/projects", undefined, projectListTimeoutMs),
   activeProject: () => request<ProjectSummary | null>("/api/projects/active"),
   createProject: (operation_mode: OperationMode) =>
     request<ProjectSummary>("/api/projects", {
@@ -135,8 +156,18 @@ export const api = {
       body: JSON.stringify({ candidate_revision, title })
     }),
   currentArc: () => request<CurrentArcState | null>("/api/arcs/current"),
-  approveCurrentArc: () =>
-    request<CurrentArcApprovalResponse>("/api/arcs/current/approve", { method: "POST" }),
+  approveCurrentArc: (target_chapter_count: number) =>
+    request<CurrentArcApprovalResponse>("/api/arcs/current/approve", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ target_chapter_count })
+    }),
+  experimentFixtureStatus: () =>
+    request<ExperimentFixtureStatus>("/api/experiments/fixtures/status"),
+  freezeExperimentFixture: () =>
+    request<ExperimentFixtureCreateResponse>("/api/experiments/fixtures", {
+      method: "POST"
+    }),
   startRun: () => request<{ run_id: string; status: string }>("/api/runs/start", { method: "POST" }),
   pauseRun: () => request<{ status: string }>("/api/runs/pause", { method: "POST" }),
   resumeRun: () => request<{ status: string }>("/api/runs/resume", { method: "POST" }),

@@ -2,7 +2,11 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
-from app.schemas.arcs import CurrentArcApprovalResponse, CurrentArcState
+from app.schemas.arcs import (
+    CurrentArcApprovalRequest,
+    CurrentArcApprovalResponse,
+    CurrentArcState,
+)
 from app.schemas.events import HarnessEvent
 from app.storage import arcs as arc_storage
 from app.storage.events import append_event
@@ -25,10 +29,15 @@ def get_current_arc() -> CurrentArcState | None:
 
 
 @router.post("/current/approve", response_model=CurrentArcApprovalResponse)
-def approve_current_arc() -> CurrentArcApprovalResponse:
+def approve_current_arc(
+    request: CurrentArcApprovalRequest | None = None,
+) -> CurrentArcApprovalResponse:
     project_path = _active_project_or_404()
     try:
-        arc = arc_storage.approve_current_arc(project_path)
+        arc = arc_storage.approve_current_arc(
+            project_path,
+            request.target_chapter_count if request is not None else None,
+        )
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -44,7 +53,13 @@ def approve_current_arc() -> CurrentArcApprovalResponse:
             artifact_path=arc.plan_path,
             routing_decision="continue",
             message=f"{arc.arc_id} approved for chapter writing.",
-            payload={"arc_id": arc.arc_id},
+            payload={
+                "arc_id": arc.arc_id,
+                "recommended_target_chapter_count": (
+                    arc.recommended_target_chapter_count
+                ),
+                "target_chapter_count": arc.target_chapter_count,
+            },
         ),
     )
     return CurrentArcApprovalResponse(arc=arc, run_status=metadata.run_status)

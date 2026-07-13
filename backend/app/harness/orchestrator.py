@@ -17,6 +17,7 @@ from app.schemas.artifacts import (
     VerificationSignal,
 )
 from app.schemas.events import EventStatus, HarnessEvent, LoopLayer
+from app.schemas.arcs import StoryArcPlanProposal
 from app.schemas.patches import CandidateStatePatch, PatchValidationResult
 from app.schemas.profiles import LlmProfile
 from app.schemas.projects import ProjectMetadata, RunStatus
@@ -228,8 +229,11 @@ class HarnessOrchestrator:
                 [
                     "Create the first rolling story arc plan for this novel.",
                     "Do not plan the full book. Plan only the current arc from committed state.",
-                    "Return a concise Markdown plan with arc goal, conflicts, chapter direction, "
-                    "pacing signal, foreshadowing movement, and stop conditions.",
+                    "Return one JSON object with plan_markdown and target_chapter_count. "
+                    "plan_markdown must be a concise Markdown plan with arc goal, conflicts, "
+                    "chapter direction, pacing signal, foreshadowing movement, and stop "
+                    "conditions. target_chapter_count must be an integer from 1 through 30 "
+                    "chosen from the approved rolling contract and current pacing needs.",
                     f"Book settings:\n{settings}",
                     f"Approved rolling story arc contract:\n{rolling_contract}",
                     f"Book state:\n{book_state}",
@@ -239,47 +243,20 @@ class HarnessOrchestrator:
                 ]
             )
         )
-        emitted_delta = False
-
-        def on_text_delta(chunk: ChatChunk) -> None:
-            nonlocal emitted_delta
-            emitted_delta = True
-            self._emit_model_output_delta(
-                metadata,
-                "story_arc",
-                "plan_current_arc",
-                chunk.text_delta,
-            )
-
-        result = call_llm(
+        result, proposal = self._call_story_arc_plan_action(
             profile,
-            ChatRequest(
-                profile_id=profile.id,
-                messages=[
-                    ChatMessage(
-                        role="system",
-                        content=(
-                            "You are Novelpilot's story arc loop. Produce visible planning "
-                            "output only, not private chain-of-thought."
-                        ),
-                    ),
-                    ChatMessage(role="user", content=prompt),
-                ],
-                stream=True,
-                temperature=0.7,
-                metadata={
-                    "loop_layer": "story_arc",
-                    "atomic_action": "plan_current_arc",
-                    "arc_id": arc_id,
-                    "on_text_delta": on_text_delta,
-                },
+            metadata,
+            action="plan_current_arc",
+            system=(
+                "You are Novelpilot's story arc loop. Produce visible planning output only, "
+                "not private chain-of-thought. Return the requested JSON object only."
             ),
+            user=prompt,
+            arc_id=arc_id,
         )
-        if not emitted_delta:
-            self._emit_model_output(metadata, "story_arc", "plan_current_arc", result.content)
 
         plan_path = arc_path / "plan.md"
-        write_text_file(plan_path, result.content.strip() + "\n")
+        write_text_file(plan_path, proposal.plan_markdown.strip() + "\n")
         write_json(
             arc_path / "state.json",
             {
@@ -297,7 +274,8 @@ class HarnessOrchestrator:
                     else "not_required"
                 ),
                 "approved_at": None,
-                "target_chapter_count": 3,
+                "recommended_target_chapter_count": proposal.target_chapter_count,
+                "target_chapter_count": proposal.target_chapter_count,
                 "completed_chapter_ids": [],
                 "completed_at": None,
             },
@@ -326,6 +304,7 @@ class HarnessOrchestrator:
             payload={
                 "profile_id": profile.id,
                 "model_snapshot": result.model_snapshot,
+                "recommended_target_chapter_count": proposal.target_chapter_count,
             },
         )
         if paused:
@@ -538,7 +517,8 @@ class HarnessOrchestrator:
                     "Revise the current rolling story arc plan using the user feedback.",
                     "Keep the plan current-arc-only. Preserve useful constraints, but update pacing, "
                     "focus, or chapter direction where the feedback requires it.",
-                    "Return the complete revised Markdown plan only.",
+                    "Return one JSON object with the complete revised Markdown in "
+                    "plan_markdown and a revised target_chapter_count integer from 1 through 30.",
                     f"User feedback:\n{feedback}",
                     f"Current arc plan:\n{current_plan}",
                     f"Book settings:\n{_read_text(self.context.project_path / 'book' / 'settings.md')}",
@@ -548,18 +528,18 @@ class HarnessOrchestrator:
                 ]
             )
         )
-        result = self._call_feedback_llm_action(
+        result, proposal = self._call_story_arc_plan_action(
             profile,
             metadata,
-            loop_layer="story_arc",
             action="revise_current_arc_plan",
             system=(
                 "You are Novelpilot's story arc loop. Revise visible planning artifacts only; "
                 "do not reveal private chain-of-thought."
             ),
             user=prompt,
+            arc_id=arc_id,
         )
-        revised_plan = result.content.strip() + "\n"
+        revised_plan = proposal.plan_markdown.strip() + "\n"
         write_text_file(plan_path, revised_plan)
         write_text_file(
             arc_path / "revision.md",
@@ -567,12 +547,16 @@ class HarnessOrchestrator:
                 [
                     "# Arc Revision",
                     f"## User Feedback\n{feedback}",
-                    f"## Revised Plan\n{result.content.strip()}",
+                    f"## Revised Plan\n{proposal.plan_markdown.strip()}",
                 ]
             )
             + "\n",
         )
-        self._update_arc_revision_state(metadata, result)
+        self._update_arc_revision_state(
+            metadata,
+            result,
+            target_chapter_count=proposal.target_chapter_count,
+        )
         self._finish_feedback_artifact_step(
             metadata,
             loop_layer="story_arc",
@@ -882,6 +866,8 @@ class HarnessOrchestrator:
         self,
         metadata: ProjectMetadata,
         result: ChatResult,
+        *,
+        target_chapter_count: int,
     ) -> None:
         if metadata.active_arc_id is None:
             return
@@ -897,7 +883,8 @@ class HarnessOrchestrator:
         state["revision_path"] = f"arcs/{metadata.active_arc_id}/revision.md"
         state["model_snapshot"] = result.model_snapshot
         state["provider_snapshot"] = result.provider_snapshot
-        state.setdefault("target_chapter_count", 3)
+        state["recommended_target_chapter_count"] = target_chapter_count
+        state["target_chapter_count"] = target_chapter_count
         state.setdefault("completed_chapter_ids", [])
         state.setdefault("completed_at", None)
         if metadata.operation_mode == "participatory":
@@ -910,6 +897,39 @@ class HarnessOrchestrator:
             state["human_review"] = "not_required"
             state["approved_at"] = None
         write_json(state_path, state)
+
+    def _call_story_arc_plan_action(
+        self,
+        profile: LlmProfile,
+        metadata: ProjectMetadata,
+        *,
+        action: str,
+        system: str,
+        user: str,
+        arc_id: str,
+    ) -> tuple[ChatResult, StoryArcPlanProposal]:
+        result = call_llm(
+            profile,
+            ChatRequest(
+                profile_id=profile.id,
+                messages=[
+                    ChatMessage(role="system", content=system),
+                    ChatMessage(role="user", content=user),
+                ],
+                response_format=JSON_OBJECT_RESPONSE_FORMAT,
+                stream=False,
+                temperature=0.7,
+                metadata={
+                    "loop_layer": "story_arc",
+                    "atomic_action": action,
+                    "project_id": metadata.project_id,
+                    "arc_id": arc_id,
+                },
+            ),
+        )
+        proposal = _story_arc_plan_from_llm(result.content)
+        self._emit_model_output(metadata, "story_arc", action, proposal.plan_markdown)
+        return result, proposal
 
     def _bump_book_feedback_state(self) -> None:
         state_path = self.context.project_path / "book" / "state.json"
@@ -1665,6 +1685,20 @@ def _parse_json_object(text: str) -> dict[str, object] | None:
         if isinstance(value, dict):
             return value
     return None
+
+
+def _story_arc_plan_from_llm(content: str) -> StoryArcPlanProposal:
+    payload = _parse_json_object(content)
+    if payload is None:
+        raise ValueError("Story arc planner output could not be parsed as JSON.")
+    try:
+        proposal = StoryArcPlanProposal.model_validate(payload)
+    except ValueError as exc:
+        raise ValueError("Story arc planner output did not match the required schema.") from exc
+    plan_markdown = proposal.plan_markdown.strip()
+    if not plan_markdown:
+        raise ValueError("Story arc planner returned an empty Markdown plan.")
+    return proposal.model_copy(update={"plan_markdown": plan_markdown})
 
 
 def _text_chunks(text: str, chunk_size: int = 1000) -> list[str]:

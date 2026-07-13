@@ -1,4 +1,4 @@
-import { FileCheck2, MessageSquareText, Send, Sparkles } from "lucide-react";
+import { FileCheck2, MessageSquareText, PencilLine, Send, Sparkles } from "lucide-react";
 import { useEffect, useRef } from "react";
 import type { SetupStateDocument } from "../../types/domain";
 import type { BusyAction, Notice } from "./setup-types";
@@ -32,6 +32,8 @@ export function SetupDiscussion({
   onExit
 }: SetupDiscussionProps) {
   const endRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const question = state.question;
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
@@ -72,19 +74,45 @@ export function SetupDiscussion({
         <div ref={endRef} />
       </div>
 
-      {state.suggestions.length > 0 && busyAction === null && (
-        <div className={styles.suggestions}>
-          <span>参考方向</span>
-          <div>{state.suggestions.map((suggestion) => <button key={suggestion.id} title={suggestion.message} onClick={() => onUseSuggestion(suggestion.message)}>{suggestion.label}</button>)}</div>
-        </div>
+      {question && state.suggestions.length > 0 && busyAction === null && (
+        <section className={styles.questionCard} aria-labelledby="book-direction-question">
+          <header>
+            <span>NovelPilot 判断的当前关键问题</span>
+            <h2 id="book-direction-question">{question}</h2>
+          </header>
+          <div className={styles.answerOptions} role="group" aria-label="模型建议的回答">
+            {state.suggestions.map((suggestion, index) => (
+              <button
+                key={suggestion.id}
+                type="button"
+                data-selected={input === suggestion.message}
+                onClick={() => onUseSuggestion(suggestion.message)}
+              >
+                <span>{String.fromCharCode(65 + index)}</span>
+                <div><strong>{suggestion.label}</strong><small>{suggestion.message}</small></div>
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={() => {
+                onInputChange("");
+                inputRef.current?.focus();
+              }}
+            >
+              <span><PencilLine size={14} /></span>
+              <div><strong>自己输入</strong><small>以上选项都不合适，直接告诉 NovelPilot 你的决定。</small></div>
+            </button>
+          </div>
+        </section>
       )}
 
       <div className={styles.composer}>
         <textarea
+          ref={inputRef}
           value={input}
           maxLength={32000}
           disabled={busyAction !== null}
-          placeholder="继续描述、纠正、否定或提出新的方向..."
+          placeholder={question ? "选择上方建议，或者在这里输入你自己的回答..." : "继续描述、纠正、否定或提出新的方向..."}
           onChange={(event) => onInputChange(event.target.value)}
           onKeyDown={(event) => { if (event.key === "Enter" && event.ctrlKey) { event.preventDefault(); onSend(); } }}
         />

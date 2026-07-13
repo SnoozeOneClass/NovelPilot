@@ -144,6 +144,7 @@ def record_discussion_turn(
         updated.unresolved_questions = result.unresolved_questions
         updated.assumptions = result.assumptions
         updated.contradictions = result.contradictions
+        updated.question = result.question
         updated.suggestions = result.suggestions
         updated.readiness = result.readiness
         updated.candidate = None
@@ -368,6 +369,7 @@ def approve_setup(
             )
             updated.phase = "approved"
             updated.revision += 1
+            updated.question = None
             updated.suggestions = []
             files = _approved_book_files(project_path, updated, candidate)
             files["project.json"] = _json_document(metadata.model_dump(mode="json"))
@@ -465,6 +467,7 @@ def _discussion_response_payload(
         "unresolved_questions": result.unresolved_questions,
         "assumptions": result.assumptions,
         "contradictions": result.contradictions,
+        "question": result.question,
         "suggestions": [item.model_dump(mode="json") for item in result.suggestions],
         "readiness": result.readiness.model_dump(mode="json"),
         "profile_id": state.last_profile_id,

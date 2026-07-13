@@ -84,7 +84,16 @@ export function ProjectSelector({ onProjectOpened }: ProjectSelectorProps) {
           </button>
         </header>
 
-        {error && <div className={styles.errorNotice}>{error}</div>}
+        {error && (
+          <div className={styles.errorNotice}>
+            <span>{error}</span>
+            {projectsQuery.isError && (
+              <button disabled={projectsQuery.isFetching} onClick={() => void projectsQuery.refetch()}>
+                {projectsQuery.isFetching ? "正在重连..." : "重新连接"}
+              </button>
+            )}
+          </div>
+        )}
 
         <section className={styles.projectPanel} aria-label="本地小说项目">
           <header className={styles.listHeader}>
@@ -113,7 +122,11 @@ export function ProjectSelector({ onProjectOpened }: ProjectSelectorProps) {
             ))}
 
             {projectsQuery.isLoading && (
-              <div className={styles.empty}><Clock3 size={22} /><strong>正在读取本地项目</strong></div>
+              <div className={styles.empty}>
+                <Clock3 size={22} />
+                <strong>{projectsQuery.failureCount ? "正在等待本地服务" : "正在读取本地项目"}</strong>
+                {projectsQuery.failureCount > 0 && <span>后端启动后会自动继续，无需强制刷新。</span>}
+              </div>
             )}
             {!projectsQuery.isLoading && !projectsQuery.isError && projects.length === 0 && (
               <div className={styles.empty}>

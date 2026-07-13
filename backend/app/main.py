@@ -5,6 +5,7 @@ from app.api import (
     arcs,
     artifacts,
     completion,
+    experiments,
     exports,
     feedback,
     profiles,
@@ -39,6 +40,7 @@ def create_app() -> FastAPI:
     app.include_router(artifacts.router, prefix="/api/artifacts", tags=["artifacts"])
     app.include_router(exports.router, prefix="/api/export", tags=["export"])
     app.include_router(completion.router, prefix="/api/completion", tags=["completion"])
+    app.include_router(experiments.router, prefix="/api/experiments", tags=["experiments"])
     app.include_router(readiness.router, prefix="/api/readiness", tags=["readiness"])
 
     return app

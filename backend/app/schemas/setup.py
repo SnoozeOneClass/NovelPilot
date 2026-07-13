@@ -139,6 +139,7 @@ class SetupStateDocument(BaseModel):
     unresolved_questions: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
     contradictions: list[str] = Field(default_factory=list)
+    question: str | None = None
     suggestions: list[SetupSuggestion] = Field(default_factory=list)
     readiness: SetupReadinessSignal = Field(default_factory=SetupReadinessSignal)
     candidate: BookDirectionCandidate | None = None

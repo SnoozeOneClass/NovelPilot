@@ -12,7 +12,7 @@ interface StoryArcsViewProps {
   artifactPaths: string[];
   summaries: ArtifactSummary[];
   approving: boolean;
-  onApprove: () => Promise<boolean>;
+  onApprove: (targetChapterCount: number) => Promise<boolean>;
   onRequestRevision: (message: string) => Promise<boolean>;
   onSelectArtifact: (path: string) => void;
 }
@@ -54,6 +54,9 @@ function parseArcState(content: string, fallbackArcId: string): CurrentArcState 
     const targetChapterCount = typeof state.target_chapter_count === "number" && state.target_chapter_count > 0
       ? Math.floor(state.target_chapter_count)
       : Math.max(completedChapterIds.length, 1);
+    const recommendedTargetChapterCount = typeof state.recommended_target_chapter_count === "number" && state.recommended_target_chapter_count > 0
+      ? Math.floor(state.recommended_target_chapter_count)
+      : targetChapterCount;
 
     return {
       arc_id: arcId,
@@ -61,6 +64,7 @@ function parseArcState(content: string, fallbackArcId: string): CurrentArcState 
       plan_path: typeof state.plan_path === "string" ? state.plan_path : `arcs/${arcId}/plan.md`,
       human_review: humanReview,
       approved_at: typeof state.approved_at === "string" ? state.approved_at : null,
+      recommended_target_chapter_count: recommendedTargetChapterCount,
       target_chapter_count: targetChapterCount,
       completed_chapter_ids: completedChapterIds,
       completed_at: typeof state.completed_at === "string" ? state.completed_at : null
@@ -94,10 +98,15 @@ export function StoryArcsView({
   const [revisionMessage, setRevisionMessage] = useState("");
   const [revisionNotice, setRevisionNotice] = useState<string | null>(null);
   const [submittingRevision, setSubmittingRevision] = useState(false);
+  const [targetChapterCount, setTargetChapterCount] = useState(currentArc?.target_chapter_count ?? 3);
 
   useEffect(() => {
     if (currentArc?.arc_id) setSelectedArcId(currentArc.arc_id);
   }, [currentArc?.arc_id]);
+
+  useEffect(() => {
+    if (currentArc) setTargetChapterCount(currentArc.target_chapter_count);
+  }, [currentArc]);
 
   useEffect(() => {
     const path = `arcs/${selectedArcId}/plan.md`;
@@ -164,6 +173,7 @@ export function StoryArcsView({
   const sections = parseMarkdownSections(planContent).slice(0, 6);
   const isCurrentArc = currentArc?.arc_id === selectedArcId;
   const awaitingReview = isCurrentArc && currentArc?.human_review === "awaiting_review";
+  const validTargetChapterCount = Number.isInteger(targetChapterCount) && targetChapterCount >= 1 && targetChapterCount <= 30;
   const arcChapterIds = selectedArcState?.completed_chapter_ids ?? [];
   const chapterIds = [...arcChapterIds];
   if (isCurrentArc && activeChapterId && !chapterIds.includes(activeChapterId)) chapterIds.push(activeChapterId);
@@ -209,7 +219,19 @@ export function StoryArcsView({
             <p>AI 已完成当前故事弧计划。该人工门禁必须批准后，才会开始章节创作。</p>
           </div>
           <div className={styles.reviewActions}>
-            <button className={styles.primaryButton} disabled={approving} onClick={() => void onApprove()}>
+            <label className={styles.chapterCountField}>
+              <span>计划章节数</span>
+              <input
+                type="number"
+                min={1}
+                max={30}
+                value={targetChapterCount}
+                disabled={approving}
+                onChange={(event) => setTargetChapterCount(Number(event.target.value))}
+              />
+              <small>Loop 建议 {currentArc?.recommended_target_chapter_count ?? targetChapterCount} 章</small>
+            </label>
+            <button className={styles.primaryButton} disabled={approving || !validTargetChapterCount} onClick={() => void onApprove(targetChapterCount)}>
               <Check size={17} /> {approving ? "正在批准..." : "批准并继续"}
             </button>
             <button className={styles.secondaryButton} onClick={() => setShowRevision((value) => !value)}>

@@ -114,7 +114,7 @@
   align-content: start;
   gap: 12px;
   overflow-y: auto;
-  padding: 18px;
+  padding: 18px 24px;
   background: var(--np-surface);
 }
 
@@ -145,7 +145,7 @@
 }
 
 .message {
-  width: min(82%, 720px);
+  width: min(94%, 1120px);
   border-left: 2px solid var(--np-line-strong);
   padding: 2px 0 2px 12px;
 }
@@ -188,27 +188,89 @@
   white-space: pre-wrap;
 }
 
-.suggestions {
-  display: flex;
-  align-items: center;
+.questionCard {
+  display: grid;
   gap: 10px;
   border-top: 1px solid var(--np-line);
-  padding: 8px 14px;
-  overflow-x: auto;
+  padding: 12px 18px 14px;
+  background: var(--np-surface-raised);
 }
 
-.suggestions > span {
-  flex: 0 0 auto;
+.questionCard > header {
+  display: grid;
+  gap: 4px;
+}
+
+.questionCard > header span {
+  color: var(--np-accent);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.questionCard h2 {
+  margin: 0;
+  color: var(--np-text);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.answerOptions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.answerOptions > button {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: start;
+  gap: 9px;
+  border: 1px solid var(--np-line);
+  border-radius: var(--np-radius-sm);
+  padding: 10px;
+  background: var(--np-surface);
+  color: var(--np-text-secondary);
+  text-align: left;
+}
+
+.answerOptions > button:hover,
+.answerOptions > button[data-selected="true"] {
+  border-color: var(--np-accent);
+  background: var(--np-accent-soft);
+}
+
+.answerOptions > button > span {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--np-surface-muted);
+  color: var(--np-accent);
+  font: 10px var(--np-font-mono);
+}
+
+.answerOptions > button > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.answerOptions strong {
+  color: var(--np-text);
+  font-size: 11px;
+}
+
+.answerOptions small {
+  overflow: hidden;
   color: var(--np-text-muted);
   font-size: 10px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.suggestions > div {
-  display: flex;
-  gap: 6px;
-}
-
-.suggestions button,
 .iconTextButton,
 .issueList button {
   border: 1px solid var(--np-line);
@@ -229,12 +291,14 @@
 
 .composer textarea,
 .reviewComposer textarea {
-  min-height: 76px;
+  min-height: 132px;
+  max-height: 260px;
   resize: vertical;
   border: 0;
   padding: 12px 14px;
   background: transparent;
   color: var(--np-text);
+  font-size: 13px;
   line-height: 1.6;
   outline: 0;
 }
@@ -904,7 +968,8 @@
   }
 
   .reviewColumns,
-  .recommendedTitles {
+  .recommendedTitles,
+  .answerOptions {
     grid-template-columns: 1fr;
   }
 

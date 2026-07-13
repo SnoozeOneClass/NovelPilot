@@ -65,7 +65,7 @@ export function SetupConversation({ projectId, onApproved, onExit, onSetupChange
   }
 
   function useSuggestedText(message: string) {
-    setInput((current) => current.trim() ? `${current.trimEnd()}\n\n${message}` : message);
+    setInput(message);
   }
 
   async function sendMessage() {
@@ -73,12 +73,18 @@ export function SetupConversation({ projectId, onApproved, onExit, onSetupChange
     if (!message || !canSend) return;
     setBusyAction("turn");
     setNotice(null);
+    setInput("");
+    writeLocalDraft(draftStorageKey, "");
     try {
       const nextState = await api.continueSetupDiscussion(message);
       await applyState(nextState);
-      setInput("");
       setNotice({ kind: "success", text: "本轮讨论完成，方向草稿和不确定项已经更新。" });
     } catch (error) {
+      const currentDraft = readLocalDraft(draftStorageKey);
+      if (!currentDraft.trim()) {
+        writeLocalDraft(draftStorageKey, message);
+        setInput(message);
+      }
       setNotice({ kind: "error", text: `${formatSetupError(error)} 当前输入尚未提交，可以直接重试。` });
     } finally {
       setBusyAction(null);

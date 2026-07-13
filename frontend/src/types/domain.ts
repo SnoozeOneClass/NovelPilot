@@ -164,6 +164,7 @@ export interface SetupStateDocument {
   unresolved_questions: string[];
   assumptions: string[];
   contradictions: string[];
+  question: string | null;
   suggestions: SetupSuggestion[];
   readiness: SetupReadinessSignal;
   candidate: BookDirectionCandidate | null;
@@ -183,9 +184,46 @@ export interface CurrentArcState {
   plan_path: string;
   human_review: ArcReviewStatus;
   approved_at: string | null;
+  recommended_target_chapter_count: number;
   target_chapter_count: number;
   completed_chapter_ids: string[];
   completed_at: string | null;
+}
+
+export interface ExperimentFixtureIssue {
+  code: string;
+  message: string;
+}
+
+export interface ExperimentFixtureCheckpoint {
+  source_project_name: string;
+  source_project_id: string;
+  source_title: string | null;
+  active_arc_id: string;
+  completed_arc_ids: string[];
+  warmup_chapter_ids: string[];
+  recommended_target_chapter_count: number;
+  target_chapter_count: number;
+  checkpoint_fingerprint: string;
+}
+
+export interface ExperimentFixtureSummary {
+  fixture_id: string;
+  created_at: string;
+  relative_path: string;
+  checkpoint: ExperimentFixtureCheckpoint;
+}
+
+export interface ExperimentFixtureStatus {
+  eligible: boolean;
+  issues: ExperimentFixtureIssue[];
+  checkpoint: ExperimentFixtureCheckpoint | null;
+  existing_fixture: ExperimentFixtureSummary | null;
+}
+
+export interface ExperimentFixtureCreateResponse {
+  created: boolean;
+  fixture: ExperimentFixtureSummary;
 }
 
 export interface CurrentArcApprovalResponse {

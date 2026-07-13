@@ -71,7 +71,10 @@ def test_orchestrator_plans_initial_arc_with_active_profile(tmp_path, monkeypatc
     def fake_call_llm(_profile, request):
         captured_prompts.append(request.messages[-1].content)
         return ChatResult(
-            content="# Arc 1\n\nA focused first arc.",
+            content=(
+                '{"plan_markdown":"# Arc 1\\n\\nA focused first arc.",'
+                '"target_chapter_count":9}'
+            ),
             model_snapshot="story-model",
             provider_snapshot="openai-compatible",
         )
@@ -90,6 +93,8 @@ def test_orchestrator_plans_initial_arc_with_active_profile(tmp_path, monkeypatc
     assert metadata["active_arc_id"] == "arc-001"
     assert metadata["run_status"] == "idle"
     assert arc_state["model_snapshot"] == "story-model"
+    assert arc_state["recommended_target_chapter_count"] == 9
+    assert arc_state["target_chapter_count"] == 9
     assert plan.startswith("# Arc 1")
     assert "Approved rolling story arc contract" in captured_prompts[-1]
     assert "该项目从旧版全书设定迁移而来" in captured_prompts[-1]
@@ -99,6 +104,41 @@ def test_orchestrator_plans_initial_arc_with_active_profile(tmp_path, monkeypatc
         for event in events
     )
     assert events[-1].kind == "artifact_written"
+
+
+def test_orchestrator_fails_closed_for_invalid_story_arc_plan_output(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    project_path = _make_project(tmp_path, setup_approved=True)
+    profile = LlmProfile(
+        id="main",
+        name="Main",
+        protocol="openai-compatible",
+        base_url="https://api.example.com/v1",
+        api_key=SecretStr("secret"),
+        model="story-model",
+    )
+    monkeypatch.setattr(orchestrator, "get_active_profile", lambda: profile)
+    monkeypatch.setattr(
+        orchestrator,
+        "call_llm",
+        lambda _profile, _request: ChatResult(
+            content='{"plan_markdown":"# Arc 1","target_chapter_count":0}',
+            model_snapshot="story-model",
+            provider_snapshot="openai-compatible",
+        ),
+    )
+
+    HarnessOrchestrator(
+        HarnessRunContext(project_path=project_path, run_id="run-1")
+    ).advance_to_next_checkpoint()
+
+    metadata = read_json(project_path / "project.json")
+    events = read_events(project_path)
+    assert metadata["run_status"] == "failed"
+    assert events[-1].kind == "run_failed"
+    assert not (project_path / "arcs" / "arc-001" / "state.json").exists()
 
 
 def _assert_sanitized_llm_payload(event: HarnessEvent) -> None:
@@ -165,7 +205,10 @@ def test_pause_request_becomes_paused_at_safe_checkpoint(tmp_path, monkeypatch) 
         metadata_payload["run_status"] = "pause_requested"
         write_json(project_path / "project.json", metadata_payload)
         return ChatResult(
-            content="# Arc 1\n\nA focused first arc.",
+            content=(
+                '{"plan_markdown":"# Arc 1\\n\\nA focused first arc.",'
+                '"target_chapter_count":9}'
+            ),
             model_snapshot="story-model",
             provider_snapshot="openai-compatible",
         )
@@ -204,7 +247,10 @@ def test_participatory_arc_waits_for_approval_before_chapter_loop(
         orchestrator,
         "call_llm",
         lambda _profile, _request: ChatResult(
-            content="# Arc 1\n\nA focused first arc.",
+            content=(
+                '{"plan_markdown":"# Arc 1\\n\\nA focused first arc.",'
+                '"target_chapter_count":9}'
+            ),
             model_snapshot="story-model",
             provider_snapshot="openai-compatible",
         ),
@@ -244,6 +290,8 @@ def test_approving_participatory_arc_allows_chapter_loop(tmp_path, monkeypatch) 
             "plan_path": "arcs/arc-001/plan.md",
             "human_review": "awaiting_review",
             "approved_at": None,
+            "recommended_target_chapter_count": 9,
+            "target_chapter_count": 9,
         },
     )
     (project_path / "arcs" / "arc-001" / "plan.md").write_text("# Arc 1\n", encoding="utf-8")
@@ -257,7 +305,7 @@ def test_approving_participatory_arc_allows_chapter_loop(tmp_path, monkeypatch) 
     )
     monkeypatch.setattr(orchestrator, "get_active_profile", lambda: profile)
 
-    arc_storage.approve_current_arc(project_path)
+    arc_storage.approve_current_arc(project_path, target_chapter_count=12)
     HarnessOrchestrator(
         HarnessRunContext(project_path=project_path, run_id="run-1")
     ).advance_to_next_checkpoint()
@@ -267,6 +315,8 @@ def test_approving_participatory_arc_allows_chapter_loop(tmp_path, monkeypatch) 
 
     assert metadata_payload["active_chapter_id"] == "chapter-001"
     assert arc_state["human_review"] == "approved"
+    assert arc_state["recommended_target_chapter_count"] == 9
+    assert arc_state["target_chapter_count"] == 12
     assert (project_path / "chapters" / "chapter-001" / "context_snapshot.json").exists()
 
 
@@ -666,7 +716,10 @@ def test_arc_feedback_revises_current_arc_plan_and_reopens_participatory_review(
         nonlocal captured_prompt
         captured_prompt = request.messages[-1].content
         return ChatResult(
-            content="# Arc 1\n\nSlow the pacing and emphasize recovery.",
+            content=(
+                '{"plan_markdown":"# Arc 1\\n\\nSlow the pacing and emphasize recovery.",'
+                '"target_chapter_count":7}'
+            ),
             model_snapshot="story-model",
             provider_snapshot="openai-compatible",
         )
@@ -702,6 +755,8 @@ def test_arc_feedback_revises_current_arc_plan_and_reopens_participatory_review(
     assert "Slow the pacing" in plan
     assert "User Feedback" in revision
     assert arc_state["version"] == 2
+    assert arc_state["recommended_target_chapter_count"] == 7
+    assert arc_state["target_chapter_count"] == 7
     assert arc_state["human_review"] == "awaiting_review"
     assert metadata_payload["run_status"] == "waiting_for_user"
     assert any(event.kind == "feedback_artifact_written" for event in events)
@@ -1218,7 +1273,10 @@ def test_completed_arc_rolls_to_next_arc_plan(tmp_path, monkeypatch) -> None:
         orchestrator,
         "call_llm",
         lambda _profile, _request: ChatResult(
-            content="# Arc 2\n\nThe next rolling arc.",
+            content=(
+                '{"plan_markdown":"# Arc 2\\n\\nThe next rolling arc.",'
+                '"target_chapter_count":11}'
+            ),
             model_snapshot="story-model",
             provider_snapshot="openai-compatible",
         ),
@@ -1236,4 +1294,7 @@ def test_completed_arc_rolls_to_next_arc_plan(tmp_path, monkeypatch) -> None:
     assert arc_one_state["completed_chapter_ids"] == ["chapter-001"]
     assert metadata_payload["active_arc_id"] == "arc-002"
     assert metadata_payload["active_chapter_id"] is None
+    assert read_json(project_path / "arcs" / "arc-002" / "state.json")[
+        "target_chapter_count"
+    ] == 11
     assert arc_two_plan.startswith("# Arc 2")

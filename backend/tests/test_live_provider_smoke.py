@@ -243,9 +243,8 @@ def _fixture_call_llm(_profile: object, request: ChatRequest) -> ChatResult:
                 "unresolved_questions": [],
                 "assumptions": [],
                 "contradictions": [],
-                "suggestions": [
-                    {"label": "Review", "message": "Prepare the direction for review."}
-                ],
+                "question": None,
+                "suggestions": [],
                 "ready_status": "ready",
                 "readiness_reason": "Stable direction and rolling freedoms are explicit.",
             }
@@ -280,7 +279,12 @@ def _fixture_call_llm(_profile: object, request: ChatRequest) -> ChatResult:
                 "signals": ["confirmed_decisions_preserved:passed", "rolling_scope:passed"],
             }
         ),
-        "plan_current_arc": "# Arc 1\n\nA rolling first arc focused on earned trust.",
+        "plan_current_arc": json.dumps(
+            {
+                "plan_markdown": "# Arc 1\n\nA rolling first arc focused on earned trust.",
+                "target_chapter_count": 3,
+            }
+        ),
         "generate_chapter_goal": (
             "# Chapter Goal\n\nProve the protagonist can trust companions without breaking continuity."
         ),
