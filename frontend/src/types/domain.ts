@@ -35,6 +35,7 @@ export interface LlmProfilePublic {
   protocol: LlmProtocol;
   base_url: string;
   model: string;
+  request_options: Record<string, unknown>;
   enabled: boolean;
   has_api_key: boolean;
 }
@@ -60,6 +61,7 @@ export interface LlmProfileMutation {
   base_url: string;
   api_key?: string | null;
   model: string;
+  request_options: Record<string, unknown>;
   enabled: boolean;
 }
 
@@ -78,6 +80,8 @@ export interface SetupSuggestion {
   id: string;
   label: string;
   message: string;
+  rationale?: string;
+  recommended?: boolean;
 }
 
 export interface SetupReadinessSignal {

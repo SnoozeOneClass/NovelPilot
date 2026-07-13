@@ -24,6 +24,7 @@ def test_profile_public_view_masks_api_key(tmp_path, monkeypatch) -> None:
             base_url="https://api.example.com/v1",
             api_key="secret-key",
             model="example-model",
+            request_options={"reasoning_effort": "high", "max_completion_tokens": 12000},
         )
     )
 
@@ -31,8 +32,16 @@ def test_profile_public_view_masks_api_key(tmp_path, monkeypatch) -> None:
     stored = json.loads(profile_path.read_text(encoding="utf-8"))
 
     assert public_document.profiles[0].has_api_key is True
+    assert public_document.profiles[0].request_options == {
+        "reasoning_effort": "high",
+        "max_completion_tokens": 12000,
+    }
     assert not hasattr(public_document.profiles[0], "api_key")
     assert stored["profiles"][0]["api_key"] == "secret-key"
+    assert stored["profiles"][0]["request_options"] == {
+        "reasoning_effort": "high",
+        "max_completion_tokens": 12000,
+    }
 
 
 def test_profile_update_preserves_existing_api_key(tmp_path, monkeypatch) -> None:
@@ -63,7 +72,37 @@ def test_profile_update_preserves_existing_api_key(tmp_path, monkeypatch) -> Non
 
     assert stored["profiles"][0]["name"] == "Renamed Provider"
     assert stored["profiles"][0]["model"] == "better-model"
+    assert stored["profiles"][0]["request_options"] == {}
     assert stored["profiles"][0]["api_key"] == "secret-key"
+
+
+def test_profile_update_preserves_existing_request_options(tmp_path, monkeypatch) -> None:
+    profile_path = tmp_path / "llm-profiles.local.json"
+    monkeypatch.setattr(profile_storage, "LLM_PROFILES_PATH", profile_path)
+    profile_storage.upsert_profile(
+        LlmProfileUpsert(
+            id="main",
+            name="Main Provider",
+            protocol="openai-compatible",
+            base_url="https://api.example.com/v1",
+            api_key="secret-key",
+            model="example-model",
+            request_options={"reasoning_effort": "medium"},
+        )
+    )
+
+    profile_storage.upsert_profile(
+        LlmProfileUpsert(
+            id="main",
+            name="Renamed Provider",
+            protocol="openai-compatible",
+            base_url="https://api.example.com/v1",
+            model="better-model",
+        )
+    )
+
+    stored = json.loads(profile_path.read_text(encoding="utf-8"))
+    assert stored["profiles"][0]["request_options"] == {"reasoning_effort": "medium"}
 
 
 def test_profile_selection_updates_active_project_metadata(tmp_path, monkeypatch) -> None:
@@ -197,7 +236,8 @@ def test_profile_connection_test_calls_configured_provider(tmp_path, monkeypatch
     def fake_call_llm(profile, request):
         captured_profile_ids.append(profile.id)
         assert request.profile_id == "main"
-        assert request.temperature == 0
+        assert request.stream is True
+        assert request.request_options == {}
         return ChatResult(
             content="Profile works.",
             model_snapshot="example-model",

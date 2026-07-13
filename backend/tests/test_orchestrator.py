@@ -880,7 +880,7 @@ def test_orchestrator_uses_semantic_verifier_routing(tmp_path, monkeypatch) -> N
     assert events[-1].routing_decision == "rewrite"
 
 
-def test_structured_chapter_actions_request_json_response_format(
+def test_chapter_actions_stream_without_forced_provider_request_fields(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -902,11 +902,11 @@ def test_structured_chapter_actions_request_json_response_format(
         api_key=SecretStr("secret"),
         model="story-model",
     )
-    captured_formats: dict[str, dict[str, object] | None] = {}
+    captured_requests = {}
 
     def fake_call_llm(_profile, request):
         action = request.metadata["atomic_action"]
-        captured_formats[action] = request.response_format
+        captured_requests[action] = request
         if action == "extract_candidate_observations":
             content = (
                 '{"schema_version":1,"status":"candidate",'
@@ -937,10 +937,14 @@ def test_structured_chapter_actions_request_json_response_format(
     harness._write_final_chapter(metadata, "chapter-001", chapter_path)
     harness._generate_candidate_state_patch(profile, metadata, "chapter-001", chapter_path)
 
-    assert captured_formats["extract_candidate_observations"] == {"type": "json_object"}
-    assert captured_formats["verify_chapter"] == {"type": "json_object"}
-    assert captured_formats["generate_candidate_state_patch"] == {"type": "json_object"}
-    assert captured_formats["semantic_review"] is None
+    assert set(captured_requests) == {
+        "extract_candidate_observations",
+        "semantic_review",
+        "verify_chapter",
+        "generate_candidate_state_patch",
+    }
+    assert all(request.stream is True for request in captured_requests.values())
+    assert all(request.request_options == {} for request in captured_requests.values())
 
 
 def test_orchestrator_rejects_unparseable_verifier_output(tmp_path, monkeypatch) -> None:

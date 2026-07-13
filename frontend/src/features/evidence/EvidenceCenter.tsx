@@ -78,7 +78,12 @@ export function EvidenceCenter({ events, summaries, artifactPaths, selectedArtif
   const [query, setQuery] = useState("");
   const [eventInspectorOpen, setEventInspectorOpen] = useState(false);
   const [artifactInspectorOpen, setArtifactInspectorOpen] = useState(false);
-  const statusEvents = useMemo(() => events.filter((event) => event.kind !== "llm_output_delta"), [events]);
+  const statusEvents = useMemo(
+    () => events.filter(
+      (event) => event.kind !== "llm_output_delta" && event.kind !== "llm_stream_progress"
+    ),
+    [events]
+  );
   const filteredEvents = useMemo(() => statusEvents.filter((event) => eventMatches(event, loopFilter, statusFilter, query)), [loopFilter, query, statusEvents, statusFilter]);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const traceRef = useRef<HTMLDivElement>(null);

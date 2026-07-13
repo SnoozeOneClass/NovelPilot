@@ -38,12 +38,15 @@ Novelpilot 是一个本地、单用户的长篇 AI 小说创作工作台。
 
 ## 安装与启动
 
-安装 Python 和前端依赖：
+创建项目专用的 Python 3.13 环境，并安装 Python 和前端依赖：
 
 ```powershell
-python -m pip install -e .[dev]
+py -3.13 -m venv .venv
+.\.venv\python.exe -m pip install -e .[dev]
 npm.cmd --prefix frontend install
 ```
+
+仓库根目录的 npm 脚本会直接调用 `.venv\python.exe`，不会使用 PATH 中的 Anaconda 或系统 Python。
 
 分别在两个终端启动后端和前端：
 
@@ -73,6 +76,7 @@ http://127.0.0.1:5173
 - `base_url`
 - `api_key`
 - `model`
+- `request_options`：可选的 Provider 请求体扩展字段
 - `enabled`
 
 Profile 保存在：
@@ -83,16 +87,18 @@ config/llm-profiles.local.json
 
 这个文件会被 git 忽略。小说输出目录只保存脱敏后的 profile/model 快照，不保存 API key。
 
+正式模型调用默认使用流式响应，Novelpilot 不设置应用级总超时，也不再强制写入 `temperature`、`max_tokens` 或 `response_format`。需要的采样参数、推理强度、输出上限或 Provider 私有字段，可以在设置页的“额外请求参数（JSON）”中按 profile 配置；`model`、`messages/system` 和 `stream` 由 Novelpilot 管理，避免扩展字段替换选中的模型、覆盖已经装配的上下文或关闭流式传输。Anthropic 兼容端如果要求 `max_tokens`，请在这里显式配置。扩展参数会通过本地 profile API 返回给设置界面，不要在其中放密钥。
+
 保存 profile 后，可以用 profile 行里的测试按钮先做一次小型 provider smoke test，再启动 harness。
 
 也可以通过 PowerShell 创建或更新 profile，并避免把 API key 写进命令历史：
 
 ```powershell
 $env:NOVELPILOT_API_KEY = "<your-api-key>"
-npm.cmd run profile:upsert -- --id main --name "Main Provider" --protocol openai-compatible --base-url "https://api.example.com/v1" --model "model-name" --api-key-env NOVELPILOT_API_KEY --select
+npm.cmd run profile:upsert -- --id main --name "Main Provider" --protocol openai-compatible --base-url "https://api.example.com/v1" --model "model-name" --api-key-env NOVELPILOT_API_KEY --request-options-json '{"reasoning_effort":"high"}' --select
 ```
 
-更新已有 profile 时，如果省略 `--api-key-env`，会保留已保存的 key，只修改 `--model` 或 `--base-url` 等非密钥字段。
+更新已有 profile 时，如果省略 `--api-key-env`，会保留已保存的 key；省略 `--request-options-json` 会保留已保存的扩展参数。
 
 运行完整 harness smoke 前，可以先在 CLI 测试已保存的 profile：
 

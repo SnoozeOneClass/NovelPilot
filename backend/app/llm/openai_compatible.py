@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from app.llm.request_options import merge_request_options
 from app.schemas.profiles import LlmProfile
 
 if TYPE_CHECKING:
@@ -16,7 +17,7 @@ def call_openai_compatible(profile: LlmProfile, chat_request: "ChatRequest") -> 
     url = str(profile.base_url).rstrip("/") + "/chat/completions"
     payload = _openai_payload(profile, chat_request, stream=False)
     response = _post_json(url, profile.api_key.get_secret_value(), payload)
-    content = response["choices"][0]["message"]["content"]
+    content = _response_text(response)
     return ChatResult(
         content=content,
         usage=response.get("usage", {}),
@@ -38,6 +39,7 @@ def stream_openai_compatible(
     latest_event: dict[str, Any] = {}
 
     for event in _stream_json_events(url, profile.api_key.get_secret_value(), payload):
+        _raise_stream_error(event, "OpenAI-compatible")
         latest_event = event
         latest_model = _string_value(event.get("model"), latest_model)
         usage = event.get("usage")
@@ -47,9 +49,13 @@ def stream_openai_compatible(
             if not isinstance(choice, dict):
                 continue
             delta = choice.get("delta")
-            text_delta = ""
-            if isinstance(delta, dict):
-                text_delta = _string_value(delta.get("content"), "")
+            text_delta = _content_text(delta.get("content")) if isinstance(delta, dict) else ""
+            if not text_delta:
+                message = choice.get("message")
+                if isinstance(message, dict):
+                    text_delta = _content_text(message.get("content"))
+            if not text_delta:
+                text_delta = _content_text(choice.get("text"))
             if text_delta:
                 yield ChatChunk(
                     text_delta=text_delta,
@@ -73,16 +79,16 @@ def _openai_payload(
     *,
     stream: bool,
 ) -> dict[str, Any]:
-    payload: dict[str, Any] = {
+    base_payload: dict[str, Any] = {
         "model": profile.model,
         "messages": [message.model_dump() for message in chat_request.messages],
-        "temperature": chat_request.temperature,
-        "max_tokens": chat_request.metadata.get("max_tokens", 4096),
         "stream": stream,
     }
-    if chat_request.response_format is not None:
-        payload["response_format"] = chat_request.response_format
-    return payload
+    return merge_request_options(
+        base_payload,
+        profile.request_options,
+        chat_request.request_options,
+    )
 
 
 def _post_json(url: str, api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -96,7 +102,7 @@ def _post_json(url: str, api_key: str, payload: dict[str, Any]) -> dict[str, Any
         method="POST",
     )
     try:
-        with urlopen(request, timeout=120) as response:
+        with urlopen(request) as response:
             parsed = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
@@ -124,7 +130,7 @@ def _stream_json_events(
         method="POST",
     )
     try:
-        with urlopen(request, timeout=120) as response:
+        with urlopen(request) as response:
             for event in _iter_sse_json_events(response):
                 yield event
     except HTTPError as exc:
@@ -137,9 +143,9 @@ def _stream_json_events(
 def _iter_sse_json_events(lines: Iterator[bytes]) -> Iterator[dict[str, Any]]:
     for raw_line in lines:
         line = raw_line.decode("utf-8", errors="replace").strip()
-        if not line.startswith("data:"):
+        data = line.removeprefix("data:").strip() if line.startswith("data:") else line
+        if not data.startswith("{"):
             continue
-        data = line.removeprefix("data:").strip()
         if not data or data == "[DONE]":
             continue
         try:
@@ -156,3 +162,46 @@ def _string_value(value: Any, fallback: str) -> str:
 
 def _list_value(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+def _response_text(response: dict[str, Any]) -> str:
+    direct = _content_text(response.get("output_text"))
+    if direct:
+        return direct
+    for choice in _list_value(response.get("choices")):
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message")
+        if isinstance(message, dict):
+            content = _content_text(message.get("content"))
+            if content:
+                return content
+        content = _content_text(choice.get("text"))
+        if content:
+            return content
+    raise RuntimeError("OpenAI-compatible provider response did not contain text output.")
+
+
+def _content_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list):
+        return ""
+    parts: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict):
+            text = item.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+    return "".join(parts)
+
+
+def _raise_stream_error(event: dict[str, Any], provider_name: str) -> None:
+    error = event.get("error")
+    if not isinstance(error, dict):
+        return
+    message = error.get("message")
+    detail = message if isinstance(message, str) else json.dumps(error, ensure_ascii=False)
+    raise RuntimeError(f"{provider_name} provider stream failed: {detail}")

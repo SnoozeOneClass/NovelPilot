@@ -1,19 +1,26 @@
-import { Check, FileCheck2, PanelRight, ShieldCheck } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Check, FileCheck2, ShieldCheck } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, formatApiError } from "../../api/client";
-import type { SetupStateDocument } from "../../types/domain";
-import { DirectionInspector } from "./DirectionInspector";
+import { Dialog } from "../../components/ui/Dialog";
+import type { HarnessEvent, SetupStateDocument } from "../../types/domain";
+import { BookDirectionDocument } from "./BookDirectionDocument";
+import { DirectionLedger } from "./DirectionInspector";
+import { PlanningStageBar } from "./PlanningStageBar";
 import { SetupDiscussion } from "./SetupDiscussion";
 import { SetupReview } from "./SetupReview";
+import { deriveSetupPlanningStage, summarizeSetupChanges, type SetupChangeSummary } from "./setup-planning";
 import type { BusyAction, Notice, TitleChoice } from "./setup-types";
 import styles from "./SetupConversation.module.css";
 
 interface SetupConversationProps {
   projectId: string;
+  events?: HarnessEvent[];
   onApproved: () => void | Promise<void>;
   onExit: () => void;
   onSetupChanged?: (state: SetupStateDocument) => void | Promise<void>;
 }
+
+type WorkspaceView = "plan" | "decision" | "ledger";
 
 const setupErrorCopy: Record<string, string> = {
   "Book direction is already approved.": "全书方向已经批准，不能再写入候选讨论。",
@@ -28,7 +35,7 @@ const setupErrorCopy: Record<string, string> = {
   "The current Book Direction candidate has already been reviewed. Approve it or continue the discussion before preparing another candidate.": "当前候选已经审阅。请批准它，或继续讨论使它失效后再整理新候选。"
 };
 
-export function SetupConversation({ projectId, onApproved, onExit, onSetupChanged }: SetupConversationProps) {
+export function SetupConversation({ projectId, events = [], onApproved, onExit, onSetupChanged }: SetupConversationProps) {
   const draftStorageKey = `novelpilot:book-direction-input:${projectId}`;
   const [state, setState] = useState<SetupStateDocument | null>(null);
   const [input, setInput] = useState(() => readLocalDraft(draftStorageKey));
@@ -36,7 +43,11 @@ export function SetupConversation({ projectId, onApproved, onExit, onSetupChange
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [titleChoice, setTitleChoice] = useState<TitleChoice>(null);
-  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [activeView, setActiveView] = useState<WorkspaceView>("plan");
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [changeSummary, setChangeSummary] = useState<SetupChangeSummary | null>(null);
+  const [streamStartIndex, setStreamStartIndex] = useState(0);
+  const historyTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -48,7 +59,13 @@ export function SetupConversation({ projectId, onApproved, onExit, onSetupChange
   }, []);
 
   useEffect(() => writeLocalDraft(draftStorageKey, input), [draftStorageKey, input]);
-  useEffect(() => setTitleChoice(null), [projectId, state?.candidate?.revision]);
+  useEffect(() => {
+    setTitleChoice(null);
+  }, [projectId, state?.candidate?.revision]);
+
+  useEffect(() => {
+    if (state?.candidate) setActiveView("decision");
+  }, [state?.candidate?.revision]);
 
   const candidate = state?.candidate ?? null;
   const finalTitle = titleChoice?.title.trim() ?? "";
@@ -58,27 +75,36 @@ export function SetupConversation({ projectId, onApproved, onExit, onSetupChange
   const canSend = Boolean(input.trim()) && busyAction === null && !state?.approved;
   const canReview = Boolean(state?.direction_draft.trim()) && candidate === null && busyAction === null && !state?.approved;
   const canApprove = approvalAllowed && Boolean(finalTitle) && !input.trim() && busyAction === null;
+  const streamedCharacterCount = useMemo(
+    () => events.slice(streamStartIndex).reduce((latest, event) => {
+      const value = event.payload.received_characters;
+      return event.kind === "llm_stream_progress" && typeof value === "number"
+        ? value
+        : latest;
+    }, 0),
+    [events, streamStartIndex]
+  );
 
   async function applyState(nextState: SetupStateDocument) {
     setState(nextState);
     await onSetupChanged?.(nextState);
   }
 
-  function useSuggestedText(message: string) {
-    setInput(message);
-  }
-
   async function sendMessage() {
     const message = input.trim();
-    if (!message || !canSend) return;
+    if (!message || !canSend || !state) return;
+    const previousState = state;
+    setStreamStartIndex(events.length);
     setBusyAction("turn");
     setNotice(null);
     setInput("");
     writeLocalDraft(draftStorageKey, "");
     try {
       const nextState = await api.continueSetupDiscussion(message);
+      setChangeSummary(summarizeSetupChanges(previousState, nextState));
       await applyState(nextState);
-      setNotice({ kind: "success", text: "本轮讨论完成，方向草稿和不确定项已经更新。" });
+      setActiveView("decision");
+      setNotice({ kind: "success", text: "本轮讨论已合并进 Book Direction。" });
     } catch (error) {
       const currentDraft = readLocalDraft(draftStorageKey);
       if (!currentDraft.trim()) {
@@ -93,11 +119,13 @@ export function SetupConversation({ projectId, onApproved, onExit, onSetupChange
 
   async function prepareReview() {
     if (!canReview) return;
+    setStreamStartIndex(events.length);
     setBusyAction("review");
     setNotice(null);
     try {
       const nextState = await api.prepareSetupReview();
       await applyState(nextState);
+      setActiveView("decision");
       setNotice({
         kind: nextState.candidate?.review.status === "passed" ? "success" : "error",
         text: nextState.candidate?.review.status === "passed"
@@ -127,63 +155,114 @@ export function SetupConversation({ projectId, onApproved, onExit, onSetupChange
     }
   }
 
+  function closeHistory() {
+    setHistoryOpen(false);
+    requestAnimationFrame(() => historyTriggerRef.current?.focus());
+  }
+
   if (loading) return <div className={styles.centerState}>正在读取全书共创状态...</div>;
   if (!state) return <div className={`${styles.centerState} ${styles.error}`}>无法读取全书共创状态。</div>;
 
-  if (state.approved) {
-    return (
-      <section className={styles.approvedState}>
-        <span><Check size={24} /></span>
-        <p>全书方向已提交</p>
-        <h1>{state.approved_title ? `《${state.approved_title}》` : "全书方向已经批准"}</h1>
-        <div className={styles.approvedDirection}>{state.direction_draft}</div>
-        <footer>
-          <span>后续只滚动规划当前故事弧，候选讨论不会覆盖已批准设定。</span>
-          <button onClick={() => void onApproved()}><ShieldCheck size={16} /> 进入创作工作台</button>
-        </footer>
-      </section>
-    );
-  }
+  const stage = deriveSetupPlanningStage(state);
+  const documentMarkdown = candidate?.direction_markdown ?? state.direction_draft;
+  const documentRevision = candidate?.revision ?? state.revision;
 
   return (
-    <section className={styles.workspace} data-stage={candidate ? "review" : "discussion"}>
-      <main className={styles.mainPane}>
-        <button className={styles.inspectorTrigger} title="查看方向账本" onClick={() => setInspectorOpen(true)}><PanelRight size={17} /></button>
-        {candidate ? (
-          <SetupReview
-            state={state}
-            candidate={candidate}
-            input={input}
-            titleChoice={titleChoice}
-            busyAction={busyAction}
-            notice={notice}
-            approvalAllowed={approvalAllowed}
-            canSend={canSend}
-            canApprove={canApprove}
-            onInputChange={setInput}
-            onTitleChange={setTitleChoice}
-            onUseSuggestion={useSuggestedText}
-            onSend={() => void sendMessage()}
-            onApprove={() => void approve()}
-            onExit={onExit}
-          />
-        ) : (
-          <SetupDiscussion
-            state={state}
-            input={input}
-            busyAction={busyAction}
-            notice={notice}
-            canSend={canSend}
-            canReview={canReview}
-            onInputChange={setInput}
-            onUseSuggestion={useSuggestedText}
-            onSend={() => void sendMessage()}
-            onReview={() => void prepareReview()}
-            onExit={onExit}
-          />
-        )}
+    <section className={styles.workspace} data-stage={stage}>
+      <PlanningStageBar
+        state={state}
+        stage={stage}
+        historyTriggerRef={historyTriggerRef}
+        onOpenHistory={() => setHistoryOpen(true)}
+        onExit={onExit}
+      />
+
+      <nav className={styles.mobileTabs} role="tablist" aria-label="规划工作区视图">
+        {(["plan", "decision", "ledger"] as WorkspaceView[]).map((view) => (
+          <button key={view} type="button" role="tab" aria-selected={activeView === view} aria-controls={`setup-${view}-panel`} onClick={() => setActiveView(view)}>
+            {{ plan: "计划", decision: candidate ? "审阅" : "当前决策", ledger: "账本" }[view]}
+          </button>
+        ))}
+      </nav>
+
+      <main id="setup-plan-panel" role="tabpanel" className={styles.planPane} data-mobile-visible={activeView === "plan"}>
+        <BookDirectionDocument
+          markdown={documentMarkdown}
+          revision={documentRevision}
+          mode={candidate ? "candidate" : "draft"}
+          changeSummary={changeSummary}
+        />
       </main>
-      <DirectionInspector state={state} open={inspectorOpen} onClose={() => setInspectorOpen(false)} />
+
+      <aside className={styles.contextPane} data-mobile-visible={activeView !== "plan"}>
+        {busyAction && (
+          <div className={styles.streamProgress} role="status" aria-live="polite">
+            <span />
+            {streamedCharacterCount
+              ? `模型正在流式生成，已接收 ${streamedCharacterCount.toLocaleString()} 个字符`
+              : "正在连接模型流..."}
+          </div>
+        )}
+        <nav className={styles.contextTabs} role="tablist" aria-label="决策上下文">
+          <button type="button" role="tab" aria-selected={activeView !== "ledger"} aria-controls="setup-decision-panel" onClick={() => setActiveView("decision")}>{candidate ? "候选审阅" : "当前决策"}</button>
+          <button type="button" role="tab" aria-selected={activeView === "ledger"} aria-controls="setup-ledger-panel" onClick={() => setActiveView("ledger")}>方向账本</button>
+        </nav>
+        <div id="setup-decision-panel" role="tabpanel" className={styles.contextPanel} data-visible={activeView !== "ledger"} data-mobile-visible={activeView === "decision"}>
+          {state.approved ? (
+            <section className={styles.approvedHandoff}>
+              <span><Check size={22} /></span>
+              <p>全书方向已批准</p>
+              <h2>{state.approved_title ? `《${state.approved_title}》` : "规划已经完成"}</h2>
+              <small>后续只滚动规划当前故事弧，不会覆盖已批准的最高层方向。</small>
+              <button onClick={() => void onApproved()}><ShieldCheck size={16} />进入创作工作台</button>
+            </section>
+          ) : candidate ? (
+            <SetupReview
+              candidate={candidate}
+              input={input}
+              titleChoice={titleChoice}
+              busyAction={busyAction}
+              notice={notice}
+              approvalAllowed={approvalAllowed}
+              canSend={canSend}
+              canApprove={canApprove}
+              onInputChange={setInput}
+              onTitleChange={setTitleChoice}
+              onUseSuggestion={setInput}
+              onSend={() => void sendMessage()}
+              onApprove={() => void approve()}
+            />
+          ) : (
+            <SetupDiscussion
+              state={state}
+              input={input}
+              busyAction={busyAction}
+              notice={notice}
+              canSend={canSend}
+              canReview={canReview}
+              onInputChange={setInput}
+              onUseSuggestion={setInput}
+              onSend={() => void sendMessage()}
+              onReview={() => void prepareReview()}
+            />
+          )}
+        </div>
+        <div id="setup-ledger-panel" role="tabpanel" className={styles.contextPanel} data-visible={activeView === "ledger"} data-mobile-visible={activeView === "ledger"}>
+          <DirectionLedger state={state} />
+        </div>
+      </aside>
+
+      <Dialog open={historyOpen} title="全书共创讨论记录" onClose={closeHistory}>
+        <div className={styles.historyList}>
+          {state.messages.length > 0 ? state.messages.map((message) => (
+            <article key={message.id} data-role={message.role}>
+              <header><strong>{message.role === "user" ? "你" : "NovelPilot"}</strong><span>第 {message.turn} 轮{message.model_snapshot ? ` · ${message.model_snapshot}` : ""}</span></header>
+              <p>{message.content}</p>
+            </article>
+          )) : <p className={styles.emptyHistory}>还没有讨论记录。</p>}
+        </div>
+      </Dialog>
+
       {busyAction === "review" && (
         <div className={styles.busyOverlay}><FileCheck2 size={20} /><strong>正在综合与审查全书方向</strong><span>候选仍未进入正式设定。</span></div>
       )}

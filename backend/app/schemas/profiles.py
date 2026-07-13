@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, HttpUrl, SecretStr
 
@@ -13,6 +13,7 @@ class LlmProfile(BaseModel):
     base_url: HttpUrl
     api_key: SecretStr
     model: str = Field(min_length=1)
+    request_options: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
 
 
@@ -22,6 +23,7 @@ class LlmProfilePublic(BaseModel):
     protocol: LlmProtocol
     base_url: str
     model: str
+    request_options: dict[str, Any] = Field(default_factory=dict)
     enabled: bool
     has_api_key: bool
 
@@ -53,6 +55,7 @@ class LlmProfileUpsert(BaseModel):
     base_url: HttpUrl
     api_key: str | None = None
     model: str = Field(min_length=1)
+    request_options: dict[str, Any] | None = None
     enabled: bool = True
 
 
@@ -63,6 +66,7 @@ def to_public_profile(profile: LlmProfile) -> LlmProfilePublic:
         protocol=profile.protocol,
         base_url=str(profile.base_url),
         model=profile.model,
+        request_options=profile.request_options,
         enabled=profile.enabled,
         has_api_key=bool(profile.api_key.get_secret_value()),
     )

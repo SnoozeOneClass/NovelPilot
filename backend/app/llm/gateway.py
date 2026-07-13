@@ -16,9 +16,8 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     profile_id: str
     messages: list[ChatMessage]
-    response_format: dict[str, Any] | None = None
-    stream: bool = False
-    temperature: float = 0.7
+    stream: bool = True
+    request_options: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

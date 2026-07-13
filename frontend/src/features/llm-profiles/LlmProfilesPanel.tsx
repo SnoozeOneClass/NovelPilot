@@ -16,12 +16,14 @@ const emptyForm: LlmProfileMutation = {
   base_url: "https://api.openai.com/v1",
   api_key: "",
   model: "",
+  request_options: {},
   enabled: true
 };
 
 export function LlmProfilesPanel({ onProfilesChanged }: LlmProfilesPanelProps) {
   const [profiles, setProfiles] = useState<LlmProfilesDocument | null>(null);
   const [form, setForm] = useState<LlmProfileMutation>(emptyForm);
+  const [requestOptionsText, setRequestOptionsText] = useState("{}");
   const [editingExisting, setEditingExisting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -55,19 +57,37 @@ export function LlmProfilesPanel({ onProfilesChanged }: LlmProfilesPanelProps) {
       base_url: profile.base_url,
       api_key: "",
       model: profile.model,
+      request_options: profile.request_options,
       enabled: profile.enabled
     });
+    setRequestOptionsText(JSON.stringify(profile.request_options, null, 2));
   }
 
   async function saveProfile() {
+    let requestOptions: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(requestOptionsText || "{}");
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw new Error("请求参数必须是 JSON 对象。");
+      }
+      requestOptions = parsed as Record<string, unknown>;
+    } catch (error) {
+      setNotice({ kind: "error", text: error instanceof Error ? error.message : "请求参数不是有效 JSON。" });
+      return;
+    }
     setSaving(true);
     setNotice(null);
     try {
-      await api.upsertProfile({ ...form, api_key: form.api_key?.trim() || null });
+      await api.upsertProfile({
+        ...form,
+        request_options: requestOptions,
+        api_key: form.api_key?.trim() || null
+      });
       const nextProfiles = await api.profiles();
       setProfiles(nextProfiles);
       onProfilesChanged?.(nextProfiles);
       setForm(emptyForm);
+      setRequestOptionsText("{}");
       setEditingExisting(false);
       setNotice({ kind: "success", text: "LLM 配置已保存。" });
     } catch (error) {
@@ -112,7 +132,7 @@ export function LlmProfilesPanel({ onProfilesChanged }: LlmProfilesPanelProps) {
           <h1>设置与模型</h1>
           <p>配置保存在本机全局文件中；小说项目只记录 profile_id 与模型快照。</p>
         </div>
-        <button className={styles.outlineButton} onClick={() => { setForm(emptyForm); setEditingExisting(false); }}>
+        <button className={styles.outlineButton} onClick={() => { setForm(emptyForm); setRequestOptionsText("{}"); setEditingExisting(false); }}>
           <Plus size={16} /> 新建配置
         </button>
       </header>
@@ -159,6 +179,7 @@ export function LlmProfilesPanel({ onProfilesChanged }: LlmProfilesPanelProps) {
             <label><span>模型名</span><input value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })} placeholder="gpt-4.1" /></label>
             <label className={styles.wide}><span>Base URL</span><input value={form.base_url} onChange={(event) => setForm({ ...form, base_url: event.target.value })} placeholder="https://api.example.com/v1" /></label>
             <label className={styles.wide}><span>API Key</span><input value={form.api_key ?? ""} onChange={(event) => setForm({ ...form, api_key: event.target.value })} placeholder={editingExisting ? "留空则保留原密钥" : "API Key"} type="password" /></label>
+            <label className={styles.wide}><span>额外请求参数（JSON）</span><textarea aria-label="额外请求参数（JSON）" value={requestOptionsText} onChange={(event) => setRequestOptionsText(event.target.value)} placeholder={'{"reasoning_effort":"high"}'} /><small>字段会合并到 Provider 请求体；model、messages/system 与 stream 由 NovelPilot 管理。Anthropic 如要求 max_tokens，请在这里显式填写。不要存放额外密钥。</small></label>
             <label className={styles.enabled}><input checked={form.enabled} type="checkbox" onChange={(event) => setForm({ ...form, enabled: event.target.checked })} /><span>启用这个配置</span></label>
           </div>
           <footer>

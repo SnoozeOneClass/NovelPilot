@@ -31,6 +31,7 @@ describe("mergeHarnessEvent", () => {
 describe("refreshTargetsForEvent", () => {
   it("does not refetch server state for streaming text deltas", () => {
     expect(refreshTargetsForEvent({ ...event, kind: "llm_output_delta", status: "delta" })).toEqual([]);
+    expect(refreshTargetsForEvent({ ...event, kind: "llm_stream_progress", status: "delta" })).toEqual([]);
   });
 
   it("refreshes only chapter artifacts and canon for a committed patch", () => {

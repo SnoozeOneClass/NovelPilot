@@ -18,6 +18,7 @@ def _profile_to_storage(profile: LlmProfile) -> dict[str, object]:
         "base_url": str(profile.base_url),
         "api_key": profile.api_key.get_secret_value(),
         "model": profile.model,
+        "request_options": profile.request_options,
         "enabled": profile.enabled,
     }
 
@@ -67,9 +68,13 @@ def upsert_profile(payload: LlmProfileUpsert) -> LlmProfilePublic:
     )
     if not api_key:
         raise ValueError("API key is required for a new LLM profile.")
+    request_options = payload.request_options
+    if request_options is None:
+        request_options = existing.request_options if existing is not None else {}
 
     profile_payload = payload.model_dump()
     profile_payload["api_key"] = api_key
+    profile_payload["request_options"] = request_options
     profile = LlmProfile(**profile_payload)
     remaining = [item for item in document.profiles if item.id != profile.id]
     remaining.append(profile)

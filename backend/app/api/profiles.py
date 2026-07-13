@@ -98,7 +98,6 @@ def test_profile(profile_id: str) -> LlmProfileTestResult:
                         content="Reply with one short sentence confirming this profile works.",
                     ),
                 ],
-                temperature=0,
             ),
         )
     except ValueError as exc:

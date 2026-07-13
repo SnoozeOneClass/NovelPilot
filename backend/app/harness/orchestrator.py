@@ -37,7 +37,6 @@ ChapterRoutingDecision = Literal[
     "escalate_to_arc",
     "escalate_to_book",
 ]
-JSON_OBJECT_RESPONSE_FORMAT: dict[str, Any] = {"type": "json_object"}
 CANON_CONTEXT_FILES = (
     "canon/characters.json",
     "canon/relationships.json",
@@ -908,6 +907,18 @@ class HarnessOrchestrator:
         user: str,
         arc_id: str,
     ) -> tuple[ChatResult, StoryArcPlanProposal]:
+        received_characters = 0
+
+        def on_text_delta(chunk: ChatChunk) -> None:
+            nonlocal received_characters
+            received_characters += len(chunk.text_delta)
+            self._emit_model_stream_progress(
+                metadata,
+                "story_arc",
+                action,
+                received_characters,
+            )
+
         result = call_llm(
             profile,
             ChatRequest(
@@ -916,14 +927,12 @@ class HarnessOrchestrator:
                     ChatMessage(role="system", content=system),
                     ChatMessage(role="user", content=user),
                 ],
-                response_format=JSON_OBJECT_RESPONSE_FORMAT,
-                stream=False,
-                temperature=0.7,
                 metadata={
                     "loop_layer": "story_arc",
                     "atomic_action": action,
                     "project_id": metadata.project_id,
                     "arc_id": arc_id,
+                    "on_text_delta": on_text_delta,
                 },
             ),
         )
@@ -1000,7 +1009,6 @@ class HarnessOrchestrator:
                     f"Book settings:\n{_read_text(self.context.project_path / 'book' / 'settings.md')}",
                 ]
             ),
-            max_tokens=4096,
         )
         write_text_file(chapter_path / "draft.md", result.content.strip() + "\n")
         self._finish_artifact_step(
@@ -1042,7 +1050,6 @@ class HarnessOrchestrator:
                     f"Draft:\n{_read_text(chapter_path / 'draft.md')}",
                 ]
             ),
-            response_format=JSON_OBJECT_RESPONSE_FORMAT,
         )
         payload = _parse_json_object(result.content) or {}
         payload["based_on"] = f"chapters/{chapter_id}/draft.md"
@@ -1129,8 +1136,6 @@ class HarnessOrchestrator:
                     f"Semantic review:\n{_read_text(chapter_path / 'review.md')}",
                 ]
             ),
-            max_tokens=1800,
-            response_format=JSON_OBJECT_RESPONSE_FORMAT,
         )
         verification = _chapter_verification_from_llm(
             chapter_id,
@@ -1216,7 +1221,6 @@ class HarnessOrchestrator:
                     f"Current canon:\n{canon_summary}",
                 ]
             ),
-            response_format=JSON_OBJECT_RESPONSE_FORMAT,
         )
         based_on = {
             "chapter_final": f"chapters/{chapter_id}/final.md",
@@ -1346,8 +1350,6 @@ class HarnessOrchestrator:
         action: str,
         system: str,
         user: str,
-        max_tokens: int = 2048,
-        response_format: dict[str, Any] | None = None,
     ) -> ChatResult:
         emitted_delta = False
         feedback_block = self._feedback_prompt_block(
@@ -1372,14 +1374,10 @@ class HarnessOrchestrator:
                     ChatMessage(role="system", content=system),
                     ChatMessage(role="user", content=effective_user),
                 ],
-                response_format=response_format,
-                stream=True,
-                temperature=0.7,
                 metadata={
                     "loop_layer": "chapter",
                     "atomic_action": action,
                     "project_id": metadata.project_id,
-                    "max_tokens": max_tokens,
                     "on_text_delta": on_text_delta,
                 },
             ),
@@ -1413,8 +1411,6 @@ class HarnessOrchestrator:
                     ChatMessage(role="system", content=system),
                     ChatMessage(role="user", content=user),
                 ],
-                stream=True,
-                temperature=0.7,
                 metadata={
                     "loop_layer": loop_layer,
                     "atomic_action": action,
@@ -1454,6 +1450,23 @@ class HarnessOrchestrator:
             status="delta",
             message="Model visible output.",
             payload={"text_delta": text_delta},
+        )
+
+    def _emit_model_stream_progress(
+        self,
+        metadata: ProjectMetadata,
+        loop_layer: LoopLayer,
+        atomic_action: str,
+        received_characters: int,
+    ) -> None:
+        self._emit(
+            metadata,
+            kind="llm_stream_progress",
+            loop_layer=loop_layer,
+            atomic_action=atomic_action,
+            status="delta",
+            message="Model response is streaming.",
+            payload={"received_characters": received_characters},
         )
 
     def _emit_started(self, metadata: ProjectMetadata, action: str, message: str) -> None:

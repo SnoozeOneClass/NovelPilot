@@ -31,7 +31,10 @@
 .formGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 14px; }
 .formGrid label { min-width: 0; display: grid; gap: 5px; }
 .formGrid label > span { color: var(--np-text-secondary); font-size: 9px; }
-.formGrid input, .formGrid select { min-width: 0; height: 34px; border: 1px solid var(--np-line); border-radius: var(--np-radius-sm); padding: 0 8px; background: var(--np-surface); color: var(--np-text); }
+.formGrid input, .formGrid select, .formGrid textarea { min-width: 0; border: 1px solid var(--np-line); border-radius: var(--np-radius-sm); background: var(--np-surface); color: var(--np-text); }
+.formGrid input, .formGrid select { height: 34px; padding: 0 8px; }
+.formGrid textarea { min-height: 96px; resize: vertical; padding: 8px; font: 10px/1.5 var(--np-font-mono); }
+.formGrid label > small { color: var(--np-text-muted); font-size: 8px; line-height: 1.5; }
 .formGrid .wide { grid-column: 1 / -1; }
 .formGrid .enabled { grid-column: 1 / -1; display: flex; align-items: center; gap: 7px; }
 .enabled input { width: 15px; height: 15px; }

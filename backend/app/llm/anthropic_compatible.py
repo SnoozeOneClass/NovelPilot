@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from app.llm.request_options import merge_request_options
 from app.schemas.profiles import LlmProfile
 
 if TYPE_CHECKING:
@@ -39,6 +40,7 @@ def stream_anthropic_compatible(
     latest_event: dict[str, Any] = {}
 
     for event in _stream_json_events(url, profile.api_key.get_secret_value(), payload):
+        _raise_stream_error(event)
         latest_event = event
         latest_model = _string_value(event.get("model"), latest_model)
         event_type = _string_value(event.get("type"), "")
@@ -93,16 +95,18 @@ def _anthropic_payload(
         for message in chat_request.messages
         if message.role in {"user", "assistant"}
     ]
-    payload: dict[str, Any] = {
+    base_payload: dict[str, Any] = {
         "model": profile.model,
         "messages": messages,
-        "temperature": chat_request.temperature,
-        "max_tokens": chat_request.metadata.get("max_tokens", 4096),
         "stream": stream,
     }
     if system:
-        payload["system"] = system
-    return payload
+        base_payload["system"] = system
+    return merge_request_options(
+        base_payload,
+        profile.request_options,
+        chat_request.request_options,
+    )
 
 
 def _post_json(url: str, api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -117,7 +121,7 @@ def _post_json(url: str, api_key: str, payload: dict[str, Any]) -> dict[str, Any
         method="POST",
     )
     try:
-        with urlopen(request, timeout=120) as response:
+        with urlopen(request) as response:
             parsed = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
@@ -146,7 +150,7 @@ def _stream_json_events(
         method="POST",
     )
     try:
-        with urlopen(request, timeout=120) as response:
+        with urlopen(request) as response:
             for event in _iter_sse_json_events(response):
                 yield event
     except HTTPError as exc:
@@ -159,9 +163,9 @@ def _stream_json_events(
 def _iter_sse_json_events(lines: Iterator[bytes]) -> Iterator[dict[str, Any]]:
     for raw_line in lines:
         line = raw_line.decode("utf-8", errors="replace").strip()
-        if not line.startswith("data:"):
+        data = line.removeprefix("data:").strip() if line.startswith("data:") else line
+        if not data.startswith("{"):
             continue
-        data = line.removeprefix("data:").strip()
         if not data:
             continue
         try:
@@ -174,3 +178,12 @@ def _iter_sse_json_events(lines: Iterator[bytes]) -> Iterator[dict[str, Any]]:
 
 def _string_value(value: Any, fallback: str) -> str:
     return value if isinstance(value, str) else fallback
+
+
+def _raise_stream_error(event: dict[str, Any]) -> None:
+    error = event.get("error")
+    if not isinstance(error, dict):
+        return
+    message = error.get("message")
+    detail = message if isinstance(message, str) else json.dumps(error, ensure_ascii=False)
+    raise RuntimeError(f"Anthropic-compatible provider stream failed: {detail}")

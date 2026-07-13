@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -16,6 +17,7 @@ from app.harness.loops.book import (
     review_book_direction,
     synthesize_book_direction,
 )
+from app.llm.gateway import ChatChunk
 from app.llm.profiles import get_active_profile
 from app.llm.redaction import profile_secret_values, redact_profile_secrets
 from app.schemas.events import EventStatus, HarnessEvent
@@ -92,7 +94,17 @@ def continue_setup_discussion(request: SetupTurnRequest) -> SetupStateDocument:
         )
 
         try:
-            result = continue_book_discussion(profile, state, safe_message, assembly)
+            result = continue_book_discussion(
+                profile,
+                state,
+                safe_message,
+                assembly,
+                _setup_stream_callback(
+                    project_path,
+                    metadata,
+                    action="continue_book_discussion",
+                ),
+            )
         except Exception as exc:
             reason = redact_profile_secrets(str(exc), profile)
             _append_event(
@@ -227,7 +239,15 @@ def prepare_setup_review() -> SetupStateDocument:
                 message="Synthesizing a candidate Book Direction for user review.",
                 payload={"profile_id": profile.id, "candidate_revision": candidate_revision},
             )
-            synthesis = synthesize_book_direction(profile, state)
+            synthesis = synthesize_book_direction(
+                profile,
+                state,
+                _setup_stream_callback(
+                    project_path,
+                    metadata,
+                    action="synthesize_book_direction",
+                ),
+            )
             _append_event(
                 project_path,
                 metadata,
@@ -241,6 +261,11 @@ def prepare_setup_review() -> SetupStateDocument:
                 profile,
                 state,
                 synthesis,
+                _setup_stream_callback(
+                    project_path,
+                    metadata,
+                    action="review_book_direction",
+                ),
             )
         except Exception as exc:
             reason = redact_profile_secrets(str(exc), profile)
@@ -474,3 +499,29 @@ def _append_event(
         append_event(project_path, event)
     except (OSError, ValueError):
         setup_storage.enqueue_pending_setup_event(project_path, event)
+
+
+def _setup_stream_callback(
+    project_path: Path,
+    metadata: ProjectMetadata,
+    *,
+    action: str,
+) -> Callable[[ChatChunk], None]:
+    received_characters = 0
+
+    def emit_delta(chunk: ChatChunk) -> None:
+        nonlocal received_characters
+        if not chunk.text_delta:
+            return
+        received_characters += len(chunk.text_delta)
+        _append_event(
+            project_path,
+            metadata,
+            kind="llm_stream_progress",
+            action=action,
+            status="delta",
+            message="Model response is streaming.",
+            payload={"received_characters": received_characters},
+        )
+
+    return emit_delta

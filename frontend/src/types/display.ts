@@ -121,6 +121,7 @@ const eventKindLabels: Record<string, string> = {
   feedback_artifact_written: "反馈产物已写入",
   feedback_processed: "反馈已处理",
   llm_output_delta: "模型可见输出",
+  llm_stream_progress: "模型流式进度",
   llm_profile_required: "需要 LLM 配置",
   operation_mode_changed: "运行模式已更换",
   pause_ignored: "暂停请求已忽略",

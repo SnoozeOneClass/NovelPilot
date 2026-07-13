@@ -250,6 +250,7 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
           <SetupConversation
             key={projectId}
             projectId={projectId}
+            events={events}
             onSetupChanged={refreshWorkspace}
             onExit={() => setLocation("workbench")}
             onApproved={async () => { await refreshWorkspace(); setLocation("workbench"); }}

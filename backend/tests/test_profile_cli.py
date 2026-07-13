@@ -50,6 +50,7 @@ def test_profile_cli_update_preserves_existing_api_key(
         base_url="https://api.example.com/v1",
         model="example-model",
         api_key_env="NOVELPILOT_API_KEY",
+        request_options={"reasoning_effort": "high"},
         enabled=True,
         select=True,
     )
@@ -69,7 +70,48 @@ def test_profile_cli_update_preserves_existing_api_key(
 
     assert result.profile.name == "Renamed Provider"
     assert result.profile.model == "better-model"
+    assert result.profile.request_options == {"reasoning_effort": "high"}
     assert stored["profiles"][0]["api_key"] == "secret-key"
+    assert stored["profiles"][0]["request_options"] == {"reasoning_effort": "high"}
+
+
+def test_profile_cli_accepts_arbitrary_request_options_json(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    profile_path = tmp_path / "llm-profiles.local.json"
+    monkeypatch.setattr(profile_storage, "LLM_PROFILES_PATH", profile_path)
+    monkeypatch.setattr(configure_llm_profile, "LLM_PROFILES_PATH", profile_path)
+    monkeypatch.setenv("NOVELPILOT_API_KEY", "secret-key")
+
+    exit_code = configure_llm_profile.main(
+        [
+            "--id",
+            "main",
+            "--name",
+            "Main Provider",
+            "--protocol",
+            "anthropic-compatible",
+            "--base-url",
+            "https://api.example.com",
+            "--model",
+            "example-model",
+            "--api-key-env",
+            "NOVELPILOT_API_KEY",
+            "--request-options-json",
+            '{"max_tokens":24000,"thinking":{"type":"enabled","budget_tokens":8000}}',
+            "--json",
+        ]
+    )
+    output = capsys.readouterr().out
+    payload = json.loads(output)
+
+    assert exit_code == 0
+    assert payload["profile"]["request_options"] == {
+        "max_tokens": 24000,
+        "thinking": {"type": "enabled", "budget_tokens": 8000},
+    }
 
 
 def test_profile_cli_json_output_does_not_expose_api_key(

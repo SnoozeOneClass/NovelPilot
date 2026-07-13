@@ -1,9 +1,10 @@
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
-from app.llm.gateway import ChatMessage, ChatRequest, ChatResult, call_llm
+from app.llm.gateway import ChatChunk, ChatMessage, ChatRequest, ChatResult, call_llm
 from app.llm.redaction import redact_profile_secrets
 from app.schemas.profiles import LlmProfile
 from app.schemas.setup import (
@@ -26,12 +27,6 @@ class BookLoop:
 
 RECENT_MESSAGE_LIMIT = 10
 RECENT_MESSAGE_CHARACTER_BUDGET = 16_000
-DISCUSSION_CONTEXT_CHARACTER_BUDGET = 96_000
-SYNTHESIS_CONTEXT_CHARACTER_BUDGET = 72_000
-REVIEW_CONTEXT_CHARACTER_BUDGET = 96_000
-MAX_DIRECTION_DRAFT_CHARACTERS = 24_000
-MAX_DISCUSSION_SUMMARY_CHARACTERS = 8_000
-MAX_DECISION_STATE_CHARACTERS = 20_000
 SUPERSEDED_HISTORY_CHARACTER_BUDGET = 8_000
 META_PRIORITY_QUESTION_FRAGMENTS = (
     "先讨论哪个",
@@ -104,11 +99,7 @@ def assemble_discussion_context(
         ("recent_superseded_decisions", _json_text(superseded_payload)),
         ("current_user_message", user_message),
     ]
-    fixed_character_count = sum(len(content) for _, content in fixed_blocks)
-    available_recent_characters = min(
-        RECENT_MESSAGE_CHARACTER_BUDGET,
-        max(0, DISCUSSION_CONTEXT_CHARACTER_BUDGET - fixed_character_count - 2_000),
-    )
+    available_recent_characters = RECENT_MESSAGE_CHARACTER_BUDGET
     recent_reversed: list[SetupMessage] = []
     recent_chars = 0
     for message in reversed(state.messages):
@@ -121,30 +112,24 @@ def assemble_discussion_context(
         recent_chars += message_chars
 
     recent = list(reversed(recent_reversed))
-    while True:
-        recent_payload = [
-            {"id": message.id, "role": message.role, "content": message.content}
-            for message in recent
+    recent_payload = [
+        {"id": message.id, "role": message.role, "content": message.content}
+        for message in recent
+    ]
+    prompt = "\n\n".join(
+        [
+            "下面是 Harness 为本轮全书共创装配的上下文。",
+            f"讨论摘要：\n{state.discussion_summary or '尚无摘要。'}",
+            f"当前完整 Book Direction 草稿：\n{state.direction_draft or '尚未形成草稿。'}",
+            "已确认决定：\n" + _json_text(state.confirmed_decisions),
+            "待澄清问题：\n" + _json_text(state.unresolved_questions),
+            "当前假设：\n" + _json_text(state.assumptions),
+            "已发现矛盾：\n" + _json_text(state.contradictions),
+            "近期已取代决定：\n" + _json_text(superseded_payload),
+            "最近原始对话：\n" + _json_text(recent_payload),
+            f"用户本轮输入：\n{user_message}",
         ]
-        prompt = "\n\n".join(
-            [
-                "下面是 Harness 为本轮全书共创装配的上下文。",
-                f"讨论摘要：\n{state.discussion_summary or '尚无摘要。'}",
-                f"当前完整 Book Direction 草稿：\n{state.direction_draft or '尚未形成草稿。'}",
-                "已确认决定：\n" + _json_text(state.confirmed_decisions),
-                "待澄清问题：\n" + _json_text(state.unresolved_questions),
-                "当前假设：\n" + _json_text(state.assumptions),
-                "已发现矛盾：\n" + _json_text(state.contradictions),
-                "近期已取代决定：\n" + _json_text(superseded_payload),
-                "最近原始对话：\n" + _json_text(recent_payload),
-                f"用户本轮输入：\n{user_message}",
-            ]
-        )
-        if len(prompt) <= DISCUSSION_CONTEXT_CHARACTER_BUDGET:
-            break
-        if not recent:
-            raise ValueError("Book discussion state exceeds the total context budget.")
-        recent.pop(0)
+    )
     recent_chars = sum(len(message.content) for message in recent)
     recent_ids = {message.id for message in recent}
     older = [message for message in state.messages if message.id not in recent_ids]
@@ -249,7 +234,7 @@ def assemble_discussion_context(
             "recent_message_limit": RECENT_MESSAGE_LIMIT,
             "recent_character_budget": RECENT_MESSAGE_CHARACTER_BUDGET,
             "recent_character_count": recent_chars,
-            "total_character_budget": DISCUSSION_CONTEXT_CHARACTER_BUDGET,
+            "total_character_budget": None,
             "total_character_count": len(prompt),
         },
         "assembly_rationale": (
@@ -266,6 +251,7 @@ def continue_book_discussion(
     state: SetupStateDocument,
     user_message: str,
     assembly: DiscussionContextAssembly,
+    on_text_delta: Callable[[ChatChunk], None] | None = None,
 ) -> BookDiscussionTurnResult:
     result = call_llm(
         profile,
@@ -275,13 +261,11 @@ def continue_book_discussion(
                 ChatMessage(role="system", content=_discussion_system_prompt()),
                 ChatMessage(role="user", content=assembly.prompt),
             ],
-            response_format={"type": "json_object"},
-            temperature=0.55,
             metadata={
                 "loop_layer": "book",
                 "atomic_action": "continue_book_discussion",
                 "turn": state.turn_count + 1,
-                "max_tokens": 5000,
+                **({"on_text_delta": on_text_delta} if on_text_delta is not None else {}),
             },
         ),
     )
@@ -297,6 +281,7 @@ def continue_book_discussion(
 def synthesize_book_direction(
     profile: LlmProfile,
     state: SetupStateDocument,
+    on_text_delta: Callable[[ChatChunk], None] | None = None,
 ) -> BookDirectionSynthesis:
     result = call_llm(
         profile,
@@ -306,23 +291,17 @@ def synthesize_book_direction(
                 ChatMessage(role="system", content=_synthesis_system_prompt()),
                 ChatMessage(role="user", content=_render_synthesis_context(state)),
             ],
-            response_format={"type": "json_object"},
-            temperature=0.35,
             metadata={
                 "loop_layer": "book",
                 "atomic_action": "synthesize_book_direction",
                 "candidate_revision": _next_candidate_revision(state),
-                "max_tokens": 7000,
+                **({"on_text_delta": on_text_delta} if on_text_delta is not None else {}),
             },
         ),
     )
     payload = _parse_json_object(redact_profile_secrets(result.content, profile))
     return BookDirectionSynthesis(
-        direction_markdown=_required_string(
-            payload.get("direction_markdown"),
-            "direction_markdown",
-            max_characters=MAX_DIRECTION_DRAFT_CHARACTERS,
-        ),
+        direction_markdown=_required_string(payload.get("direction_markdown"), "direction_markdown"),
         constraints=_constraints_from_payload(payload.get("constraints")),
         confirmed_decision_coverage=_coverage_from_payload(
             payload.get("confirmed_decision_coverage")
@@ -331,9 +310,7 @@ def synthesize_book_direction(
             payload.get("recommended_titles")
         ),
         rolling_plan_markdown=_required_string(
-            payload.get("rolling_plan_markdown"),
-            "rolling_plan_markdown",
-            max_characters=12_000,
+            payload.get("rolling_plan_markdown"), "rolling_plan_markdown"
         ),
         model_snapshot=result.model_snapshot,
         provider_snapshot=result.provider_snapshot,
@@ -345,6 +322,7 @@ def review_book_direction(
     profile: LlmProfile,
     state: SetupStateDocument,
     synthesis: BookDirectionSynthesis,
+    on_text_delta: Callable[[ChatChunk], None] | None = None,
 ) -> tuple[BookDirectionReview, str, dict[str, Any]]:
     result = call_llm(
         profile,
@@ -357,13 +335,11 @@ def review_book_direction(
                     content=_render_review_context(state, synthesis),
                 ),
             ],
-            response_format={"type": "json_object"},
-            temperature=0.2,
             metadata={
                 "loop_layer": "book",
                 "atomic_action": "review_book_direction",
                 "candidate_revision": _next_candidate_revision(state),
-                "max_tokens": 3500,
+                **({"on_text_delta": on_text_delta} if on_text_delta is not None else {}),
             },
         ),
     )
@@ -463,7 +439,7 @@ def build_review_context_snapshot(state: SetupStateDocument) -> dict[str, Any]:
             },
         ],
         "budget": {
-            "total_character_budget": SYNTHESIS_CONTEXT_CHARACTER_BUDGET,
+            "total_character_budget": None,
             "total_character_count": len(synthesis_context),
         },
         "assembly_rationale": (
@@ -484,7 +460,7 @@ def _discussion_system_prompt() -> str:
 
 confirmed_decisions 是本轮结束后的完整有效决定列表。不得静默删除已有决定；只有用户本轮明确改变或撤销旧决定时，才能同时在 superseded_decisions 中记录旧决定的完整原文、替代决定、原因，以及来自“用户本轮输入”的逐字短引文。没有被合法取代的旧决定必须继续保留。
 
-当 ready_status 为 continue 时，reply 只写简短的承接和提问理由，不得包含问句；question 必须是你已经选定的唯一一个具体问题，并且只包含一个问号；suggestions 必须提供 2 到 3 个针对这个问题、结合当前上下文且相互有区分度的候选回答，每条包含简短 label 和可直接作为用户回答的 message。suggestions 是同一个问题的答案，不是“先讨论什么”“下一步做什么”或“比较哪些方案”的会话动作。不要在 suggestions 中加入“其他”选项，界面会固定提供“自己输入”。当 ready_status 为 ready 时，question 必须为 null，suggestions 必须为空数组。所有用户可见内容使用中文，不输出私有思维链。
+当 ready_status 为 continue 时，reply 只写简短的承接和提问理由，不得包含问句；question 必须是你已经选定的唯一一个具体问题，并且只包含一个问号；suggestions 必须提供 2 到 3 个针对这个问题、结合当前上下文且相互有区分度的候选回答。每条 suggestion 必须包含简短 label、可直接作为用户回答的 message、用一句话说明收益或取舍的 rationale，以及布尔值 recommended；每轮必须恰好有一项 recommended 为 true。suggestions 是同一个问题的答案，不是“先讨论什么”“下一步做什么”或“比较哪些方案”的会话动作。不要在 suggestions 中加入“其他”选项，界面会固定提供“自己输入”。当 ready_status 为 ready 时，question 必须为 null，suggestions 必须为空数组。所有用户可见内容使用中文，不输出私有思维链。
 
 严格只返回一个 JSON 对象，字段必须完整：
 {
@@ -497,7 +473,7 @@ confirmed_decisions 是本轮结束后的完整有效决定列表。不得静默
   "assumptions": ["明确标注的假设"],
   "contradictions": ["尚未解决的矛盾"],
   "question": "本轮唯一的直接问题；信息充分时为 null",
-  "suggestions": [{"label":"简短选项名","message":"可直接提交的用户口吻候选回答"}],
+  "suggestions": [{"label":"简短选项名","message":"可直接提交的用户口吻候选回答","rationale":"一句话说明这个选项的收益或取舍","recommended":true}],
   "ready_status": "continue 或 ready",
   "readiness_reason": "简短说明"
 }"""
@@ -561,11 +537,7 @@ def _render_synthesis_context(state: SetupStateDocument) -> str:
             "模型就绪提示（仅供参考）：\n" + state.readiness.model_dump_json(),
         ]
     )
-    return _require_context_budget(
-        context,
-        SYNTHESIS_CONTEXT_CHARACTER_BUDGET,
-        "Book direction synthesis context",
-    )
+    return context
 
 
 def _render_review_context(
@@ -595,11 +567,7 @@ def _render_review_context(
             "候选滚动规划契约：\n" + synthesis.rolling_plan_markdown,
         ]
     )
-    return _require_context_budget(
-        context,
-        REVIEW_CONTEXT_CHARACTER_BUDGET,
-        "Book direction review context",
-    )
+    return context
 
 
 def _discussion_result_from_payload(
@@ -623,15 +591,9 @@ def _discussion_result_from_payload(
         raise ValueError("Book discussion reply must not contain additional questions.")
     turn_result = BookDiscussionTurnResult(
         reply=reply,
-        direction_draft=_required_string(
-            payload.get("direction_draft"),
-            "direction_draft",
-            max_characters=MAX_DIRECTION_DRAFT_CHARACTERS,
-        ),
+        direction_draft=_required_string(payload.get("direction_draft"), "direction_draft"),
         discussion_summary=_required_string(
-            payload.get("discussion_summary"),
-            "discussion_summary",
-            max_characters=MAX_DISCUSSION_SUMMARY_CHARACTERS,
+            payload.get("discussion_summary"), "discussion_summary"
         ),
         confirmed_decisions=_required_string_list(
             payload.get("confirmed_decisions"), "confirmed_decisions"
@@ -658,17 +620,6 @@ def _discussion_result_from_payload(
         provider_snapshot=result.provider_snapshot,
         usage=result.usage,
     )
-    decision_state = {
-        "confirmed_decisions": turn_result.confirmed_decisions,
-        "superseded_decisions": [
-            item.model_dump(mode="json") for item in turn_result.superseded_decisions
-        ],
-        "unresolved_questions": turn_result.unresolved_questions,
-        "assumptions": turn_result.assumptions,
-        "contradictions": turn_result.contradictions,
-    }
-    if len(_json_text(decision_state)) > MAX_DECISION_STATE_CHARACTERS:
-        raise ValueError("Book discussion decision state exceeds the context budget.")
     return turn_result
 
 
@@ -766,7 +717,7 @@ def _discussion_question_from_payload(
         if value is not None:
             raise ValueError("Ready book discussion response must not contain a question.")
         return None
-    question = _required_string(value, "question", max_characters=600)
+    question = _required_string(value, "question")
     if question.count("?") + question.count("？") != 1:
         raise ValueError("Book discussion response must contain exactly one question.")
     if not question.endswith(("?", "？")):
@@ -803,13 +754,29 @@ def _suggestions_from_payload(
                 id=f"turn-{turn:04d}-suggestion-{index + 1}",
                 label=_required_string(item.get("label"), "suggestion.label"),
                 message=_required_string(item.get("message"), "suggestion.message"),
+                rationale=_required_string(
+                    item.get("rationale"), "suggestion.rationale"
+                ),
+                recommended=_suggestion_recommended_from_payload(
+                    item.get("recommended")
+                ),
             )
         )
     labels = [item.label.casefold() for item in suggestions]
     messages = [item.message.casefold() for item in suggestions]
     if len(labels) != len(set(labels)) or len(messages) != len(set(messages)):
         raise ValueError("Book discussion answer options must be unique.")
+    if sum(item.recommended for item in suggestions) != 1:
+        raise ValueError(
+            "Book discussion response must recommend exactly one answer option."
+        )
     return suggestions
+
+
+def _suggestion_recommended_from_payload(value: Any) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError("Book discussion suggestion.recommended must be a boolean.")
+    return value
 
 
 def _review_issues_from_payload(value: Any) -> list[BookDirectionReviewIssue]:
@@ -995,15 +962,10 @@ def _parse_json_object(text: str) -> dict[str, Any]:
 def _required_string(
     value: Any,
     field_name: str,
-    *,
-    max_characters: int | None = None,
 ) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"LLM response is missing {field_name}.")
-    stripped = value.strip()
-    if max_characters is not None and len(stripped) > max_characters:
-        raise ValueError(f"LLM response field {field_name} exceeds its context budget.")
-    return stripped
+    return value.strip()
 
 
 def _required_string_list(value: Any, field_name: str) -> list[str]:
@@ -1048,12 +1010,6 @@ def _recent_superseded_payload(state: SetupStateDocument) -> list[dict[str, Any]
         selected.append(payload)
         character_count += item_count
     return list(reversed(selected))
-
-
-def _require_context_budget(content: str, budget: int, label: str) -> str:
-    if len(content) > budget:
-        raise ValueError(f"{label} exceeds the total context budget.")
-    return content
 
 
 def _injected_content_record(

@@ -1,4 +1,3 @@
-import { X } from "lucide-react";
 import type { BookDirectionConstraints, SetupStateDocument } from "../../types/domain";
 import styles from "./SetupConversation.module.css";
 
@@ -10,37 +9,48 @@ const constraintSections: Array<{ key: keyof BookDirectionConstraints; title: st
   { key: "open_decisions", title: "仍待决定" }
 ];
 
-export function DirectionInspector({ state, open, onClose }: { state: SetupStateDocument; open: boolean; onClose: () => void }) {
+export function DirectionLedger({ state }: { state: SetupStateDocument }) {
   const candidate = state.candidate;
   const ledger = [
-    { title: "已确认", items: state.confirmed_decisions, tone: "confirmed" },
-    { title: "待澄清", items: state.unresolved_questions, tone: "open" },
-    { title: "当前假设", items: state.assumptions, tone: "assumption" },
-    { title: "矛盾", items: state.contradictions, tone: "conflict" },
-    { title: "已取代", items: state.superseded_decisions.slice(-5).map((item) => item.replacement ? `${item.decision} → ${item.replacement}` : `${item.decision} → 已撤销`), tone: "superseded" }
+    { title: "已确认", description: "模型必须持续保留的用户决定", items: state.confirmed_decisions, tone: "confirmed" },
+    { title: "待澄清", description: "尚未成为事实的问题", items: state.unresolved_questions, tone: "open" },
+    { title: "当前假设", description: "可用于推演、但仍可被推翻", items: state.assumptions, tone: "assumption" },
+    { title: "矛盾", description: "必须显式解决的冲突", items: state.contradictions, tone: "conflict" },
+    {
+      title: "已取代",
+      description: "由用户明确撤销或替换的旧决定",
+      items: state.superseded_decisions.map((item) => item.replacement ? `${item.decision} → ${item.replacement}` : `${item.decision} → 已撤销`),
+      tone: "superseded"
+    }
   ];
 
   return (
-    <aside className={styles.inspector} data-open={open}>
-      <header><div><p>方向账本</p><h2>{state.approved ? "已批准方向" : `候选修订 r${state.revision}`}</h2></div><span>{state.direction_draft ? "已同步" : "待开始"}</span><button className={styles.inspectorClose} title="关闭方向账本" onClick={onClose}><X size={17} /></button></header>
-      <section className={styles.directionDraft}>{state.direction_draft || "对话开始后，模型会在这里持续维护完整的全书方向草稿。"}</section>
+    <section className={styles.ledgerView} aria-labelledby="direction-ledger-title">
+      <header>
+        <div><span>Decision Ledger</span><h2 id="direction-ledger-title">方向账本</h2></div>
+        <strong>r{state.revision}</strong>
+      </header>
       <div className={styles.ledger}>
         {ledger.map((section) => (
           <section key={section.title} data-tone={section.tone}>
-            <h3>{section.title}<span>{section.items.length}</span></h3>
-            {section.items.length ? <ul>{section.items.map((item) => <li key={item}>{item}</li>)}</ul> : <p>暂无</p>}
+            <header><h3>{section.title}</h3><span>{section.items.length}</span></header>
+            <p>{section.description}</p>
+            {section.items.length > 0 ? <ul>{section.items.map((item) => <li key={item}>{item}</li>)}</ul> : <em>暂无记录</em>}
           </section>
         ))}
       </div>
       {candidate && (
         <section className={styles.contract}>
-          <h3>滚动故事弧契约</h3>
+          <header><span>Review Contract</span><h2>滚动故事弧契约</h2></header>
           <pre>{candidate.rolling_plan_markdown}</pre>
-          {constraintSections.map((section) => candidate.constraints[section.key].length ? (
-            <div key={section.key}><strong>{section.title}</strong><ul>{candidate.constraints[section.key].map((item) => <li key={item}>{item}</li>)}</ul></div>
+          {constraintSections.map((section) => candidate.constraints[section.key].length > 0 ? (
+            <div key={section.key}>
+              <strong>{section.title}</strong>
+              <ul>{candidate.constraints[section.key].map((item) => <li key={item}>{item}</li>)}</ul>
+            </div>
           ) : null)}
         </section>
       )}
-    </aside>
+    </section>
   );
 }

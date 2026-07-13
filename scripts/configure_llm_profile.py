@@ -42,6 +42,7 @@ def configure_profile(
     base_url: str,
     model: str,
     api_key_env: str | None,
+    request_options: dict[str, object] | None = None,
     enabled: bool,
     select: bool,
 ) -> ProfileConfigureResult:
@@ -54,6 +55,7 @@ def configure_profile(
             base_url=base_url,
             api_key=api_key,
             model=model,
+            request_options=request_options,
             enabled=enabled,
         )
     )
@@ -108,6 +110,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--base-url", required=True, help="Provider base URL.")
     parser.add_argument("--model", required=True, help="Model name to request.")
     parser.add_argument(
+        "--request-options-json",
+        help=(
+            "JSON object merged into the provider request body, for example "
+            "{\"reasoning_effort\":\"high\"}. Omit it on update to preserve saved options."
+        ),
+    )
+    parser.add_argument(
         "--api-key-env",
         help=(
             "Environment variable containing the API key. Required for new profiles; "
@@ -123,6 +132,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
+        request_options = _request_options_from_json(args.request_options_json)
         result = configure_profile(
             profile_id=args.id,
             name=args.name,
@@ -130,6 +140,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             base_url=args.base_url,
             model=args.model,
             api_key_env=args.api_key_env,
+            request_options=request_options,
             enabled=not args.disabled,
             select=args.select,
         )
@@ -146,6 +157,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         print(render_text(result), end="")
     return 0
+
+
+def _request_options_from_json(value: str | None) -> dict[str, object] | None:
+    if value is None:
+        return None
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise ValueError("--request-options-json must contain a JSON object.")
+    return parsed
 
 
 if __name__ == "__main__":

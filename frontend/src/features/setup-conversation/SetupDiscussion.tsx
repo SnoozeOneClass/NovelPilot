@@ -1,6 +1,7 @@
-import { FileCheck2, MessageSquareText, PencilLine, Send, Sparkles } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { FileCheck2, PencilLine, Send, Sparkles } from "lucide-react";
+import { useRef } from "react";
 import type { SetupStateDocument } from "../../types/domain";
+import { latestSetupExchange } from "./setup-planning";
 import type { BusyAction, Notice } from "./setup-types";
 import styles from "./SetupConversation.module.css";
 
@@ -15,7 +16,6 @@ interface SetupDiscussionProps {
   onUseSuggestion: (value: string) => void;
   onSend: () => void;
   onReview: () => void;
-  onExit: () => void;
 }
 
 export function SetupDiscussion({
@@ -28,68 +28,57 @@ export function SetupDiscussion({
   onInputChange,
   onUseSuggestion,
   onSend,
-  onReview,
-  onExit
+  onReview
 }: SetupDiscussionProps) {
-  const endRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const question = state.question;
+  const latest = latestSetupExchange(state.messages);
 
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
-  }, [state.messages.length, busyAction]);
+  function populateComposer(value: string) {
+    onUseSuggestion(value);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }
 
   return (
-    <div className={styles.discussionStage}>
-      <header className={styles.stageHeader}>
-        <div><p>全书 Loop · 深度共创</p><h1>讨论这本书真正要成为怎样的作品</h1></div>
-        <div className={styles.stageStatus}>
-          <span data-tone={state.readiness.status === "ready" ? "success" : "accent"}><Sparkles size={13} />{state.readiness.status === "ready" ? "可以整理候选" : "继续讨论"}</span>
-          <span>{state.turn_count} 轮</span>
-        </div>
+    <section className={styles.decisionView} aria-labelledby="current-decision-title">
+      <header className={styles.contextHeader}>
+        <div><span>Current Decision</span><h2 id="current-decision-title">当前决策</h2></div>
+        <strong data-tone={state.readiness.status === "ready" ? "success" : "accent"}><Sparkles size={12} />{state.readiness.status === "ready" ? "可审阅" : `第 ${state.turn_count + 1} 轮`}</strong>
       </header>
 
-      {notice && <div className={styles.notice} data-kind={notice.kind}>{notice.text}</div>}
+      <div className={styles.decisionScroll}>
+        {notice && <div className={styles.notice} data-kind={notice.kind}>{notice.text}</div>}
 
-      <div className={styles.conversation} aria-live="polite">
-        {state.messages.length === 0 && (
-          <div className={styles.emptyConversation}>
-            <MessageSquareText size={28} />
-            <h2>从一个模糊想法开始也可以</h2>
-            <p>写下题材、人物、读者体验，或者任何你不希望这本书变成的样子。</p>
-          </div>
+        {(latest.user || latest.assistant) && (
+          <section className={styles.latestExchange} aria-label="最近一轮讨论摘要">
+            <header><h3>最近一轮</h3><span>完整记录在“历史”中</span></header>
+            {latest.user && <article data-role="user"><strong>你</strong><p>{latest.user.content}</p></article>}
+            {latest.assistant && <article data-role="assistant"><strong>NovelPilot</strong><p>{latest.assistant.content}</p></article>}
+          </section>
         )}
-        {state.messages.map((message) => (
-          <article key={message.id} className={styles.message} data-role={message.role}>
-            <header><strong>{message.role === "user" ? "你" : "NovelPilot"}</strong><span>第 {message.turn} 轮{message.model_snapshot ? ` · ${message.model_snapshot}` : ""}{message.migrated ? " · 旧版迁移" : ""}</span></header>
-            <p>{message.content}</p>
-          </article>
-        ))}
-        {busyAction === "turn" && (
-          <article className={styles.message} data-role="assistant" data-pending="true">
-            <header><strong>NovelPilot</strong><span>正在更新方向草稿</span></header>
-            <p>正在重新识别已确认决定、待定项、假设和矛盾...</p>
-          </article>
-        )}
-        <div ref={endRef} />
-      </div>
 
-      {question && state.suggestions.length > 0 && busyAction === null && (
-        <section className={styles.questionCard} aria-labelledby="book-direction-question">
-          <header>
-            <span>NovelPilot 判断的当前关键问题</span>
-            <h2 id="book-direction-question">{question}</h2>
-          </header>
-          <div className={styles.answerOptions} role="group" aria-label="模型建议的回答">
+        <section className={styles.activeQuestion} data-empty={!question}>
+          <span>{question ? "模型判断的最高影响缺口" : "开始规划"}</span>
+          <h2>{question ?? "你希望这本书最终带给读者怎样的体验？"}</h2>
+          {!question && <p>可以从模糊想法开始，也可以直接纠正当前方向。系统不会强制固定题目顺序。</p>}
+        </section>
+
+        {question && state.suggestions.length > 0 && busyAction === null && (
+          <div className={styles.answerOptions} role="group" aria-label="同一决策的候选回答">
             {state.suggestions.map((suggestion, index) => (
               <button
                 key={suggestion.id}
                 type="button"
                 data-selected={input === suggestion.message}
-                onClick={() => onUseSuggestion(suggestion.message)}
+                data-recommended={suggestion.recommended === true}
+                onClick={() => populateComposer(suggestion.message)}
               >
                 <span>{String.fromCharCode(65 + index)}</span>
-                <div><strong>{suggestion.label}</strong><small>{suggestion.message}</small></div>
+                <div>
+                  <header><strong>{suggestion.label}</strong>{suggestion.recommended && <em>推荐</em>}</header>
+                  {suggestion.rationale && <p>{suggestion.rationale}</p>}
+                  <small>{suggestion.message}</small>
+                </div>
               </button>
             ))}
             <button
@@ -100,30 +89,31 @@ export function SetupDiscussion({
               }}
             >
               <span><PencilLine size={14} /></span>
-              <div><strong>自己输入</strong><small>以上选项都不合适，直接告诉 NovelPilot 你的决定。</small></div>
+              <div><header><strong>自己输入</strong></header><p>直接提出你的决定、异议或补充条件。</p></div>
             </button>
           </div>
-        </section>
-      )}
+        )}
+      </div>
 
       <div className={styles.composer}>
+        <label htmlFor="book-direction-composer">你的意见</label>
         <textarea
+          id="book-direction-composer"
           ref={inputRef}
           value={input}
-          maxLength={32000}
           disabled={busyAction !== null}
-          placeholder={question ? "选择上方建议，或者在这里输入你自己的回答..." : "继续描述、纠正、否定或提出新的方向..."}
+          placeholder={question ? "选择建议后可以继续编辑，或直接输入自己的回答..." : "描述、纠正、否定或提出新的方向..."}
           onChange={(event) => onInputChange(event.target.value)}
           onKeyDown={(event) => { if (event.key === "Enter" && event.ctrlKey) { event.preventDefault(); onSend(); } }}
         />
-        <button title="发送本轮讨论" disabled={!canSend} onClick={onSend}><Send size={17} /></button>
+        <button title="发送本轮讨论" aria-label="发送本轮讨论" disabled={!canSend} onClick={onSend}><Send size={17} /></button>
+        <span>Ctrl + Enter 发送；选项只会填入，不会自动提交。</span>
       </div>
 
-      <footer className={styles.discussionFooter}>
-        <div><strong>{state.readiness.reason}</strong><span>模型的就绪判断不会自动结束讨论。</span></div>
-        <button className={styles.secondaryButton} disabled={busyAction !== null} onClick={onExit}>退出共创</button>
-        <button className={styles.primaryButton} disabled={!canReview} onClick={onReview}><FileCheck2 size={16} />整理并审阅</button>
+      <footer className={styles.decisionFooter}>
+        <div><strong>{state.readiness.reason}</strong><span>就绪判断不会自动结束讨论。</span></div>
+        <button className={styles.primaryButton} disabled={!canReview} onClick={onReview}><FileCheck2 size={15} />准备审阅</button>
       </footer>
-    </div>
+    </section>
   );
 }

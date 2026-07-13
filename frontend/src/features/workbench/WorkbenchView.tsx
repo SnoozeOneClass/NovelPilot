@@ -58,7 +58,9 @@ function eventTone(status: HarnessEvent["status"]): string {
 export function WorkbenchView({ project, events, currentArc, summaries, modelOutput, activeArtifact, canonCounts, readiness, canStart, canResume, busy, onStart, onResume, onExport, onSelectArtifact, onOpenEvidence, onOpenStory }: WorkbenchViewProps) {
   const [auxPanel, setAuxPanel] = useState<"runtime" | "context" | null>(null);
   const metadata = project.metadata;
-  const statusEvents = events.filter((event) => event.kind !== "llm_output_delta");
+  const statusEvents = events.filter(
+    (event) => event.kind !== "llm_output_delta" && event.kind !== "llm_stream_progress"
+  );
   const latestEvent = statusEvents.at(-1) ?? null;
   const recentEvents = statusEvents.slice(-12);
   const activeChapter = metadata.active_chapter_id;

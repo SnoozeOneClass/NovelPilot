@@ -26,6 +26,8 @@ class SetupSuggestion(BaseModel):
     id: str
     label: str
     message: str
+    rationale: str = ""
+    recommended: bool = False
 
 
 class SetupReadinessSignal(BaseModel):
@@ -152,7 +154,7 @@ class SetupStateDocument(BaseModel):
 
 
 class SetupTurnRequest(BaseModel):
-    message: str = Field(min_length=1, max_length=32_000)
+    message: str = Field(min_length=1)
 
     @field_validator("message")
     @classmethod

@@ -7,7 +7,7 @@ import { workspaceQueryKeys } from "./workspace-queries";
 export type WorkspaceRefreshTarget = "project" | "readiness" | "arc" | "artifacts" | "canon" | "completion";
 
 export function refreshTargetsForEvent(event: HarnessEvent): WorkspaceRefreshTarget[] {
-  if (event.kind === "llm_output_delta") return [];
+  if (event.kind === "llm_output_delta" || event.kind === "llm_stream_progress") return [];
   const targets = new Set<WorkspaceRefreshTarget>(["project", "readiness"]);
   if (event.loop_layer === "story_arc" || event.kind.includes("arc")) targets.add("arc");
   if (event.artifact_path || event.kind.includes("artifact") || event.kind.includes("chapter")) targets.add("artifacts");

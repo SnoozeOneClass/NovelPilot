@@ -5,9 +5,12 @@
 在仓库根目录运行：
 
 ```powershell
-python -m pip install -e .[dev]
+py -3.13 -m venv .venv
+.\.venv\python.exe -m pip install -e .[dev]
 npm.cmd --prefix frontend install
 ```
+
+仓库根目录的 npm 脚本会直接调用 `.venv\python.exe`，不会使用 PATH 中的 Anaconda 或系统 Python。
 
 ## 启动应用
 
@@ -35,7 +38,7 @@ http://127.0.0.1:5173
 
 ```powershell
 $env:NOVELPILOT_API_KEY = "<your-api-key>"
-npm.cmd run profile:upsert -- --id main --name "Main Provider" --protocol openai-compatible --base-url "https://api.example.com/v1" --model "model-name" --api-key-env NOVELPILOT_API_KEY --select
+npm.cmd run profile:upsert -- --id main --name "Main Provider" --protocol openai-compatible --base-url "https://api.example.com/v1" --model "model-name" --api-key-env NOVELPILOT_API_KEY --request-options-json '{"reasoning_effort":"high"}' --select
 ```
 
 支持的协议：
@@ -44,6 +47,10 @@ npm.cmd run profile:upsert -- --id main --name "Main Provider" --protocol openai
 - `anthropic-compatible`
 
 Profile 保存在 `config/llm-profiles.local.json`，这个文件会被 git 忽略。生成的小说项目只保存脱敏后的 profile/model 快照。
+
+设置页的“额外请求参数（JSON）”会把任意 Provider 请求体字段合并进正式调用，例如 `reasoning_effort`、`temperature`、`max_completion_tokens` 或 Provider 私有扩展。Novelpilot 只固定保护 profile 选择的 `model`、已经装配的 `messages/system` 与默认开启的 `stream`，不再自动注入温度、输出 token 上限或 `response_format`。Anthropic 兼容接口通常要求 `max_tokens`，需要在 profile 中显式填写。扩展参数不是秘密存储区，不要把额外密钥写在这里。
+
+所有正式模型调用默认读取流式响应，并通过 SSE 展示正文增量或结构化任务的接收进度。应用层不设置总请求超时；Provider、代理、操作系统或网络仍可能主动断开连接。CLI 更新 profile 时，省略 `--request-options-json` 会保留原有扩展参数。
 
 测试已保存的 profile：
 

@@ -10,7 +10,7 @@ from app.api import setup as setup_api
 from app.harness.loops import book as book_loop
 from app.harness.loops.book import BookDirectionSynthesis, BookDiscussionTurnResult
 from app.harness.run_control import begin_active_runner, end_active_runner
-from app.llm.gateway import ChatResult
+from app.llm.gateway import ChatChunk, ChatResult
 from app.schemas.profiles import LlmProfile, LlmProfilesDocument
 from app.schemas.projects import ProjectMetadata
 from app.schemas.setup import (
@@ -76,8 +76,7 @@ def test_setup_approval_request_rejects_blank_title() -> None:
     with pytest.raises(ValidationError):
         SetupApprovalRequest(candidate_revision=1, title="   ")
 
-    with pytest.raises(ValidationError, match="at most 32000 characters"):
-        SetupTurnRequest(message="x" * 32_001)
+    assert len(SetupTurnRequest(message="x" * 32_001).message) == 32_001
 
 
 def test_discussion_context_uses_summary_and_recent_raw_messages_only() -> None:
@@ -116,9 +115,8 @@ def test_discussion_context_uses_summary_and_recent_raw_messages_only() -> None:
     assert "raw-message-13" in assembly.prompt
     assert "The older discussion is represented here." in assembly.prompt
     assert "Make the ending bittersweet." in assembly.prompt
-    assert assembly.snapshot["budget"]["total_character_count"] <= (
-        book_loop.DISCUSSION_CONTEXT_CHARACTER_BUDGET
-    )
+    assert assembly.snapshot["budget"]["total_character_budget"] is None
+    assert assembly.snapshot["budget"]["total_character_count"] == len(assembly.prompt)
     injected = {item["id"]: item for item in assembly.snapshot["injected"]}
     assert injected["current_direction_draft"]["source_path"] == (
         "book/direction_draft.md"
@@ -184,9 +182,8 @@ def test_review_context_records_versioned_sources_hashes_and_total_budget() -> N
     )
     assert len(injected["complete_direction_draft"]["sha256"]) == 64
     assert "content" not in injected["complete_direction_draft"]
-    assert snapshot["budget"]["total_character_count"] <= (
-        book_loop.SYNTHESIS_CONTEXT_CHARACTER_BUDGET
-    )
+    assert snapshot["budget"]["total_character_budget"] is None
+    assert snapshot["budget"]["total_character_count"] > len(state.direction_draft)
 
 
 def test_book_discussion_parses_one_question_and_answer_options(
@@ -210,9 +207,24 @@ def test_book_discussion_parses_one_question_and_answer_options(
                     "contradictions": [],
                     "question": "Which relationship must carry the emotional cost?",
                     "suggestions": [
-                        {"label": "Leave it open", "message": "Keep that relationship open."},
-                        {"label": "Reconcile", "message": "Let them reconcile at a cost."},
-                        {"label": "Separate", "message": "They should separate permanently."},
+                        {
+                            "label": "Leave it open",
+                            "message": "Keep that relationship open.",
+                            "rationale": "Preserves ambiguity but delays emotional closure.",
+                            "recommended": False,
+                        },
+                        {
+                            "label": "Reconcile",
+                            "message": "Let them reconcile at a cost.",
+                            "rationale": "Supports the hopeful ending while preserving a price.",
+                            "recommended": True,
+                        },
+                        {
+                            "label": "Separate",
+                            "message": "They should separate permanently.",
+                            "rationale": "Creates the sharpest cost but weakens the hopeful note.",
+                            "recommended": False,
+                        },
                     ],
                     "ready_status": "continue",
                     "readiness_reason": "The final relationship outcome remains open.",
@@ -240,12 +252,25 @@ def test_book_discussion_parses_one_question_and_answer_options(
     assert result.question == "Which relationship must carry the emotional cost?"
     assert len(result.suggestions) == 3
     assert result.suggestions[0].id == "turn-0001-suggestion-1"
+    assert result.suggestions[0].rationale.startswith("Preserves ambiguity")
+    assert result.suggestions[1].recommended is True
     assert captured["request"].metadata["atomic_action"] == "continue_book_discussion"
-    assert captured["request"].response_format == {"type": "json_object"}
+    assert captured["request"].stream is True
+    assert captured["request"].request_options == {}
     system_prompt = captured["request"].messages[0].content
     assert "决定“下一步问什么”是全书 Loop 的职责" in system_prompt
     assert "人物身份、人数范围、角色关系" in system_prompt
     assert "suggestions 是同一个问题的答案" in system_prompt
+    assert "每轮必须恰好有一项 recommended 为 true" in system_prompt
+
+
+def test_setup_suggestion_keeps_legacy_payloads_readable() -> None:
+    suggestion = SetupSuggestion.model_validate(
+        {"id": "legacy", "label": "Legacy", "message": "Keep the old answer."}
+    )
+
+    assert suggestion.rationale == ""
+    assert suggestion.recommended is False
 
 
 def test_book_discussion_rejects_invalid_model_state(monkeypatch) -> None:
@@ -296,6 +321,82 @@ def test_book_discussion_rejects_invalid_model_state(monkeypatch) -> None:
             "2 to 3 answer options",
         ),
         (
+            {
+                "suggestions": [
+                    {
+                        "label": "Personal",
+                        "message": "Make the cost personal.",
+                        "rationale": " ",
+                        "recommended": True,
+                    },
+                    {
+                        "label": "Public",
+                        "message": "Make the cost public.",
+                        "rationale": "Expands the consequence beyond the protagonist.",
+                        "recommended": False,
+                    },
+                ]
+            },
+            "suggestion.rationale",
+        ),
+        (
+            {
+                "suggestions": [
+                    {
+                        "label": "Personal",
+                        "message": "Make the cost personal.",
+                        "rationale": "Keeps the consequence intimate.",
+                        "recommended": False,
+                    },
+                    {
+                        "label": "Public",
+                        "message": "Make the cost public.",
+                        "rationale": "Expands the consequence beyond the protagonist.",
+                        "recommended": False,
+                    },
+                ]
+            },
+            "recommend exactly one",
+        ),
+        (
+            {
+                "suggestions": [
+                    {
+                        "label": "Personal",
+                        "message": "Make the cost personal.",
+                        "rationale": "Keeps the consequence intimate.",
+                        "recommended": True,
+                    },
+                    {
+                        "label": "Public",
+                        "message": "Make the cost public.",
+                        "rationale": "Expands the consequence beyond the protagonist.",
+                        "recommended": True,
+                    },
+                ]
+            },
+            "recommend exactly one",
+        ),
+        (
+            {
+                "suggestions": [
+                    {
+                        "label": "Personal",
+                        "message": "Make the cost personal.",
+                        "rationale": "Keeps the consequence intimate.",
+                        "recommended": "yes",
+                    },
+                    {
+                        "label": "Public",
+                        "message": "Make the cost public.",
+                        "rationale": "Expands the consequence beyond the protagonist.",
+                        "recommended": False,
+                    },
+                ]
+            },
+            "must be a boolean",
+        ),
+        (
             {"ready_status": "ready", "question": "Continue anyway?", "suggestions": []},
             "must not contain a question",
         ),
@@ -320,8 +421,18 @@ def test_book_discussion_rejects_non_plan_question_shapes(
         "contradictions": [],
         "question": "Which relationship must carry the emotional cost?",
         "suggestions": [
-            {"label": "Mentor", "message": "Let the mentor relationship bear it."},
-            {"label": "Sibling", "message": "Let the sibling relationship bear it."},
+            {
+                "label": "Mentor",
+                "message": "Let the mentor relationship bear it.",
+                "rationale": "Ties the cost to guidance and betrayal.",
+                "recommended": True,
+            },
+            {
+                "label": "Sibling",
+                "message": "Let the sibling relationship bear it.",
+                "rationale": "Makes the cost more intimate and familial.",
+                "recommended": False,
+            },
         ],
         "ready_status": "continue",
         "readiness_reason": "One high-impact decision remains.",
@@ -359,8 +470,18 @@ def test_book_discussion_redacts_provider_secrets_from_model_content(monkeypatch
                     "contradictions": [],
                     "question": "Which consequence matters most?",
                     "suggestions": [
-                        {"label": "Personal", "message": "Make the consequence personal."},
-                        {"label": "Public", "message": "Make the consequence public."},
+                        {
+                            "label": "Personal",
+                            "message": "Make the consequence personal.",
+                            "rationale": "Keeps the emotional focus intimate.",
+                            "recommended": True,
+                        },
+                        {
+                            "label": "Public",
+                            "message": "Make the consequence public.",
+                            "rationale": "Broadens the stakes to the entire city.",
+                            "recommended": False,
+                        },
                     ],
                     "ready_status": "continue",
                     "readiness_reason": "Continue.",
@@ -1030,10 +1151,26 @@ def test_setup_api_runs_discussion_review_and_explicit_approval(
     profile = _profile()
     monkeypatch.setattr(setup_api, "get_active_project_path", lambda: project_path)
     monkeypatch.setattr(setup_api, "get_active_profile", lambda: profile)
+
+    def fake_discussion(_profile, _state, _message, _assembly, on_text_delta):
+        on_text_delta(
+            ChatChunk(
+                text_delta='{"reply":',
+                provider_snapshot="openai-compatible",
+            )
+        )
+        on_text_delta(
+            ChatChunk(
+                text_delta="{",
+                provider_snapshot="openai-compatible",
+            )
+        )
+        return _turn_result()
+
     monkeypatch.setattr(
         setup_api,
         "continue_book_discussion",
-        lambda *_args: _turn_result(),
+        fake_discussion,
     )
     monkeypatch.setattr(setup_api, "synthesize_book_direction", lambda *_args: _synthesis())
     monkeypatch.setattr(
@@ -1064,9 +1201,15 @@ def test_setup_api_runs_discussion_review_and_explicit_approval(
     event_kinds = [event.kind for event in read_events(project_path)]
     assert approved.approved is True
     assert "book_discussion_context_assembled" in event_kinds
+    assert "llm_stream_progress" in event_kinds
     assert "book_direction_candidate_reviewed" in event_kinds
     assert "book_loop_approved" in event_kinds
     assert event_kinds.count("approved_book_artifact_written") == 4
+    progress_events = [
+        event for event in read_events(project_path) if event.kind == "llm_stream_progress"
+    ]
+    assert [event.payload["received_characters"] for event in progress_events] == [9, 10]
+    assert all("text_delta" not in event.payload for event in progress_events)
 
     with pytest.raises(HTTPException) as duplicate_approval:
         setup_api.approve_setup(
@@ -1164,7 +1307,7 @@ def test_setup_api_redacts_secrets_from_user_discussion_before_storage(
     monkeypatch.setattr(setup_api, "get_active_project_path", lambda: project_path)
     monkeypatch.setattr(setup_api, "get_active_profile", lambda: profile)
 
-    def fake_discussion(_profile, _state, message, _assembly):
+    def fake_discussion(_profile, _state, message, _assembly, _on_text_delta):
         captured_messages.append(message)
         return _turn_result()
 
