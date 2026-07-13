@@ -69,4 +69,30 @@ describe("EvidenceCenter", () => {
     expect(artifactList.querySelectorAll("button").length).toBeGreaterThan(0);
     expect(artifactList.querySelectorAll("button").length).toBeLessThan(summaries.length);
   });
+
+  it("does not attach a previously selected context snapshot to an unrelated event", () => {
+    const unrelated = { ...events[0], event_id: "unrelated", artifact_path: null, message: "没有关联产物" };
+    render(
+      <EvidenceCenter
+        events={[unrelated]}
+        summaries={summaries}
+        artifactPaths={summaries.map((summary) => summary.path)}
+        selectedArtifactPath="chapters/chapter-001/context_snapshot.json"
+        activeArtifact={{ path: "chapters/chapter-001/context_snapshot.json", content: '{"sources":["book/direction.md"]}' }}
+        readiness={null}
+        completionAudit={null}
+        canPause={false}
+        canResume={false}
+        canRetry={false}
+        busy={false}
+        onSelectArtifact={vi.fn()}
+        onPause={vi.fn(async () => undefined)}
+        onResume={vi.fn(async () => undefined)}
+        onRetry={vi.fn(async () => undefined)}
+        onRefreshAudit={vi.fn(async () => undefined)}
+      />
+    );
+
+    expect(screen.queryByRole("heading", { name: "上下文装配快照" })).not.toBeInTheDocument();
+  });
 });

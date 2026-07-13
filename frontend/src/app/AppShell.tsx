@@ -139,6 +139,7 @@ export function AppShell({
           <div className={styles.statuses}>
             <span>{formatOperationMode(project.metadata.operation_mode)}</span>
             <strong data-status={project.metadata.run_status}>{formatRunStatus(project.metadata.run_status)}</strong>
+            <button className={styles.mobileSettings} title="设置" onClick={() => onLocationChange("settings")}><Settings2 size={17} /></button>
           </div>
         </header>
         {notice}

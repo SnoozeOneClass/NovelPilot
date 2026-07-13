@@ -55,7 +55,7 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
             ),
             EvidenceProbe(
                 "frontend/src/features/project-selector/ProjectSelector.tsx",
-                ("开始新书", "继续创作", "未命名新书"),
+                ("新建小说", "openProject", "未命名新书"),
             ),
         ),
     ),
@@ -127,9 +127,14 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
                 "frontend/src/features/setup-conversation/SetupConversation.tsx",
                 (
                     "prepareSetupReview",
+                    "approveSetup(candidate.revision, finalTitle)",
+                ),
+            ),
+            EvidenceProbe(
+                "frontend/src/features/setup-conversation/SetupReview.tsx",
+                (
                     "candidate.recommended_titles",
                     "option.rationale",
-                    "approveSetup(candidate.revision, finalTitle)",
                 ),
             ),
         ),
@@ -201,8 +206,8 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
                 ("_current_arc_requires_human_review", 'human_review == "awaiting_review"'),
             ),
             EvidenceProbe(
-                "frontend/src/features/project-selector/ProjectSelector.tsx",
-                ("continueProject", "api.updateProjectMode", "modeLocked"),
+                "frontend/src/features/settings/SettingsView.tsx",
+                ("changeMode", "api.updateProjectMode", "modeLocked"),
             ),
         ),
     ),
@@ -256,14 +261,14 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
         requirement="Frontend provides a three-column harness workspace with status, artifacts, and signals.",
         probes=(
             EvidenceProbe(
-                "frontend/src/features/workspace/CockpitView.tsx",
-                ("cockpit-grid", "Harness 状态", "当前执行流"),
+                "frontend/src/features/workbench/WorkbenchView.tsx",
+                ("WorkbenchView", "运行状态", "事件流", "章节 Pipeline"),
             ),
             EvidenceProbe(
-                "frontend/src/features/workspace/TraceConsole.tsx",
-                ("事件时间线", "运行轨迹", "验证"),
+                "frontend/src/features/evidence/EvidenceCenter.tsx",
+                ("事件时间线", "运行轨迹", "验证", "useVirtualizer"),
             ),
-            EvidenceProbe("frontend/src/styles.css", (".cockpit-grid", "grid-template-columns")),
+            EvidenceProbe("frontend/src/features/workbench/WorkbenchView.module.css", (".workbench", "grid-template-columns")),
         ),
     ),
     AcceptanceCriterion(
@@ -272,7 +277,8 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
         probes=(
             EvidenceProbe("backend/app/api/runs.py", ("start_run", "pause_run", "resume_run", "stream_events")),
             EvidenceProbe("backend/tests/test_runs.py", ("_events_after_last_event_id", "concurrent")),
-            EvidenceProbe("frontend/src/features/workspace/Workspace.tsx", ("EventSource", "pauseRun", "resumeRun")),
+            EvidenceProbe("frontend/src/features/workspace/Workspace.tsx", ("useHarnessEvents", "pauseRun", "resumeRun")),
+            EvidenceProbe("frontend/src/app/harness-events.ts", ("EventSource", "mergeHarnessEvent")),
         ),
     ),
     AcceptanceCriterion(

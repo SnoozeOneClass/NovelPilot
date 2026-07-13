@@ -63,7 +63,13 @@
   font-size: 13px;
 }
 
-.runtimePanel > header > span {
+.panelHeaderActions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.panelHeaderActions > span {
   border: 1px solid var(--np-line);
   border-radius: 999px;
   padding: 4px 7px;
@@ -71,9 +77,15 @@
   font-size: 9px;
 }
 
-.runtimePanel > header > span[data-status="running"] {
+.panelHeaderActions > span[data-status="running"] {
   border-color: var(--np-success);
   color: var(--np-success);
+}
+
+.closePanel,
+.runtimeToggle,
+.contextToggle {
+  display: none;
 }
 
 .contextPanel > header button,
@@ -255,10 +267,16 @@
   font-size: 10px;
 }
 
-.runActions button:first-child {
+.runActions .startButton {
   border-color: var(--np-accent);
   background: var(--np-accent);
   color: #fff;
+}
+
+.runActions .runtimeToggle,
+.runActions .contextToggle,
+.contextPanel > header .closePanel {
+  display: none;
 }
 
 .idleState {
@@ -506,6 +524,22 @@
   .contextPanel {
     display: none;
   }
+
+  .contextPanel[data-open="true"] {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    display: block;
+    border-left: 0;
+    background: var(--np-surface-raised);
+  }
+
+  .runActions .contextToggle,
+  .closePanel,
+  .contextPanel > header .closePanel {
+    display: grid;
+    place-items: center;
+  }
 }
 
 @media (max-width: 800px) {
@@ -516,6 +550,20 @@
 
   .runtimePanel {
     display: none;
+  }
+
+  .runtimePanel[data-open="true"] {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    display: block;
+    border-right: 0;
+    background: var(--np-surface-raised);
+  }
+
+  .runActions .runtimeToggle {
+    display: grid;
+    place-items: center;
   }
 
   .executionHeader {

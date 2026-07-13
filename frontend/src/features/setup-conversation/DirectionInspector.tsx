@@ -1,3 +1,4 @@
+import { X } from "lucide-react";
 import type { BookDirectionConstraints, SetupStateDocument } from "../../types/domain";
 import styles from "./SetupConversation.module.css";
 
@@ -9,7 +10,7 @@ const constraintSections: Array<{ key: keyof BookDirectionConstraints; title: st
   { key: "open_decisions", title: "仍待决定" }
 ];
 
-export function DirectionInspector({ state }: { state: SetupStateDocument }) {
+export function DirectionInspector({ state, open, onClose }: { state: SetupStateDocument; open: boolean; onClose: () => void }) {
   const candidate = state.candidate;
   const ledger = [
     { title: "已确认", items: state.confirmed_decisions, tone: "confirmed" },
@@ -20,8 +21,8 @@ export function DirectionInspector({ state }: { state: SetupStateDocument }) {
   ];
 
   return (
-    <aside className={styles.inspector}>
-      <header><div><p>方向账本</p><h2>{state.approved ? "已批准方向" : `候选修订 r${state.revision}`}</h2></div><span>{state.direction_draft ? "已同步" : "待开始"}</span></header>
+    <aside className={styles.inspector} data-open={open}>
+      <header><div><p>方向账本</p><h2>{state.approved ? "已批准方向" : `候选修订 r${state.revision}`}</h2></div><span>{state.direction_draft ? "已同步" : "待开始"}</span><button className={styles.inspectorClose} title="关闭方向账本" onClick={onClose}><X size={17} /></button></header>
       <section className={styles.directionDraft}>{state.direction_draft || "对话开始后，模型会在这里持续维护完整的全书方向草稿。"}</section>
       <div className={styles.ledger}>
         {ledger.map((section) => (

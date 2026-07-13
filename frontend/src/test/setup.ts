@@ -26,4 +26,5 @@ HTMLDialogElement.prototype.close = function close() {
   this.removeAttribute("open");
 };
 
-Element.prototype.scrollIntoView = () => undefined;
+// Some browser shells implement scrolling asynchronously; effects must not leak that return value.
+Element.prototype.scrollIntoView = () => Promise.resolve() as unknown as void;

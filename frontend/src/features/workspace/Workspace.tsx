@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { X } from "lucide-react";
+import { RefreshCw, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api, formatApiError } from "../../api/client";
 import { AppShell } from "../../app/AppShell";
@@ -16,6 +16,7 @@ import { StoryWorldView } from "../story-world/StoryWorldView";
 import { FeedbackComposer } from "../workbench/FeedbackComposer";
 import { WorkbenchView } from "../workbench/WorkbenchView";
 import { type CanonKind, parseCanonDocument } from "./workspace-utils";
+import styles from "./Workspace.module.css";
 
 interface WorkspaceProps {
   project: ProjectSummary;
@@ -105,7 +106,7 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
 
   async function refreshWorkspace() {
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.activeProject(projectId) }),
+      queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.project(projectId) }),
       queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.profiles() })
     ]);
   }
@@ -292,10 +293,12 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
     }
   }
 
-  const notice = workspaceNotice ? (
-    <div className={`workspace-notice ${workspaceNotice.kind}`}>
-      <span>{workspaceNotice.text}</span>
-      <button title="关闭" onClick={() => setWorkspaceNotice(null)}><X size={15} /></button>
+  const queryNotice = queries.error ? { kind: "error" as const, text: `工作区数据读取失败：${formatApiError(queries.error)}` } : null;
+  const activeNotice = workspaceNotice ?? queryNotice;
+  const notice = activeNotice ? (
+    <div className={styles.workspaceNotice} data-kind={activeNotice.kind}>
+      <span>{activeNotice.text}</span>
+      <button title={queryNotice && !workspaceNotice ? "重试" : "关闭"} onClick={() => { if (queryNotice && !workspaceNotice) void refreshWorkspace(); else setWorkspaceNotice(null); }}>{queryNotice && !workspaceNotice ? <RefreshCw size={15} /> : <X size={15} />}</button>
     </div>
   ) : null;
 
@@ -327,15 +330,15 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
       </AppShell>
 
       {feedbackNotice && (
-        <div className={`feedback-toast ${feedbackNotice.kind}`}>
+        <div className={styles.feedbackToast} data-kind={feedbackNotice.kind}>
           <span>{feedbackNotice.text}</span>
           <button title="关闭" onClick={() => setFeedbackNotice(null)}><X size={14} /></button>
         </div>
       )}
 
       {artifactDrawerOpen && (
-        <div className="artifact-drawer-backdrop" onMouseDown={() => setArtifactDrawerOpen(false)}>
-          <aside className="artifact-drawer" onMouseDown={(event) => event.stopPropagation()}>
+        <div className={styles.drawerBackdrop} onMouseDown={() => setArtifactDrawerOpen(false)}>
+          <aside className={styles.drawer} onMouseDown={(event) => event.stopPropagation()}>
             <header>
               <div><span>产物预览</span><strong>{selectedArtifactPath}</strong></div>
               <button title="关闭预览" onClick={() => setArtifactDrawerOpen(false)}><X size={18} /></button>

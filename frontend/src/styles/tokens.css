@@ -37,25 +37,6 @@
   --np-font-ui: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", ui-sans-serif, system-ui, sans-serif;
   --np-font-mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
 
-  /* Temporary aliases keep unchanged views readable while they are migrated. */
-  --bg: var(--np-bg);
-  --surface: var(--np-surface-raised);
-  --surface-soft: var(--np-surface);
-  --sidebar: var(--np-sidebar);
-  --line: var(--np-line);
-  --line-soft: var(--np-line);
-  --ink: var(--np-text);
-  --muted: var(--np-text-muted);
-  --gold: var(--np-accent);
-  --gold-dark: var(--np-accent-hover);
-  --gold-soft: var(--np-accent-soft);
-  --brown: var(--np-text);
-  --green: var(--np-success);
-  --green-soft: var(--np-success-soft);
-  --purple: #6d5bd0;
-  --red: var(--np-danger);
-  --red-soft: var(--np-danger-soft);
-  --blue: var(--np-info);
 }
 
 :root[data-theme="dark"] {

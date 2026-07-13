@@ -1,5 +1,5 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Archive, Check, Circle, FileText, Pause, Play, RefreshCw, Search, ShieldCheck } from "lucide-react";
+import { Archive, Check, Circle, FileText, Pause, Play, RefreshCw, Search, ShieldCheck, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { apiUrl } from "../../api/client";
 import type { EvidenceTab } from "../../app/types";
@@ -76,6 +76,8 @@ export function EvidenceCenter({ events, summaries, artifactPaths, selectedArtif
   const [loopFilter, setLoopFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [query, setQuery] = useState("");
+  const [eventInspectorOpen, setEventInspectorOpen] = useState(false);
+  const [artifactInspectorOpen, setArtifactInspectorOpen] = useState(false);
   const statusEvents = useMemo(() => events.filter((event) => event.kind !== "llm_output_delta"), [events]);
   const filteredEvents = useMemo(() => statusEvents.filter((event) => eventMatches(event, loopFilter, statusFilter, query)), [loopFilter, query, statusEvents, statusFilter]);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
@@ -99,11 +101,18 @@ export function EvidenceCenter({ events, summaries, artifactPaths, selectedArtif
 
   const selectedEvent = statusEvents.find((event) => event.event_id === selectedEventId) ?? filteredEvents.at(-1) ?? null;
   const selectedSummary = summaries.find((summary) => summary.path === selectedArtifactPath) ?? null;
-  const contextSnapshot = activeArtifact?.path.endsWith("context_snapshot.json") ? parseJsonRecord(activeArtifact.content) : null;
+  const selectedEventArtifact = selectedEvent?.artifact_path === activeArtifact?.path ? activeArtifact : null;
+  const contextSnapshot = selectedEventArtifact?.path.endsWith("context_snapshot.json") ? parseJsonRecord(selectedEventArtifact.content) : null;
 
   function selectEvent(event: HarnessEvent) {
     setSelectedEventId(event.event_id);
+    setEventInspectorOpen(true);
     if (event.artifact_path) onSelectArtifact(event.artifact_path);
+  }
+
+  function selectArtifact(path: string) {
+    onSelectArtifact(path);
+    setArtifactInspectorOpen(true);
   }
 
   return (
@@ -140,8 +149,8 @@ export function EvidenceCenter({ events, summaries, artifactPaths, selectedArtif
                 {!filteredEvents.length && <p className={styles.empty}>没有符合筛选条件的事件。</p>}
               </div>
             </section>
-            <aside className={styles.inspector}>
-              <header><h2>事件检查器</h2>{selectedEvent && <span data-tone={tone(selectedEvent.status)}>{formatEventStatus(selectedEvent.status)}</span>}</header>
+            <aside className={styles.inspector} data-open={eventInspectorOpen}>
+              <header><h2>事件检查器</h2><div>{selectedEvent && <span data-tone={tone(selectedEvent.status)}>{formatEventStatus(selectedEvent.status)}</span>}<button className={styles.closeInspector} title="关闭事件检查器" onClick={() => setEventInspectorOpen(false)}><X size={16} /></button></div></header>
               {selectedEvent ? (
                 <>
                   <dl>
@@ -175,14 +184,14 @@ export function EvidenceCenter({ events, summaries, artifactPaths, selectedArtif
               <div style={{ height: artifactVirtualizer.getTotalSize() || summaries.length * 58, position: "relative" }}>
                 {visibleArtifactRows.map((row) => {
                   const summary = summaries[row.index];
-                  return <button key={summary.path} className={selectedArtifactPath === summary.path ? styles.selected : ""} style={{ position: "absolute", transform: `translateY(${row.start}px)`, height: row.size, width: "100%" }} onClick={() => onSelectArtifact(summary.path)}><FileText size={14} /><div><strong>{formatArtifactTitle(summary)}</strong><small>{summary.path}</small></div><em data-tone={tone(summary.status)}>{formatGenericStatus(summary.status)}</em></button>;
+                  return <button key={summary.path} className={selectedArtifactPath === summary.path ? styles.selected : ""} style={{ position: "absolute", transform: `translateY(${row.start}px)`, height: row.size, width: "100%" }} onClick={() => selectArtifact(summary.path)}><FileText size={14} /><div><strong>{formatArtifactTitle(summary)}</strong><small>{summary.path}</small></div><em data-tone={tone(summary.status)}>{formatGenericStatus(summary.status)}</em></button>;
                 })}
               </div>
               {!summaries.length && <p className={styles.empty}>还没有落盘产物。</p>}
             </div>
           </aside>
-          <section className={styles.artifactInspector}>
-            <header><div><p>产物检查器</p><h2>{selectedSummary ? formatArtifactTitle(selectedSummary) : "尚未选择产物"}</h2><small>{selectedArtifactPath}</small></div>{selectedSummary && <span data-tone={tone(selectedSummary.status)}>{formatGenericStatus(selectedSummary.status)}</span>}</header>
+          <section className={styles.artifactInspector} data-open={artifactInspectorOpen}>
+            <header><div><p>产物检查器</p><h2>{selectedSummary ? formatArtifactTitle(selectedSummary) : "尚未选择产物"}</h2><small>{selectedArtifactPath}</small></div><div>{selectedSummary && <span data-tone={tone(selectedSummary.status)}>{formatGenericStatus(selectedSummary.status)}</span>}<button className={styles.closeInspector} title="关闭产物检查器" onClick={() => setArtifactInspectorOpen(false)}><X size={16} /></button></div></header>
             {selectedSummary && <p className={styles.description}>{formatArtifactDetail(selectedSummary.detail)}</p>}
             <pre>{activeArtifact?.content ?? "从左侧选择一个文件。"}</pre>
           </section>

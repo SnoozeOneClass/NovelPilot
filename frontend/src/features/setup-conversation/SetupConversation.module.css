@@ -17,7 +17,13 @@
 }
 
 .mainPane {
+  position: relative;
   overflow: hidden;
+}
+
+.inspectorTrigger,
+.inspectorClose {
+  display: none;
 }
 
 .discussionStage,
@@ -830,6 +836,40 @@
 
   .inspector {
     display: none;
+  }
+
+  .inspector[data-open="true"] {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    display: block;
+    border-left: 0;
+    background: var(--np-surface-raised);
+  }
+
+  .inspectorTrigger {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    z-index: 5;
+    width: 32px;
+    height: 32px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--np-line);
+    border-radius: var(--np-radius-sm);
+    background: var(--np-surface-raised);
+    color: var(--np-text-secondary);
+  }
+
+  .inspectorClose {
+    width: 30px;
+    height: 30px;
+    display: grid;
+    place-items: center;
+    border-radius: var(--np-radius-sm);
+    background: transparent;
+    color: var(--np-text-secondary);
   }
 }
 

@@ -26,8 +26,12 @@ export function ChapterBrowser({ activeChapterId, artifactPaths, summaries, onSe
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (activeChapterId) setSelectedChapterId(activeChapterId);
-    else if (!selectedChapterId && chapterIds.length) setSelectedChapterId(chapterIds.at(-1) ?? "");
+    setSelectedChapterId(activeChapterId ?? chapterIds.at(-1) ?? "");
+  }, [activeChapterId]);
+
+  useEffect(() => {
+    if (selectedChapterId && chapterIds.includes(selectedChapterId)) return;
+    setSelectedChapterId(activeChapterId ?? chapterIds.at(-1) ?? "");
   }, [activeChapterId, chapterIds, selectedChapterId]);
 
   const virtualizer = useVirtualizer({
@@ -37,6 +41,8 @@ export function ChapterBrowser({ activeChapterId, artifactPaths, summaries, onSe
     overscan: 8,
     initialRect: { width: 280, height: 520 }
   });
+  const virtualRows = virtualizer.getVirtualItems();
+  const visibleRows = virtualRows.length ? virtualRows : Array.from({ length: Math.min(chapterIds.length, 12) }, (_, index) => ({ index, start: index * 58, size: 58 }));
   const chapterSummaries = summaries
     .filter((summary) => summary.path.startsWith(`chapters/${selectedChapterId}/`))
     .sort((left, right) => orderedFiles.indexOf(left.path.split("/").at(-1) ?? "") - orderedFiles.indexOf(right.path.split("/").at(-1) ?? ""));
@@ -46,10 +52,10 @@ export function ChapterBrowser({ activeChapterId, artifactPaths, summaries, onSe
   return (
     <section className={styles.chapterBrowser}>
       <aside className={styles.chapterList}>
-        <header><div><p>章节索引</p><strong>{chapterIds.length} 章</strong></div><small>虚拟列表</small></header>
+        <header><div><p>章节索引</p><strong>{chapterIds.length} 章</strong></div><small>按创作顺序</small></header>
         <div ref={scrollRef} className={styles.virtualViewport}>
-          <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
-            {virtualizer.getVirtualItems().map((item) => {
+          <div style={{ height: virtualizer.getTotalSize() || chapterIds.length * 58, position: "relative" }}>
+            {visibleRows.map((item) => {
               const chapterId = chapterIds[item.index];
               const final = summaries.find((summary) => summary.path === `chapters/${chapterId}/final.md` && summary.committed);
               return (

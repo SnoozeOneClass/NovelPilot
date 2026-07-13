@@ -4,6 +4,7 @@ import { api, formatApiError } from "../../api/client";
 import { formatGenericStatus } from "../../types/display";
 import type { ArtifactSummary, CurrentArcState } from "../../types/domain";
 import { arcIdsFromArtifacts, parseMarkdownSections } from "./workspace-utils";
+import styles from "./StoryArcsView.module.css";
 
 interface StoryArcsViewProps {
   currentArc: CurrentArcState | null;
@@ -192,8 +193,8 @@ export function StoryArcsView({
   }
 
   return (
-    <section className="np-surface arcs-view">
-      <header className="view-heading">
+    <section className={styles.view}>
+      <header className={styles.heading}>
         <div>
           <h1>故事弧与章节</h1>
           <p>章节只属于当前故事弧；后续故事弧会在提交状态之上滚动生成。</p>
@@ -201,20 +202,20 @@ export function StoryArcsView({
       </header>
 
       {awaitingReview && (
-        <section className="arc-review-banner">
+        <section className={styles.reviewBanner}>
           <div>
-            <span className="soft-badge amber"><span className="status-dot amber" /> 等待你的确认</span>
+            <span className={styles.reviewBadge}><span /> 等待你的确认</span>
             <h2>第 {displayArcNumber(selectedArcId)} 故事弧计划 · 审批中</h2>
             <p>AI 已完成当前故事弧计划。该人工门禁必须批准后，才会开始章节创作。</p>
           </div>
-          <div className="arc-review-actions">
-            <button className="gold-button" disabled={approving} onClick={() => void onApprove()}>
+          <div className={styles.reviewActions}>
+            <button className={styles.primaryButton} disabled={approving} onClick={() => void onApprove()}>
               <Check size={17} /> {approving ? "正在批准..." : "批准并继续"}
             </button>
-            <button className="outline-button" onClick={() => setShowRevision((value) => !value)}>
+            <button className={styles.secondaryButton} onClick={() => setShowRevision((value) => !value)}>
               <MessageSquareText size={16} /> 要求修改
             </button>
-            <button className="quiet-button" onClick={() => onSelectArtifact(`arcs/${selectedArcId}/plan.md`)}>
+            <button className={styles.quietButton} onClick={() => onSelectArtifact(`arcs/${selectedArcId}/plan.md`)}>
               <FileText size={15} /> 查看完整计划
             </button>
           </div>
@@ -222,47 +223,47 @@ export function StoryArcsView({
       )}
 
       {showRevision && (
-        <div className="arc-revision-box">
+        <div className={styles.revisionBox}>
           <textarea
             value={revisionMessage}
             disabled={submittingRevision}
             onChange={(event) => setRevisionMessage(event.target.value)}
             placeholder="说明希望调整的节奏、冲突、人物重点或章节方向..."
           />
-          <button className="gold-button" disabled={!revisionMessage.trim() || submittingRevision} onClick={requestRevision}>
+          <button className={styles.primaryButton} disabled={!revisionMessage.trim() || submittingRevision} onClick={requestRevision}>
             提交修改意见
           </button>
         </div>
       )}
-      {revisionNotice && <p className="notice-banner success">{revisionNotice}</p>}
+      {revisionNotice && <p className={styles.notice}>{revisionNotice}</p>}
 
-      <div className="arc-columns">
-        <aside className="arc-list-panel">
+      <div className={styles.columns}>
+        <aside className={styles.listPanel}>
           <h2>故事弧列表</h2>
-          <div className="arc-list">
+          <div className={styles.arcList}>
             {arcIds.map((arcId) => {
               const selected = selectedArcId === arcId;
               const status = arcId === currentArc?.arc_id
                 ? currentArc.human_review === "awaiting_review" ? "审批中" : formatGenericStatus(currentArc.status)
                 : "已归档";
               return (
-                <button key={arcId} className={selected ? "selected" : ""} onClick={() => setSelectedArcId(arcId)}>
+                <button key={arcId} className={selected ? styles.selected : ""} onClick={() => setSelectedArcId(arcId)}>
                   <strong>第 {displayArcNumber(arcId)} 故事弧</strong>
                   <span>{arcId}</span>
                   <small>{status}</small>
                 </button>
               );
             })}
-            {arcIds.length === 0 && <p className="empty-state">还没有故事弧。</p>}
+            {arcIds.length === 0 && <p className={styles.empty}>还没有故事弧。</p>}
           </div>
         </aside>
 
-        <section className="arc-plan-summary">
+        <section className={styles.planSummary}>
           <h2>故事弧计划摘要</h2>
           {loadingPlan ? (
-            <p className="empty-state">正在读取计划...</p>
+            <p className={styles.empty}>正在读取计划...</p>
           ) : sections.length ? (
-            <div className="arc-plan-sections">
+            <div className={styles.planSections}>
               {sections.map((section) => (
                 <article key={`${section.title}-${section.body.slice(0, 12)}`}>
                   <h3>{sectionTitle(section.title)}</h3>
@@ -271,7 +272,7 @@ export function StoryArcsView({
               ))}
             </div>
           ) : (
-            <div className="empty-state">
+            <div className={styles.empty}>
               <FileText size={24} />
               <p>这个故事弧还没有计划产物。</p>
             </div>
@@ -281,10 +282,10 @@ export function StoryArcsView({
           </footer>
         </section>
 
-        <aside className="arc-chapter-list">
+        <aside className={styles.chapterList}>
           <h2>本弧章节</h2>
           <div>
-            {loadingArcState && <p className="empty-state">正在读取故事弧状态...</p>}
+            {loadingArcState && <p className={styles.empty}>正在读取故事弧状态...</p>}
             {!loadingArcState && chapterSlots.map((chapterId, index) => {
               const completed = chapterId ? arcChapterIds.includes(chapterId) : false;
               const active = isCurrentArc && chapterId === activeChapterId;
@@ -294,18 +295,18 @@ export function StoryArcsView({
                   )
                 : undefined;
               return (
-                <article key={chapterId ?? `pending-${selectedArcId}-${index}`} className={active ? "active" : ""}>
+                <article key={chapterId ?? `pending-${selectedArcId}-${index}`} className={active ? styles.active : ""}>
                   <span>{completed ? <Check size={13} /> : <Circle size={13} />}</span>
-                  <strong>Chapter {String(index + 1).padStart(2, "0")}</strong>
+                  <strong>第 {String(index + 1).padStart(2, "0")} 章</strong>
                   <p>{chapterSummary?.detail ?? chapterId ?? "待规划"}</p>
                   <small>{completed ? "已提交" : active ? "进行中" : "未开始"}</small>
                 </article>
               );
             })}
-            {!loadingArcState && chapterSlots.length === 0 && <p className="empty-state">故事弧批准后生成章节。</p>}
+            {!loadingArcState && chapterSlots.length === 0 && <p className={styles.empty}>故事弧批准后生成章节。</p>}
           </div>
           {isCurrentArc && currentArc && (
-            <button className="text-link" onClick={() => onSelectArtifact(currentArc.plan_path)}>
+            <button className={styles.textLink} onClick={() => onSelectArtifact(currentArc.plan_path)}>
               查看计划原文 <ChevronRight size={15} />
             </button>
           )}

@@ -17,6 +17,17 @@ Novelpilot 是一个本地、单用户的长篇 AI 小说创作工作台。
 - 前端：React、Vite、TypeScript。
 - LLM 协议：OpenAI 兼容和 Anthropic 兼容 profile。
 
+## 四域工作台
+
+项目打开后使用统一的本地 IDE 式工作台，不再维护彼此割裂的页面：
+
+- **共创**：开放式全书方向讨论、方向账本、候选审阅和书名批准。
+- **工作台**：三栏展示 Loop、原子动作、Pipeline、可见模型输出、章节契约、产物和验证信号，底部可随时提交反馈。
+- **故事世界**：查看当前故事弧、虚拟化章节索引和仅包含已提交状态的正史。
+- **证据中心**：查看虚拟化运行轨迹、产物、验证门禁和原始事件。
+
+项目运行模式、LLM Profile 和 `system | light | dark` 主题位于侧边栏底部的设置中。当前任务域按小说项目保存在会话中；未批准项目始终回到共创，已批准项目默认进入工作台。
+
 ## 文档
 
 精简的公开设计文档见：
@@ -134,7 +145,7 @@ npm.cmd run audit:completion -- --project "<smoke-project-path>"
 1. 在首页选择“开始新书”或“继续创作”。继续创作会恢复已有项目的内容、进度和模式。
 2. 开始新书时只选择 `full_auto` 或 `participatory` 初始模式，不需要预先确定书名。
 3. 配置并选择 LLM profile。
-4. 在全书方向页面自由讨论。模型会持续维护完整草稿和当前决策状态；推荐回复只是参考，也可以始终自由输入。
+4. 在“共创”中自由讨论全书方向。模型会持续维护完整草稿和当前决策状态；推荐回复只是参考，也可以始终自由输入。
 5. 用户认为方向成熟后，点击整理并审阅。审阅通过后，选择推荐书名或输入自定义书名，再明确批准当前候选版本；正式标题与全书方向在同一事务中提交。存在阻断问题时继续讨论和修订。
 6. 启动或恢复 harness。
    全自动推进会跨过章节完成 checkpoint 继续运行，直到遇到人工门禁、失败、协作式暂停，或有界步数预算用尽，并停在安全 checkpoint。
@@ -222,7 +233,7 @@ exports/
 npm.cmd run typecheck
 npm.cmd run lint
 npm.cmd run test
-npm.cmd --prefix frontend run build
+npm.cmd run frontend:build
 npm.cmd run acceptance
 npm.cmd run audit:secrets
 ```

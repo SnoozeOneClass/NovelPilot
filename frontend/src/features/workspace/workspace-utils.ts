@@ -134,6 +134,13 @@ export function pipelineState(
   return "pending";
 }
 
+export function eventBelongsToChapter(event: HarnessEvent, chapterId: string): boolean {
+  if (event.loop_layer !== "chapter") return false;
+  if (event.artifact_path?.startsWith(`chapters/${chapterId}/`)) return true;
+  if (event.payload.chapter_id === chapterId) return true;
+  return event.message.includes(chapterId);
+}
+
 export function artifactForChapter(
   summaries: ArtifactSummary[],
   chapterId: string | null,

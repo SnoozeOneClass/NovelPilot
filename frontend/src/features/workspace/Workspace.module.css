@@ -1,0 +1,13 @@
+.workspaceNotice { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--np-line); border-left: 3px solid var(--np-info); padding: 7px 12px; background: var(--np-info-soft); color: var(--np-text-secondary); font-size: 10px; }
+.workspaceNotice[data-kind="error"] { border-left-color: var(--np-danger); background: var(--np-danger-soft); }
+.workspaceNotice button, .feedbackToast button, .drawer header button { width: 26px; height: 26px; display: grid; place-items: center; border-radius: var(--np-radius-sm); background: transparent; color: inherit; }
+.feedbackToast { position: fixed; right: 18px; bottom: 18px; z-index: 70; max-width: min(420px, calc(100vw - 36px)); display: flex; align-items: center; gap: 10px; border: 1px solid var(--np-success); border-radius: var(--np-radius-md); padding: 9px 10px; background: var(--np-success-soft); color: var(--np-text); box-shadow: var(--np-shadow); font-size: 10px; }
+.feedbackToast[data-kind="error"] { border-color: var(--np-danger); background: var(--np-danger-soft); }
+.drawerBackdrop { position: fixed; inset: 0; z-index: 80; display: flex; justify-content: flex-end; background: rgba(0, 0, 0, .42); }
+.drawer { width: min(680px, 92vw); height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr); border-left: 1px solid var(--np-line); background: var(--np-surface-raised); box-shadow: var(--np-shadow); }
+.drawer header { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--np-line); padding: 11px 13px; background: var(--np-surface); }
+.drawer header div { min-width: 0; display: grid; gap: 3px; }
+.drawer header span { color: var(--np-accent); font-size: 9px; font-weight: 700; }
+.drawer header strong { overflow: hidden; color: var(--np-text); font: 10px var(--np-font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.drawer pre { min-width: 0; min-height: 0; margin: 0; overflow: auto; padding: 16px; color: var(--np-text-secondary); font: 11px/1.65 var(--np-font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 767px) { .drawer { width: 100vw; } .feedbackToast { right: 8px; bottom: 66px; max-width: calc(100vw - 16px); } }

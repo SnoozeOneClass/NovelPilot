@@ -33,7 +33,9 @@ export function SetupDiscussion({
 }: SetupDiscussionProps) {
   const endRef = useRef<HTMLDivElement | null>(null);
 
-  useEffect(() => endRef.current?.scrollIntoView({ block: "end", behavior: "smooth" }), [state.messages.length, busyAction]);
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
+  }, [state.messages.length, busyAction]);
 
   return (
     <div className={styles.discussionStage}>

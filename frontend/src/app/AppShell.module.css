@@ -229,6 +229,10 @@
   justify-content: flex-end;
 }
 
+.mobileSettings {
+  display: none;
+}
+
 .statuses span,
 .statuses strong {
   border: 1px solid var(--np-line);
@@ -322,6 +326,17 @@
   .location span,
   .statuses span {
     display: none;
+  }
+
+  .mobileSettings {
+    width: 30px;
+    height: 30px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--np-line);
+    border-radius: var(--np-radius-sm);
+    background: var(--np-surface);
+    color: var(--np-text-secondary);
   }
 
   .content {

@@ -35,9 +35,11 @@
 .virtualViewport em[data-tone="danger"] { color: var(--np-danger); }
 .inspector { min-width: 0; min-height: 0; overflow: auto; }
 .inspector > header { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--np-line); padding: 13px; background: var(--np-surface); }
-.inspector header span, .artifactInspector header > span { border: 1px solid var(--np-line); border-radius: 999px; padding: 3px 7px; color: var(--np-text-muted); font-size: 9px; }
-.inspector header span[data-tone="success"], .artifactInspector header > span[data-tone="success"] { border-color: var(--np-success); color: var(--np-success); }
-.inspector header span[data-tone="danger"], .artifactInspector header > span[data-tone="danger"] { border-color: var(--np-danger); color: var(--np-danger); }
+.inspector > header > div, .artifactInspector > header > div:last-child { display: flex; align-items: center; gap: 6px; }
+.closeInspector { display: none; width: 28px; height: 28px; place-items: center; border-radius: var(--np-radius-sm); background: transparent; color: var(--np-text-secondary); }
+.inspector header span, .artifactInspector header > div:last-child > span { border: 1px solid var(--np-line); border-radius: 999px; padding: 3px 7px; color: var(--np-text-muted); font-size: 9px; }
+.inspector header span[data-tone="success"], .artifactInspector header > div:last-child > span[data-tone="success"] { border-color: var(--np-success); color: var(--np-success); }
+.inspector header span[data-tone="danger"], .artifactInspector header > div:last-child > span[data-tone="danger"] { border-color: var(--np-danger); color: var(--np-danger); }
 .inspector dl { margin: 0; padding: 8px 13px; }
 .inspector dl div { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 10px; border-bottom: 1px solid var(--np-line); padding: 8px 0; }
 .inspector dt { color: var(--np-text-muted); font-size: 10px; }
@@ -79,6 +81,8 @@
 @media (max-width: 1279px) {
   .traceGrid { grid-template-columns: minmax(0, 1fr); }
   .inspector { display: none; }
+  .inspector[data-open="true"] { position: fixed; inset: 0; z-index: 90; display: block; background: var(--np-surface-raised); }
+  .closeInspector { display: grid; }
   .artifactGrid { grid-template-columns: 330px minmax(0, 1fr); }
 }
 @media (max-width: 767px) {
@@ -89,6 +93,7 @@
   .filters label { grid-column: 1 / -1; }
   .traceGrid, .artifactGrid, .rawEvents { min-height: 0; height: calc(100dvh - 250px); grid-template-columns: 1fr; }
   .artifactInspector { display: none; }
+  .artifactInspector[data-open="true"] { position: fixed; inset: 0; z-index: 90; display: grid; background: var(--np-surface-raised); }
   .runControls { overflow-x: auto; }
   .runControls button, .runControls a { flex: 0 0 auto; }
   .gateGrid { grid-template-columns: 1fr; }

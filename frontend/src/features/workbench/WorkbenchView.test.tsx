@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { HarnessEvent, ProjectReadiness, ProjectSummary } from "../../types/domain";
 import { WorkbenchView } from "./WorkbenchView";
@@ -88,5 +88,35 @@ describe("WorkbenchView", () => {
     expect(screen.getByText("事件流")).toBeInTheDocument();
     expect(screen.getAllByText("正在规划当前故事弧")).not.toHaveLength(0);
     expect(screen.getByText("这是 Provider 返回的可见输出")).toBeInTheDocument();
+  });
+
+  it("scopes pipeline progress and checkpoints to the active chapter", () => {
+    const previousCheckpoint: HarnessEvent = {
+      seq: 1, event_id: "old", timestamp: "2026-07-13T00:00:00Z", project_id: "project-1", run_id: "run-1", kind: "safe_checkpoint_reached", loop_layer: "chapter", atomic_action: "semantic_review", status: "completed", artifact_path: "chapters/chapter-001/review.md", routing_decision: null, message: "chapter-001 complete", payload: { chapter_id: "chapter-001" }
+    };
+    const currentDraft: HarnessEvent = {
+      ...previousCheckpoint, seq: 2, event_id: "current", kind: "atomic_action_started", atomic_action: "assemble_context", status: "started", artifact_path: null, message: "Assembling controlled context for chapter-002.", payload: {}
+    };
+    render(
+      <WorkbenchView
+        project={{ ...project, metadata: { ...project.metadata, active_chapter_id: "chapter-002", run_status: "running" } }}
+        events={[previousCheckpoint, currentDraft]}
+        currentArc={null}
+        summaries={[]}
+        modelOutput=""
+        activeArtifact={null}
+        canonCounts={{}}
+        readiness={readiness}
+        canStart={false}
+        canResume={false}
+        busy={false}
+        {...handlers}
+      />
+    );
+
+    const pipeline = screen.getByRole("heading", { name: "章节 Pipeline" }).parentElement as HTMLElement;
+    expect(within(pipeline).getByText("装配上下文").closest("div")).toHaveTextContent("进行中");
+    expect(within(pipeline).getByText("语义审查").closest("div")).toHaveTextContent("等待");
+    expect(screen.getByText("安全检查点").closest("div")).toHaveTextContent("等待中");
   });
 });

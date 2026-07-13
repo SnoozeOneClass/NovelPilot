@@ -1,4 +1,5 @@
-import { Check, Circle, FileDown, FileText, GitBranch, Play, Radio, RotateCw, ShieldCheck } from "lucide-react";
+import { Check, Circle, FileDown, FileText, GitBranch, PanelLeft, PanelRight, Play, Radio, RotateCw, ShieldCheck, X } from "lucide-react";
+import { useState } from "react";
 import {
   formatArtifactTitle,
   formatAtomicAction,
@@ -14,7 +15,7 @@ import {
   formatRunStatus
 } from "../../types/display";
 import type { ArtifactSummary, CurrentArcState, HarnessEvent, ProjectReadiness, ProjectSummary } from "../../types/domain";
-import { artifactForChapter, chapterPipeline, formatClock, pipelineState } from "../workspace/workspace-utils";
+import { artifactForChapter, chapterPipeline, eventBelongsToChapter, formatClock, pipelineState } from "../workspace/workspace-utils";
 import styles from "./WorkbenchView.module.css";
 
 interface WorkbenchViewProps {
@@ -55,20 +56,23 @@ function eventTone(status: HarnessEvent["status"]): string {
 }
 
 export function WorkbenchView({ project, events, currentArc, summaries, modelOutput, activeArtifact, canonCounts, readiness, canStart, canResume, busy, onStart, onResume, onExport, onSelectArtifact, onOpenEvidence, onOpenStory }: WorkbenchViewProps) {
+  const [auxPanel, setAuxPanel] = useState<"runtime" | "context" | null>(null);
   const metadata = project.metadata;
   const statusEvents = events.filter((event) => event.kind !== "llm_output_delta");
   const latestEvent = statusEvents.at(-1) ?? null;
   const recentEvents = statusEvents.slice(-12);
   const activeChapter = metadata.active_chapter_id;
+  const chapterEvents = activeChapter ? statusEvents.filter((event) => eventBelongsToChapter(event, activeChapter)) : [];
+  const latestChapterEvent = chapterEvents.at(-1) ?? null;
   const visibleContent = modelOutput || activeArtifact?.content || "等待 Harness 生成新的可见输出。";
   const isStreaming = Boolean(modelOutput) && metadata.run_status === "running";
-  const safeCheckpoint = events.some((event) => event.kind === "safe_checkpoint_reached");
+  const safeCheckpoint = latestChapterEvent?.kind === "safe_checkpoint_reached";
   const recentArtifacts = summaries.slice(-5).reverse();
 
   return (
     <section className={styles.workbench}>
-      <aside className={styles.runtimePanel}>
-        <header><div><p>Harness</p><h2>运行状态</h2></div><span data-status={metadata.run_status}>{formatRunStatus(metadata.run_status)}</span></header>
+      <aside className={styles.runtimePanel} data-open={auxPanel === "runtime"}>
+        <header><div><p>Harness</p><h2>运行状态</h2></div><div className={styles.panelHeaderActions}><span data-status={metadata.run_status}>{formatRunStatus(metadata.run_status)}</span><button className={styles.closePanel} title="关闭运行详情" onClick={() => setAuxPanel(null)}><X size={16} /></button></div></header>
         <dl className={styles.runtimeFacts}>
           <div><dt>当前 Loop</dt><dd>{formatLoopLayer(latestEvent?.loop_layer ?? "system")}</dd></div>
           <div><dt>原子动作</dt><dd>{formatAtomicAction(latestEvent?.atomic_action)}</dd></div>
@@ -80,7 +84,7 @@ export function WorkbenchView({ project, events, currentArc, summaries, modelOut
         <section className={styles.pipeline}>
           <h3>章节 Pipeline</h3>
           {chapterPipeline.map((step) => {
-            const state = pipelineState(step.id, latestEvent, events);
+            const state = pipelineState(step.id, latestChapterEvent, chapterEvents);
             return (
               <div key={step.id} data-state={state}>
                 <span>{state === "done" ? <Check size={12} /> : <Circle size={11} />}</span>
@@ -104,7 +108,9 @@ export function WorkbenchView({ project, events, currentArc, summaries, modelOut
         <header className={styles.executionHeader}>
           <div><p>当前执行流</p><h1>{latestEvent ? formatAtomicAction(latestEvent.atomic_action) : "等待启动 Harness"}</h1></div>
           <div className={styles.runActions}>
-            <button disabled={!canStart || busy} onClick={() => void onStart()}><Play size={15} />启动</button>
+            <button className={styles.runtimeToggle} title="查看运行详情" onClick={() => setAuxPanel("runtime")}><PanelLeft size={15} /></button>
+            <button className={styles.contextToggle} title="查看故事上下文" onClick={() => setAuxPanel("context")}><PanelRight size={15} /></button>
+            <button className={styles.startButton} disabled={!canStart || busy} onClick={() => void onStart()}><Play size={15} />启动</button>
             <button disabled={!canResume || busy} onClick={() => void onResume()}><RotateCw size={15} />继续</button>
             <button disabled={busy} onClick={() => void onExport()}><FileDown size={15} />导出</button>
           </div>
@@ -144,8 +150,8 @@ export function WorkbenchView({ project, events, currentArc, summaries, modelOut
         </section>
       </main>
 
-      <aside className={styles.contextPanel}>
-        <header><div><p>故事上下文</p><h2>{currentArc?.arc_id ?? "尚未创建故事弧"}</h2></div><button onClick={onOpenStory}>查看世界</button></header>
+      <aside className={styles.contextPanel} data-open={auxPanel === "context"}>
+        <header><div><p>故事上下文</p><h2>{currentArc?.arc_id ?? "尚未创建故事弧"}</h2></div><div className={styles.panelHeaderActions}><button onClick={onOpenStory}>查看世界</button><button className={styles.closePanel} title="关闭故事上下文" onClick={() => setAuxPanel(null)}><X size={16} /></button></div></header>
         <section className={styles.arcSummary}>
           <strong>{currentArc ? `${currentArc.completed_chapter_ids.length}/${currentArc.target_chapter_count} 章已完成` : "等待首次故事弧规划"}</strong>
           <p>{currentArc ? `当前状态：${formatGenericStatus(currentArc.status)}。${currentArc.human_review === "awaiting_review" ? "计划正在等待人工审批。" : "Harness 将依据已提交状态继续推进。"}` : "全书方向批准后，系统只规划当前故事弧。"}</p>

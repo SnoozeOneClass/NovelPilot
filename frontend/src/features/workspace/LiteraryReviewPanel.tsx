@@ -6,6 +6,7 @@ import type {
   LiteraryReviewDecision,
   ProjectCompletionAudit
 } from "../../types/domain";
+import styles from "./LiteraryReviewPanel.module.css";
 
 interface LiteraryReviewPanelProps {
   completionAudit: ProjectCompletionAudit | null;
@@ -47,14 +48,14 @@ export function LiteraryReviewPanel({ completionAudit, onRecorded }: LiteraryRev
   }
 
   return (
-    <section className="literary-review-panel">
+    <section className={styles.panel}>
       <header><ShieldCheck size={18} /><div><h2>人工文学审查</h2><p>真实模型冒烟通过后，记录章节正文与状态补丁的人工判断。</p></div></header>
       {!smokePassed && (
-        <p className="notice-banner error">
+        <p className={styles.error}>
           {formatGateMessage(smokeGate?.message ?? "Live provider smoke has not passed.")}
         </p>
       )}
-      <div className="literary-review-form">
+      <div className={styles.form}>
         <select value={decision} disabled={saving} onChange={(event) => setDecision(event.target.value as LiteraryReviewDecision)}>
           <option value="approved">{formatLiteraryDecision("approved")}</option>
           <option value="rejected">{formatLiteraryDecision("rejected")}</option>
@@ -63,11 +64,11 @@ export function LiteraryReviewPanel({ completionAudit, onRecorded }: LiteraryRev
         <textarea value={chapterAssessment} disabled={saving} onChange={(event) => setChapterAssessment(event.target.value)} placeholder="章节正文评价" />
         <textarea value={statePatchAssessment} disabled={saving} onChange={(event) => setStatePatchAssessment(event.target.value)} placeholder="状态补丁评价" />
         <textarea value={notes} disabled={saving} onChange={(event) => setNotes(event.target.value)} placeholder="补充记录（可选）" />
-        <button className="gold-button" disabled={!smokePassed || !complete || saving} onClick={() => void recordReview()}>
+        <button className={styles.primaryButton} disabled={!smokePassed || !complete || saving} onClick={() => void recordReview()}>
           <ShieldCheck size={16} /> {saving ? "正在记录..." : "记录审查"}
         </button>
       </div>
-      {notice && <p className={`notice-banner ${notice.kind}`}>{notice.text}</p>}
+      {notice && <p className={notice.kind === "error" ? styles.error : styles.success}>{notice.text}</p>}
     </section>
   );
 }

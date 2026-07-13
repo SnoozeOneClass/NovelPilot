@@ -1,4 +1,4 @@
-import { Check, FileCheck2, ShieldCheck } from "lucide-react";
+import { Check, FileCheck2, PanelRight, ShieldCheck } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, formatApiError } from "../../api/client";
 import type { SetupStateDocument } from "../../types/domain";
@@ -36,6 +36,7 @@ export function SetupConversation({ projectId, onApproved, onExit, onSetupChange
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [titleChoice, setTitleChoice] = useState<TitleChoice>(null);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -141,6 +142,7 @@ export function SetupConversation({ projectId, onApproved, onExit, onSetupChange
   return (
     <section className={styles.workspace} data-stage={candidate ? "review" : "discussion"}>
       <main className={styles.mainPane}>
+        <button className={styles.inspectorTrigger} title="查看方向账本" onClick={() => setInspectorOpen(true)}><PanelRight size={17} /></button>
         {candidate ? (
           <SetupReview
             state={state}
@@ -175,7 +177,7 @@ export function SetupConversation({ projectId, onApproved, onExit, onSetupChange
           />
         )}
       </main>
-      <DirectionInspector state={state} />
+      <DirectionInspector state={state} open={inspectorOpen} onClose={() => setInspectorOpen(false)} />
       {busyAction === "review" && (
         <div className={styles.busyOverlay}><FileCheck2 size={20} /><strong>正在综合与审查全书方向</strong><span>候选仍未进入正式设定。</span></div>
       )}

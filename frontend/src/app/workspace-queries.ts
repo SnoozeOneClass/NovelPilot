@@ -20,6 +20,7 @@ export const workspaceQueryKeys = {
   artifactPaths: (projectId: string) => ["workspace", projectId, "artifact-paths"] as const,
   artifactSummaries: (projectId: string) => ["workspace", projectId, "artifact-summaries"] as const,
   completion: (projectId: string) => ["workspace", projectId, "completion"] as const,
+  canonRoot: (projectId: string) => ["workspace", projectId, "canon"] as const,
   canon: (projectId: string, kind: CanonKind) => ["workspace", projectId, "canon", kind] as const,
   artifact: (projectId: string, path: string | null) => ["workspace", projectId, "artifact", path] as const
 };
@@ -49,6 +50,8 @@ export function useWorkspaceQueries(projectId: string) {
   const canonContents = Object.fromEntries(
     (Object.keys(canonFiles) as CanonKind[]).map((kind, index) => [kind, canonQueries[index]?.data ?? emptyCanonContents[kind]])
   ) as Record<CanonKind, string>;
+  const error = [activeProject, setup, readiness, currentArc, profiles, artifactPaths, artifactSummaries, completionAudit]
+    .find((query) => query.error)?.error ?? null;
 
   return {
     activeProject,
@@ -59,6 +62,7 @@ export function useWorkspaceQueries(projectId: string) {
     artifactPaths,
     artifactSummaries,
     completionAudit,
-    canonContents
+    canonContents,
+    error
   };
 }

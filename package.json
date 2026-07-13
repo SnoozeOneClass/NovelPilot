@@ -9,6 +9,7 @@
     "backend:typecheck": "python -m mypy backend",
     "frontend:dev": "npm.cmd --prefix frontend run dev",
     "frontend:lint": "npm.cmd --prefix frontend run lint",
+    "frontend:test": "npm.cmd --prefix frontend run test",
     "frontend:build": "npm.cmd --prefix frontend run build",
     "frontend:typecheck": "npm.cmd --prefix frontend run typecheck",
     "acceptance": "python scripts/acceptance_report.py",
@@ -20,6 +21,6 @@
     "audit:completion": "python scripts/completion_audit.py",
     "lint": "npm.cmd run backend:lint && npm.cmd run frontend:lint",
     "typecheck": "npm.cmd run backend:typecheck && npm.cmd run frontend:typecheck",
-    "test": "python -m pytest backend/tests"
+    "test": "npm.cmd run backend:test && npm.cmd run frontend:test"
   }
 }
