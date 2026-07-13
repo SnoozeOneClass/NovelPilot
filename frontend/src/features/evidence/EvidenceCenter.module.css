@@ -1,0 +1,97 @@
+.center { min-width: 0; min-height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr); }
+.heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--np-line); padding: 4px 4px 12px; }
+.heading p, .artifactInspector header p, .rawEvents > header p { margin: 0 0 3px; color: var(--np-accent); font-size: 10px; font-weight: 800; text-transform: uppercase; }
+.heading h1 { margin: 0; color: var(--np-text); font-size: 20px; letter-spacing: 0; }
+.heading nav { display: flex; gap: 2px; border: 1px solid var(--np-line); border-radius: var(--np-radius-md); padding: 2px; background: var(--np-surface); }
+.heading nav button { min-height: 32px; border-radius: var(--np-radius-sm); padding: 0 11px; background: transparent; color: var(--np-text-muted); }
+.heading nav button.active { background: var(--np-accent-soft); color: var(--np-accent); font-weight: 700; }
+.traceLayout { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; padding-top: 12px; }
+.filters { display: grid; grid-template-columns: 160px 150px minmax(220px, 1fr); gap: 7px; border: 1px solid var(--np-line); border-bottom: 0; padding: 8px; background: var(--np-surface); }
+.filters select, .filters label { min-width: 0; height: 32px; border: 1px solid var(--np-line); border-radius: var(--np-radius-sm); background: var(--np-surface-raised); color: var(--np-text); }
+.filters select { padding: 0 8px; }
+.filters label { display: flex; align-items: center; gap: 6px; padding: 0 8px; color: var(--np-text-muted); }
+.filters input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: var(--np-text); }
+.traceGrid, .artifactGrid { min-width: 0; min-height: 620px; height: calc(100vh - 212px); display: grid; grid-template-columns: minmax(440px, 1fr) minmax(320px, 0.72fr); border: 1px solid var(--np-line); overflow: hidden; background: var(--np-surface-raised); }
+.artifactGrid { grid-template-columns: 380px minmax(0, 1fr); margin-top: 12px; height: calc(100vh - 154px); }
+.virtualPanel { min-width: 0; min-height: 0; display: grid; grid-template-rows: 44px minmax(0, 1fr); border-right: 1px solid var(--np-line); }
+.virtualPanel > header { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--np-line); padding: 0 12px; background: var(--np-surface); }
+.virtualPanel h2, .inspector h2, .gateSection h2, .rawEvents h2 { margin: 0; color: var(--np-text); font-size: 12px; }
+.virtualPanel header span, .rawEvents > header > span { color: var(--np-text-muted); font-size: 10px; }
+.virtualViewport { min-height: 0; overflow: auto; }
+.virtualViewport button { display: grid; grid-template-columns: 15px 62px minmax(0, 1fr) auto; align-items: center; gap: 7px; border-bottom: 1px solid var(--np-line); padding: 6px 10px; background: transparent; color: var(--np-text-secondary); text-align: left; }
+.artifactGrid .virtualViewport button { grid-template-columns: 22px minmax(0, 1fr) auto; }
+.virtualViewport button:hover, .virtualViewport button.selected { background: var(--np-surface-muted); }
+.virtualViewport button.selected { box-shadow: inset 3px 0 var(--np-accent); }
+.node { width: 7px; height: 7px; border-radius: 50%; background: var(--np-text-muted); }
+.node[data-tone="success"] { background: var(--np-success); }
+.node[data-tone="danger"] { background: var(--np-danger); }
+.node[data-tone="active"] { background: var(--np-info); }
+.virtualViewport time { color: var(--np-text-muted); font: 9px var(--np-font-mono); }
+.virtualViewport button div { min-width: 0; display: grid; gap: 3px; }
+.virtualViewport strong { overflow: hidden; color: var(--np-text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.virtualViewport small { overflow: hidden; color: var(--np-text-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.virtualViewport em { border: 1px solid var(--np-line); border-radius: 999px; padding: 2px 5px; color: var(--np-text-muted); font-size: 8px; font-style: normal; white-space: nowrap; }
+.virtualViewport em[data-tone="success"] { color: var(--np-success); }
+.virtualViewport em[data-tone="danger"] { color: var(--np-danger); }
+.inspector { min-width: 0; min-height: 0; overflow: auto; }
+.inspector > header { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--np-line); padding: 13px; background: var(--np-surface); }
+.inspector header span, .artifactInspector header > span { border: 1px solid var(--np-line); border-radius: 999px; padding: 3px 7px; color: var(--np-text-muted); font-size: 9px; }
+.inspector header span[data-tone="success"], .artifactInspector header > span[data-tone="success"] { border-color: var(--np-success); color: var(--np-success); }
+.inspector header span[data-tone="danger"], .artifactInspector header > span[data-tone="danger"] { border-color: var(--np-danger); color: var(--np-danger); }
+.inspector dl { margin: 0; padding: 8px 13px; }
+.inspector dl div { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 10px; border-bottom: 1px solid var(--np-line); padding: 8px 0; }
+.inspector dt { color: var(--np-text-muted); font-size: 10px; }
+.inspector dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--np-text); font: 10px var(--np-font-mono); }
+.snapshot { margin: 8px 13px; border-left: 3px solid var(--np-info); padding: 8px 10px; background: var(--np-info-soft); }
+.snapshot h3 { margin: 0 0 6px; color: var(--np-text); font-size: 11px; }
+.snapshot p, .snapshot small { margin: 3px 0; color: var(--np-text-secondary); font-size: 9px; }
+.inspector details { margin: 10px 13px; color: var(--np-text-secondary); font-size: 10px; }
+.inspector pre, .artifactInspector pre { margin: 8px 0 0; overflow: auto; color: var(--np-text-secondary); font: 10px/1.6 var(--np-font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.runControls { display: flex; gap: 6px; border: 1px solid var(--np-line); border-top: 0; padding: 8px; background: var(--np-surface); }
+.runControls button, .runControls a { display: flex; align-items: center; gap: 6px; min-height: 32px; border: 1px solid var(--np-line); border-radius: var(--np-radius-sm); padding: 0 10px; background: var(--np-surface-raised); color: var(--np-text-secondary); font-size: 10px; text-decoration: none; }
+.runControls a { margin-left: auto; border-color: var(--np-accent); background: var(--np-accent); color: #fff; }
+.artifactInspector { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr); }
+.artifactInspector > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--np-line); padding: 12px 14px; background: var(--np-surface); }
+.artifactInspector h2 { margin: 0; color: var(--np-text); font-size: 14px; }
+.artifactInspector header small { display: block; max-width: 560px; overflow: hidden; color: var(--np-text-muted); font: 9px var(--np-font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.description { margin: 0; border-bottom: 1px solid var(--np-line); padding: 9px 14px; color: var(--np-text-secondary); font-size: 11px; }
+.artifactInspector > pre { min-height: 0; margin: 0; padding: 14px; background: var(--np-surface-raised); }
+.verification { display: grid; gap: 12px; padding-top: 12px; }
+.gateGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.gateSection { border: 1px solid var(--np-line); border-radius: var(--np-radius-md); overflow: hidden; background: var(--np-surface-raised); }
+.gateSection > header { display: flex; align-items: center; gap: 7px; border-bottom: 1px solid var(--np-line); padding: 11px 13px; color: var(--np-accent); background: var(--np-surface); }
+.gateSection article { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; gap: 7px; border-bottom: 1px solid var(--np-line); padding: 9px 12px; }
+.gateSection article > span { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 50%; color: var(--np-text-muted); background: var(--np-surface-muted); }
+.gateSection article > span[data-status="passed"] { color: var(--np-success); background: var(--np-success-soft); }
+.gateSection article div { min-width: 0; display: grid; gap: 3px; }
+.gateSection article strong { color: var(--np-text); font-size: 11px; }
+.gateSection article p { margin: 0; color: var(--np-text-secondary); font-size: 10px; }
+.gateSection article small { color: var(--np-text-muted); font: 9px var(--np-font-mono); }
+.gateSection article em { color: var(--np-text-muted); font-size: 9px; font-style: normal; }
+.rawEvents { min-height: 620px; height: calc(100vh - 154px); display: grid; grid-template-rows: 54px minmax(0, 1fr); margin-top: 12px; border: 1px solid var(--np-line); background: var(--np-surface-raised); }
+.rawEvents > header { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--np-line); padding: 8px 12px; background: var(--np-surface); }
+.rawViewport { min-height: 0; overflow: auto; }
+.rawViewport article { display: grid; grid-template-columns: 12px 66px minmax(140px, .7fr) minmax(180px, .8fr) minmax(220px, 1.4fr); align-items: center; gap: 8px; border-bottom: 1px solid var(--np-line); padding: 6px 10px; }
+.rawViewport time, .rawViewport code { color: var(--np-text-muted); font: 9px var(--np-font-mono); }
+.rawViewport strong { overflow: hidden; color: var(--np-text); font: 10px var(--np-font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.rawViewport p { margin: 0; overflow: hidden; color: var(--np-text-secondary); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.empty { margin: 18px; color: var(--np-text-muted); font-size: 11px; }
+@media (max-width: 1279px) {
+  .traceGrid { grid-template-columns: minmax(0, 1fr); }
+  .inspector { display: none; }
+  .artifactGrid { grid-template-columns: 330px minmax(0, 1fr); }
+}
+@media (max-width: 767px) {
+  .heading { align-items: stretch; flex-direction: column; }
+  .heading nav { display: grid; grid-template-columns: repeat(4, 1fr); }
+  .heading nav button { padding: 0 3px; font-size: 10px; }
+  .filters { grid-template-columns: 1fr 1fr; }
+  .filters label { grid-column: 1 / -1; }
+  .traceGrid, .artifactGrid, .rawEvents { min-height: 0; height: calc(100dvh - 250px); grid-template-columns: 1fr; }
+  .artifactInspector { display: none; }
+  .runControls { overflow-x: auto; }
+  .runControls button, .runControls a { flex: 0 0 auto; }
+  .gateGrid { grid-template-columns: 1fr; }
+  .rawViewport article { grid-template-columns: 10px 54px minmax(110px, .7fr) minmax(160px, 1fr); }
+  .rawViewport p { display: none; }
+}

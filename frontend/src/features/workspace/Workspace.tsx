@@ -9,13 +9,12 @@ import { useWorkspaceQueries, workspaceQueryKeys } from "../../app/workspace-que
 import { harnessVisibleOutputForLatestAction } from "../../types/domain";
 import { formatRunStatus } from "../../types/display";
 import type { LlmProfilesDocument, ProjectSummary } from "../../types/domain";
-import { LlmProfilesPanel } from "../llm-profiles/LlmProfilesPanel";
+import { EvidenceCenter } from "../evidence/EvidenceCenter";
+import { SettingsView } from "../settings/SettingsView";
 import { SetupConversation } from "../setup-conversation/SetupConversation";
+import { StoryWorldView } from "../story-world/StoryWorldView";
 import { FeedbackComposer } from "../workbench/FeedbackComposer";
 import { WorkbenchView } from "../workbench/WorkbenchView";
-import { CanonView } from "./CanonView";
-import { StoryArcsView } from "./StoryArcsView";
-import { TraceConsole } from "./TraceConsole";
 import { type CanonKind, parseCanonDocument } from "./workspace-utils";
 
 interface WorkspaceProps {
@@ -26,7 +25,6 @@ interface WorkspaceProps {
 type WorkspaceLocation = TaskDomain | "settings";
 type WorkspaceCommand = "start" | "resume" | "pause" | "export" | "approve" | "retry" | "recover" | "revision";
 type WorkspaceNotice = { kind: "success" | "error"; text: string };
-type StoryTab = "arcs" | "chapters" | "canon";
 
 function initialLocation(project: ProjectSummary): WorkspaceLocation {
   try {
@@ -46,7 +44,6 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
   const queries = useWorkspaceQueries(projectId);
   const events = useHarnessEvents(projectId);
   const [location, setLocation] = useState<WorkspaceLocation>(() => initialLocation(project));
-  const [storyTab, setStoryTab] = useState<StoryTab>("arcs");
   const [feedback, setFeedback] = useState("");
   const [feedbackNotice, setFeedbackNotice] = useState<WorkspaceNotice | null>(null);
   const [sendingFeedback, setSendingFeedback] = useState(false);
@@ -108,7 +105,7 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
 
   async function refreshWorkspace() {
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.project(projectId) }),
+      queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.activeProject(projectId) }),
       queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.profiles() })
     ]);
   }
@@ -234,37 +231,6 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
     );
   }
 
-  function renderStoryWorld() {
-    return (
-      <section className="story-world-domain">
-        <header className="domain-heading">
-          <div><h1>故事世界</h1><p>滚动故事弧、章节进度与已提交正史。</p></div>
-          <nav className="domain-tabs">
-            {(["arcs", "chapters", "canon"] as StoryTab[]).map((tab) => (
-              <button key={tab} className={storyTab === tab ? "active" : ""} onClick={() => setStoryTab(tab)}>
-                {{ arcs: "故事弧", chapters: "章节", canon: "正史" }[tab]}
-              </button>
-            ))}
-          </nav>
-        </header>
-        {storyTab === "canon" ? (
-          <CanonView contents={queries.canonContents} summaries={artifactSummaries} onSelectArtifact={openArtifact} onRefresh={refreshWorkspace} />
-        ) : (
-          <StoryArcsView
-            currentArc={currentArc}
-            activeChapterId={metadata.active_chapter_id}
-            artifactPaths={artifactPaths}
-            summaries={artifactSummaries}
-            approving={pendingCommands.has("approve")}
-            onApprove={approveArc}
-            onRequestRevision={requestArcRevision}
-            onSelectArtifact={openArtifact}
-          />
-        )}
-      </section>
-    );
-  }
-
   function renderContent() {
     switch (location) {
       case "cocreate":
@@ -280,10 +246,23 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
       case "workbench":
         return renderWorkbench();
       case "story":
-        return renderStoryWorld();
+        return (
+          <StoryWorldView
+            currentArc={currentArc}
+            activeChapterId={metadata.active_chapter_id}
+            artifactPaths={artifactPaths}
+            summaries={artifactSummaries}
+            canonContents={queries.canonContents}
+            approving={pendingCommands.has("approve")}
+            onApprove={approveArc}
+            onRequestRevision={requestArcRevision}
+            onSelectArtifact={openArtifact}
+            onRefresh={refreshWorkspace}
+          />
+        );
       case "evidence":
         return (
-          <TraceConsole
+          <EvidenceCenter
             events={events}
             summaries={artifactSummaries}
             artifactPaths={artifactPaths}
@@ -303,7 +282,13 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
           />
         );
       case "settings":
-        return <LlmProfilesPanel onProfilesChanged={handleProfilesChanged} />;
+        return (
+          <SettingsView
+            project={projectState}
+            onProjectChanged={(nextProject) => queryClient.setQueryData(workspaceQueryKeys.activeProject(projectId), nextProject)}
+            onProfilesChanged={handleProfilesChanged}
+          />
+        );
     }
   }
 

@@ -1,0 +1,51 @@
+.settings { min-width: 0; min-height: 660px; height: calc(100vh - 84px); display: grid; grid-template-columns: 220px minmax(0, 1fr); border: 1px solid var(--np-line); border-radius: var(--np-radius-md); overflow: hidden; background: var(--np-surface-raised); }
+.sectionNav { min-width: 0; display: grid; grid-template-rows: auto 1fr auto; border-right: 1px solid var(--np-line); background: var(--np-surface); }
+.sectionNav header { border-bottom: 1px solid var(--np-line); padding: 16px; }
+.sectionNav header p, .preferencePage > header p { margin: 0 0 4px; color: var(--np-accent); font-size: 10px; font-weight: 800; text-transform: uppercase; }
+.sectionNav h1 { margin: 0; color: var(--np-text); font-size: 17px; letter-spacing: 0; }
+.sectionNav nav { display: grid; align-content: start; gap: 2px; padding: 8px; }
+.sectionNav nav button { min-height: 38px; display: flex; align-items: center; gap: 9px; border-radius: var(--np-radius-sm); padding: 0 10px; background: transparent; color: var(--np-text-secondary); text-align: left; }
+.sectionNav nav button:hover, .sectionNav nav button.active { background: var(--np-surface-muted); color: var(--np-text); }
+.sectionNav nav button.active { box-shadow: inset 3px 0 var(--np-accent); color: var(--np-accent); font-weight: 700; }
+.sectionNav footer { min-width: 0; display: grid; gap: 4px; border-top: 1px solid var(--np-line); padding: 12px; }
+.sectionNav footer span, .sectionNav footer small { color: var(--np-text-muted); font-size: 9px; }
+.sectionNav footer strong, .sectionNav footer small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sectionNav footer strong { color: var(--np-text); font-size: 11px; }
+.sectionNav footer small { font-family: var(--np-font-mono); }
+.settingsContent { min-width: 0; min-height: 0; overflow: auto; }
+.preferencePage { max-width: 820px; display: grid; align-content: start; gap: 18px; padding: 26px; }
+.preferencePage > header { display: grid; gap: 4px; border-bottom: 1px solid var(--np-line); padding-bottom: 16px; }
+.preferencePage h2 { margin: 0; color: var(--np-text); font-size: 20px; }
+.preferencePage > header span { color: var(--np-text-secondary); font-size: 11px; }
+.modeOptions, .themeOptions { display: grid; gap: 8px; }
+.modeOptions > button { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px; border: 1px solid var(--np-line); border-radius: var(--np-radius-md); padding: 14px; background: var(--np-surface); color: var(--np-text); text-align: left; }
+.modeOptions > button.selected, .themeOptions > button.selected { border-color: var(--np-accent); background: var(--np-accent-soft); }
+.modeOptions > button > span { width: 20px; height: 20px; display: grid; place-items: center; border: 1px solid var(--np-line-strong); border-radius: 50%; color: var(--np-accent); }
+.modeOptions > button.selected > span { border-color: var(--np-accent); }
+.modeOptions div { display: grid; gap: 5px; }
+.modeOptions strong { font-size: 13px; }
+.modeOptions p { margin: 0; color: var(--np-text-secondary); font-size: 11px; line-height: 1.6; }
+.modeOptions button:disabled { cursor: not-allowed; opacity: .58; }
+.safetyNote { border-left: 3px solid var(--np-info); padding: 10px 12px; background: var(--np-info-soft); }
+.safetyNote strong { color: var(--np-text); font-size: 11px; }
+.safetyNote p { margin: 5px 0 0; color: var(--np-text-secondary); font-size: 10px; line-height: 1.6; }
+.warning, .error, .success { margin: 0; border-left: 3px solid var(--np-warning); padding: 9px 11px; background: var(--np-warning-soft); color: var(--np-text-secondary); font-size: 10px; }
+.error { border-color: var(--np-danger); background: var(--np-danger-soft); }
+.success { border-color: var(--np-success); background: var(--np-success-soft); }
+.themeOptions { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.themeOptions > button { min-width: 0; display: grid; grid-template-columns: 24px minmax(0, 1fr) 18px; align-items: center; gap: 8px; border: 1px solid var(--np-line); border-radius: var(--np-radius-md); padding: 13px; background: var(--np-surface); color: var(--np-text-secondary); text-align: left; }
+.themeOptions div { min-width: 0; display: grid; gap: 4px; }
+.themeOptions strong { color: var(--np-text); font-size: 11px; }
+.themeOptions small { overflow: hidden; color: var(--np-text-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.themePreview { display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--np-line); padding-top: 12px; }
+.themePreview span { color: var(--np-text-muted); font-size: 10px; }
+.themePreview strong { color: var(--np-text); font-size: 11px; }
+@media (max-width: 767px) {
+  .settings { min-height: 0; height: auto; grid-template-columns: 1fr; }
+  .sectionNav { grid-template-rows: auto auto; border-right: 0; border-bottom: 1px solid var(--np-line); }
+  .sectionNav nav { grid-template-columns: repeat(3, 1fr); }
+  .sectionNav nav button { justify-content: center; padding: 0 4px; font-size: 10px; }
+  .sectionNav footer { display: none; }
+  .preferencePage { padding: 16px; }
+  .themeOptions { grid-template-columns: 1fr; }
+}
