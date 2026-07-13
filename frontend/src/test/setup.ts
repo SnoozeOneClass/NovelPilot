@@ -25,3 +25,5 @@ HTMLDialogElement.prototype.showModal = function showModal() {
 HTMLDialogElement.prototype.close = function close() {
   this.removeAttribute("open");
 };
+
+Element.prototype.scrollIntoView = () => undefined;
