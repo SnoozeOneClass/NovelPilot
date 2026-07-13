@@ -27,7 +27,7 @@ npm.cmd run frontend:dev
 http://127.0.0.1:5173
 ```
 
-前端会把 API 请求代理到 FastAPI 后端 `http://127.0.0.1:8000`。
+前端会把 API 请求代理到 FastAPI 后端 `http://127.0.0.1:8010`。
 
 ## 配置 LLM Profile
 

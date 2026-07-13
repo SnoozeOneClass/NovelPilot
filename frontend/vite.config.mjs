@@ -1,7 +1,7 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
-const apiTarget = process.env.NOVELPILOT_API_TARGET ?? "http://127.0.0.1:8000";
+const apiTarget = process.env.NOVELPILOT_API_TARGET ?? "http://127.0.0.1:8010";
 
 export default defineConfig({
   cacheDir: "../.tmp/vite-cache",
