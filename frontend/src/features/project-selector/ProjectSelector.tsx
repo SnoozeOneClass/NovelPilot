@@ -1,289 +1,155 @@
-import { ArrowLeft, ArrowRight, Bot, Clock3, Feather, FolderOpen, Plus, UserRound } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ArrowRight, BookOpen, Clock3, Feather, FolderOpen, Plus } from "lucide-react";
+import { useState } from "react";
 import { api, formatApiError } from "../../api/client";
+import { Dialog } from "../../components/ui/Dialog";
+import { ThemeToggle } from "../../components/ui/ThemeToggle";
 import { formatOperationMode, formatProjectTitle, formatRunStatus } from "../../types/display";
 import type { OperationMode, ProjectSummary } from "../../types/domain";
+import styles from "./ProjectSelector.module.css";
 
 interface ProjectSelectorProps {
   onProjectOpened: (project: ProjectSummary) => void;
 }
 
-type SelectorStep = "home" | "new-mode" | "continue-list" | "continue-mode";
+function formatUpdatedAt(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "更新时间未知";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(date);
+}
 
 export function ProjectSelector({ onProjectOpened }: ProjectSelectorProps) {
-  const [step, setStep] = useState<SelectorStep>("home");
-  const [projects, setProjects] = useState<ProjectSummary[]>([]);
-  const [selectedProject, setSelectedProject] = useState<ProjectSummary | null>(null);
+  const queryClient = useQueryClient();
+  const [newBookOpen, setNewBookOpen] = useState(false);
   const [mode, setMode] = useState<OperationMode>("full_auto");
-  const [creating, setCreating] = useState(false);
-  const [openingProject, setOpeningProject] = useState<string | null>(null);
-  const [projectsLoading, setProjectsLoading] = useState(true);
-  const [projectsLoadFailed, setProjectsLoadFailed] = useState(false);
-  const [notice, setNotice] = useState<{ kind: "error"; text: string } | null>(null);
-  const actionLockRef = useRef(false);
-  const selectorBusy = creating || openingProject !== null;
+  const [notice, setNotice] = useState<string | null>(null);
+  const projectsQuery = useQuery({ queryKey: ["projects"], queryFn: api.listProjects });
 
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .listProjects()
-      .then((result) => {
-        if (!cancelled) {
-          setProjects(result);
-          setProjectsLoadFailed(false);
-          setNotice(null);
-        }
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          setProjectsLoadFailed(true);
-          setNotice({ kind: "error", text: formatApiError(error) });
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setProjectsLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  function goHome() {
-    if (selectorBusy) return;
-    setStep("home");
-    setSelectedProject(null);
-    setMode("full_auto");
-    setNotice(null);
-  }
-
-  function startNewBookFlow() {
-    setMode("full_auto");
-    setNotice(null);
-    setStep("new-mode");
-  }
-
-  function startContinueFlow() {
-    setSelectedProject(null);
-    setNotice(null);
-    setStep("continue-list");
-  }
-
-  function chooseProject(project: ProjectSummary) {
-    setSelectedProject(project);
-    setMode(project.metadata.operation_mode);
-    setNotice(null);
-    setStep("continue-mode");
-  }
-
-  async function createProject() {
-    if (actionLockRef.current) return;
-    actionLockRef.current = true;
-    setCreating(true);
-    setNotice(null);
-    try {
-      onProjectOpened(await api.createProject(mode));
-    } catch (error) {
-      setNotice({ kind: "error", text: formatApiError(error) });
-    } finally {
-      actionLockRef.current = false;
-      setCreating(false);
-    }
-  }
-
-  async function continueProject() {
-    if (!selectedProject || actionLockRef.current) return;
-    const projectToOpen = selectedProject;
-    actionLockRef.current = true;
-    setOpeningProject(projectToOpen.name);
-    setNotice(null);
-    try {
-      const activeProject = await api.activeProject();
-      let project = activeProject?.name === projectToOpen.name
-        ? activeProject
-        : await api.openProject(projectToOpen.name);
-      if (project.metadata.operation_mode !== mode) {
-        project = await api.updateProjectMode(mode);
-      }
+  const createMutation = useMutation({
+    mutationFn: (operationMode: OperationMode) => api.createProject(operationMode),
+    onSuccess: (project) => {
+      void queryClient.invalidateQueries({ queryKey: ["projects"] });
       onProjectOpened(project);
-    } catch (error) {
-      setNotice({ kind: "error", text: formatApiError(error) });
-    } finally {
-      actionLockRef.current = false;
-      setOpeningProject(null);
-    }
+    },
+    onError: (error) => setNotice(formatApiError(error))
+  });
+
+  const openMutation = useMutation({
+    mutationFn: async (project: ProjectSummary) => {
+      const active = await api.activeProject();
+      return active?.name === project.name ? active : api.openProject(project.name);
+    },
+    onSuccess: (openedProject) => onProjectOpened(openedProject),
+    onError: (error) => setNotice(formatApiError(error))
+  });
+
+  const busy = createMutation.isPending || openMutation.isPending;
+  const projects = projectsQuery.data ?? [];
+  const error = notice ?? (projectsQuery.error ? formatApiError(projectsQuery.error) : null);
+
+  function createProject() {
+    setNotice(null);
+    createMutation.mutate(mode);
+  }
+
+  function openProject(project: ProjectSummary) {
+    setNotice(null);
+    openMutation.mutate(project);
   }
 
   return (
-    <main className="project-selector-shell">
-      <header className="selector-brand">
-        <span><Feather size={22} /></span>
-        <div><strong>NovelPilot</strong><small>本地 AI 长篇小说创作系统</small></div>
+    <main className={styles.shell}>
+      <header className={styles.topbar}>
+        <div className={styles.brand}>
+          <span><Feather size={20} /></span>
+          <div><strong>NovelPilot</strong><small>本地长篇小说工作台</small></div>
+        </div>
+        <ThemeToggle />
       </header>
 
-      {notice && <p className="notice-banner error selector-notice">{notice.text}</p>}
+      <section className={styles.content}>
+        <header className={styles.heading}>
+          <div>
+            <p>小说项目</p>
+            <h1>继续写作，或者开始一本新书</h1>
+            <span>所有正文、设定和运行证据都保存在本地项目目录中。</span>
+          </div>
+          <button className={styles.primaryButton} disabled={busy} onClick={() => setNewBookOpen(true)}>
+            <Plus size={17} /> 新建小说
+          </button>
+        </header>
 
-      {step === "home" && (
-        <div className="project-selector-grid selector-home-grid">
-          <section className="np-surface selector-choice-panel">
-            <span className="selector-choice-icon"><Plus size={24} /></span>
-            <p className="eyebrow">开始新书</p>
-            <h1>从全书方向开始构思一本新小说</h1>
-            <p>先选择创作模式，再与 AI 讨论题材、人物和故事方向。现在不需要提前确定书名。</p>
-            <button className="gold-button" disabled={selectorBusy} onClick={startNewBookFlow}>
-              开始新书 <ArrowRight size={17} />
-            </button>
-          </section>
+        {error && <div className={styles.errorNotice}>{error}</div>}
 
-          <section className="np-surface selector-choice-panel">
-            <span className="selector-choice-icon"><FolderOpen size={24} /></span>
-            <p className="eyebrow">继续创作</p>
-            <h1>恢复一本已有小说的创作进度</h1>
-            <p>选择本地小说，并决定这一次继续使用原有模式，还是切换到另一种创作模式。</p>
-            <button className="outline-button" disabled={selectorBusy} onClick={startContinueFlow}>
-              选择已有小说 <ArrowRight size={17} />
-            </button>
-          </section>
-        </div>
-      )}
+        <section className={styles.projectPanel} aria-label="本地小说项目">
+          <header className={styles.listHeader}>
+            <span>小说</span><span>当前位置</span><span>模式</span><span>更新时间</span><span />
+          </header>
+          <div className={styles.projectList}>
+            {projects.map((project) => (
+              <button
+                key={project.metadata.project_id}
+                className={styles.projectRow}
+                disabled={busy}
+                onClick={() => openProject(project)}
+              >
+                <span className={styles.projectIdentity}>
+                  <span className={styles.bookIcon}><BookOpen size={18} /></span>
+                  <span><strong>{formatProjectTitle(project.title)}</strong><small>{project.name}</small></span>
+                </span>
+                <span className={styles.progress}>
+                  <strong>{project.metadata.active_chapter_id ?? project.metadata.active_arc_id ?? "尚未开始"}</strong>
+                  <small>{formatRunStatus(project.metadata.run_status)}</small>
+                </span>
+                <span className={styles.mode}>{formatOperationMode(project.metadata.operation_mode)}</span>
+                <span className={styles.updated}><Clock3 size={14} /> {formatUpdatedAt(project.metadata.updated_at)}</span>
+                <ArrowRight size={16} />
+              </button>
+            ))}
 
-      {step === "new-mode" && (
-        <div className="project-selector-grid selector-flow-grid">
-          <ModePanel
-            eyebrow="开始新书"
-            title="选择这本新书的创作模式"
-            description="项目将以“未命名新书”开始；正式书名会在全书方向讨论完成后确定。"
-            mode={mode}
-            disabled={selectorBusy}
-            onModeChange={setMode}
-            onBack={goHome}
-            actionLabel={creating ? "正在创建未命名新书..." : "创建未命名新书"}
-            onConfirm={() => void createProject()}
-          />
-          <FlowSummary kind="new" mode={mode} />
-        </div>
-      )}
-
-      {step === "continue-list" && (
-        <div className="project-selector-grid selector-list-grid">
-          <section className="np-surface recent-projects-panel">
-            <header className="view-heading compact-heading">
-              <div>
-                <button className="selector-back-button" disabled={selectorBusy} onClick={goHome}><ArrowLeft size={15} /> 返回首页</button>
-                <p className="eyebrow">继续创作</p>
-                <h2>选择已有小说</h2>
-                <p>下一步可以保留或更换这次创作使用的模式。</p>
+            {projectsQuery.isLoading && (
+              <div className={styles.empty}><Clock3 size={22} /><strong>正在读取本地项目</strong></div>
+            )}
+            {!projectsQuery.isLoading && !projectsQuery.isError && projects.length === 0 && (
+              <div className={styles.empty}>
+                <FolderOpen size={24} />
+                <strong>还没有小说项目</strong>
+                <span>新建一本小说，从开放式全书共创开始。</span>
               </div>
-            </header>
-            <div className="project-list-modern">
-              {projects.map((project) => (
-                <button key={project.metadata.project_id} disabled={selectorBusy} onClick={() => chooseProject(project)}>
-                  <span className="project-folder"><FolderOpen size={20} /></span>
-                  <span className="project-list-copy">
-                    <strong>{formatProjectTitle(project.title)}</strong>
-                    <small title={project.path}>{project.path}</small>
-                    <span><em>{formatOperationMode(project.metadata.operation_mode)}</em><em>{formatRunStatus(project.metadata.run_status)}</em></span>
-                  </span>
-                  <Clock3 size={16} />
-                </button>
-              ))}
-              {projectsLoading && <SelectorEmpty icon={<Clock3 size={26} />} title="正在读取本地项目" detail="请稍候，正在恢复可以继续创作的项目列表。" />}
-              {!projectsLoading && projectsLoadFailed && <SelectorEmpty icon={<FolderOpen size={26} />} title="项目列表加载失败" detail="请确认后端服务正在运行，然后刷新页面重试。" />}
-              {!projectsLoading && !projectsLoadFailed && projects.length === 0 && <SelectorEmpty icon={<FolderOpen size={26} />} title="还没有可以继续的项目" detail="返回首页，开始你的第一本新书。" />}
-            </div>
-          </section>
-        </div>
-      )}
+            )}
+          </div>
+        </section>
+      </section>
 
-      {step === "continue-mode" && selectedProject && (
-        <div className="project-selector-grid selector-flow-grid">
-          <ModePanel
-            eyebrow="继续创作"
-            title={`继续《${formatProjectTitle(selectedProject.title)}》`}
-            description={`上次使用${formatOperationMode(selectedProject.metadata.operation_mode)}。你可以保持不变，也可以为后续创作切换模式。`}
-            mode={mode}
-            disabled={selectorBusy}
-            modeLocked={selectedProject.metadata.run_status === "running" || selectedProject.metadata.run_status === "pause_requested"}
-            onModeChange={setMode}
-            onBack={() => setStep("continue-list")}
-            actionLabel={openingProject ? "正在打开小说..." : "以此模式继续创作"}
-            onConfirm={() => void continueProject()}
-          />
-          <FlowSummary kind="continue" mode={mode} project={selectedProject} />
+      <footer className={styles.footer}>
+        <span>本地单用户</span><span>数据不会上传到 NovelPilot 服务</span>
+      </footer>
+
+      <Dialog open={newBookOpen} title="开始一本新书" onClose={() => !createMutation.isPending && setNewBookOpen(false)}>
+        <div className={styles.newBookDialog}>
+          <p>项目会先以“未命名新书”创建，正式书名在全书方向审阅通过后确定。</p>
+          <fieldset className={styles.modePicker}>
+            <legend>初始创作模式</legend>
+            <button type="button" className={mode === "full_auto" ? styles.selected : ""} onClick={() => setMode("full_auto")}>
+              <strong>全自动</strong><span>故事弧和章节由 Harness 连续推进。</span>
+            </button>
+            <button type="button" className={mode === "participatory" ? styles.selected : ""} onClick={() => setMode("participatory")}>
+              <strong>参与模式</strong><span>每个故事弧计划等待你的批准。</span>
+            </button>
+          </fieldset>
+          <footer>
+            <button type="button" className={styles.cancelButton} disabled={createMutation.isPending} onClick={() => setNewBookOpen(false)}>取消</button>
+            <button type="button" className={styles.primaryButton} disabled={createMutation.isPending} onClick={createProject}>
+              {createMutation.isPending ? "正在创建..." : "创建并进入共创"} <ArrowRight size={16} />
+            </button>
+          </footer>
         </div>
-      )}
+      </Dialog>
     </main>
   );
-}
-
-function ModePanel({
-  eyebrow,
-  title,
-  description,
-  mode,
-  disabled,
-  modeLocked = false,
-  onModeChange,
-  onBack,
-  actionLabel,
-  onConfirm
-}: {
-  eyebrow: string;
-  title: string;
-  description: string;
-  mode: OperationMode;
-  disabled: boolean;
-  modeLocked?: boolean;
-  onModeChange: (mode: OperationMode) => void;
-  onBack: () => void;
-  actionLabel: string;
-  onConfirm: () => void;
-}) {
-  return (
-    <section className="np-surface create-project-panel selector-mode-panel">
-      <button className="selector-back-button" disabled={disabled} onClick={onBack}><ArrowLeft size={15} /> 返回</button>
-      <p className="eyebrow">{eyebrow}</p>
-      <h1>{title}</h1>
-      <p>{description}</p>
-      <fieldset>
-        <legend>创作模式</legend>
-        <button disabled={disabled || modeLocked} className={mode === "full_auto" ? "selected" : ""} onClick={() => onModeChange("full_auto")}>
-          <Bot size={19} />
-          <span><strong>全自动模式</strong><small>故事弧与章节由 harness 连续推进，你可以随时提出意见。</small></span>
-        </button>
-        <button disabled={disabled || modeLocked} className={mode === "participatory" ? "selected" : ""} onClick={() => onModeChange("participatory")}>
-          <UserRound size={19} />
-          <span><strong>参与模式</strong><small>每个故事弧计划都等待你审批，章节 loop 自动执行。</small></span>
-        </button>
-      </fieldset>
-      {modeLocked && <p className="selector-mode-note">小说正在运行或等待安全暂停，本次只能按当前模式进入；暂停完成后才能切换。</p>}
-      <button className="gold-button create-project-button" disabled={disabled} onClick={onConfirm}>
-        {actionLabel} <ArrowRight size={17} />
-      </button>
-    </section>
-  );
-}
-
-function FlowSummary({ kind, mode, project }: { kind: "new" | "continue"; mode: OperationMode; project?: ProjectSummary }) {
-  return (
-    <aside className="np-surface selector-summary-panel">
-      <p className="eyebrow">本次创作</p>
-      <h2>{kind === "new" ? "新书流程" : formatProjectTitle(project?.title)}</h2>
-      <dl>
-        {project && <div><dt>当前进度</dt><dd>{formatRunStatus(project.metadata.run_status)}</dd></div>}
-        {project && <div><dt>上次模式</dt><dd>{formatOperationMode(project.metadata.operation_mode)}</dd></div>}
-        <div><dt>本次模式</dt><dd>{formatOperationMode(mode)}</dd></div>
-        <div><dt>已有内容</dt><dd>{kind === "new" ? "从空白方向开始" : "全部保留"}</dd></div>
-        <div><dt>正式书名</dt><dd>{kind === "new" ? "全书方向确定后选择" : formatProjectTitle(project?.title)}</dd></div>
-      </dl>
-      <p className="selector-summary-note">
-        {kind === "new"
-          ? "创建后先进行全书方向讨论；推荐书名和自定义书名会在批准方向时出现。"
-          : "切换模式只改变后续故事弧的人工门禁，不会重置章节、正史或审批记录。"}
-      </p>
-    </aside>
-  );
-}
-
-function SelectorEmpty({ icon, title, detail }: { icon: ReactNode; title: string; detail: string }) {
-  return <div className="empty-state">{icon}<h2>{title}</h2><p>{detail}</p></div>;
 }

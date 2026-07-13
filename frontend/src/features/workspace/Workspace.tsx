@@ -1,105 +1,74 @@
-import {
-  BookOpen,
-  Boxes,
-  Columns3,
-  Feather,
-  GitBranch,
-  Home,
-  RefreshCcw,
-  Send,
-  Settings2,
-  ShieldCheck,
-  X
-} from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, apiUrl, formatApiError } from "../../api/client";
-import { harnessVisibleOutputForLatestAction, isHarnessEvent } from "../../types/domain";
-import {
-  formatLoopLayer,
-  formatOperationMode,
-  formatOptionalId,
-  formatProjectTitle,
-  formatRunStatus
-} from "../../types/display";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Send, X } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { api, formatApiError } from "../../api/client";
+import { AppShell } from "../../app/AppShell";
+import { useHarnessEvents } from "../../app/harness-events";
+import type { TaskDomain } from "../../app/types";
+import { useWorkspaceQueries, workspaceQueryKeys } from "../../app/workspace-queries";
+import { harnessVisibleOutputForLatestAction } from "../../types/domain";
+import { formatRunStatus } from "../../types/display";
+import type { LlmProfilesDocument, ProjectSummary } from "../../types/domain";
 import { LlmProfilesPanel } from "../llm-profiles/LlmProfilesPanel";
 import { SetupConversation } from "../setup-conversation/SetupConversation";
-import type {
-  ArtifactSummary,
-  CurrentArcState,
-  HarnessEvent,
-  LlmProfilesDocument,
-  ProjectCompletionAudit,
-  ProjectReadiness,
-  ProjectSummary
-} from "../../types/domain";
 import { CanonView } from "./CanonView";
 import { CockpitView } from "./CockpitView";
 import { ProjectOverview } from "./ProjectOverview";
 import { StoryArcsView } from "./StoryArcsView";
 import { TraceConsole } from "./TraceConsole";
-import { canonFiles, type CanonKind, parseCanonDocument } from "./workspace-utils";
+import { type CanonKind, parseCanonDocument } from "./workspace-utils";
 
 interface WorkspaceProps {
   project: ProjectSummary;
   onProjectClosed: () => void;
 }
 
-type WorkspaceView = "overview" | "plan" | "cockpit" | "arcs" | "canon" | "trace" | "settings";
+type WorkspaceLocation = TaskDomain | "settings";
 type WorkspaceCommand = "start" | "resume" | "pause" | "export" | "approve" | "retry" | "recover" | "revision";
 type WorkspaceNotice = { kind: "success" | "error"; text: string };
+type StoryTab = "arcs" | "chapters" | "canon";
 
-const viewLabels: Record<WorkspaceView, string> = {
-  overview: "项目概览",
-  plan: "开书规划",
-  cockpit: "创作工作台",
-  arcs: "故事弧与章节",
-  canon: "正史状态",
-  trace: "运行证据与产物",
-  settings: "设置与模型"
-};
-
-const navItems: Array<{ id: WorkspaceView; label: string; icon: typeof Home }> = [
-  { id: "overview", label: "项目概览", icon: Home },
-  { id: "plan", label: "开书规划", icon: BookOpen },
-  { id: "cockpit", label: "创作工作台", icon: Columns3 },
-  { id: "arcs", label: "故事弧与章节", icon: Boxes },
-  { id: "canon", label: "正史状态", icon: ShieldCheck },
-  { id: "trace", label: "运行证据与产物", icon: GitBranch },
-  { id: "settings", label: "设置与模型", icon: Settings2 }
-];
-
-const emptyCanonContents: Record<CanonKind, string> = {
-  characters: "{\"schema_version\":1,\"version\":1,\"items\":{}}",
-  relationships: "{\"schema_version\":1,\"version\":1,\"items\":{}}",
-  world_facts: "{\"schema_version\":1,\"version\":1,\"items\":{}}",
-  foreshadowing: "{\"schema_version\":1,\"version\":1,\"items\":{}}"
-};
+function initialLocation(project: ProjectSummary): WorkspaceLocation {
+  try {
+    const stored = window.sessionStorage.getItem(`novelpilot.location.${project.metadata.project_id}`);
+    if (["cocreate", "workbench", "story", "evidence", "settings"].includes(stored ?? "")) {
+      return stored as WorkspaceLocation;
+    }
+  } catch {
+    // Use the project-derived location when session storage is unavailable.
+  }
+  return project.title ? "workbench" : "cocreate";
+}
 
 export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
-  const [activeView, setActiveView] = useState<WorkspaceView>(
-    project.metadata.active_arc_id ? "cockpit" : "plan"
-  );
-  const [projectState, setProjectState] = useState<ProjectSummary>(project);
-  const [events, setEvents] = useState<HarnessEvent[]>([]);
+  const projectId = project.metadata.project_id;
+  const queryClient = useQueryClient();
+  const queries = useWorkspaceQueries(projectId);
+  const events = useHarnessEvents(projectId);
+  const [location, setLocation] = useState<WorkspaceLocation>(() => initialLocation(project));
+  const [storyTab, setStoryTab] = useState<StoryTab>("arcs");
   const [feedback, setFeedback] = useState("");
   const [feedbackNotice, setFeedbackNotice] = useState<WorkspaceNotice | null>(null);
   const [sendingFeedback, setSendingFeedback] = useState(false);
   const [workspaceNotice, setWorkspaceNotice] = useState<WorkspaceNotice | null>(null);
   const [pendingCommands, setPendingCommands] = useState<Set<WorkspaceCommand>>(() => new Set());
-  const [currentArc, setCurrentArc] = useState<CurrentArcState | null>(null);
-  const [artifactPaths, setArtifactPaths] = useState<string[]>([]);
-  const [artifactSummaries, setArtifactSummaries] = useState<ArtifactSummary[]>([]);
   const [selectedArtifactPath, setSelectedArtifactPath] = useState<string | null>(null);
-  const [activeArtifact, setActiveArtifact] = useState<{ path: string; content: string } | null>(null);
   const [artifactDrawerOpen, setArtifactDrawerOpen] = useState(false);
-  const [profiles, setProfiles] = useState<LlmProfilesDocument | null>(null);
-  const [completionAudit, setCompletionAudit] = useState<ProjectCompletionAudit | null>(null);
-  const [readiness, setReadiness] = useState<ProjectReadiness | null>(null);
-  const [canonContents, setCanonContents] = useState<Record<CanonKind, string>>(emptyCanonContents);
 
-  const latestEvent = events.at(-1) ?? null;
-  const latestStatusEvent = [...events].reverse().find((event) => event.kind !== "llm_output_delta") ?? null;
+  const projectState = queries.activeProject.data ?? project;
   const metadata = projectState.metadata;
+  const currentArc = queries.currentArc.data ?? null;
+  const readiness = queries.readiness.data ?? null;
+  const profiles = queries.profiles.data ?? null;
+  const artifactPaths = queries.artifactPaths.data ?? [];
+  const artifactSummaries = queries.artifactSummaries.data ?? [];
+  const completionAudit = queries.completionAudit.data ?? null;
+  const activeArtifactQuery = useQuery({
+    queryKey: workspaceQueryKeys.artifact(projectId, selectedArtifactPath),
+    queryFn: () => api.artifactContent(selectedArtifactPath ?? ""),
+    enabled: Boolean(selectedArtifactPath)
+  });
+  const activeArtifact = activeArtifactQuery.data ?? null;
   const runStatus = metadata.run_status;
   const runInFlight = runStatus === "running" || runStatus === "pause_requested";
   const canStart = Boolean(readiness?.can_start_run && readiness.next_action.id === "start_run");
@@ -111,9 +80,9 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
   const modelOutput = useMemo(() => harnessVisibleOutputForLatestAction(events), [events]);
   const canonCounts = useMemo(
     () => Object.fromEntries(
-      Object.entries(canonContents).map(([kind, content]) => [kind, Object.keys(parseCanonDocument(content).items).length])
+      Object.entries(queries.canonContents).map(([kind, content]) => [kind, Object.keys(parseCanonDocument(content).items).length])
     ) as Record<CanonKind, number>,
-    [canonContents]
+    [queries.canonContents]
   );
   const retryableChapterArtifact = useMemo(() => {
     if (!metadata.active_chapter_id) return false;
@@ -124,149 +93,32 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
     );
   }, [artifactSummaries, metadata.active_chapter_id]);
 
-  const refreshWorkspaceState = useCallback(async () => {
-    try {
-      const [activeProject, arc, nextProfiles] = await Promise.all([
-        api.activeProject(),
-        api.currentArc(),
-        api.profiles()
-      ]);
-      if (activeProject) setProjectState(activeProject);
-      setCurrentArc(arc);
-      setProfiles(nextProfiles);
-    } catch (error) {
-      setWorkspaceNotice({ kind: "error", text: formatApiError(error) });
-    }
-  }, []);
-
-  const refreshArtifacts = useCallback(async () => {
-    try {
-      const [paths, summaries] = await Promise.all([api.listArtifacts(), api.artifactSummaries()]);
-      setArtifactPaths(paths);
-      setArtifactSummaries(summaries);
-    } catch (error) {
-      setWorkspaceNotice({ kind: "error", text: formatApiError(error) });
-    }
-  }, []);
-
-  const refreshCanon = useCallback(async () => {
-    const entries = await Promise.all(
-      (Object.entries(canonFiles) as Array<[CanonKind, string]>).map(async ([kind, path]) => {
-        try {
-          const artifact = await api.artifactContent(path);
-          return [kind, artifact.content] as const;
-        } catch {
-          return [kind, emptyCanonContents[kind]] as const;
-        }
-      })
-    );
-    setCanonContents(Object.fromEntries(entries) as Record<CanonKind, string>);
-  }, []);
-
-  const refreshReadiness = useCallback(async () => {
-    try {
-      setReadiness(await api.readiness());
-    } catch (error) {
-      setReadiness(null);
-      setWorkspaceNotice({ kind: "error", text: formatApiError(error) });
-    }
-  }, []);
-
-  const refreshCompletionAudit = useCallback(async () => {
-    try {
-      setCompletionAudit(await api.completionAudit());
-    } catch (error) {
-      setCompletionAudit(null);
-      setWorkspaceNotice({ kind: "error", text: formatApiError(error) });
-    }
-  }, []);
-
-  const refreshInspection = useCallback(async () => {
-    await Promise.all([refreshArtifacts(), refreshCanon(), refreshCompletionAudit()]);
-  }, [refreshArtifacts, refreshCanon, refreshCompletionAudit]);
+  useEffect(() => {
+    try { window.sessionStorage.setItem(`novelpilot.location.${projectId}`, location); } catch { /* no-op */ }
+  }, [location, projectId]);
 
   useEffect(() => {
-    setProjectState(project);
-    setEvents([]);
-    setCurrentArc(null);
-    setArtifactPaths([]);
-    setArtifactSummaries([]);
-    setSelectedArtifactPath(null);
-    setActiveArtifact(null);
-    setArtifactDrawerOpen(false);
-    setCompletionAudit(null);
-    setReadiness(null);
-    setProfiles(null);
-    setPendingCommands(new Set());
-    setFeedbackNotice(null);
-    setWorkspaceNotice(null);
-    setCanonContents(emptyCanonContents);
-    setActiveView(project.metadata.active_arc_id ? "cockpit" : "plan");
-
-    let cancelled = false;
-    api.setupState().then((setup) => {
-      if (!cancelled && setup.approved && !project.metadata.active_arc_id) setActiveView("overview");
-    }).catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [project]);
+    if (queries.setup.data && !queries.setup.data.approved) setLocation("cocreate");
+  }, [queries.setup.data]);
 
   useEffect(() => {
-    const source = new EventSource(apiUrl("/api/runs/events"));
-    const handleHarnessEvent = (message: MessageEvent<string>) => {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(message.data);
-      } catch {
-        return;
-      }
-      if (!isHarnessEvent(parsed)) return;
-      setEvents((current) => current.some((event) => event.event_id === parsed.event_id) ? current : [...current, parsed]);
-    };
-    source.onmessage = handleHarnessEvent;
-    source.addEventListener("harness_event", (event) => handleHarnessEvent(event as MessageEvent<string>));
-    source.addEventListener("stream_ready", () => undefined);
-    return () => source.close();
-  }, [project.metadata.project_id]);
+    const latest = events.at(-1);
+    if (latest?.artifact_path) setSelectedArtifactPath(latest.artifact_path);
+  }, [events]);
 
-  useEffect(() => {
-    void Promise.all([refreshWorkspaceState(), refreshReadiness(), refreshArtifacts(), refreshCanon(), refreshCompletionAudit()]);
-  }, [project.metadata.project_id, refreshArtifacts, refreshCanon, refreshCompletionAudit, refreshReadiness, refreshWorkspaceState]);
-
-  useEffect(() => {
-    if (!latestStatusEvent?.event_id) return;
-    void Promise.all([refreshWorkspaceState(), refreshReadiness(), refreshInspection()]);
-  }, [latestStatusEvent?.event_id, refreshInspection, refreshReadiness, refreshWorkspaceState]);
-
-  useEffect(() => {
-    if (latestEvent?.artifact_path) setSelectedArtifactPath(latestEvent.artifact_path);
-  }, [latestEvent?.artifact_path]);
-
-  useEffect(() => {
-    if (!selectedArtifactPath) {
-      setActiveArtifact(null);
-      return;
-    }
-    let cancelled = false;
-    api.artifactContent(selectedArtifactPath)
-      .then((artifact) => {
-        if (!cancelled) setActiveArtifact(artifact);
-      })
-      .catch(() => {
-        if (!cancelled) setActiveArtifact(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedArtifactPath]);
+  async function refreshWorkspace() {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.project(projectId) }),
+      queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.profiles() })
+    ]);
+  }
 
   async function runCommand(command: WorkspaceCommand, action: () => Promise<void>): Promise<boolean> {
     setPendingCommands((current) => new Set(current).add(command));
     setWorkspaceNotice(null);
     try {
       await action();
-      await Promise.all([refreshWorkspaceState(), refreshReadiness(), refreshInspection()]);
+      await refreshWorkspace();
       return true;
     } catch (error) {
       setWorkspaceNotice({ kind: "error", text: formatApiError(error) });
@@ -280,13 +132,8 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
     }
   }
 
-  async function startRun() {
-    await runCommand("start", async () => { await api.startRun(); });
-  }
-
-  async function resumeRun() {
-    await runCommand("resume", async () => { await api.resumeRun(); });
-  }
+  async function startRun() { await runCommand("start", async () => { await api.startRun(); }); }
+  async function resumeRun() { await runCommand("resume", async () => { await api.resumeRun(); }); }
 
   async function pauseRun() {
     let status = "";
@@ -323,8 +170,7 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
 
   async function recoverStaleRun() {
     if (!canRecover) return;
-    const confirmed = window.confirm("仅在确认没有仍在执行的 harness 请求时恢复。恢复后项目会停在 paused。");
-    if (!confirmed) return;
+    if (!window.confirm("仅在确认没有仍在执行的 Harness 请求时恢复。恢复后项目会停在已暂停状态。")) return;
     await runCommand("recover", async () => { await api.recoverStaleRun(); });
   }
 
@@ -347,6 +193,7 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
     setWorkspaceNotice(null);
     try {
       await api.closeProject();
+      queryClient.removeQueries({ queryKey: workspaceQueryKeys.project(projectId) });
       onProjectClosed();
     } catch (error) {
       setWorkspaceNotice({ kind: "error", text: formatApiError(error) });
@@ -354,8 +201,8 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
   }
 
   function handleProfilesChanged(nextProfiles: LlmProfilesDocument) {
-    setProfiles(nextProfiles);
-    void Promise.all([refreshWorkspaceState(), refreshReadiness()]);
+    queryClient.setQueryData(workspaceQueryKeys.profiles(), nextProfiles);
+    void refreshWorkspace();
   }
 
   function openArtifact(path: string) {
@@ -363,56 +210,68 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
     setArtifactDrawerOpen(true);
   }
 
-  function renderView() {
-    switch (activeView) {
-      case "overview":
-        return (
-          <ProjectOverview
-            project={projectState}
-            currentArc={currentArc}
-            readiness={readiness}
-            summaries={artifactSummaries}
-            canonCounts={canonCounts}
-            canStart={canStart}
-            canResume={canResume}
-            busy={commandBusy}
-            onStart={startRun}
-            onResume={resumeRun}
-            onExport={exportManuscript}
-            onNavigate={setActiveView}
-            onSelectArtifact={openArtifact}
-          />
-        );
-      case "plan":
-        return (
-          <SetupConversation
-            key={metadata.project_id}
-            projectId={metadata.project_id}
-            onSetupChanged={() => { void Promise.all([refreshReadiness(), refreshWorkspaceState(), refreshArtifacts()]); }}
-            onExit={() => setActiveView("overview")}
-            onApproved={async () => {
-              await Promise.all([refreshWorkspaceState(), refreshReadiness(), refreshArtifacts()]);
-              setActiveView("cockpit");
-            }}
-          />
-        );
-      case "cockpit":
-        return (
-          <CockpitView
-            project={projectState}
-            events={events}
-            currentArc={currentArc}
-            summaries={artifactSummaries}
-            modelOutput={modelOutput}
-            activeArtifact={activeArtifact}
-            canonCounts={canonCounts}
-            onSelectArtifact={openArtifact}
-            onOpenTrace={() => setActiveView("trace")}
-            onOpenCanon={() => setActiveView("canon")}
-          />
-        );
-      case "arcs":
-        return (
+  function navigateFromOverview(view: "plan" | "cockpit" | "arcs" | "canon" | "trace") {
+    if (view === "plan") setLocation("cocreate");
+    else if (view === "cockpit") setLocation("workbench");
+    else if (view === "trace") setLocation("evidence");
+    else {
+      setStoryTab(view === "canon" ? "canon" : "arcs");
+      setLocation("story");
+    }
+  }
+
+  function renderWorkbench() {
+    if (!metadata.active_arc_id && events.length === 0) {
+      return (
+        <ProjectOverview
+          project={projectState}
+          currentArc={currentArc}
+          readiness={readiness}
+          summaries={artifactSummaries}
+          canonCounts={canonCounts}
+          canStart={canStart}
+          canResume={canResume}
+          busy={commandBusy}
+          onStart={startRun}
+          onResume={resumeRun}
+          onExport={exportManuscript}
+          onNavigate={navigateFromOverview}
+          onSelectArtifact={openArtifact}
+        />
+      );
+    }
+    return (
+      <CockpitView
+        project={projectState}
+        events={events}
+        currentArc={currentArc}
+        summaries={artifactSummaries}
+        modelOutput={modelOutput}
+        activeArtifact={activeArtifact}
+        canonCounts={canonCounts}
+        onSelectArtifact={openArtifact}
+        onOpenTrace={() => setLocation("evidence")}
+        onOpenCanon={() => { setStoryTab("canon"); setLocation("story"); }}
+      />
+    );
+  }
+
+  function renderStoryWorld() {
+    return (
+      <section className="story-world-domain">
+        <header className="domain-heading">
+          <div><h1>故事世界</h1><p>滚动故事弧、章节进度与已提交正史。</p></div>
+          <nav className="domain-tabs">
+            {(["arcs", "chapters", "canon"] as StoryTab[]).map((tab) => (
+              <button key={tab} className={storyTab === tab ? "active" : ""} onClick={() => setStoryTab(tab)}>
+                {{ arcs: "故事弧", chapters: "章节", canon: "正史" }[tab]}
+              </button>
+            ))}
+          </nav>
+        </header>
+        {storyTab === "canon" ? (
+          <CanonView contents={queries.canonContents} summaries={artifactSummaries} onSelectArtifact={openArtifact} onRefresh={refreshWorkspace} />
+        ) : (
           <StoryArcsView
             currentArc={currentArc}
             activeChapterId={metadata.active_chapter_id}
@@ -423,17 +282,28 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
             onRequestRevision={requestArcRevision}
             onSelectArtifact={openArtifact}
           />
-        );
-      case "canon":
+        )}
+      </section>
+    );
+  }
+
+  function renderContent() {
+    switch (location) {
+      case "cocreate":
         return (
-          <CanonView
-            contents={canonContents}
-            summaries={artifactSummaries}
-            onSelectArtifact={openArtifact}
-            onRefresh={refreshInspection}
+          <SetupConversation
+            key={projectId}
+            projectId={projectId}
+            onSetupChanged={refreshWorkspace}
+            onExit={() => setLocation("workbench")}
+            onApproved={async () => { await refreshWorkspace(); setLocation("workbench"); }}
           />
         );
-      case "trace":
+      case "workbench":
+        return renderWorkbench();
+      case "story":
+        return renderStoryWorld();
+      case "evidence":
         return (
           <TraceConsole
             events={events}
@@ -451,7 +321,7 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
             onPause={pauseRun}
             onResume={resumeRun}
             onRetry={retryCurrentChapter}
-            onRefreshAudit={refreshCompletionAudit}
+            onRefreshAudit={async () => { await queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.completion(projectId) }); }}
           />
         );
       case "settings":
@@ -459,82 +329,50 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
     }
   }
 
+  const notice = workspaceNotice ? (
+    <div className={`workspace-notice ${workspaceNotice.kind}`}>
+      <span>{workspaceNotice.text}</span>
+      <button title="关闭" onClick={() => setWorkspaceNotice(null)}><X size={15} /></button>
+    </div>
+  ) : null;
+
+  const feedbackDock = location === "workbench" ? (
+    <footer className="feedback-dock">
+      <label>
+        <input value={feedback} disabled={sendingFeedback} onChange={(event) => setFeedback(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void sendFeedback()} placeholder="告诉 NovelPilot 需要如何纠偏..." />
+      </label>
+      <span className="feedback-scope">范围：<strong>模型自动判断</strong></span>
+      <div className="feedback-suggestions">
+        {["节奏太快", "增加伏笔", "强化动机"].map((suggestion) => <button key={suggestion} onClick={() => setFeedback(suggestion)}>{suggestion}</button>)}
+      </div>
+      <button className="send-feedback-button" title="提交反馈" disabled={sendingFeedback || !feedback.trim()} onClick={() => void sendFeedback()}><Send size={18} /></button>
+    </footer>
+  ) : null;
+
   return (
-    <main className="novelpilot-app">
-      <aside className="app-sidebar">
-        <header className="sidebar-brand"><Feather size={21} /><strong>NovelPilot</strong></header>
-        <nav>
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            return (
-              <button key={item.id} aria-label={item.label} className={activeView === item.id ? "active" : ""} onClick={() => setActiveView(item.id)}>
-                <Icon size={18} /> <span>{item.label}</span>
-              </button>
-            );
-          })}
-        </nav>
-        <footer>
-          <span>当前书籍</span>
-          <button className="current-book-button" title={formatProjectTitle(projectState.title)} onClick={() => setActiveView("overview")}>
-            <span className="book-gem" />
-            <strong>{formatProjectTitle(projectState.title)}</strong>
-            <small>⌄</small>
-          </button>
-          <div className="sidebar-utilities">
-            <button title="刷新工作区" onClick={() => void Promise.all([refreshWorkspaceState(), refreshReadiness(), refreshInspection()])}><RefreshCcw size={16} /></button>
-            <button title="恢复卡住的运行" disabled={!canRecover} onClick={() => void recoverStaleRun()}><ShieldCheck size={16} /></button>
-            <button title="关闭项目" disabled={runInFlight} onClick={() => void closeProject()}><X size={16} /></button>
-          </div>
-        </footer>
-      </aside>
+    <>
+      <AppShell
+        project={projectState}
+        location={location}
+        profile={currentProfile}
+        canRecover={Boolean(canRecover)}
+        runInFlight={runInFlight}
+        notice={notice}
+        feedbackDock={feedbackDock}
+        onLocationChange={setLocation}
+        onRefresh={() => void refreshWorkspace()}
+        onRecover={() => void recoverStaleRun()}
+        onCloseProject={() => void closeProject()}
+      >
+        {renderContent()}
+      </AppShell>
 
-      <section className="app-workspace">
-        <header className="app-topbar">
-          <div className="provider-status">
-            <span>{currentProfile?.name ?? formatOptionalId(profiles?.active_profile_id)}</span>
-            <small>/ {currentProfile?.model ?? "未选择模型"}</small>
-            <i className={currentProfile?.has_api_key ? "ready" : ""} />
-          </div>
-          <div className="project-location">
-            <strong>《{formatProjectTitle(projectState.title)}》</strong>
-            <span>/ {viewLabels[activeView]}</span>
-          </div>
-          <div className="topbar-statuses">
-            <span className="soft-badge amber">{formatOperationMode(metadata.operation_mode)}</span>
-            {latestStatusEvent && <span className="soft-badge">{formatLoopLayer(latestStatusEvent.loop_layer)}</span>}
-            <span className={`soft-badge run-${runStatus}`}><span className={`status-dot ${runStatus}`} />{formatRunStatus(runStatus)}</span>
-          </div>
-        </header>
-
-        {workspaceNotice && (
-          <div className={`workspace-notice ${workspaceNotice.kind}`}>
-            <span>{workspaceNotice.text}</span>
-            <button title="关闭" onClick={() => setWorkspaceNotice(null)}><X size={15} /></button>
-          </div>
-        )}
-
-        <div className={`workspace-view view-${activeView}`}>{renderView()}</div>
-
-        {activeView === "cockpit" && (
-          <footer className="feedback-dock">
-            <label>
-              <input value={feedback} disabled={sendingFeedback} onChange={(event) => setFeedback(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void sendFeedback()} placeholder="告诉 NovelPilot 需要如何纠偏..." />
-            </label>
-            <span className="feedback-scope">范围：<strong>模型自动判断</strong></span>
-            <div className="feedback-suggestions">
-              {["节奏太快", "增加伏笔", "强化动机"].map((suggestion) => <button key={suggestion} onClick={() => setFeedback(suggestion)}>{suggestion}</button>)}
-            </div>
-            <button className="send-feedback-button" title="提交反馈" disabled={sendingFeedback || !feedback.trim()} onClick={() => void sendFeedback()}><Send size={18} /></button>
-          </footer>
-        )}
-
-        {feedbackNotice && (
-          <div className={`feedback-toast ${feedbackNotice.kind}`}>
-            <span>{feedbackNotice.text}</span>
-            <button title="关闭" onClick={() => setFeedbackNotice(null)}><X size={14} /></button>
-          </div>
-        )}
-      </section>
+      {feedbackNotice && (
+        <div className={`feedback-toast ${feedbackNotice.kind}`}>
+          <span>{feedbackNotice.text}</span>
+          <button title="关闭" onClick={() => setFeedbackNotice(null)}><X size={14} /></button>
+        </div>
+      )}
 
       {artifactDrawerOpen && (
         <div className="artifact-drawer-backdrop" onMouseDown={() => setArtifactDrawerOpen(false)}>
@@ -543,10 +381,10 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
               <div><span>产物预览</span><strong>{selectedArtifactPath}</strong></div>
               <button title="关闭预览" onClick={() => setArtifactDrawerOpen(false)}><X size={18} /></button>
             </header>
-            <pre>{activeArtifact?.content ?? "正在读取产物..."}</pre>
+            <pre>{activeArtifactQuery.isLoading ? "正在读取产物..." : activeArtifact?.content ?? "没有可显示的产物。"}</pre>
           </aside>
         </div>
       )}
-    </main>
+    </>
   );
 }

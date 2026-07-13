@@ -1,0 +1,16 @@
+.button {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--np-line);
+  border-radius: var(--np-radius-md);
+  background: transparent;
+  color: var(--np-text-secondary);
+}
+
+.button:hover {
+  border-color: var(--np-line-strong);
+  background: var(--np-surface-muted);
+  color: var(--np-text);
+}
