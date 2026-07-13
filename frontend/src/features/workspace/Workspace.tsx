@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Send, X } from "lucide-react";
+import { X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api, formatApiError } from "../../api/client";
 import { AppShell } from "../../app/AppShell";
@@ -11,9 +11,9 @@ import { formatRunStatus } from "../../types/display";
 import type { LlmProfilesDocument, ProjectSummary } from "../../types/domain";
 import { LlmProfilesPanel } from "../llm-profiles/LlmProfilesPanel";
 import { SetupConversation } from "../setup-conversation/SetupConversation";
+import { FeedbackComposer } from "../workbench/FeedbackComposer";
+import { WorkbenchView } from "../workbench/WorkbenchView";
 import { CanonView } from "./CanonView";
-import { CockpitView } from "./CockpitView";
-import { ProjectOverview } from "./ProjectOverview";
 import { StoryArcsView } from "./StoryArcsView";
 import { TraceConsole } from "./TraceConsole";
 import { type CanonKind, parseCanonDocument } from "./workspace-utils";
@@ -210,38 +210,9 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
     setArtifactDrawerOpen(true);
   }
 
-  function navigateFromOverview(view: "plan" | "cockpit" | "arcs" | "canon" | "trace") {
-    if (view === "plan") setLocation("cocreate");
-    else if (view === "cockpit") setLocation("workbench");
-    else if (view === "trace") setLocation("evidence");
-    else {
-      setStoryTab(view === "canon" ? "canon" : "arcs");
-      setLocation("story");
-    }
-  }
-
   function renderWorkbench() {
-    if (!metadata.active_arc_id && events.length === 0) {
-      return (
-        <ProjectOverview
-          project={projectState}
-          currentArc={currentArc}
-          readiness={readiness}
-          summaries={artifactSummaries}
-          canonCounts={canonCounts}
-          canStart={canStart}
-          canResume={canResume}
-          busy={commandBusy}
-          onStart={startRun}
-          onResume={resumeRun}
-          onExport={exportManuscript}
-          onNavigate={navigateFromOverview}
-          onSelectArtifact={openArtifact}
-        />
-      );
-    }
     return (
-      <CockpitView
+      <WorkbenchView
         project={projectState}
         events={events}
         currentArc={currentArc}
@@ -249,9 +220,16 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
         modelOutput={modelOutput}
         activeArtifact={activeArtifact}
         canonCounts={canonCounts}
+        readiness={readiness}
+        canStart={canStart}
+        canResume={canResume}
+        busy={commandBusy}
+        onStart={startRun}
+        onResume={resumeRun}
+        onExport={exportManuscript}
         onSelectArtifact={openArtifact}
-        onOpenTrace={() => setLocation("evidence")}
-        onOpenCanon={() => { setStoryTab("canon"); setLocation("story"); }}
+        onOpenEvidence={() => setLocation("evidence")}
+        onOpenStory={() => setLocation("story")}
       />
     );
   }
@@ -337,16 +315,12 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
   ) : null;
 
   const feedbackDock = location === "workbench" ? (
-    <footer className="feedback-dock">
-      <label>
-        <input value={feedback} disabled={sendingFeedback} onChange={(event) => setFeedback(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void sendFeedback()} placeholder="告诉 NovelPilot 需要如何纠偏..." />
-      </label>
-      <span className="feedback-scope">范围：<strong>模型自动判断</strong></span>
-      <div className="feedback-suggestions">
-        {["节奏太快", "增加伏笔", "强化动机"].map((suggestion) => <button key={suggestion} onClick={() => setFeedback(suggestion)}>{suggestion}</button>)}
-      </div>
-      <button className="send-feedback-button" title="提交反馈" disabled={sendingFeedback || !feedback.trim()} onClick={() => void sendFeedback()}><Send size={18} /></button>
-    </footer>
+    <FeedbackComposer
+      value={feedback}
+      sending={sendingFeedback}
+      onChange={setFeedback}
+      onSend={() => void sendFeedback()}
+    />
   ) : null;
 
   return (

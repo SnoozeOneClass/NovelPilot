@@ -1,0 +1,67 @@
+.composer {
+  min-width: 0;
+  min-height: 52px;
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto auto 36px;
+  align-items: center;
+  gap: 10px;
+  border-top: 1px solid var(--np-line);
+  padding: 7px 12px;
+  background: var(--np-surface);
+}
+
+.composer textarea {
+  min-width: 0;
+  min-height: 34px;
+  max-height: 96px;
+  resize: vertical;
+  border: 1px solid var(--np-line);
+  border-radius: var(--np-radius-sm);
+  padding: 7px 10px;
+  background: var(--np-surface-raised);
+  line-height: 1.5;
+}
+
+.scope {
+  color: var(--np-text-muted);
+  font-size: 10px;
+}
+
+.scope strong {
+  color: var(--np-text-secondary);
+}
+
+.suggestions {
+  display: flex;
+  gap: 5px;
+}
+
+.suggestions button {
+  border: 1px solid var(--np-line);
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: transparent;
+  color: var(--np-text-secondary);
+  font-size: 10px;
+}
+
+.send {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--np-radius-sm);
+  background: var(--np-accent);
+  color: #fff;
+}
+
+@media (max-width: 980px) {
+  .composer {
+    grid-template-columns: minmax(0, 1fr) 36px;
+  }
+
+  .scope,
+  .suggestions {
+    display: none;
+  }
+}

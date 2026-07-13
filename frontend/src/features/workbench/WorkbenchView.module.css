@@ -1,0 +1,542 @@
+.workbench {
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 238px minmax(440px, 1fr) 310px;
+  border: 1px solid var(--np-line);
+  border-radius: var(--np-radius-lg);
+  background: var(--np-surface-raised);
+  overflow: hidden;
+}
+
+.runtimePanel,
+.executionPanel,
+.contextPanel {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.runtimePanel {
+  border-right: 1px solid var(--np-line);
+  background: var(--np-surface);
+}
+
+.contextPanel {
+  border-left: 1px solid var(--np-line);
+  background: var(--np-surface);
+}
+
+.runtimePanel > header,
+.contextPanel > header,
+.executionHeader {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid var(--np-line);
+  padding: 9px 12px;
+}
+
+.runtimePanel header p,
+.runtimePanel header h2,
+.contextPanel header p,
+.contextPanel header h2,
+.executionHeader p,
+.executionHeader h1 {
+  margin: 0;
+}
+
+.runtimePanel header p,
+.contextPanel header p,
+.executionHeader p {
+  color: var(--np-accent);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.runtimePanel header h2,
+.contextPanel header h2,
+.executionHeader h1 {
+  margin-top: 3px;
+  font-size: 13px;
+}
+
+.runtimePanel > header > span {
+  border: 1px solid var(--np-line);
+  border-radius: 999px;
+  padding: 4px 7px;
+  color: var(--np-text-secondary);
+  font-size: 9px;
+}
+
+.runtimePanel > header > span[data-status="running"] {
+  border-color: var(--np-success);
+  color: var(--np-success);
+}
+
+.contextPanel > header button,
+.eventStream header button,
+.outputPanel footer button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  background: transparent;
+  color: var(--np-accent);
+  font-size: 10px;
+}
+
+.runtimeFacts {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 8px 12px;
+}
+
+.runtimeFacts div {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr);
+  gap: 6px;
+  border-bottom: 1px solid var(--np-line);
+  padding: 8px 0;
+}
+
+.runtimeFacts dt,
+.runtimeFacts dd {
+  margin: 0;
+  font-size: 10px;
+}
+
+.runtimeFacts dt {
+  color: var(--np-text-muted);
+}
+
+.runtimeFacts dd {
+  overflow: hidden;
+  color: var(--np-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pipeline,
+.checkpoints,
+.canonSummary,
+.artifacts,
+.recentArtifacts,
+.arcSummary {
+  border-top: 1px solid var(--np-line);
+  padding: 12px;
+}
+
+.pipeline h3,
+.checkpoints h3,
+.canonSummary h3,
+.artifacts h3,
+.recentArtifacts h3 {
+  margin: 0 0 9px;
+  color: var(--np-text-secondary);
+  font-size: 10px;
+}
+
+.pipeline > div {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  position: relative;
+}
+
+.pipeline > div::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 21px;
+  width: 1px;
+  height: 18px;
+  background: var(--np-line);
+}
+
+.pipeline > div:last-child::before {
+  display: none;
+}
+
+.pipeline span {
+  color: var(--np-text-muted);
+}
+
+.pipeline div[data-state="done"] span {
+  color: var(--np-success);
+}
+
+.pipeline div[data-state="active"] span,
+.pipeline div[data-state="active"] strong {
+  color: var(--np-accent);
+}
+
+.pipeline strong,
+.pipeline small {
+  font-size: 10px;
+}
+
+.pipeline small {
+  color: var(--np-text-muted);
+}
+
+.checkpoints button,
+.artifacts button,
+.recentArtifacts button {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  align-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--np-text-secondary);
+  text-align: left;
+}
+
+.checkpoints button {
+  grid-template-columns: 8px minmax(0, 1fr);
+  gap: 7px;
+  padding: 5px 0;
+}
+
+.checkpoints button > span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--np-line-strong);
+}
+
+.checkpoints button > span[data-tone="success"] { background: var(--np-success); }
+.checkpoints button > span[data-tone="danger"] { background: var(--np-danger); }
+.checkpoints button > span[data-tone="active"] { background: var(--np-accent); }
+
+.checkpoints button div {
+  min-width: 0;
+  display: flex;
+  justify-content: space-between;
+  gap: 5px;
+}
+
+.checkpoints strong,
+.checkpoints small,
+.checkpoints p {
+  font-size: 9px;
+}
+
+.checkpoints p {
+  color: var(--np-text-muted);
+}
+
+.executionPanel {
+  display: grid;
+  grid-template-rows: auto minmax(170px, 0.8fr) minmax(260px, 1.2fr);
+}
+
+.runActions {
+  display: flex;
+  gap: 5px;
+}
+
+.runActions button {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--np-line);
+  border-radius: var(--np-radius-sm);
+  padding: 0 8px;
+  background: transparent;
+  color: var(--np-text-secondary);
+  font-size: 10px;
+}
+
+.runActions button:first-child {
+  border-color: var(--np-accent);
+  background: var(--np-accent);
+  color: #fff;
+}
+
+.idleState {
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--np-line);
+  padding: 24px;
+  color: var(--np-text-muted);
+  text-align: center;
+}
+
+.idleState h2,
+.idleState p {
+  margin: 0;
+}
+
+.idleState h2 {
+  color: var(--np-text);
+  font-size: 15px;
+}
+
+.idleState p {
+  max-width: 560px;
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+.idleState > div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 5px;
+}
+
+.idleState > div span {
+  display: flex;
+  gap: 5px;
+  border: 1px solid var(--np-line);
+  border-radius: var(--np-radius-sm);
+  padding: 4px 6px;
+  font-size: 9px;
+}
+
+.idleState > div span[data-status="passed"] {
+  border-color: var(--np-success);
+  color: var(--np-success);
+}
+
+.eventStream {
+  min-height: 0;
+  overflow: hidden;
+  border-bottom: 1px solid var(--np-line);
+}
+
+.eventStream > header,
+.outputPanel > header,
+.outputPanel > footer {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid var(--np-line);
+  padding: 0 12px;
+}
+
+.eventStream h2 {
+  margin: 0;
+  font-size: 11px;
+}
+
+.eventStream ol {
+  height: calc(100% - 34px);
+  margin: 0;
+  padding: 6px 12px;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.eventStream li {
+  min-height: 27px;
+  display: grid;
+  grid-template-columns: 7px 56px minmax(110px, 0.6fr) minmax(180px, 1fr);
+  align-items: center;
+  gap: 7px;
+  border-bottom: 1px solid color-mix(in srgb, var(--np-line) 60%, transparent);
+}
+
+.eventStream li > span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--np-line-strong);
+}
+
+.eventStream li > span[data-tone="success"] { background: var(--np-success); }
+.eventStream li > span[data-tone="danger"] { background: var(--np-danger); }
+.eventStream li > span[data-tone="active"] { background: var(--np-accent); }
+
+.eventStream time,
+.eventStream strong,
+.eventStream small {
+  overflow: hidden;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eventStream time,
+.eventStream small {
+  color: var(--np-text-muted);
+}
+
+.outputPanel {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 34px minmax(0, 1fr) 34px;
+}
+
+.outputPanel > header div {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--np-accent);
+}
+
+.outputPanel > header strong,
+.outputPanel > header span,
+.outputPanel > footer span {
+  font-size: 10px;
+}
+
+.outputPanel > header span,
+.outputPanel > footer span {
+  overflow: hidden;
+  color: var(--np-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.outputPanel pre {
+  min-height: 0;
+  margin: 0;
+  overflow: auto;
+  padding: 16px;
+  color: var(--np-text-secondary);
+  font-family: var(--np-font-ui);
+  font-size: 12px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+}
+
+.outputPanel > footer {
+  border-top: 1px solid var(--np-line);
+  border-bottom: 0;
+}
+
+.arcSummary strong {
+  font-size: 12px;
+}
+
+.arcSummary p {
+  margin: 6px 0 0;
+  color: var(--np-text-muted);
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.canonSummary > div {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border: 1px solid var(--np-line);
+}
+
+.canonSummary button {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-right: 1px solid var(--np-line);
+  border-bottom: 1px solid var(--np-line);
+  padding: 0 10px;
+  background: transparent;
+  color: var(--np-text-secondary);
+}
+
+.canonSummary button:nth-child(even) { border-right: 0; }
+.canonSummary button:nth-last-child(-n + 2) { border-bottom: 0; }
+
+.canonSummary span,
+.canonSummary strong {
+  font-size: 10px;
+}
+
+.artifacts button {
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 6px;
+  min-height: 27px;
+}
+
+.artifacts button > span {
+  color: var(--np-text-muted);
+}
+
+.artifacts button > span[data-status="passed"],
+.artifacts button > span[data-status="committed"] {
+  color: var(--np-success);
+}
+
+.artifacts strong,
+.artifacts small {
+  font-size: 9px;
+}
+
+.artifacts small {
+  color: var(--np-text-muted);
+}
+
+.recentArtifacts button {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+  border-top: 1px solid var(--np-line);
+  padding: 6px 0;
+}
+
+.recentArtifacts strong,
+.recentArtifacts small {
+  overflow: hidden;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recentArtifacts small {
+  color: var(--np-text-muted);
+}
+
+@media (max-width: 1279px) {
+  .workbench {
+    grid-template-columns: 210px minmax(0, 1fr);
+  }
+
+  .contextPanel {
+    display: none;
+  }
+}
+
+@media (max-width: 800px) {
+  .workbench {
+    grid-template-columns: 1fr;
+    border-radius: 0;
+  }
+
+  .runtimePanel {
+    display: none;
+  }
+
+  .executionHeader {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .runActions {
+    width: 100%;
+  }
+
+  .runActions button {
+    flex: 1;
+    justify-content: center;
+  }
+
+  .eventStream li {
+    grid-template-columns: 7px 52px minmax(0, 1fr);
+  }
+
+  .eventStream li small {
+    display: none;
+  }
+}
