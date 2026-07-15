@@ -50,6 +50,24 @@ from app.storage.profiles import require_harness_capabilities
 
 AgentEventCallback = Callable[[dict[str, object]], None]
 
+STORY_ARC_AGENT_TOOLS = (
+    "get_loop_context",
+    "read_chapter_evidence",
+    "submit_story_arc_candidate",
+    "report_blocker",
+)
+
+CHAPTER_AGENT_TOOLS = (
+    "get_loop_context",
+    "read_chapter_evidence",
+    "plan_chapter_candidate",
+    "write_chapter_draft",
+    "edit_chapter_draft",
+    "inspect_chapter_consistency",
+    "submit_chapter_candidate",
+    "report_blocker",
+)
+
 
 class AgentCandidateError(RuntimeError):
     pass
@@ -463,18 +481,11 @@ def run_story_arc_agent(
         candidate_run_id=resolved_candidate_run_id,
         phase="planning" if intent == "create" else "revision",
         expected_revision=expected_revision,
-        allowed_tools=(
-            "get_loop_context",
-            "read_chapter_evidence",
-            "submit_story_arc_candidate",
-        )
-        + _optional_user_decision_tool(metadata)
-        + ("report_blocker",),
+        allowed_tools=STORY_ARC_AGENT_TOOLS,
         system_prompt=_story_arc_agent_prompt(
             arc_id=arc_id,
             intent=intent,
             expected_revision=expected_revision,
-            full_auto=metadata.operation_mode == "full_auto",
         ),
         messages=(ChatMessage(role="user", content=instruction),),
         policy=policy,
@@ -614,21 +625,10 @@ def run_chapter_agent(
         candidate_run_id=candidate_run_id,
         phase="chapter",
         expected_revision=expected_revision,
-        allowed_tools=(
-            "get_loop_context",
-            "read_chapter_evidence",
-            "plan_chapter_candidate",
-            "write_chapter_draft",
-            "edit_chapter_draft",
-            "inspect_chapter_consistency",
-            "submit_chapter_candidate",
-        )
-        + _optional_user_decision_tool(metadata)
-        + ("report_blocker",),
+        allowed_tools=CHAPTER_AGENT_TOOLS,
         system_prompt=_chapter_agent_prompt(
             chapter_id=chapter_id,
             expected_revision=expected_revision,
-            full_auto=metadata.operation_mode == "full_auto",
         ),
         messages=(ChatMessage(role="user", content=instruction),),
         policy=policy,
@@ -1195,19 +1195,14 @@ def _story_arc_agent_prompt(
     arc_id: str,
     intent: str,
     expected_revision: int,
-    full_auto: bool,
 ) -> str:
-    autonomy = (
-        "This project is full-auto: resolve open local creative choices yourself within the "
-        "approved Book contract; no user-decision Tool is available. "
-        if full_auto
-        else "Request one explicit user decision only when a real participatory checkpoint is required. "
-    )
     return (
         "You are the persistent logical Story Arc Agent inside NovelPilot's deterministic "
         "Harness. Use only exposed Tools and never activate another Agent. Read bounded context "
         "as needed, plan only the current rolling arc, and preserve committed evidence. "
-        + autonomy
+        "Resolve local creative choices yourself within the approved Book contract; no "
+        "user-decision Tool is available. Human participation happens only when the submitted "
+        "Story Arc plan is reviewed. "
         + "Submit "
         f"one {intent} candidate for {arc_id} with expected_revision={expected_revision} through "
         "submit_story_arc_candidate. Choose a target chapter count from 1 through 30. Do not "
@@ -1216,20 +1211,13 @@ def _story_arc_agent_prompt(
     )
 
 
-def _chapter_agent_prompt(
-    *, chapter_id: str, expected_revision: int, full_auto: bool
-) -> str:
-    autonomy = (
-        "This project is full-auto: resolve open chapter-local creative choices yourself within "
-        "the approved Book and Story Arc contracts; no user-decision Tool is available. "
-        if full_auto
-        else "Request one explicit user decision only when a real participatory checkpoint is required. "
-    )
+def _chapter_agent_prompt(*, chapter_id: str, expected_revision: int) -> str:
     return (
         "You are the persistent logical Chapter Agent inside NovelPilot's deterministic Harness. "
         "Use only exposed Tools and never activate another Agent. For the owned chapter "
         f"{chapter_id}, expected_revision={expected_revision}: "
-        + autonomy
+        "Resolve chapter-local creative choices yourself within the approved Book and Story Arc "
+        "contracts; no user-decision Tool or chapter approval gate is available. "
         + "Read bounded context, call "
         "plan_chapter_candidate, write visible prose through write_chapter_draft, optionally use "
         "targeted edits, call inspect_chapter_consistency, then bind plan, draft, candidate "
@@ -1237,14 +1225,6 @@ def _chapter_agent_prompt(
         "and candidate revisions at 1 for a fresh workspace. Never write final.md, never commit "
         "canon, and never claim semantic approval. Use report_blocker only with exact evidence."
     )
-
-
-def _optional_user_decision_tool(metadata: ProjectMetadata) -> tuple[str, ...]:
-    if metadata.operation_mode == "full_auto":
-        return ()
-    return ("request_user_decision",)
-
-
 def _chapter_patch_evidence_repair_prompt(
     *, chapter_id: str, expected_revision: int
 ) -> str:

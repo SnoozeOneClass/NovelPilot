@@ -23,7 +23,7 @@ type ShellLocation = TaskDomain | "settings";
 
 const domainItems: Array<{ id: TaskDomain; label: string; icon: typeof MessagesSquare }> = [
   { id: "cocreate", label: "共创", icon: MessagesSquare },
-  { id: "workbench", label: "工作台", icon: SquareTerminal },
+  { id: "creation", label: "创作", icon: SquareTerminal },
   { id: "story", label: "故事世界", icon: LibraryBig },
   { id: "evidence", label: "证据中心", icon: GitBranch },
   { id: "experiments", label: "实验室", icon: FlaskConical }
@@ -31,7 +31,7 @@ const domainItems: Array<{ id: TaskDomain; label: string; icon: typeof MessagesS
 
 const locationLabels: Record<ShellLocation, string> = {
   cocreate: "全书共创",
-  workbench: "创作工作台",
+  creation: "创作",
   story: "故事世界",
   evidence: "证据中心",
   experiments: "实验室",
@@ -53,7 +53,6 @@ interface AppShellProps {
   canRecover: boolean;
   runInFlight: boolean;
   notice?: ReactNode;
-  feedbackDock?: ReactNode;
   children: ReactNode;
   onLocationChange: (location: ShellLocation) => void;
   onRefresh: () => void;
@@ -68,7 +67,6 @@ export function AppShell({
   canRecover,
   runInFlight,
   notice,
-  feedbackDock,
   children,
   onLocationChange,
   onRefresh,
@@ -122,7 +120,7 @@ export function AppShell({
           <div className={styles.utilityRow}>
             <ThemeToggle />
             <button title="刷新工作区" onClick={onRefresh}><RefreshCw size={16} /></button>
-            <button title="恢复卡住的运行" disabled={!canRecover} onClick={onRecover}><ShieldCheck size={16} /></button>
+            {canRecover && <button title="恢复异常中断的运行" onClick={onRecover}><ShieldCheck size={16} /></button>}
             <button title="切换小说" disabled={runInFlight} onClick={onCloseProject}><X size={16} /></button>
           </div>
         </footer>
@@ -147,7 +145,6 @@ export function AppShell({
         </header>
         {notice}
         <div className={styles.content}>{children}</div>
-        {feedbackDock}
       </section>
 
       <nav className={styles.mobileNav} aria-label="任务域">

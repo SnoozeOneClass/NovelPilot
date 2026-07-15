@@ -287,27 +287,31 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
     ),
     AcceptanceCriterion(
         id="workspace_ui",
-        requirement="Frontend provides a three-column harness workspace with status, artifacts, and signals.",
+        requirement="Frontend provides one state-derived creation flow with live prose and secondary diagnostics.",
         probes=(
             EvidenceProbe(
-                "frontend/src/features/workbench/WorkbenchView.tsx",
-                ("WorkbenchView", "运行状态", "事件流", "章节 Pipeline"),
+                "frontend/src/features/creation/CreationView.tsx",
+                ("CreationView", "LiveChapterDocument", "StoryArcReviewTask", "CreationDetailsSheet"),
             ),
             EvidenceProbe(
                 "frontend/src/features/evidence/EvidenceCenter.tsx",
                 ("事件时间线", "运行轨迹", "验证", "useVirtualizer"),
             ),
-            EvidenceProbe("frontend/src/features/workbench/WorkbenchView.module.css", (".workbench", "grid-template-columns")),
+            EvidenceProbe(
+                "frontend/src/features/creation/CreationView.module.css",
+                (".creation", ".readingColumn", ".composer"),
+            ),
         ),
     ),
     AcceptanceCriterion(
         id="run_control_sse",
-        requirement="Harness can start, pause cooperatively, resume from state, and stream updates.",
+        requirement="Harness has one explicit start, guarded automatic continuation, abnormal recovery, and replayable streaming updates.",
         probes=(
             EvidenceProbe("backend/app/api/runs.py", ("start_run", "pause_run", "resume_run", "stream_events")),
             EvidenceProbe("backend/tests/test_runs.py", ("_events_after_last_event_id", "concurrent")),
-            EvidenceProbe("frontend/src/features/workspace/Workspace.tsx", ("useHarnessEvents", "pauseRun", "resumeRun")),
-            EvidenceProbe("frontend/src/app/harness-events.ts", ("EventSource", "mergeHarnessEvent")),
+            EvidenceProbe("frontend/src/features/workspace/Workspace.tsx", ("useHarnessEvents", "useCreationRunController", "resumeRun")),
+            EvidenceProbe("frontend/src/features/creation/useCreationRunController.ts", ("can_auto_continue", "requires_user", "hasStarted")),
+            EvidenceProbe("frontend/src/app/harness-events.ts", ("EventSource", "chapter_draft_delta")),
         ),
     ),
     AcceptanceCriterion(

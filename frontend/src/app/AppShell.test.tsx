@@ -31,7 +31,7 @@ describe("AppShell", () => {
       <ThemeProvider>
         <AppShell
           project={project}
-          location="workbench"
+          location="creation"
           profile={null}
           canRecover={false}
           runInFlight={false}
@@ -46,7 +46,7 @@ describe("AppShell", () => {
     );
 
     const primary = screen.getAllByRole("navigation", { name: "任务域" })[0];
-    expect(primary).toHaveTextContent("共创工作台故事世界证据中心实验室");
+    expect(primary).toHaveTextContent("共创创作故事世界证据中心实验室");
     await user.click(screen.getAllByRole("button", { name: "实验室" })[0]);
     expect(navigate).toHaveBeenCalledWith("experiments");
   });

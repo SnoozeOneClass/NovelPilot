@@ -19,6 +19,7 @@ from app.harness.agents.loop_runners import (
 from app.harness.agents.models import AgentIdentity, EvaluationRecord
 from app.harness.agents.persistence import read_agent_state, save_agent_state
 from app.harness.agents.policy import ResolvedAgentPolicy, resolve_agent_policy
+from app.harness.agents.public_stream import ChapterDraftStreamProjector
 from app.harness.stream_progress import StreamProgressAccumulator
 from app.llm.gateway import ChatChunk, ChatMessage, ChatRequest, ChatResult, call_llm
 from app.llm.profiles import get_active_profile
@@ -1100,6 +1101,26 @@ class HarnessOrchestrator:
             "chapter",
             "run_chapter_agent",
         )
+        public_stream = ChapterDraftStreamProjector(
+            chapter_id=chapter_id,
+            project_path=self.context.project_path,
+            emit=self._chapter_draft_event_callback(metadata),
+        )
+
+        def on_tool_event(chunk: ChatChunk) -> None:
+            stream_callback(chunk)
+            public_stream.observe(chunk)
+
+        agent_event_callback = self._agent_event_callback(
+            metadata,
+            "chapter",
+            "run_chapter_agent",
+        )
+
+        def on_agent_event(payload: dict[str, Any]) -> None:
+            public_stream.observe_agent_event(payload)
+            agent_event_callback(payload)
+
         resume_payload = read_json(chapter_path / "upstream-resume.json", default={})
         resume_candidate_run_id = (
             resume_payload.get("candidate_run_id")
@@ -1116,15 +1137,12 @@ class HarnessOrchestrator:
                 expected_revision=0,
                 instruction=instruction,
                 candidate_run_id=resume_candidate_run_id,
-                on_event=self._agent_event_callback(
-                    metadata,
-                    "chapter",
-                    "run_chapter_agent",
-                ),
+                on_event=on_agent_event,
                 on_text_delta=stream_callback,
-                on_tool_event=stream_callback,
+                on_tool_event=on_tool_event,
             )
         except AgentControlCheckpoint as checkpoint:
+            public_stream.discard_open("chapter_agent_control_checkpoint")
             self._handle_agent_control_checkpoint(
                 metadata,
                 checkpoint,
@@ -1132,6 +1150,9 @@ class HarnessOrchestrator:
                 action="run_chapter_agent",
             )
             return
+        except Exception:
+            public_stream.discard_open("chapter_agent_failed")
+            raise
         (chapter_path / "upstream-resume.json").unlink(missing_ok=True)
         root = self.context.project_path / agent_result.candidate_root
         plan = _read_text(root / "plan.md")
@@ -1272,6 +1293,42 @@ class HarnessOrchestrator:
                 routing_decision=projected.routing_decision,
                 message=projected.message,
                 payload=projected.payload,
+            )
+
+        return on_event
+
+    def _chapter_draft_event_callback(
+        self,
+        metadata: ProjectMetadata,
+    ) -> Callable[[str, dict[str, object]], None]:
+        messages = {
+            "chapter_draft_stream_started": "Chapter draft streaming started.",
+            "chapter_draft_delta": "Chapter draft prose received.",
+            "chapter_draft_stream_committed": (
+                "Chapter draft stream reconciled with its candidate artifact."
+            ),
+            "chapter_draft_stream_discarded": (
+                "Chapter draft stream was discarded after a rejected generation step."
+            ),
+        }
+
+        def on_event(kind: str, payload: dict[str, object]) -> None:
+            status: EventStatus = (
+                "failed" if kind == "chapter_draft_stream_discarded" else
+                "completed" if kind == "chapter_draft_stream_committed" else
+                "delta" if kind == "chapter_draft_delta" else
+                "started"
+            )
+            artifact_path = payload.get("artifact_path")
+            self._emit(
+                metadata,
+                kind=kind,
+                loop_layer="chapter",
+                atomic_action="run_chapter_agent",
+                status=status,
+                artifact_path=(artifact_path if isinstance(artifact_path, str) else None),
+                message=messages[kind],
+                payload=payload,
             )
 
         return on_event
@@ -2230,8 +2287,7 @@ class HarnessOrchestrator:
             )
             repair_limit = metadata.agent_policy.semantic_revision_limit
             auto_repair = (
-                metadata.operation_mode == "full_auto"
-                and attempts < repair_limit
+                attempts < repair_limit
                 and _is_evidence_quote_repairable(exc.result.reasons)
             )
             metadata.run_status = "running" if auto_repair else "waiting_for_user"
@@ -2292,8 +2348,7 @@ class HarnessOrchestrator:
         )
         repair_limit = metadata.agent_policy.semantic_revision_limit
         if (
-            metadata.operation_mode != "full_auto"
-            or attempts >= repair_limit
+            attempts >= repair_limit
             or not _is_evidence_quote_repairable(reasons)
         ):
             metadata.run_status = "waiting_for_user"

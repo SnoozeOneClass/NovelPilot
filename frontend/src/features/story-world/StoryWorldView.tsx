@@ -14,9 +14,6 @@ interface StoryWorldViewProps {
   artifactPaths: string[];
   summaries: ArtifactSummary[];
   canonContents: Record<CanonKind, string>;
-  approving: boolean;
-  onApprove: (targetChapterCount: number) => Promise<boolean>;
-  onRequestRevision: (message: string) => Promise<boolean>;
   onSelectArtifact: (path: string) => void;
   onRefresh: () => Promise<void>;
 }
@@ -27,7 +24,7 @@ const tabs: Array<{ id: StoryWorldTab; label: string; icon: typeof GitBranch }> 
   { id: "canon", label: "正史", icon: ScrollText }
 ];
 
-export function StoryWorldView({ currentArc, activeChapterId, artifactPaths, summaries, canonContents, approving, onApprove, onRequestRevision, onSelectArtifact, onRefresh }: StoryWorldViewProps) {
+export function StoryWorldView({ currentArc, activeChapterId, artifactPaths, summaries, canonContents, onSelectArtifact, onRefresh }: StoryWorldViewProps) {
   const [tab, setTab] = useState<StoryWorldTab>("arcs");
 
   return (
@@ -52,9 +49,6 @@ export function StoryWorldView({ currentArc, activeChapterId, artifactPaths, sum
             activeChapterId={activeChapterId}
             artifactPaths={artifactPaths}
             summaries={summaries}
-            approving={approving}
-            onApprove={onApprove}
-            onRequestRevision={onRequestRevision}
             onSelectArtifact={onSelectArtifact}
           />
         )}

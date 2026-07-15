@@ -48,13 +48,9 @@ describe("EvidenceCenter", () => {
         activeArtifact={null}
         readiness={null}
         completionAudit={null}
-        canPause={false}
-        canResume={false}
         canRetry={false}
         busy={false}
         onSelectArtifact={vi.fn()}
-        onPause={vi.fn(async () => undefined)}
-        onResume={vi.fn(async () => undefined)}
         onRetry={vi.fn(async () => undefined)}
         onRefreshAudit={vi.fn(async () => undefined)}
       />
@@ -81,13 +77,9 @@ describe("EvidenceCenter", () => {
         activeArtifact={{ path: "chapters/chapter-001/context_snapshot.json", content: '{"sources":["book/direction.md"]}' }}
         readiness={null}
         completionAudit={null}
-        canPause={false}
-        canResume={false}
         canRetry={false}
         busy={false}
         onSelectArtifact={vi.fn()}
-        onPause={vi.fn(async () => undefined)}
-        onResume={vi.fn(async () => undefined)}
         onRetry={vi.fn(async () => undefined)}
         onRefreshAudit={vi.fn(async () => undefined)}
       />
@@ -121,13 +113,9 @@ describe("EvidenceCenter", () => {
         activeArtifact={null}
         readiness={null}
         completionAudit={null}
-        canPause={false}
-        canResume={false}
         canRetry={false}
         busy={false}
         onSelectArtifact={onSelectArtifact}
-        onPause={vi.fn(async () => undefined)}
-        onResume={vi.fn(async () => undefined)}
         onRetry={vi.fn(async () => undefined)}
         onRefreshAudit={vi.fn(async () => undefined)}
       />

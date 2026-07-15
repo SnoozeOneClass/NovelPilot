@@ -3,7 +3,7 @@ from pathlib import Path
 from app.storage.json_files import read_json
 
 VERIFICATION_RETRY_ARTIFACTS = ["draft.md", "observations.json", "review.md", "verification.json"]
-STATE_PATCH_RETRY_ARTIFACTS = ["candidate_state_patch.json", "state_patch_rejection.json"]
+STATE_PATCH_RETRY_ARTIFACTS = ["state_patch_rejection.json"]
 
 
 def retry_scope_for_chapter(chapter_path: Path) -> tuple[str | None, list[str]]:

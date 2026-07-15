@@ -1,5 +1,5 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Archive, Check, Circle, FileText, Pause, Play, RefreshCw, Search, ShieldCheck, X } from "lucide-react";
+import { Archive, Check, Circle, FileText, RefreshCw, Search, ShieldCheck, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { apiUrl } from "../../api/client";
 import type { EvidenceTab } from "../../app/types";
@@ -31,13 +31,9 @@ interface EvidenceCenterProps {
   activeArtifact: { path: string; content: string } | null;
   readiness: ProjectReadiness | null;
   completionAudit: ProjectCompletionAudit | null;
-  canPause: boolean;
-  canResume: boolean;
   canRetry: boolean;
   busy: boolean;
   onSelectArtifact: (path: string) => void;
-  onPause: () => Promise<void>;
-  onResume: () => Promise<void>;
   onRetry: () => Promise<void>;
   onRefreshAudit: () => Promise<void>;
 }
@@ -71,7 +67,7 @@ function GateSection({ title, gates }: { title: string; gates: Array<{ id: strin
   );
 }
 
-export function EvidenceCenter({ events, summaries, artifactPaths, selectedArtifactPath, activeArtifact, readiness, completionAudit, canPause, canResume, canRetry, busy, onSelectArtifact, onPause, onResume, onRetry, onRefreshAudit }: EvidenceCenterProps) {
+export function EvidenceCenter({ events, summaries, artifactPaths, selectedArtifactPath, activeArtifact, readiness, completionAudit, canRetry, busy, onSelectArtifact, onRetry, onRefreshAudit }: EvidenceCenterProps) {
   const [tab, setTab] = useState<EvidenceTab>("trace");
   const [loopFilter, setLoopFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -186,8 +182,6 @@ export function EvidenceCenter({ events, summaries, artifactPaths, selectedArtif
             </aside>
           </div>
           <footer className={styles.runControls}>
-            <button disabled={!canPause || busy} onClick={() => void onPause()}><Pause size={15} />暂停</button>
-            <button disabled={!canResume || busy} onClick={() => void onResume()}><Play size={15} />恢复</button>
             <button disabled={!canRetry || busy} onClick={() => void onRetry()}><RefreshCw size={15} />重试当前章节</button>
             <a href={apiUrl("/api/runs/archive")} download><Archive size={15} />下载 Run 归档</a>
           </footer>

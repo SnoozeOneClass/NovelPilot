@@ -1,6 +1,6 @@
-import { Check, ChevronRight, Circle, FileText, MessageSquareText } from "lucide-react";
+import { Check, ChevronRight, Circle, FileText } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { api, formatApiError } from "../../api/client";
+import { api } from "../../api/client";
 import { formatGenericStatus } from "../../types/display";
 import type { ArtifactSummary, CurrentArcState } from "../../types/domain";
 import { arcIdsFromArtifacts, parseMarkdownSections } from "./workspace-utils";
@@ -11,9 +11,6 @@ interface StoryArcsViewProps {
   activeChapterId: string | null;
   artifactPaths: string[];
   summaries: ArtifactSummary[];
-  approving: boolean;
-  onApprove: (targetChapterCount: number) => Promise<boolean>;
-  onRequestRevision: (message: string) => Promise<boolean>;
   onSelectArtifact: (path: string) => void;
 }
 
@@ -79,9 +76,6 @@ export function StoryArcsView({
   activeChapterId,
   artifactPaths,
   summaries,
-  approving,
-  onApprove,
-  onRequestRevision,
   onSelectArtifact
 }: StoryArcsViewProps) {
   const arcIds = useMemo(() => {
@@ -94,19 +88,10 @@ export function StoryArcsView({
   const [loadingPlan, setLoadingPlan] = useState(false);
   const [selectedArcState, setSelectedArcState] = useState<CurrentArcState | null>(currentArc);
   const [loadingArcState, setLoadingArcState] = useState(false);
-  const [showRevision, setShowRevision] = useState(false);
-  const [revisionMessage, setRevisionMessage] = useState("");
-  const [revisionNotice, setRevisionNotice] = useState<string | null>(null);
-  const [submittingRevision, setSubmittingRevision] = useState(false);
-  const [targetChapterCount, setTargetChapterCount] = useState(currentArc?.target_chapter_count ?? 3);
 
   useEffect(() => {
     if (currentArc?.arc_id) setSelectedArcId(currentArc.arc_id);
   }, [currentArc?.arc_id]);
-
-  useEffect(() => {
-    if (currentArc) setTargetChapterCount(currentArc.target_chapter_count);
-  }, [currentArc]);
 
   useEffect(() => {
     const path = `arcs/${selectedArcId}/plan.md`;
@@ -173,7 +158,6 @@ export function StoryArcsView({
   const sections = parseMarkdownSections(planContent).slice(0, 6);
   const isCurrentArc = currentArc?.arc_id === selectedArcId;
   const awaitingReview = isCurrentArc && currentArc?.human_review === "awaiting_review";
-  const validTargetChapterCount = Number.isInteger(targetChapterCount) && targetChapterCount >= 1 && targetChapterCount <= 30;
   const arcChapterIds = selectedArcState?.completed_chapter_ids ?? [];
   const chapterIds = [...arcChapterIds];
   if (isCurrentArc && activeChapterId && !chapterIds.includes(activeChapterId)) chapterIds.push(activeChapterId);
@@ -184,24 +168,6 @@ export function StoryArcsView({
       )
     : [];
 
-  async function requestRevision() {
-    if (!revisionMessage.trim() || submittingRevision) return;
-    setSubmittingRevision(true);
-    setRevisionNotice(null);
-    try {
-      const ok = await onRequestRevision(revisionMessage.trim());
-      if (ok) {
-        setRevisionMessage("");
-        setShowRevision(false);
-        setRevisionNotice("修改意见已进入安全检查点队列，harness 正在据此重写当前故事弧。 ");
-      }
-    } catch (error) {
-      setRevisionNotice(formatApiError(error));
-    } finally {
-      setSubmittingRevision(false);
-    }
-  }
-
   return (
     <section className={styles.view}>
       <header className={styles.heading}>
@@ -211,53 +177,7 @@ export function StoryArcsView({
         </div>
       </header>
 
-      {awaitingReview && (
-        <section className={styles.reviewBanner}>
-          <div>
-            <span className={styles.reviewBadge}><span /> 等待你的确认</span>
-            <h2>第 {displayArcNumber(selectedArcId)} 故事弧计划 · 审批中</h2>
-            <p>AI 已完成当前故事弧计划。该人工门禁必须批准后，才会开始章节创作。</p>
-          </div>
-          <div className={styles.reviewActions}>
-            <label className={styles.chapterCountField}>
-              <span>计划章节数</span>
-              <input
-                type="number"
-                min={1}
-                max={30}
-                value={targetChapterCount}
-                disabled={approving}
-                onChange={(event) => setTargetChapterCount(Number(event.target.value))}
-              />
-              <small>Loop 建议 {currentArc?.recommended_target_chapter_count ?? targetChapterCount} 章</small>
-            </label>
-            <button className={styles.primaryButton} disabled={approving || !validTargetChapterCount} onClick={() => void onApprove(targetChapterCount)}>
-              <Check size={17} /> {approving ? "正在批准..." : "批准并继续"}
-            </button>
-            <button className={styles.secondaryButton} onClick={() => setShowRevision((value) => !value)}>
-              <MessageSquareText size={16} /> 要求修改
-            </button>
-            <button className={styles.quietButton} onClick={() => onSelectArtifact(`arcs/${selectedArcId}/plan.md`)}>
-              <FileText size={15} /> 查看完整计划
-            </button>
-          </div>
-        </section>
-      )}
-
-      {showRevision && (
-        <div className={styles.revisionBox}>
-          <textarea
-            value={revisionMessage}
-            disabled={submittingRevision}
-            onChange={(event) => setRevisionMessage(event.target.value)}
-            placeholder="说明希望调整的节奏、冲突、人物重点或章节方向..."
-          />
-          <button className={styles.primaryButton} disabled={!revisionMessage.trim() || submittingRevision} onClick={requestRevision}>
-            提交修改意见
-          </button>
-        </div>
-      )}
-      {revisionNotice && <p className={styles.notice}>{revisionNotice}</p>}
+      {awaitingReview && <p className={styles.notice}>当前计划等待审查。请前往“创作”批准计划或提交修改意见；故事世界只用于浏览。</p>}
 
       <div className={styles.columns}>
         <aside className={styles.listPanel}>

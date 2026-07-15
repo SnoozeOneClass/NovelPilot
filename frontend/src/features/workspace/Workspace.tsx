@@ -6,17 +6,14 @@ import { AppShell } from "../../app/AppShell";
 import { useHarnessEvents } from "../../app/harness-events";
 import type { TaskDomain } from "../../app/types";
 import { useWorkspaceQueries, workspaceQueryKeys } from "../../app/workspace-queries";
-import { harnessVisibleOutputForLatestAction } from "../../types/domain";
-import { formatRunStatus } from "../../types/display";
 import type { LlmProfilesDocument, ProjectSummary } from "../../types/domain";
+import { CreationView } from "../creation/CreationView";
+import { useCreationRunController } from "../creation/useCreationRunController";
 import { EvidenceCenter } from "../evidence/EvidenceCenter";
 import { ExperimentLab } from "../experiments/ExperimentLab";
 import { SettingsView } from "../settings/SettingsView";
 import { SetupConversation } from "../setup-conversation/SetupConversation";
 import { StoryWorldView } from "../story-world/StoryWorldView";
-import { FeedbackComposer } from "../workbench/FeedbackComposer";
-import { WorkbenchView } from "../workbench/WorkbenchView";
-import { type CanonKind, parseCanonDocument } from "./workspace-utils";
 import styles from "./Workspace.module.css";
 
 interface WorkspaceProps {
@@ -25,19 +22,20 @@ interface WorkspaceProps {
 }
 
 type WorkspaceLocation = TaskDomain | "settings";
-type WorkspaceCommand = "start" | "resume" | "pause" | "export" | "approve" | "approveBookRevision" | "retry" | "recover" | "revision" | "freeze";
+type WorkspaceCommand = "start" | "resume" | "approve" | "approveBookRevision" | "retry" | "recover" | "revision" | "freeze";
 type WorkspaceNotice = { kind: "success" | "error"; text: string };
 
 function initialLocation(project: ProjectSummary): WorkspaceLocation {
   try {
     const stored = window.sessionStorage.getItem(`novelpilot.location.${project.metadata.project_id}`);
-    if (["cocreate", "workbench", "story", "evidence", "experiments", "settings"].includes(stored ?? "")) {
+    if (stored === "workbench") return "creation";
+    if (["cocreate", "creation", "story", "evidence", "experiments", "settings"].includes(stored ?? "")) {
       return stored as WorkspaceLocation;
     }
   } catch {
     // Use the project-derived location when session storage is unavailable.
   }
-  return project.title ? "workbench" : "cocreate";
+  return project.title ? "creation" : "cocreate";
 }
 
 export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
@@ -72,19 +70,9 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
   const activeArtifact = activeArtifactQuery.data ?? null;
   const runStatus = metadata.run_status;
   const runInFlight = runStatus === "running" || runStatus === "pause_requested";
-  const canStart = Boolean(readiness?.can_start_run && readiness.next_action.id === "start_run");
-  const canResume = Boolean(readiness?.can_start_run && readiness.next_action.id === "resume_run");
-  const canPause = runStatus === "running";
   const canRecover = readiness?.next_action.id === "recover_stale_run";
   const commandBusy = pendingCommands.size > 0;
   const currentProfile = profiles?.profiles.find((profile) => profile.id === profiles.active_profile_id) ?? null;
-  const modelOutput = useMemo(() => harnessVisibleOutputForLatestAction(events), [events]);
-  const canonCounts = useMemo(
-    () => Object.fromEntries(
-      Object.entries(queries.canonContents).map(([kind, content]) => [kind, Object.keys(parseCanonDocument(content).items).length])
-    ) as Record<CanonKind, number>,
-    [queries.canonContents]
-  );
   const retryableChapterArtifact = useMemo(() => {
     if (!metadata.active_chapter_id) return false;
     const prefix = `chapters/${metadata.active_chapter_id}/`;
@@ -93,6 +81,17 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
         ((summary.kind === "verification" && summary.status === "failed") || summary.kind === "state_patch_rejection")
     );
   }, [artifactSummaries, metadata.active_chapter_id]);
+  const hasStarted = useMemo(
+    () => events.some((event) => event.kind === "run_started" || event.kind === "run_resumed"),
+    [events]
+  );
+  useCreationRunController({
+    hasStarted,
+    readiness,
+    busy: commandBusy,
+    continuationKey: `${metadata.updated_at}:${events.at(-1)?.event_id ?? "none"}`,
+    onResume: resumeRun
+  });
 
   useEffect(() => {
     try { window.sessionStorage.setItem(`novelpilot.location.${projectId}`, location); } catch { /* no-op */ }
@@ -136,21 +135,9 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
   async function startRun() { await runCommand("start", async () => { await api.startRun(); }); }
   async function resumeRun() { await runCommand("resume", async () => { await api.resumeRun(); }); }
 
-  async function pauseRun() {
-    let status = "";
-    const ok = await runCommand("pause", async () => { status = (await api.pauseRun()).status; });
-    if (ok) setFeedbackNotice({ kind: "success", text: status === "pause_requested" ? "已请求暂停，将在当前原子动作结束后生效。" : `当前状态：${formatRunStatus(status)}。` });
-  }
-
-  async function exportManuscript() {
-    let path = "";
-    const ok = await runCommand("export", async () => { path = (await api.exportManuscript()).artifact_path; });
-    if (ok) setFeedbackNotice({ kind: "success", text: `已导出：${path}` });
-  }
-
   async function approveArc(targetChapterCount: number): Promise<boolean> {
     const ok = await runCommand("approve", async () => { await api.approveCurrentArc(targetChapterCount); });
-    if (ok) setFeedbackNotice({ kind: "success", text: "当前故事弧已批准，可以继续章节写作。" });
+    if (ok) setFeedbackNotice({ kind: "success", text: "当前故事弧已批准，正在自动进入章节创作。" });
     return ok;
   }
 
@@ -202,16 +189,18 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
     await runCommand("recover", async () => { await api.recoverStaleRun(); });
   }
 
-  async function sendFeedback() {
-    if (!feedback.trim() || sendingFeedback) return;
+  async function sendFeedback(): Promise<boolean> {
+    if (!feedback.trim() || sendingFeedback) return false;
     setSendingFeedback(true);
     setFeedbackNotice(null);
     try {
       await api.submitFeedback(feedback.trim());
       setFeedback("");
-      setFeedbackNotice({ kind: "success", text: "意见已记录，会在当前原子动作结束后的安全检查点注入。" });
+      setFeedbackNotice({ kind: "success", text: "意见已记录，会在本轮生成结束后纳入后续创作。" });
+      return true;
     } catch (error) {
       setFeedbackNotice({ kind: "error", text: formatApiError(error) });
+      return false;
     } finally {
       setSendingFeedback(false);
     }
@@ -238,28 +227,27 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
     setArtifactDrawerOpen(true);
   }
 
-  function renderWorkbench() {
+  function renderCreation() {
     return (
-      <WorkbenchView
+      <CreationView
         project={projectState}
         events={events}
         currentArc={currentArc}
         summaries={artifactSummaries}
-        modelOutput={modelOutput}
-        activeArtifact={activeArtifact}
-        canonCounts={canonCounts}
         readiness={readiness}
         bookRevision={bookRevision}
-        canStart={canStart}
-        canResume={canResume}
         busy={commandBusy}
+        feedback={feedback}
+        sendingFeedback={sendingFeedback}
+        onFeedbackChange={setFeedback}
+        onSendFeedback={sendFeedback}
+        onRequestArcRevision={requestArcRevision}
         onStart={startRun}
-        onResume={resumeRun}
+        onApproveArc={approveArc}
         onApproveBookRevision={approveBookRevision}
-        onExport={exportManuscript}
+        onRetryChapter={retryCurrentChapter}
+        onRecoverStale={recoverStaleRun}
         onSelectArtifact={openArtifact}
-        onOpenEvidence={() => setLocation("evidence")}
-        onOpenStory={() => setLocation("story")}
       />
     );
   }
@@ -273,12 +261,12 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
             projectId={projectId}
             events={events}
             onSetupChanged={refreshWorkspace}
-            onExit={() => setLocation("workbench")}
-            onApproved={async () => { await refreshWorkspace(); setLocation("workbench"); }}
+            onExit={() => setLocation("creation")}
+            onApproved={async () => { await refreshWorkspace(); setLocation("creation"); }}
           />
         );
-      case "workbench":
-        return renderWorkbench();
+      case "creation":
+        return renderCreation();
       case "story":
         return (
           <StoryWorldView
@@ -287,9 +275,6 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
             artifactPaths={artifactPaths}
             summaries={artifactSummaries}
             canonContents={queries.canonContents}
-            approving={pendingCommands.has("approve")}
-            onApprove={approveArc}
-            onRequestRevision={requestArcRevision}
             onSelectArtifact={openArtifact}
             onRefresh={refreshWorkspace}
           />
@@ -304,13 +289,9 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
             activeArtifact={activeArtifact}
             readiness={readiness}
             completionAudit={completionAudit}
-            canPause={canPause}
-            canResume={canResume}
             canRetry={Boolean(metadata.active_chapter_id && retryableChapterArtifact && !runInFlight)}
             busy={commandBusy}
             onSelectArtifact={setSelectedArtifactPath}
-            onPause={pauseRun}
-            onResume={resumeRun}
             onRetry={retryCurrentChapter}
             onRefreshAudit={async () => { await queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.completion(projectId) }); }}
           />
@@ -346,15 +327,6 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
     </div>
   ) : null;
 
-  const feedbackDock = location === "workbench" ? (
-    <FeedbackComposer
-      value={feedback}
-      sending={sendingFeedback}
-      onChange={setFeedback}
-      onSend={() => void sendFeedback()}
-    />
-  ) : null;
-
   return (
     <>
       <AppShell
@@ -364,7 +336,6 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
         canRecover={Boolean(canRecover)}
         runInFlight={runInFlight}
         notice={notice}
-        feedbackDock={feedbackDock}
         onLocationChange={setLocation}
         onRefresh={() => void refreshWorkspace()}
         onRecover={() => void recoverStaleRun()}

@@ -25,3 +25,33 @@ surface. It should:
 The existing `llm_stream_progress` events and received-character count are the first
 integration point to evaluate. The blocking overlay should not hide whatever
 progress surface is chosen.
+
+## Story arc approval breaks the normal creation flow
+
+**Status:** Implemented by `.trellis/tasks/07-15-creation-workflow-ux`.
+
+The former creation workbench split one normal participatory flow across the
+workbench and Story World. Approving a story arc still required the user to return
+to the workbench and click `恢复`, which made a successful transition look like an
+interruption.
+
+The replacement `创作` surface now:
+
+- treats story arc planning, human review, approval, and the transition into chapter
+  creation as consecutive stages of the same task;
+- never requires the user to return to a previous page and click `恢复` after a normal,
+  successful story arc approval;
+- removes `恢复` and proactive pause from the normal creation flow; abnormal stale-run
+  recovery remains failure handling only;
+- keeps one clear primary action at each stage and explains what will happen next;
+- makes the current state and required user action visible wherever the user lands;
+- rebuilds and renames the workbench as the persistent `创作` surface, while keeping
+  `故事世界` browse-only;
+- keeps one persistent feedback composer and streams sanitized read-only Chapter prose
+  into the central surface during generation;
+- avoids adding another confirmation unless a real user decision or irreversible
+  action requires it.
+
+Book discussion, Story Arc review, and persistent feedback remain the only creative
+human-intervention surfaces. The task's PRD and design retain the original failure
+analysis and acceptance contract.

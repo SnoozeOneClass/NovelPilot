@@ -1,5 +1,4 @@
 import { render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { CurrentArcState } from "../../types/domain";
 import { StoryArcsView } from "./StoryArcsView";
@@ -17,29 +16,19 @@ const currentArc: CurrentArcState = {
 };
 
 describe("StoryArcsView", () => {
-  it("lets participatory approval override the recommended chapter count", async () => {
-    const user = userEvent.setup();
-    const approve = vi.fn().mockResolvedValue(true);
-
+  it("keeps story arc review controls out of the browse-only story world", () => {
     render(
       <StoryArcsView
         currentArc={currentArc}
         activeChapterId={null}
         artifactPaths={[]}
         summaries={[]}
-        approving={false}
-        onApprove={approve}
-        onRequestRevision={vi.fn().mockResolvedValue(true)}
         onSelectArtifact={vi.fn()}
       />
     );
 
-    expect(screen.getByText("Loop 建议 10 章")).toBeInTheDocument();
-    const chapterCount = screen.getByRole("spinbutton", { name: /计划章节数/ });
-    await user.clear(chapterCount);
-    await user.type(chapterCount, "12");
-    await user.click(screen.getByRole("button", { name: /批准并继续/ }));
-
-    expect(approve).toHaveBeenCalledWith(12);
+    expect(screen.getByText(/故事世界只用于浏览/)).toBeInTheDocument();
+    expect(screen.queryByRole("spinbutton")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /批准/ })).not.toBeInTheDocument();
   });
 });

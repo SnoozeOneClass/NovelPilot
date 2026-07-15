@@ -272,7 +272,7 @@ def test_chapter_tools_build_quarantined_candidate_and_never_promote(
                                 {"key": "visible", "json_value": "true"},
                                 {"key": "name", "json_value": "harbor bell"},
                             ],
-                            "evidence_quotes": ["The bell"],
+                            "evidence_quotes": ["钟声响起"],
                             "rationale": "The draft makes the bell audible.",
                         }
                     ],
@@ -298,6 +298,99 @@ def test_chapter_tools_build_quarantined_candidate_and_never_promote(
         "visible": True,
         "name": "harbor bell",
     }
+
+
+def test_chapter_submission_rejects_non_verbatim_patch_evidence_before_checkpoint(
+    tmp_path: Path,
+) -> None:
+    registry = build_default_tool_registry()
+    context = _context(
+        tmp_path,
+        role="chapter",
+        scope_id="chapter-0001",
+        phase="chapter",
+        revision=0,
+        call_id="plan",
+    )
+    registry.execute(
+        context,
+        _call(
+            "plan",
+            "plan_chapter_candidate",
+            {
+                "chapter_id": "chapter-0001",
+                "expected_revision": 0,
+                "plan_revision": 1,
+                "plan_markdown": "# Chapter plan",
+            },
+        ),
+    )
+    registry.execute(
+        context.__class__(**{**context.__dict__, "tool_call_id": "draft"}),
+        _call(
+            "draft",
+            "write_chapter_draft",
+            {
+                "chapter_id": "chapter-0001",
+                "expected_revision": 0,
+                "plan_revision": 1,
+                "draft_revision": 1,
+                "mode": "write",
+                "content": "The harbor bell rang once. Everyone faced the door.",
+            },
+        ),
+    )
+
+    submit = registry.execute(
+        context.__class__(**{**context.__dict__, "tool_call_id": "submit"}),
+        _call(
+            "submit",
+            "submit_chapter_candidate",
+            {
+                "chapter_id": "chapter-0001",
+                "expected_revision": 0,
+                "candidate_revision": 1,
+                "plan_revision": 1,
+                "draft_revision": 1,
+                "summary": "The bell marks an arrival.",
+                "observations": {
+                    "events": [],
+                    "character_changes": [],
+                    "relationship_changes": [],
+                    "world_fact_candidates": [],
+                    "foreshadowing_candidates": [],
+                    "requires_commit": True,
+                },
+                "state_patch": {
+                    "operations": [
+                        {
+                            "op": "upsert",
+                            "target_file": "canon/world_facts.json",
+                            "target_id": "harbor-bell",
+                            "expected_version": 1,
+                            "value_fields": [
+                                {"key": "heard", "json_value": "true"}
+                            ],
+                            "evidence_quotes": [
+                                "“The harbor bell rang once.”",
+                                "Everyone looked toward the entrance.",
+                            ],
+                            "rationale": "The draft establishes the bell.",
+                        }
+                    ],
+                },
+            },
+        ),
+    )
+
+    assert submit.status == "error"
+    assert submit.recoverable is True
+    assert submit.error_code == "candidate_patch_evidence_not_verbatim"
+    assert submit.content["rejected_evidence"] == [
+        {"operation_index": 0, "evidence_indexes": [0, 1]}
+    ]
+    assert "retry:submit_chapter_candidate" in submit.allowed_actions
+    assert not any(tmp_path.rglob("manifest.json"))
 
 
 def test_targeted_chapter_edit_requires_a_unique_anchor(tmp_path: Path) -> None:

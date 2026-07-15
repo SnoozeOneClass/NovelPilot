@@ -700,6 +700,34 @@ def _submit_chapter_candidate(
         context.project_path / draft_path,
         code="candidate_draft_missing",
     )
+    rejected_evidence = [
+        {
+            "operation_index": operation_index,
+            "evidence_indexes": [
+                evidence_index
+                for evidence_index, evidence in enumerate(operation.evidence)
+                if evidence.quote not in draft
+            ],
+        }
+        for operation_index, operation in enumerate(request.state_patch.operations)
+    ]
+    rejected_evidence = [
+        item for item in rejected_evidence if item["evidence_indexes"]
+    ]
+    if rejected_evidence:
+        raise ToolHandlerError(
+            "candidate_patch_evidence_not_verbatim",
+            (
+                "State-patch evidence must quote exact substrings from the current "
+                "candidate draft. Correct only the rejected evidence indexes and resubmit."
+            ),
+            recoverable=True,
+            content={"rejected_evidence": rejected_evidence},
+            allowed_actions=[
+                "inspect_chapter_consistency",
+                "retry:submit_chapter_candidate",
+            ],
+        )
     observations_path = root / "obs.json"
     patch_path = root / "patch.json"
     manifest_path = root / "manifest.json"

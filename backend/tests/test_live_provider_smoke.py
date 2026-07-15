@@ -180,16 +180,13 @@ def test_live_provider_smoke_failure_reports_harness_context(
 
     assert "missing=" in message
     assert "Inspect project:" in message
-    assert "Last harness event: state_patch_rejected" in message
-    assert "Last artifact: chapters/chapter-001/state_patch_rejection.json" in message
-    assert "not present in chapter_final" in message
+    assert "Last harness event: run_failed" in message
+    assert "State-patch evidence must quote exact substrings" in message
     assert report["status"] == "failed"
-    assert report["failure"]["last_event"]["kind"] == "state_patch_rejected"
-    assert report["failure"]["last_event"]["artifact_path"] == (
-        "chapters/chapter-001/state_patch_rejection.json"
-    )
-    assert "not present in chapter_final" in (
-        report["failure"]["artifact_reasons"][0]
+    assert report["failure"]["last_event"]["kind"] == "run_failed"
+    assert report["failure"]["last_event"]["artifact_path"] is None
+    assert "State-patch evidence must quote exact substrings" in (
+        report["failure"]["last_event"]["message"]
     )
     report_payload = json.dumps(report, ensure_ascii=False)
     assert "secret-key" not in report_payload

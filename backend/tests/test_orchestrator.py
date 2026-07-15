@@ -22,7 +22,7 @@ from app.harness.agents.models import (
 from app.harness.agents.persistence import read_agent_state, save_agent_state
 from app.harness.loops.book import BookDirectionSynthesis
 from app.harness.orchestrator import HarnessOrchestrator, HarnessRunContext
-from app.llm.gateway import ChatMessage, ChatRequest, ChatResult
+from app.llm.gateway import ChatChunk, ChatMessage, ChatRequest, ChatResult
 from app.schemas.arcs import StoryArcPlanProposal
 from app.schemas.artifacts import CandidateObservations, ChapterVerification
 from app.schemas.events import HarnessEvent
@@ -668,6 +668,100 @@ def test_chapter_retry_reuses_routed_candidate_run_budget(
 
     assert captured == ["chapter-run-1"]
     assert (chapter_path / "upstream-resume.json").exists()
+
+
+def test_chapter_agent_projects_safe_public_draft_events(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_path = tmp_path / "project"
+    chapter_path = project_path / "chapters" / "chapter-001"
+    candidate_draft = chapter_path / "agent" / "a" / "activation" / "draft.md"
+    candidate_draft.parent.mkdir(parents=True)
+    candidate_draft.write_text("公开正文\n", encoding="utf-8")
+    write_json(chapter_path / "context_snapshot.json", {"sources": []})
+    metadata = ProjectMetadata(
+        project_id="project-1",
+        title="Novel",
+        active_arc_id="arc-001",
+        active_chapter_id="chapter-001",
+    )
+    write_json(project_path / "project.json", metadata.model_dump(mode="json"))
+    profile = LlmProfile(
+        id="main",
+        name="Main",
+        protocol="openai-compatible",
+        base_url="https://api.example.com/v1",
+        api_key=SecretStr("secret"),
+        model="chapter-model",
+    )
+
+    def stream_then_stop(*_args, on_tool_event=None, on_event=None, **_kwargs):
+        assert on_tool_event is not None
+        assert on_event is not None
+        on_tool_event(
+            ChatChunk(
+                event_type="tool_call_start",
+                tool_call_id="call-1",
+                tool_name="write_chapter_draft",
+                tool_index=0,
+                provider_snapshot="test",
+            )
+        )
+        on_tool_event(
+            ChatChunk(
+                event_type="tool_argument_delta",
+                tool_call_id="call-1",
+                tool_name="write_chapter_draft",
+                tool_index=0,
+                arguments_delta=(
+                    '{"content":"公开正文","state_patch":"PRIVATE-PATCH"}'
+                ),
+                provider_snapshot="test",
+            )
+        )
+        on_tool_event(
+            ChatChunk(
+                event_type="tool_call_stop",
+                tool_call_id="call-1",
+                tool_name="write_chapter_draft",
+                tool_index=0,
+                provider_snapshot="test",
+            )
+        )
+        on_event(
+            {
+                "kind": "agent_tool_result",
+                "tool_name": "write_chapter_draft",
+                "tool_call_id": "call-1",
+                "status": "ok",
+                "artifact_paths": [
+                    "chapters/chapter-001/agent/a/activation/draft.md"
+                ],
+            }
+        )
+        raise RuntimeError("stop after stream projection")
+
+    monkeypatch.setattr(orchestrator, "run_chapter_agent", stream_then_stop)
+    runner = HarnessOrchestrator(
+        HarnessRunContext(project_path=project_path, run_id="run-1")
+    )
+
+    with pytest.raises(RuntimeError, match="stop after stream projection"):
+        runner._run_chapter_agent(profile, metadata, "chapter-001", chapter_path)
+
+    events = read_events(project_path)
+    assert [event.kind for event in events if event.kind.startswith("chapter_draft_")] == [
+        "chapter_draft_stream_started",
+        "chapter_draft_delta",
+        "chapter_draft_stream_committed",
+    ]
+    assert "".join(
+        str(event.payload.get("text_delta", ""))
+        for event in events
+        if event.kind == "chapter_draft_delta"
+    ) == "公开正文"
+    assert "PRIVATE-PATCH" not in repr(events)
 
 
 def _make_project(tmp_path, *, setup_approved: bool = False):
@@ -1705,19 +1799,31 @@ def test_orchestrator_rejects_legacy_partial_chapter_without_agent_patch(
     assert not (chapter_path / "state_patch_rejection.json").exists()
 
 
-def test_full_auto_repairs_rejected_patch_quotes_without_changing_operations(
+@pytest.mark.parametrize("operation_mode", ["full_auto", "participatory"])
+def test_repairs_rejected_patch_quotes_without_changing_operations(
     tmp_path: Path,
     monkeypatch,
+    operation_mode: str,
 ) -> None:
     project_path = _make_project(tmp_path, setup_approved=True)
     metadata = ProjectMetadata(
         title="Novel",
-        operation_mode="full_auto",
+        operation_mode=operation_mode,
         active_arc_id="arc-001",
         active_chapter_id="chapter-001",
         run_status="running",
     )
     write_json(project_path / "project.json", metadata.model_dump(mode="json"))
+    write_json(
+        project_path / "arcs" / "arc-001" / "state.json",
+        {
+            "arc_id": "arc-001",
+            "status": "approved",
+            "plan_path": "arcs/arc-001/plan.md",
+            "human_review": "approved",
+            "approved_at": "2026-07-15T00:00:00+00:00",
+        },
+    )
     chapter_path = project_path / "chapters" / "chapter-001"
     chapter_path.mkdir(parents=True)
     (chapter_path / "context_snapshot.json").write_text("{}\n", encoding="utf-8")

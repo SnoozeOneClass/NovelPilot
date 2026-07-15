@@ -515,12 +515,13 @@ def test_retry_current_chapter_archives_rejected_state_patch(
     manifest = read_json(project_path / result["artifact_path"])
 
     assert result["retry_scope"] == "state_patch"
-    assert not (chapter_path / "candidate_state_patch.json").exists()
+    assert (chapter_path / "candidate_state_patch.json").exists()
     assert not (chapter_path / "state_patch_rejection.json").exists()
-    assert (chapter_path / "attempts" / "attempt-001" / "candidate_state_patch.json").exists()
+    assert not (
+        chapter_path / "attempts" / "attempt-001" / "candidate_state_patch.json"
+    ).exists()
     assert manifest["archived_artifacts"] == [
-        "attempts/attempt-001/candidate_state_patch.json",
-        "attempts/attempt-001/state_patch_rejection.json",
+        "attempts/attempt-001/state_patch_rejection.json"
     ]
 
 

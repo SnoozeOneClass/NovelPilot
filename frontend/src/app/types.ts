@@ -1,4 +1,4 @@
-export type TaskDomain = "cocreate" | "workbench" | "story" | "evidence" | "experiments";
+export type TaskDomain = "cocreate" | "creation" | "story" | "evidence" | "experiments";
 
 export type StoryWorldTab = "arcs" | "chapters" | "canon";
 

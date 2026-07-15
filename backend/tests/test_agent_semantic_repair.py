@@ -25,16 +25,9 @@ from app.schemas.projects import ProjectMetadata
 from app.schemas.setup import SetupStateDocument
 
 
-def test_user_decision_tool_is_not_exposed_to_full_auto_downstream_agents() -> None:
-    assert (
-        loop_runners._optional_user_decision_tool(  # pyright: ignore[reportPrivateUsage]
-            ProjectMetadata(operation_mode="full_auto")
-        )
-        == ()
-    )
-    assert loop_runners._optional_user_decision_tool(  # pyright: ignore[reportPrivateUsage]
-        ProjectMetadata(operation_mode="participatory")
-    ) == ("request_user_decision",)
+def test_user_decision_tool_is_not_exposed_to_downstream_agents() -> None:
+    assert "request_user_decision" not in loop_runners.STORY_ARC_AGENT_TOOLS
+    assert "request_user_decision" not in loop_runners.CHAPTER_AGENT_TOOLS
 
 
 def test_story_arc_agent_repairs_local_semantic_failure_with_frozen_budget(
