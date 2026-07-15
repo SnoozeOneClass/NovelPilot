@@ -11,6 +11,7 @@ from app.core.paths import resolve_project_path
 from app.harness.run_control import begin_active_runner, end_active_runner
 from app.schemas.projects import (
     CreateProjectRequest,
+    DeleteProjectsRequest,
     OpenProjectRequest,
     ProjectMetadata,
     UpdateOperationModeRequest,
@@ -233,6 +234,114 @@ def test_multiple_untitled_projects_have_unique_stable_directories(
     assert first.path != second.path
     assert resolve_project_path(first.name).exists()
     assert resolve_project_path(second.name).exists()
+
+
+def test_delete_projects_removes_selected_project_directory_only(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _isolate_project_runtime(tmp_path, monkeypatch)
+    selected = create_project(CreateProjectRequest(operation_mode="full_auto"))
+    selected_path = resolve_project_path(selected.name)
+    evidence_path = selected_path / "chapters" / "chapter-001" / "candidate" / "draft.md"
+    evidence_path.parent.mkdir(parents=True)
+    evidence_path.write_text("delete every project artifact", encoding="utf-8")
+    preserved = create_project(CreateProjectRequest(operation_mode="participatory"))
+    preserved_path = resolve_project_path(preserved.name)
+
+    response = project_api.delete_projects(
+        DeleteProjectsRequest(project_ids=[selected.metadata.project_id])
+    )
+
+    assert [item.project_id for item in response.deleted] == [
+        selected.metadata.project_id
+    ]
+    assert response.active_project_closed is False
+    assert not selected_path.exists()
+    assert preserved_path.exists()
+    assert project_storage.get_active_project_path() == preserved_path
+
+
+def test_delete_projects_supports_batch_and_closes_deleted_active_project(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _isolate_project_runtime(tmp_path, monkeypatch)
+    first = create_project(CreateProjectRequest(operation_mode="full_auto"))
+    second = create_project(CreateProjectRequest(operation_mode="participatory"))
+
+    response = project_api.delete_projects(
+        DeleteProjectsRequest(
+            project_ids=[first.metadata.project_id, second.metadata.project_id]
+        )
+    )
+
+    assert [item.project_id for item in response.deleted] == [
+        first.metadata.project_id,
+        second.metadata.project_id,
+    ]
+    assert response.active_project_closed is True
+    assert project_storage.list_projects() == []
+    assert project_storage.get_active_project_path() is None
+    assert not project_storage.ACTIVE_PROJECT_PATH.exists()
+    assert not (project_storage.OUTPUT_DIR / ".deleting").exists()
+
+
+def test_delete_projects_validates_entire_batch_before_removing_anything(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _isolate_project_runtime(tmp_path, monkeypatch)
+    project = create_project(CreateProjectRequest(operation_mode="full_auto"))
+    project_path = resolve_project_path(project.name)
+
+    with pytest.raises(HTTPException) as caught:
+        project_api.delete_projects(
+            DeleteProjectsRequest(
+                project_ids=[project.metadata.project_id, "missing-project-id"]
+            )
+        )
+
+    assert caught.value.status_code == 404
+    assert project_path.exists()
+    assert project_storage.get_active_project_path() == project_path
+
+
+@pytest.mark.parametrize("run_status", ["running", "pause_requested"])
+def test_delete_projects_rejects_running_project(
+    tmp_path,
+    monkeypatch,
+    run_status: str,
+) -> None:
+    _isolate_project_runtime(tmp_path, monkeypatch)
+    project = create_project(CreateProjectRequest(operation_mode="full_auto"))
+    project_path = resolve_project_path(project.name)
+    _set_run_status(project_path, run_status)
+
+    with pytest.raises(HTTPException) as caught:
+        project_api.delete_projects(
+            DeleteProjectsRequest(project_ids=[project.metadata.project_id])
+        )
+
+    assert caught.value.status_code == 409
+    assert project_path.exists()
+
+
+def test_delete_projects_rejects_active_runner(tmp_path, monkeypatch) -> None:
+    _isolate_project_runtime(tmp_path, monkeypatch)
+    project = create_project(CreateProjectRequest(operation_mode="full_auto"))
+    project_path = resolve_project_path(project.name)
+    assert begin_active_runner(project_path) is True
+    try:
+        with pytest.raises(HTTPException) as caught:
+            project_api.delete_projects(
+                DeleteProjectsRequest(project_ids=[project.metadata.project_id])
+            )
+    finally:
+        end_active_runner(project_path)
+
+    assert caught.value.status_code == 409
+    assert project_path.exists()
 
 
 def test_mode_change_marks_existing_unapproved_arc_for_review_and_keeps_directory(

@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useId, useRef, type ReactNode } from "react";
 import { X } from "lucide-react";
 import styles from "./Dialog.module.css";
 
@@ -11,6 +11,7 @@ interface DialogProps {
 
 export function Dialog({ open, title, children, onClose }: DialogProps) {
   const ref = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
 
   useEffect(() => {
     const dialog = ref.current;
@@ -23,12 +24,12 @@ export function Dialog({ open, title, children, onClose }: DialogProps) {
     <dialog
       ref={ref}
       className={styles.dialog}
-      aria-labelledby="np-dialog-title"
+      aria-labelledby={titleId}
       onCancel={(event) => { event.preventDefault(); onClose(); }}
       onClick={(event) => { if (event.target === ref.current) onClose(); }}
     >
       <header>
-        <h2 id="np-dialog-title">{title}</h2>
+        <h2 id={titleId}>{title}</h2>
         <button type="button" title="关闭" aria-label="关闭" onClick={onClose}><X size={17} /></button>
       </header>
       <div className={styles.content}>{children}</div>

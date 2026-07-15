@@ -12,6 +12,8 @@ from app.harness.run_control import (
 )
 from app.schemas.projects import (
     CreateProjectRequest,
+    DeleteProjectsRequest,
+    DeleteProjectsResponse,
     OpenProjectRequest,
     ProjectSummary,
     UpdateAgentPolicyRequest,
@@ -60,6 +62,40 @@ def close_project() -> dict[str, bool]:
     except project_storage.ActiveProjectBusyError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"closed": True}
+
+
+@router.post("/delete", response_model=DeleteProjectsResponse)
+def delete_projects(request: DeleteProjectsRequest) -> DeleteProjectsResponse:
+    with active_project_transition_lock():
+        try:
+            targets = project_storage.resolve_project_deletion_targets(
+                request.project_ids
+            )
+        except project_storage.ProjectNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except project_storage.ProjectDeletionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        lease_paths: list[Path] = []
+        try:
+            for target in targets:
+                if not begin_active_runner(target.path):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Cannot delete {target.name} while a Harness action is active."
+                        ),
+                    )
+                lease_paths.append(target.path)
+            try:
+                return project_storage.delete_projects(targets)
+            except project_storage.ActiveProjectBusyError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except project_storage.ProjectDeletionError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+        finally:
+            for path in reversed(lease_paths):
+                end_active_runner(path)
 
 
 @router.get("/active", response_model=ProjectSummary | None)

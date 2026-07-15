@@ -126,7 +126,8 @@
   color: var(--np-text-secondary);
 }
 
-.errorNotice {
+.errorNotice,
+.successNotice {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -137,6 +138,12 @@
   background: var(--np-danger-soft);
   color: var(--np-danger);
   font-size: 13px;
+}
+
+.successNotice {
+  border-left-color: var(--np-success);
+  background: var(--np-success-soft);
+  color: var(--np-success);
 }
 
 .errorNotice button {
@@ -158,10 +165,61 @@
   box-shadow: var(--np-shadow);
 }
 
+.selectionToolbar {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--np-line);
+  padding: 6px 12px 6px 18px;
+  background: var(--np-surface-raised);
+  color: var(--np-text-secondary);
+  font-size: 12px;
+}
+
+.selectionToolbar > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.selectionToolbar button {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--np-line);
+  border-radius: var(--np-radius-sm);
+  padding: 0 11px;
+  background: var(--np-surface);
+  color: var(--np-text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.selectionToolbar button:hover:not(:disabled) {
+  border-color: var(--np-accent);
+  color: var(--np-accent);
+}
+
+.selectionToolbar .deleteButton {
+  border-color: var(--np-danger);
+  background: var(--np-danger-soft);
+  color: var(--np-danger);
+}
+
+.selectionToolbar .deleteButton:hover:not(:disabled) {
+  border-color: var(--np-danger);
+  background: var(--np-danger);
+  color: #fff;
+}
+
 .listHeader,
 .projectRow {
   display: grid;
-  grid-template-columns: minmax(260px, 1.4fr) minmax(160px, 0.8fr) 118px 150px 24px;
+  grid-template-columns: 48px minmax(260px, 1.4fr) minmax(160px, 0.8fr) 118px 150px 24px;
   align-items: center;
   gap: 16px;
 }
@@ -184,7 +242,7 @@
   width: 100%;
   min-height: 68px;
   border-bottom: 1px solid var(--np-line);
-  padding: 9px 18px;
+  padding: 0 18px;
   background: transparent;
   color: var(--np-text-secondary);
   text-align: left;
@@ -194,8 +252,47 @@
   border-bottom: 0;
 }
 
-.projectRow:hover:not(:disabled) {
+.projectRow:hover,
+.projectRow[data-selected="true"] {
   background: var(--np-surface-muted);
+}
+
+.projectRow[data-selected="true"] {
+  box-shadow: inset 3px 0 var(--np-accent);
+}
+
+.selectionCell {
+  min-height: 68px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.selectionCell input {
+  width: 17px;
+  height: 17px;
+  margin: 0;
+  accent-color: var(--np-accent);
+  cursor: pointer;
+}
+
+.selectionCell:has(input:disabled),
+.selectionCell input:disabled {
+  cursor: not-allowed;
+}
+
+.projectOpenButton {
+  min-width: 0;
+  min-height: 67px;
+  grid-column: 2 / -1;
+  display: grid;
+  grid-template-columns: minmax(260px, 1.4fr) minmax(160px, 0.8fr) 118px 150px 24px;
+  align-items: center;
+  gap: 16px;
+  padding: 9px 0;
+  background: transparent;
+  color: var(--np-text-secondary);
+  text-align: left;
 }
 
 .projectIdentity {
@@ -324,6 +421,92 @@
   margin-top: 24px;
 }
 
+.deleteDialog > p {
+  margin: 0;
+  color: var(--np-text-secondary);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.deleteDialog code {
+  border-radius: 4px;
+  padding: 2px 5px;
+  background: var(--np-surface-muted);
+  color: var(--np-text);
+  font: 12px var(--np-font-mono);
+}
+
+.deleteDialog ul {
+  max-height: 230px;
+  margin: 16px 0 0;
+  overflow: auto;
+  border: 1px solid var(--np-line);
+  border-radius: var(--np-radius-md);
+  padding: 0;
+  list-style: none;
+}
+
+.deleteDialog li {
+  display: grid;
+  gap: 3px;
+  border-bottom: 1px solid var(--np-line);
+  padding: 10px 12px;
+}
+
+.deleteDialog li:last-child {
+  border-bottom: 0;
+}
+
+.deleteDialog li strong {
+  color: var(--np-text);
+  font-size: 13px;
+}
+
+.deleteDialog li span,
+.deleteDialog > small {
+  color: var(--np-text-muted);
+  font: 10px var(--np-font-mono);
+}
+
+.deleteDialog > small {
+  display: block;
+  margin-top: 8px;
+}
+
+.deleteError {
+  margin-top: 14px;
+  border-left: 3px solid var(--np-danger);
+  padding: 9px 11px;
+  background: var(--np-danger-soft);
+  color: var(--np-danger);
+  font-size: 12px;
+}
+
+.deleteDialog > footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 22px;
+}
+
+.confirmDeleteButton {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--np-danger);
+  border-radius: var(--np-radius-md);
+  padding: 0 16px;
+  background: var(--np-danger);
+  color: #fff;
+  font-weight: 700;
+}
+
+.confirmDeleteButton:hover:not(:disabled) {
+  filter: brightness(0.92);
+}
+
 @media (max-width: 760px) {
   .topbar {
     padding: 0 14px;
@@ -348,7 +531,29 @@
     width: 100%;
   }
 
+  .selectionToolbar {
+    align-items: stretch;
+    flex-direction: column;
+    padding: 10px 12px;
+  }
+
+  .selectionToolbar > div {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
   .projectRow {
+    grid-template-columns: 40px minmax(0, 1fr);
+    gap: 8px;
+    padding: 0 12px;
+  }
+
+  .selectionCell {
+    min-height: 68px;
+  }
+
+  .projectOpenButton {
+    grid-column: 2;
     grid-template-columns: minmax(0, 1fr) 20px;
     gap: 10px;
   }
@@ -363,7 +568,8 @@
     grid-template-columns: 1fr;
   }
 
-  .newBookDialog > footer {
+  .newBookDialog > footer,
+  .deleteDialog > footer {
     display: grid;
     grid-template-columns: 1fr;
   }

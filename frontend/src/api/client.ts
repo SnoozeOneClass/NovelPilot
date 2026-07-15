@@ -7,6 +7,7 @@ import type {
   LiteraryReviewRequest,
   CurrentArcApprovalResponse,
   CurrentArcState,
+  DeleteProjectsResponse,
   ExperimentFixtureCreateResponse,
   ExperimentFixtureStatus,
   ChapterRetryResponse,
@@ -121,6 +122,12 @@ export const api = {
       body: JSON.stringify({ name })
     }),
   closeProject: () => request<{ closed: boolean }>("/api/projects/close", { method: "POST" }),
+  deleteProjects: (project_ids: string[]) =>
+    request<DeleteProjectsResponse>("/api/projects/delete", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ project_ids })
+    }),
   updateProjectMode: (operation_mode: OperationMode) =>
     request<ProjectSummary>("/api/projects/active/mode", {
       method: "PATCH",

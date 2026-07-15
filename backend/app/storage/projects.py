@@ -1,8 +1,10 @@
 import json
 import shutil
 from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 from app.core.config import ACTIVE_PROJECT_PATH, OUTPUT_DIR, ensure_runtime_dirs
 from app.core.paths import resolve_project_path
@@ -12,6 +14,8 @@ from app.schemas.projects import (
     ActiveProjectDocument,
     AgentPolicy,
     CreateProjectRequest,
+    DeletedProject,
+    DeleteProjectsResponse,
     OperationMode,
     ProjectMetadata,
     ProjectSummary,
@@ -38,6 +42,21 @@ RUN_LOCK_STATUSES = {"running", "pause_requested"}
 
 class ActiveProjectBusyError(RuntimeError):
     pass
+
+
+class ProjectNotFoundError(LookupError):
+    pass
+
+
+class ProjectDeletionError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class ProjectDeletionTarget:
+    project_id: str
+    name: str
+    path: Path
 
 
 def metadata_path(project_path: Path) -> Path:
@@ -260,6 +279,103 @@ def list_projects() -> list[ProjectSummary]:
     return projects
 
 
+def resolve_project_deletion_targets(
+    project_ids: list[str],
+) -> list[ProjectDeletionTarget]:
+    ensure_runtime_dirs()
+    requested = set(project_ids)
+    matches: dict[str, ProjectDeletionTarget] = {}
+    for entry in sorted(OUTPUT_DIR.iterdir(), key=lambda item: item.name.lower()):
+        if not entry.is_dir() or entry.is_symlink():
+            continue
+        try:
+            project_path = resolve_project_path(entry.name)
+        except ValueError:
+            continue
+        if not metadata_path(project_path).is_file():
+            continue
+        try:
+            metadata = read_project_metadata(project_path)
+        except (FileNotFoundError, ValueError):
+            continue
+        if metadata.project_id not in requested:
+            continue
+        if metadata.project_id in matches:
+            raise ProjectDeletionError(
+                f"Multiple project directories use project ID {metadata.project_id}."
+            )
+        matches[metadata.project_id] = ProjectDeletionTarget(
+            project_id=metadata.project_id,
+            name=entry.name,
+            path=project_path,
+        )
+
+    missing = [project_id for project_id in project_ids if project_id not in matches]
+    if missing:
+        raise ProjectNotFoundError(
+            "Projects not found: " + ", ".join(missing)
+        )
+    return [matches[project_id] for project_id in project_ids]
+
+
+def delete_projects(targets: list[ProjectDeletionTarget]) -> DeleteProjectsResponse:
+    if not targets:
+        raise ValueError("At least one project is required for deletion.")
+
+    active_project = get_active_project_path()
+    active_project_closed = active_project is not None and any(
+        target.path.resolve() == active_project.resolve() for target in targets
+    )
+    target_paths: set[Path] = set()
+    for target in targets:
+        safe_path = resolve_project_path(target.name)
+        if safe_path.resolve() != target.path.resolve():
+            raise ProjectDeletionError("Project deletion target changed during validation.")
+        if safe_path in target_paths:
+            raise ProjectDeletionError("Project deletion targets must be unique.")
+        target_paths.add(safe_path)
+        metadata = read_project_metadata(safe_path)
+        if metadata.project_id != target.project_id:
+            raise ProjectDeletionError("Project ID changed during deletion validation.")
+        if metadata.run_status in RUN_LOCK_STATUSES:
+            raise ActiveProjectBusyError(
+                f"Cannot delete {target.name} while its harness run is in progress."
+            )
+
+    deleting_root = OUTPUT_DIR / ".deleting"
+    batch_root = deleting_root / f"batch-{uuid4()}"
+    deleting_root.mkdir(parents=True, exist_ok=True)
+    batch_root.mkdir()
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for target in targets:
+            staged_path = batch_root / target.name
+            target.path.replace(staged_path)
+            moved.append((target.path, staged_path))
+        if active_project_closed and ACTIVE_PROJECT_PATH.exists():
+            ACTIVE_PROJECT_PATH.unlink()
+    except OSError as exc:
+        _rollback_project_deletion(moved)
+        shutil.rmtree(batch_root, ignore_errors=True)
+        _remove_empty_deleting_root()
+        raise ProjectDeletionError("Failed to stage projects for deletion.") from exc
+
+    try:
+        shutil.rmtree(batch_root)
+    except OSError as exc:
+        raise ProjectDeletionError(
+            "Project directories were detached but could not be fully removed."
+        ) from exc
+    _remove_empty_deleting_root()
+    return DeleteProjectsResponse(
+        deleted=[
+            DeletedProject(project_id=target.project_id, name=target.name)
+            for target in targets
+        ],
+        active_project_closed=active_project_closed,
+    )
+
+
 def open_project(name: str) -> ProjectSummary:
     _ensure_active_project_can_change()
     project_path = resolve_project_path(name)
@@ -326,5 +442,18 @@ def _json_document(value: object) -> str:
 def _remove_empty_creating_root() -> None:
     try:
         (OUTPUT_DIR / ".creating").rmdir()
+    except OSError:
+        pass
+
+
+def _rollback_project_deletion(moved: list[tuple[Path, Path]]) -> None:
+    for original_path, staged_path in reversed(moved):
+        if staged_path.exists() and not original_path.exists():
+            staged_path.replace(original_path)
+
+
+def _remove_empty_deleting_root() -> None:
+    try:
+        (OUTPUT_DIR / ".deleting").rmdir()
     except OSError:
         pass

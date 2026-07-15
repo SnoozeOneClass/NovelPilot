@@ -85,6 +85,32 @@ class OpenProjectRequest(BaseModel):
     name: str = Field(min_length=1)
 
 
+class DeleteProjectsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_ids: list[str] = Field(min_length=1)
+
+    @field_validator("project_ids")
+    @classmethod
+    def normalize_project_ids(cls, value: list[str]) -> list[str]:
+        normalized = [project_id.strip() for project_id in value]
+        if any(not project_id for project_id in normalized):
+            raise ValueError("Project IDs must not be blank.")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("Project IDs must be unique.")
+        return normalized
+
+
+class DeletedProject(BaseModel):
+    project_id: str
+    name: str
+
+
+class DeleteProjectsResponse(BaseModel):
+    deleted: list[DeletedProject]
+    active_project_closed: bool
+
+
 class ActiveProjectDocument(BaseModel):
     name: str
     path: str

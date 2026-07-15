@@ -25,6 +25,21 @@ const project: ProjectSummary = {
   }
 };
 
+const secondProject: ProjectSummary = {
+  ...project,
+  name: "project-2",
+  title: "第二本小说",
+  path: "D:/output/project-2",
+  metadata: {
+    ...project.metadata,
+    project_id: "project-2",
+    title: "第二本小说",
+    active_arc_id: null,
+    active_chapter_id: null,
+    updated_at: "2026-07-13T02:00:00Z"
+  }
+};
+
 function renderSelector(onProjectOpened = vi.fn()) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(
@@ -79,5 +94,50 @@ describe("ProjectSelector", () => {
 
     expect(await screen.findByRole("button", { name: /测试小说/ })).toBeInTheDocument();
     expect(api.listProjects).toHaveBeenCalledTimes(2);
+  });
+
+  it("selects and permanently deletes one project after confirmation", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.listProjects).mockResolvedValueOnce([project]).mockResolvedValue([]);
+    const remove = vi.spyOn(api, "deleteProjects").mockResolvedValue({
+      deleted: [{ project_id: "project-1", name: "project-1" }],
+      active_project_closed: false
+    });
+    renderSelector();
+
+    await user.click(await screen.findByRole("checkbox", { name: "选择《测试小说》" }));
+    await user.click(screen.getByRole("button", { name: "删除选中（1）" }));
+
+    expect(screen.getByRole("dialog", { name: "确认删除 1 本小说？" })).toHaveTextContent(
+      "此操作不可撤销"
+    );
+    await user.click(screen.getByRole("button", { name: "永久删除" }));
+
+    await waitFor(() => expect(remove).toHaveBeenCalledWith(["project-1"]));
+    expect(await screen.findByText("已从本地 output 目录永久删除 1 本小说。")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /测试小说/ })).not.toBeInTheDocument();
+  });
+
+  it("selects every listed project for one batch deletion", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.listProjects).mockResolvedValue([project, secondProject]);
+    const remove = vi.spyOn(api, "deleteProjects").mockResolvedValue({
+      deleted: [
+        { project_id: "project-1", name: "project-1" },
+        { project_id: "project-2", name: "project-2" }
+      ],
+      active_project_closed: true
+    });
+    renderSelector();
+
+    await screen.findByRole("button", { name: /第二本小说/ });
+    await user.click(screen.getByRole("button", { name: "全选" }));
+
+    expect(screen.getByRole("checkbox", { name: "选择《测试小说》" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "选择《第二本小说》" })).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "删除选中（2）" }));
+    await user.click(screen.getByRole("button", { name: "永久删除" }));
+
+    await waitFor(() => expect(remove).toHaveBeenCalledWith(["project-1", "project-2"]));
   });
 });

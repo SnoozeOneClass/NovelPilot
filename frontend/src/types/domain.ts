@@ -58,6 +58,16 @@ export interface ProjectSummary {
   metadata: ProjectMetadata;
 }
 
+export interface DeletedProject {
+  project_id: string;
+  name: string;
+}
+
+export interface DeleteProjectsResponse {
+  deleted: DeletedProject[];
+  active_project_closed: boolean;
+}
+
 export interface LlmProfilePublic {
   id: string;
   name: string;

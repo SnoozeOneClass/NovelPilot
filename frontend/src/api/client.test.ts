@@ -1,6 +1,32 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "./client";
 
+describe("project deletion API", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("sends only selected project IDs to the batch deletion endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({ deleted: [], active_project_closed: false }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.deleteProjects(["project-a", "project-b"]);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/delete",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ project_ids: ["project-a", "project-b"] })
+      })
+    );
+  });
+});
+
 describe("experiment fixture API errors", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
