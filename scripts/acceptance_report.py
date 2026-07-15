@@ -83,8 +83,8 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
     AcceptanceCriterion(
         id="book_setup",
         requirement=(
-            "Book direction uses open-ended co-creation, reviewed title recommendations, and "
-            "atomic version-bound approval of the final title and direction."
+            "Book direction uses open-ended co-creation, confirms the formal title as the final "
+            "discussion decision, and atomically approves that title with the reviewed direction."
         ),
         probes=(
             EvidenceProbe(
@@ -113,7 +113,8 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
                 "backend/tests/test_setup.py",
                 (
                     "test_explicit_approval_requires_latest_revision",
-                    "test_explicit_approval_accepts_custom_title",
+                    "test_explicit_approval_rejects_title_not_confirmed_in_discussion",
+                    "test_book_discussion_tool_requires_confirmed_title_before_review_ready",
                     "test_approval_transaction_rolls_back_partial_formal_artifacts",
                     "test_review_blocks_candidate_without_confirmed_decision_coverage",
                     "test_setup_api_failure_is_fail_closed",
@@ -133,8 +134,16 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
             EvidenceProbe(
                 "frontend/src/features/setup-conversation/SetupReview.tsx",
                 (
-                    "candidate.recommended_titles",
-                    "option.rationale",
+                    "selectedTitle",
+                    "正式书名已经在逐问讨论的最后一步由你确认",
+                    "批准并采用",
+                ),
+            ),
+            EvidenceProbe(
+                "frontend/src/features/setup-conversation/SetupConversation.test.tsx",
+                (
+                    "uses the standard one-question flow for the final formal-title decision",
+                    "renders the discussion-confirmed title without another title picker",
                 ),
             ),
         ),

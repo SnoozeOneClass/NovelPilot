@@ -238,24 +238,39 @@ def _complete_book_setup(
     if setup_state.approved:
         return setup_state
 
-    next_message = SMOKE_BOOK_DIRECTION_BRIEF
-    for review_attempt in range(1, 4):
-        setup_state = _call_user_action(
-            "continue book direction discussion",
-            lambda message=next_message: setup_api.continue_setup_discussion(
-                SetupTurnRequest(message=message)
-            ),
-            redaction_values,
-        )
-        setup_state = _call_user_action(
-            "prepare book direction review",
-            setup_api.prepare_setup_review,
-            redaction_values,
-        )
+    next_message = (
+        SMOKE_BOOK_DIRECTION_BRIEF
+        + f"\n\n正式书名确定为《{final_title}》，这是已经明确确认的决定。"
+    )
+    for _attempt in range(1, 13):
         candidate = setup_state.candidate
-        if candidate is None:
-            raise LiveProviderSmokeError("Book direction review produced no candidate.")
-        if candidate.approval_allowed:
+        if candidate is not None and not candidate.approval_allowed:
+            setup_state = _call_user_action(
+                "continue bounded book direction revision",
+                setup_api.prepare_setup_review,
+                redaction_values,
+            )
+        elif setup_state.readiness.status == "ready":
+            setup_state = _call_user_action(
+                "prepare book direction review",
+                setup_api.prepare_setup_review,
+                redaction_values,
+            )
+        else:
+            setup_state = _call_user_action(
+                "continue book direction discussion",
+                lambda message=next_message: setup_api.continue_setup_discussion(
+                    SetupTurnRequest(message=message)
+                ),
+                redaction_values,
+            )
+
+        candidate = setup_state.candidate
+        if candidate is not None and candidate.approval_allowed:
+            if setup_state.selected_title != final_title:
+                raise LiveProviderSmokeError(
+                    "Book setup did not preserve the explicitly confirmed smoke title."
+                )
             return _call_user_action(
                 "approve reviewed book direction",
                 lambda revision=candidate.revision, title=final_title: setup_api.approve_setup(
@@ -264,22 +279,26 @@ def _complete_book_setup(
                 redaction_values,
             )
 
-        blocking_issues = [
-            issue for issue in candidate.review.issues if issue.severity == "blocking"
-        ]
-        issue_text = "\n".join(
-            f"- {issue.message}"
-            + (f" 建议澄清：{issue.suggested_question}" if issue.suggested_question else "")
-            for issue in blocking_issues
-        )
-        next_message = (
-            f"第 {review_attempt} 次候选审阅发现以下阻断问题，请据此继续讨论并修订完整草稿。"
-            "不要替我改变已经确认的决定；如果问题只是表达过薄，请把现有决定具体化。\n"
-            + issue_text
-        )
+        if setup_state.question:
+            if setup_state.question == "以下哪个书名最适合作为正式书名？":
+                next_message = f"采用《{final_title}》作为正式书名。"
+            elif setup_state.suggestions:
+                selected = next(
+                    (
+                        item
+                        for item in setup_state.suggestions
+                        if item.recommended
+                    ),
+                    setup_state.suggestions[0],
+                )
+                next_message = selected.message
+            else:
+                raise LiveProviderSmokeError(
+                    "Book Agent requested a decision without answer suggestions."
+                )
 
     raise LiveProviderSmokeError(
-        "Book direction remained blocked after three synthesis/review attempts."
+        "Book direction did not converge after twelve bounded setup actions."
     )
 
 
@@ -592,7 +611,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--profile-id", help="LLM profile id to test. Defaults to the active profile.")
     parser.add_argument(
         "--title",
-        help="Final novel title selected when approving the generated Book Direction.",
+        help="Formal title confirmed during Book discussion and reused for approval.",
     )
     parser.add_argument(
         "--skip-profile-test",

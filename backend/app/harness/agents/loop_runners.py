@@ -153,6 +153,7 @@ def run_book_discussion_agent(
         unresolved_questions=candidate.unresolved_questions,
         assumptions=candidate.assumptions,
         contradictions=candidate.contradictions,
+        selected_title=candidate.selected_title,
         question=candidate.question,
         suggestions=candidate.suggestions,
         readiness=candidate.readiness,
@@ -194,6 +195,12 @@ def run_book_direction_agent(
             "unresolved_questions": state.unresolved_questions,
             "assumptions": state.assumptions,
             "contradictions": state.contradictions,
+            "selected_title": state.selected_title,
+            "previous_blocked_review": (
+                state.candidate.review.model_dump(mode="json")
+                if state.candidate is not None and not state.candidate.approval_allowed
+                else None
+            ),
         },
         on_event=on_event,
         on_text_delta=on_text_delta,
@@ -330,6 +337,29 @@ def _run_book_direction_candidate_agent(
             result,
             on_event,
         )
+    if evaluation.result.outcome == "needs_user":
+        decision_activation = replace(
+            activation,
+            system_prompt=_book_evaluation_user_decision_prompt(),
+            allowed_tools=("request_user_decision",),
+            messages=(
+                ChatMessage(
+                    role="user",
+                    content=json.dumps(
+                        {
+                            "candidate_kind": "Book Direction",
+                            "selected_title": state.selected_title,
+                            "evaluation_id": evaluation.evaluation_id,
+                            "evaluation": evaluation.result.model_dump(mode="json"),
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
+            ),
+        )
+        decision_result = runner.run(decision_activation)
+        _terminal_payload(project_path, decision_result, "request_user_decision")
+        raise AgentCandidateError("Book Agent did not stop at the user-decision checkpoint.")
     return synthesis, evaluation, review
 
 
@@ -1101,14 +1131,21 @@ def _book_discussion_agent_prompt() -> str:
         "You are the persistent logical Book Agent inside NovelPilot's deterministic Harness. "
         "Use only exposed Tools. Read context only when needed. Update the complete working "
         "Book Direction, respond to the user's latest input, and choose the single highest-value "
-        "concrete question yourself. Do not ask the user which topic to discuss next. While more "
+        "concrete question yourself. Do not ask the user which topic to discuss next. "
         "Keep confirmed_decisions cumulative and copy every existing entry verbatim; never "
         "paraphrase, split, merge, or remove one. Add a new confirmed decision only when the "
         "latest human message explicitly confirms it; review feedback and repair guidance are "
-        "not new user-confirmed decisions. "
-        "clarification is needed, call submit_book_discussion_update with exactly one question "
-        "and two or three actionable suggestions. When the direction is genuinely ready, submit "
-        "readiness=ready with no question or suggestions. Never claim approval or commit state."
+        "not new user-confirmed decisions. When clarification is needed, call "
+        "submit_book_discussion_update with exactly one question "
+        "and two or three actionable suggestions. After every substantive story decision has "
+        "converged, if selected_title is still empty, make the final question exactly: "
+        "‘以下哪个书名最适合作为正式书名？’ Offer two or three concrete title choices whose "
+        "suggestion messages contain "
+        "the exact title, while the Web UI supplies the custom-input option. Set selected_title "
+        "only when the latest human message explicitly chooses or supplies that title. Do not "
+        "mark readiness=ready until selected_title is non-empty. When the direction and title "
+        "are genuinely ready, submit readiness=ready with no question or suggestions. Never "
+        "claim approval or commit state."
     )
 
 
@@ -1117,11 +1154,24 @@ def _book_direction_agent_prompt(*, state_revision: int, candidate_revision: int
         "You are the Book Agent preparing one candidate for Harness evaluation. Use only exposed "
         "Tools. Copy every fixed-input confirmed user decision verbatim into both "
         "constraints.confirmed and confirmed_decision_coverage.decision; do not paraphrase, "
-        "split, or merge those strings. Surface open decisions, produce three to five "
-        "unique title suggestions, and create a rolling plan. Call "
+        "split, or merge those strings. Preserve the already user-confirmed selected_title as "
+        "the authoritative formal title; do not ask the user to choose another title. Surface "
+        "open decisions, produce three to five unique compatibility title entries with the "
+        "selected title first, and create a rolling plan. Call "
         "submit_book_direction_candidate with "
         f"expected_revision={state_revision} and candidate_revision={candidate_revision}. "
         "Do not review, approve, or commit the candidate yourself."
+    )
+
+
+def _book_evaluation_user_decision_prompt() -> str:
+    return (
+        "The stateless Evaluator determined that the Book Direction cannot be repaired without "
+        "one explicit human decision. Inspect the cited evaluation evidence, choose the single "
+        "highest-value concrete decision yourself, and call request_user_decision exactly once. "
+        "Ask exactly one question and provide two or three actionable answer suggestions. Do not "
+        "ask which topic to discuss, do not submit another candidate, and do not expose hidden "
+        "reasoning. The Web UI adds the custom-input option."
     )
 
 

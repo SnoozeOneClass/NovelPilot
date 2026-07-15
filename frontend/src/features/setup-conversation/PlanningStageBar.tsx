@@ -1,13 +1,14 @@
 import { Check, History, LogOut } from "lucide-react";
 import type { RefObject } from "react";
+import { Button } from "../../components/ui/Button";
 import type { SetupStateDocument } from "../../types/domain";
 import type { SetupPlanningStage } from "./setup-planning";
-import styles from "./SetupConversation.module.css";
+import styles from "./PlanningStageBar.module.css";
 
 interface PlanningStageBarProps {
   state: SetupStateDocument;
   stage: SetupPlanningStage;
-  historyTriggerRef: RefObject<HTMLButtonElement | null>;
+  historyTriggerRef: RefObject<HTMLElement | null>;
   onOpenHistory: () => void;
   onExit: () => void;
 }
@@ -24,20 +25,24 @@ export function PlanningStageBar({ state, stage, historyTriggerRef, onOpenHistor
   return (
     <header className={styles.planningHeader}>
       <div className={styles.planningTitle}>
-        <span>全书 Loop · Plan Workspace</span>
+        <span>全书 Loop</span>
         <strong>{stageMessage(state, stage)}</strong>
       </div>
       <ol className={styles.stageProgress} aria-label="全书方向规划阶段">
         {stages.map((item, index) => (
-          <li key={item.id} data-state={index < currentIndex ? "complete" : index === currentIndex ? "current" : "upcoming"} aria-current={index === currentIndex ? "step" : undefined}>
-            <span>{index < currentIndex ? <Check size={11} /> : index + 1}</span>
+          <li
+            key={item.id}
+            data-state={index < currentIndex ? "complete" : index === currentIndex ? "current" : "upcoming"}
+            aria-current={index === currentIndex ? "step" : undefined}
+          >
+            <span>{index < currentIndex ? <Check size={12} /> : index + 1}</span>
             <strong>{item.label}</strong>
           </li>
         ))}
       </ol>
       <div className={styles.planningActions}>
-        <button ref={historyTriggerRef} type="button" onClick={onOpenHistory}><History size={14} />历史</button>
-        <button type="button" onClick={onExit}><LogOut size={14} />退出</button>
+        <Button ref={historyTriggerRef} variant="ghost" size="sm" onClick={onOpenHistory}><History size={15} />历史</Button>
+        <Button variant="ghost" size="sm" onClick={onExit}><LogOut size={15} />退出</Button>
       </div>
     </header>
   );

@@ -62,6 +62,7 @@ class BookDiscussionTurnResult:
     unresolved_questions: list[str]
     assumptions: list[str]
     contradictions: list[str]
+    selected_title: str | None
     question: str | None
     suggestions: list[SetupSuggestion]
     readiness: SetupReadinessSignal
@@ -96,6 +97,7 @@ def assemble_discussion_context(
         ("unresolved_questions", _json_text(state.unresolved_questions)),
         ("assumptions", _json_text(state.assumptions)),
         ("contradictions", _json_text(state.contradictions)),
+        ("selected_title", state.selected_title or "尚未确定"),
         ("recent_superseded_decisions", _json_text(superseded_payload)),
         ("current_user_message", user_message),
     ]
@@ -125,6 +127,7 @@ def assemble_discussion_context(
             "待澄清问题：\n" + _json_text(state.unresolved_questions),
             "当前假设：\n" + _json_text(state.assumptions),
             "已发现矛盾：\n" + _json_text(state.contradictions),
+            "已确认正式书名：\n" + (state.selected_title or "尚未确定"),
             "近期已取代决定：\n" + _json_text(superseded_payload),
             "最近原始对话：\n" + _json_text(recent_payload),
             f"用户本轮输入：\n{user_message}",
@@ -162,6 +165,7 @@ def assemble_discussion_context(
                     "unresolved_questions",
                     "assumptions",
                     "contradictions",
+                    "selected_title",
                 ],
             },
             {
@@ -207,7 +211,7 @@ def assemble_discussion_context(
                     source_path=version_paths["state"],
                     version=state.revision,
                 )
-                for content_id, content in fixed_blocks[2:7]
+                for content_id, content in fixed_blocks[2:8]
             ],
             _injected_content_record(
                 content_id="recent_raw_messages",
@@ -341,6 +345,7 @@ def build_review_context_snapshot(state: SetupStateDocument) -> dict[str, Any]:
         ("unresolved_questions", _json_text(state.unresolved_questions), version_paths["state"]),
         ("assumptions", _json_text(state.assumptions), version_paths["state"]),
         ("contradictions", _json_text(state.contradictions), version_paths["state"]),
+        ("selected_title", state.selected_title or "尚未确定", version_paths["state"]),
         ("recent_superseded_decisions", superseded, version_paths["state"]),
         ("readiness", state.readiness.model_dump_json(), version_paths["state"]),
     ]
@@ -370,6 +375,7 @@ def build_review_context_snapshot(state: SetupStateDocument) -> dict[str, Any]:
                     "unresolved_questions",
                     "assumptions",
                     "contradictions",
+                    "selected_title",
                     "superseded_decisions",
                     "readiness",
                 ],
@@ -428,6 +434,7 @@ def _render_synthesis_context(state: SetupStateDocument) -> str:
             "待澄清问题：\n" + _json_text(state.unresolved_questions),
             "假设：\n" + _json_text(state.assumptions),
             "矛盾：\n" + _json_text(state.contradictions),
+            "已确认正式书名：\n" + (state.selected_title or "尚未确定"),
             "已被取代的决定：\n"
             + _json_text(_recent_superseded_payload(state)),
             "模型就绪提示（仅供参考）：\n" + state.readiness.model_dump_json(),

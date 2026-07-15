@@ -129,6 +129,7 @@ class SetupStateDocument(BaseModel):
     approved: bool = False
     approved_at: datetime | None = None
     approved_title: str | None = None
+    selected_title: str | None = Field(default=None, max_length=200)
     title_selection_source: TitleSelectionSource | None = None
     migrated_from_schema_version: int | None = None
     turn_count: int = Field(default=0, ge=0)

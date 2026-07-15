@@ -1,4 +1,4 @@
-import type { SetupMessage, SetupStateDocument } from "../../types/domain";
+import type { SetupStateDocument } from "../../types/domain";
 
 export type SetupPlanningStage = "exploration" | "convergence" | "review" | "approved";
 
@@ -13,11 +13,6 @@ export interface SetupChangeSummary {
   changedSections: string[];
   ledgerDeltas: Array<{ label: string; delta: number }>;
   directionUpdated: boolean;
-}
-
-export interface LatestSetupExchange {
-  user: SetupMessage | null;
-  assistant: SetupMessage | null;
 }
 
 const ledgerFields: Array<{
@@ -100,18 +95,6 @@ export function summarizeSetupChanges(
     ledgerDeltas,
     directionUpdated: previous.direction_draft !== next.direction_draft
   };
-}
-
-export function latestSetupExchange(messages: SetupMessage[]): LatestSetupExchange {
-  let user: SetupMessage | null = null;
-  let assistant: SetupMessage | null = null;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (!user && message.role === "user") user = message;
-    if (!assistant && message.role === "assistant") assistant = message;
-    if (user && assistant) break;
-  }
-  return { user, assistant };
 }
 
 function indexSections(sections: DirectionSection[]): Map<string, DirectionSection> {

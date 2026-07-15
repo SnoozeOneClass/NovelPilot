@@ -1,0 +1,180 @@
+.decisionView {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--np-surface-raised);
+}
+
+.conversationScroll {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.conversationColumn {
+  width: min(100%, 880px);
+  margin: 0 auto;
+  padding: 30px clamp(24px, 4vw, 48px) 44px;
+}
+
+.conversationHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 34px;
+}
+
+.conversationHeader > div {
+  display: grid;
+  gap: 4px;
+}
+
+.conversationHeader span,
+.issueSection > header > div > span,
+.titlePicker > header > div > span {
+  color: var(--np-accent);
+  font: 700 12px var(--np-font-mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.conversationHeader h1 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.notice {
+  margin: 28px 0 0;
+  border-left: 3px solid var(--np-success);
+  padding: 10px 12px;
+  background: var(--np-success-soft);
+  color: var(--np-text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.notice[data-kind="error"] {
+  border-left-color: var(--np-danger);
+  background: var(--np-danger-soft);
+}
+
+.questionCard,
+.startPrompt {
+  margin-top: 36px;
+  border-left: 4px solid var(--np-accent);
+  padding: 22px 24px;
+  background: color-mix(in srgb, var(--np-accent-soft) 55%, var(--np-surface-raised));
+}
+
+.questionCard h2,
+.startPrompt h2 {
+  margin: 12px 0 8px;
+  font-size: clamp(20px, 3vw, 26px);
+  line-height: 1.38;
+}
+
+.questionCard > p,
+.startPrompt > p {
+  margin: 0;
+  color: var(--np-text-secondary);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.answerOptions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.composerShell {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 auto;
+  border-top: 1px solid var(--np-line);
+  background: color-mix(in srgb, var(--np-surface-raised) 96%, transparent);
+  box-shadow: 0 -12px 28px rgba(25, 28, 24, 0.05);
+  backdrop-filter: blur(8px);
+}
+
+.composerInner {
+  width: min(100%, 880px);
+  margin: 0 auto;
+  padding: 14px clamp(24px, 4vw, 48px) 12px;
+}
+
+.composerInner > label {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--np-text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.composerRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.composerRow textarea {
+  min-height: 108px;
+  max-height: 260px;
+}
+
+.composerRow > button {
+  width: 42px;
+  height: 42px;
+  margin-bottom: 2px;
+}
+
+.composerMeta {
+  display: grid;
+  gap: 10px;
+  margin-top: 8px;
+  color: var(--np-text-muted);
+  font-size: 12px;
+}
+
+.composerMeta > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-top: 10px;
+  border-top: 1px solid var(--np-line);
+}
+
+.composerMeta strong {
+  color: var(--np-text-secondary);
+}
+
+@media (max-width: 700px) {
+  .conversationColumn,
+  .composerInner {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .answerOptions {
+    grid-template-columns: 1fr;
+  }
+
+  .questionCard,
+  .startPrompt {
+    padding: 18px;
+  }
+
+  .composerMeta > div {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .composerMeta > div > button {
+    width: 100%;
+  }
+}

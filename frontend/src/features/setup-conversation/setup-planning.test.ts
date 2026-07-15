@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import type { SetupStateDocument } from "../../types/domain";
 import {
   deriveSetupPlanningStage,
-  latestSetupExchange,
   parseDirectionDocument,
   summarizeSetupChanges
 } from "./setup-planning";
@@ -15,6 +14,7 @@ function setupState(overrides: Partial<SetupStateDocument> = {}): SetupStateDocu
     approved: false,
     approved_at: null,
     approved_title: null,
+    selected_title: null,
     title_selection_source: null,
     migrated_from_schema_version: null,
     turn_count: 0,
@@ -79,17 +79,5 @@ describe("setup planning utilities", () => {
       ],
       directionUpdated: true
     });
-  });
-
-  it("finds only the latest user and assistant messages", () => {
-    const messages: SetupStateDocument["messages"] = [
-      { id: "1", turn: 1, role: "user", content: "旧问题", created_at: "", profile_id: null, model_snapshot: null, migrated: false },
-      { id: "2", turn: 1, role: "assistant", content: "旧回答", created_at: "", profile_id: null, model_snapshot: null, migrated: false },
-      { id: "3", turn: 2, role: "user", content: "新问题", created_at: "", profile_id: null, model_snapshot: null, migrated: false }
-    ];
-
-    const latest = latestSetupExchange(messages);
-    expect(latest.user?.content).toBe("新问题");
-    expect(latest.assistant?.content).toBe("旧回答");
   });
 });

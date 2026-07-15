@@ -2,7 +2,7 @@ import { FileText, ListTree, RefreshCw } from "lucide-react";
 import type { ReactNode } from "react";
 import type { SetupChangeSummary } from "./setup-planning";
 import { parseDirectionDocument } from "./setup-planning";
-import styles from "./SetupConversation.module.css";
+import styles from "./BookDirectionDocument.module.css";
 
 interface BookDirectionDocumentProps {
   markdown: string;

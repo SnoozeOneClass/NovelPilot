@@ -16,6 +16,7 @@ from app.schemas.setup import (
     BookDirectionReview,
     BookDirectionReviewIssue,
     BookTitleSuggestion,
+    ConfirmedDecisionCoverage,
     SetupApprovalRequest,
     SetupReadinessSignal,
 )
@@ -124,6 +125,7 @@ def test_readiness_recommends_review_when_discussion_draft_is_ready(
     project_path = Path(project.path)
     state = setup_storage.read_setup_state(project_path)
     state.direction_draft = _direction()
+    state.selected_title = "Readiness Fixture"
     state.readiness = SetupReadinessSignal(status="ready", reason="Ready for review.")
     write_json(project_path / "book" / "setup.json", state.model_dump(mode="json"))
     _create_profile()
@@ -168,8 +170,8 @@ def test_readiness_routes_blocked_candidate_back_to_discussion(
 
     readiness = readiness_api.get_readiness()
 
-    assert readiness.next_action.id == "continue_book_discussion"
-    assert readiness.next_action.command == "POST /api/setup/turn"
+    assert readiness.next_action.id == "review_book_direction"
+    assert readiness.next_action.command == "POST /api/setup/prepare-review"
     assert "candidate_review:blocked" in readiness.next_action.evidence
     assert "The candidate contradicts a confirmed decision." in readiness.next_action.evidence
 
@@ -378,6 +380,14 @@ def _approve_setup(project_path: Path) -> None:
 def _prepare_candidate(project_path: Path, *, blocked: bool = False):
     state = setup_storage.read_setup_state(project_path)
     state.direction_draft = _direction()
+    state.selected_title = "Readiness Fixture"
+    state.title_selection_source = "custom"
+    title_decision = "正式书名：《Readiness Fixture》"
+    state.confirmed_decisions = [title_decision]
+    state.readiness = SetupReadinessSignal(
+        status="ready",
+        reason="Direction and formal title are ready for review.",
+    )
     context_path = setup_storage.write_review_context_snapshot(
         project_path,
         candidate_revision=state.candidate_revision_counter + 1,
@@ -389,13 +399,18 @@ def _prepare_candidate(project_path: Path, *, blocked: bool = False):
         synthesis=BookDirectionSynthesis(
             direction_markdown=_direction(),
             constraints=BookDirectionConstraints(
-                confirmed=["Use fair clues."],
+                confirmed=["Use fair clues.", title_decision],
                 must_preserve=["Reveals change relationships."],
                 must_avoid=["No arbitrary solution."],
                 creative_freedoms=["Plan only the current arc."],
                 open_decisions=[],
             ),
-            confirmed_decision_coverage=[],
+            confirmed_decision_coverage=[
+                ConfirmedDecisionCoverage(
+                    decision=title_decision,
+                    candidate_evidence="Readiness Fixture",
+                )
+            ],
             recommended_titles=[
                 BookTitleSuggestion(title="Readiness Fixture", rationale="Primary option."),
                 BookTitleSuggestion(title="Ready Arc", rationale="Arc-focused option."),

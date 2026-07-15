@@ -32,7 +32,7 @@ def test_acceptance_report_marks_manual_gates_as_manual_required() -> None:
     assert by_id["project_lifecycle"]["status"] == "covered"
     assert "stable internal storage identities" in by_id["project_lifecycle"]["requirement"]
     assert by_id["book_setup"]["status"] == "covered"
-    assert "title recommendations" in by_id["book_setup"]["requirement"]
+    assert "formal title as the final discussion decision" in by_id["book_setup"]["requirement"]
     assert by_id["operation_modes"]["status"] == "covered"
     assert "bypassing pending story-arc review gates" in (
         by_id["operation_modes"]["requirement"]
@@ -63,6 +63,6 @@ def test_acceptance_report_markdown_contains_summary() -> None:
     assert "Static repository evidence map." in completed.stdout
     assert "Summary: 16 covered, 0 partial, 2 manual required, 0 missing, 18 total." in completed.stdout
     assert "stable internal storage identities" in completed.stdout
-    assert "reviewed title recommendations" in completed.stdout
+    assert "formal title as the final discussion decision" in completed.stdout
     assert "bypassing pending story-arc review gates" in completed.stdout
     assert "manual required" in completed.stdout

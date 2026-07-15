@@ -49,7 +49,12 @@ def test_local_happy_path_creates_writes_commits_and_exports(
     profiles_api.select_profile(profile.id)
 
     setup_api.continue_setup_discussion(
-        SetupTurnRequest(message="Build a fair mystery about earned trust and visible costs.")
+        SetupTurnRequest(
+            message=(
+                "Build a fair mystery about earned trust and visible costs. "
+                "Use 《Fixture Novel》 as the formal title."
+            )
+        )
     )
     candidate_state = setup_api.prepare_setup_review()
     assert candidate_state.candidate is not None
@@ -230,10 +235,16 @@ def _fixture_agent_call_llm(_profile: object, request: ChatRequest) -> ChatResul
     }
     if "submit_book_discussion_update" in tool_names:
         name = "submit_book_discussion_update"
-        arguments = _book_discussion_arguments(_expected_revision(request))
+        arguments = _book_discussion_arguments(
+            _expected_revision(request),
+            _selected_title(request),
+        )
     elif "submit_book_direction_candidate" in tool_names:
         name = "submit_book_direction_candidate"
-        arguments = _book_direction_arguments(_expected_revision(request))
+        arguments = _book_direction_arguments(
+            _expected_revision(request),
+            _selected_title(request),
+        )
     elif "submit_story_arc_candidate" in tool_names:
         name = "submit_story_arc_candidate"
         arguments = {
@@ -265,7 +276,10 @@ def _fixture_agent_call_llm(_profile: object, request: ChatRequest) -> ChatResul
     )
 
 
-def _book_discussion_arguments(expected_revision: int) -> dict[str, object]:
+def _book_discussion_arguments(
+    expected_revision: int,
+    selected_title: str,
+) -> dict[str, object]:
     return {
         "expected_revision": expected_revision,
         "reply": "The direction is concrete enough to review.",
@@ -276,6 +290,7 @@ def _book_discussion_arguments(expected_revision: int) -> dict[str, object]:
         "unresolved_questions": [],
         "assumptions": [],
         "contradictions": [],
+        "selected_title": selected_title,
         "question": None,
         "suggestions": [],
         "readiness": {
@@ -285,13 +300,22 @@ def _book_discussion_arguments(expected_revision: int) -> dict[str, object]:
     }
 
 
-def _book_direction_arguments(expected_revision: int) -> dict[str, object]:
+def _book_direction_arguments(
+    expected_revision: int,
+    selected_title: str,
+) -> dict[str, object]:
+    title_decision = f"正式书名：《{selected_title}》"
     return {
         "expected_revision": expected_revision,
         "candidate_revision": 1,
         "direction_markdown": _fixture_direction(),
         "constraints": {
-            "confirmed": ["Fair clues", "Earned trust", "Visible costs"],
+            "confirmed": [
+                "Fair clues",
+                "Earned trust",
+                "Visible costs",
+                title_decision,
+            ],
             "must_preserve": ["Reveals alter meaningful relationships."],
             "must_avoid": ["No arbitrary solution."],
             "creative_freedoms": ["Choose the current arc antagonist from committed canon."],
@@ -301,9 +325,10 @@ def _book_direction_arguments(expected_revision: int) -> dict[str, object]:
             {"decision": "Fair clues", "candidate_evidence": "visible clues"},
             {"decision": "Earned trust", "candidate_evidence": "earned trust"},
             {"decision": "Visible costs", "candidate_evidence": "personal costs"},
+            {"decision": title_decision, "candidate_evidence": selected_title},
         ],
         "recommended_titles": [
-            {"title": "Fixture Novel", "rationale": "Names the fixture clearly."},
+            {"title": selected_title, "rationale": "The user-confirmed formal title."},
             {"title": "Visible Costs", "rationale": "Highlights the core promise."},
             {"title": "Earned Trust", "rationale": "Centers the emotional arc."},
         ],
@@ -386,6 +411,18 @@ def _expected_revision(request: ChatRequest) -> int:
         if isinstance(payload, dict) and isinstance(payload.get("state_revision"), int):
             return int(payload["state_revision"])
     raise AssertionError("Fixture request did not expose its Harness revision.")
+
+
+def _selected_title(request: ChatRequest) -> str:
+    content = "\n".join(message.content for message in request.messages)
+    for pattern in (
+        r'"selected_title"\s*:\s*"([^"]+)"',
+        r"《([^》]+)》",
+    ):
+        match = re.search(pattern, content)
+        if match is not None:
+            return match.group(1)
+    raise AssertionError("Fixture request did not expose the confirmed formal title.")
 
 
 def _fixture_direction() -> str:

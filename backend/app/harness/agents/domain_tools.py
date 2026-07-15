@@ -54,6 +54,7 @@ class BookDiscussionUpdateInput(BaseModel):
     unresolved_questions: list[str] = Field(max_length=100)
     assumptions: list[str] = Field(max_length=100)
     contradictions: list[str] = Field(max_length=100)
+    selected_title: str | None = Field(default=None, max_length=200)
     question: str | None = Field(default=None, max_length=600)
     suggestions: list[SetupSuggestion] = Field(max_length=3)
     readiness: SetupReadinessSignal
@@ -113,6 +114,10 @@ class BookDiscussionUpdateInput(BaseModel):
                 )
         elif self.question is not None or self.suggestions:
             raise ValueError("A review-ready Book direction cannot ask another question.")
+        elif not (self.selected_title or "").strip():
+            raise ValueError(
+                "A review-ready Book direction requires the user-confirmed formal title."
+            )
         return self
 
 

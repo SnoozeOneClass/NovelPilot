@@ -14,6 +14,8 @@ from app.schemas.setup import (
     SetupMessage,
     SetupReadinessSignal,
     SetupStateDocument,
+    SetupSuggestion,
+    TitleSelectionSource,
     missing_confirmed_decisions,
 )
 from app.schemas.events import HarnessEvent
@@ -145,6 +147,20 @@ def record_discussion_turn(
         updated.unresolved_questions = result.unresolved_questions
         updated.assumptions = result.assumptions
         updated.contradictions = result.contradictions
+        updated.selected_title = _validated_selected_title(
+            state,
+            result,
+            user_message=user_message,
+        )
+        updated.title_selection_source = _title_selection_source(
+            state,
+            updated.selected_title,
+            user_message=user_message,
+        )
+        updated.confirmed_decisions = _merge_title_decision(
+            updated.confirmed_decisions,
+            updated.selected_title,
+        )
         updated.question = result.question
         updated.suggestions = result.suggestions
         updated.readiness = result.readiness
@@ -191,6 +207,89 @@ def record_discussion_turn(
                     updated.model_dump(mode="json")
                 ),
                 "book/direction_draft.md": result.direction_draft.rstrip() + "\n",
+                "book/discussion/transcript.jsonl": _transcript_content(updated),
+                "book/setup.json": _json_document(updated.model_dump(mode="json")),
+            },
+        )
+        return updated
+
+
+def record_agent_user_decision(
+    project_path: Path,
+    state: SetupStateDocument,
+    *,
+    payload: dict[str, Any],
+    checkpoint_path: str,
+    profile_id: str,
+    model_snapshot: str,
+) -> SetupStateDocument:
+    """Persist one Agent-selected question without inventing a user message."""
+
+    with _setup_project_lock(project_path):
+        recover_file_transactions(project_path)
+        _assert_current_revision_unlocked(project_path, state)
+        question = str(payload.get("question", "")).strip()
+        context = str(payload.get("context", "")).strip()
+        raw_suggestions = payload.get("suggestions")
+        if not question or not isinstance(raw_suggestions, list):
+            raise ValueError("Book Agent user-decision checkpoint is incomplete.")
+        suggestions = [
+            SetupSuggestion(
+                id=f"{payload.get('checkpoint_id', 'book-decision')}:{index + 1}",
+                label=str(item.get("label", "")).strip(),
+                message=str(item.get("message", "")).strip(),
+                rationale=str(item.get("rationale", "")).strip(),
+            )
+            for index, item in enumerate(raw_suggestions)
+            if isinstance(item, dict)
+        ]
+        if not 2 <= len(suggestions) <= 3:
+            raise ValueError("Book Agent user decision requires two or three suggestions.")
+
+        updated = state.model_copy(deep=True)
+        turn = updated.turn_count + 1
+        updated.messages.append(
+            SetupMessage(
+                turn=turn,
+                role="assistant",
+                content=context or "当前候选还需要你确认一个关键决定。",
+                profile_id=profile_id,
+                model_snapshot=model_snapshot,
+            )
+        )
+        updated.turn_count = turn
+        updated.revision += 1
+        updated.phase = "discussing"
+        updated.candidate = None
+        updated.question = question
+        updated.suggestions = suggestions
+        updated.readiness = SetupReadinessSignal(
+            status="continue",
+            reason=context or "审查需要一个明确的用户决定。",
+        )
+        updated.last_context_snapshot_path = checkpoint_path
+        updated.last_profile_id = profile_id
+        updated.last_model_snapshot = model_snapshot
+
+        version_root = Path("book") / "discussion" / "versions" / (
+            f"revision-{updated.revision:04d}"
+        )
+        updated.direction_draft_version_path = (
+            version_root / "direction_draft.md"
+        ).as_posix()
+        updated.discussion_state_version_path = (version_root / "state.json").as_posix()
+        updated.discussion_transcript_version_path = (
+            version_root / "transcript.jsonl"
+        ).as_posix()
+        commit_file_transaction(
+            project_path,
+            kind=f"book-agent-user-decision-{turn:04d}",
+            files={
+                updated.direction_draft_version_path: updated.direction_draft.rstrip() + "\n",
+                updated.discussion_state_version_path: _json_document(
+                    updated.model_dump(mode="json")
+                ),
+                updated.discussion_transcript_version_path: _transcript_content(updated),
                 "book/discussion/transcript.jsonl": _transcript_content(updated),
                 "book/setup.json": _json_document(updated.model_dump(mode="json")),
             },
@@ -345,6 +444,10 @@ def approve_setup(
                 raise ValueError("Book direction candidate is stale; review the latest candidate.")
             if not candidate.approval_allowed:
                 raise ValueError("Book direction review has blocking issues.")
+            if not state.selected_title:
+                raise ValueError("Confirm the formal book title before approval.")
+            if request.title != state.selected_title:
+                raise ValueError("Approved title does not match the confirmed discussion title.")
             missing_decisions = _candidate_missing_confirmed_decisions(state, candidate)
             if missing_decisions:
                 raise ValueError(
@@ -363,11 +466,7 @@ def approve_setup(
             updated.approved = True
             updated.approved_at = approved_at
             updated.approved_title = request.title
-            updated.title_selection_source = (
-                "recommended"
-                if any(item.title == request.title for item in candidate.recommended_titles)
-                else "custom"
-            )
+            updated.title_selection_source = state.title_selection_source or "custom"
             updated.phase = "approved"
             updated.revision += 1
             updated.question = None
@@ -468,6 +567,7 @@ def _discussion_response_payload(
         "unresolved_questions": result.unresolved_questions,
         "assumptions": result.assumptions,
         "contradictions": result.contradictions,
+        "selected_title": state.selected_title,
         "question": result.question,
         "suggestions": [item.model_dump(mode="json") for item in result.suggestions],
         "readiness": result.readiness.model_dump(mode="json"),
@@ -504,6 +604,48 @@ def _merge_confirmed_decisions(
         decision for decision in result.confirmed_decisions if decision not in superseded
     )
     return list(dict.fromkeys(merged))
+
+
+def _validated_selected_title(
+    state: SetupStateDocument,
+    result: BookDiscussionTurnResult,
+    *,
+    user_message: str,
+) -> str | None:
+    selected = (result.selected_title or "").strip() or None
+    if selected == state.selected_title:
+        return selected
+    if selected is None and state.selected_title:
+        return state.selected_title
+    if selected is None:
+        return None
+    if selected.casefold() not in user_message.casefold():
+        raise ValueError(
+            "Book Agent can set the formal title only from the user's explicit answer."
+        )
+    return selected
+
+
+def _title_selection_source(
+    state: SetupStateDocument,
+    selected_title: str | None,
+    *,
+    user_message: str,
+) -> TitleSelectionSource | None:
+    if selected_title == state.selected_title:
+        return state.title_selection_source
+    if any(suggestion.message == user_message for suggestion in state.suggestions):
+        return "recommended"
+    return "custom"
+
+
+def _merge_title_decision(decisions: list[str], selected_title: str | None) -> list[str]:
+    without_previous_title = [
+        decision for decision in decisions if not decision.startswith("正式书名：")
+    ]
+    if selected_title:
+        without_previous_title.append(f"正式书名：《{selected_title}》")
+    return without_previous_title
 
 
 def _approved_book_files(

@@ -222,6 +222,7 @@ export interface SetupStateDocument {
   approved: boolean;
   approved_at: string | null;
   approved_title: string | null;
+  selected_title: string | null;
   title_selection_source: "recommended" | "custom" | null;
   migrated_from_schema_version: number | null;
   turn_count: number;

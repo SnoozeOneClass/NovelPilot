@@ -214,7 +214,20 @@ def prepare_setup_review() -> SetupStateDocument:
                 status_code=409,
                 detail="Discuss the novel direction before requesting a review.",
             )
-        if state.candidate is not None:
+        retrying_blocked_candidate = bool(
+            state.candidate is not None and not state.candidate.approval_allowed
+        )
+        if not state.selected_title and not retrying_blocked_candidate:
+            raise HTTPException(
+                status_code=409,
+                detail="Confirm the formal book title before requesting a review.",
+            )
+        if state.readiness.status != "ready" and not retrying_blocked_candidate:
+            raise HTTPException(
+                status_code=409,
+                detail="Book Agent has not marked the direction ready for review.",
+            )
+        if state.candidate is not None and state.candidate.approval_allowed:
             raise HTTPException(
                 status_code=409,
                 detail=(
@@ -294,6 +307,36 @@ def prepare_setup_review() -> SetupStateDocument:
                 ),
             )
         except AgentControlCheckpoint as checkpoint:
+            if checkpoint.run_result.outcome == "waiting_user":
+                try:
+                    updated = setup_storage.record_agent_user_decision(
+                        project_path,
+                        state,
+                        payload=checkpoint.payload,
+                        checkpoint_path=checkpoint.artifact_path,
+                        profile_id=profile.id,
+                        model_snapshot=(
+                            checkpoint.run_result.model_snapshot or profile.model
+                        ),
+                    )
+                except (OSError, ValueError) as exc:
+                    raise HTTPException(status_code=500, detail=str(exc)) from exc
+                _append_event(
+                    project_path,
+                    metadata,
+                    kind="agent_waiting_for_user",
+                    action="synthesize_and_review_book_direction",
+                    status="requested",
+                    artifact_path=checkpoint.artifact_path,
+                    routing="continue_book_discussion",
+                    message="Book Agent requested one explicit user decision after evaluation.",
+                    payload={
+                        "checkpoint_id": checkpoint.payload.get("checkpoint_id"),
+                        "question": checkpoint.payload.get("question"),
+                        "suggestions": checkpoint.payload.get("suggestions"),
+                    },
+                )
+                return updated
             _raise_setup_control_checkpoint(
                 project_path,
                 metadata,
@@ -314,6 +357,44 @@ def prepare_setup_review() -> SetupStateDocument:
                 payload={"profile_id": profile.id, "reason": reason},
             )
             raise HTTPException(status_code=502, detail=reason) from exc
+
+        if review.commit_allowed and not state.selected_title:
+            title_payload = {
+                "checkpoint_id": f"book-title:{candidate_revision}",
+                "question": "以下哪个书名最适合作为正式书名？",
+                "context": "全书方向已经收敛，请完成规划阶段的最后一个书名决定。",
+                "suggestions": [
+                    {
+                        "label": item.title,
+                        "message": f"采用《{item.title}》作为正式书名。",
+                        "rationale": item.rationale,
+                    }
+                    for item in synthesis.recommended_titles[:3]
+                ],
+            }
+            try:
+                updated = setup_storage.record_agent_user_decision(
+                    project_path,
+                    state,
+                    payload=title_payload,
+                    checkpoint_path=context_path,
+                    profile_id=profile.id,
+                    model_snapshot=synthesis.model_snapshot,
+                )
+            except (OSError, ValueError) as exc:
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+            _append_event(
+                project_path,
+                metadata,
+                kind="book_title_decision_requested",
+                action="synthesize_and_review_book_direction",
+                status="requested",
+                artifact_path=context_path,
+                routing="continue_book_discussion",
+                message="Book Agent requested the final formal-title decision.",
+                payload={"question": title_payload["question"]},
+            )
+            return updated
 
         try:
             updated = setup_storage.save_book_direction_candidate(

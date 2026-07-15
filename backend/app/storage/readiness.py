@@ -257,10 +257,10 @@ def _next_action(
             )
         if candidate is not None:
             return RunNextAction(
-                id="continue_book_discussion",
-                command="POST /api/setup/turn",
+                id="review_book_direction",
+                command="POST /api/setup/prepare-review",
                 requires_user=True,
-                message="Continue the open-ended Book Direction discussion.",
+                message="Start a new bounded Book Direction revision after blocked review.",
                 evidence=[
                     f"candidate_revision:{candidate.revision}",
                     f"candidate_review:{candidate.review.status}",
@@ -271,7 +271,11 @@ def _next_action(
                     ][:3],
                 ],
             )
-        if setup_state.direction_draft.strip() and setup_state.readiness.status == "ready":
+        if (
+            setup_state.direction_draft.strip()
+            and setup_state.selected_title
+            and setup_state.readiness.status == "ready"
+        ):
             return RunNextAction(
                 id="review_book_direction",
                 command="POST /api/setup/prepare-review",

@@ -39,6 +39,7 @@ from app.storage.setup import (
     approve_setup,
     initialize_setup_state,
     read_setup_state,
+    record_agent_user_decision,
     record_discussion_turn,
     save_book_direction_candidate,
     write_discussion_context_snapshot,
@@ -222,6 +223,32 @@ def test_book_discussion_tool_accepts_one_question_and_answer_options() -> None:
     assert result.question == "Which relationship must carry the emotional cost?"
     assert len(result.suggestions) == 2
     assert result.suggestions[1].recommended is True
+
+
+def test_book_discussion_tool_requires_confirmed_title_before_review_ready() -> None:
+    payload = {
+        "expected_revision": 2,
+        "reply": "The full-book direction is ready for review.",
+        "direction_draft": _long_direction(),
+        "discussion_summary": "A converged fair-play mystery direction.",
+        "confirmed_decisions": ["Fair clues"],
+        "superseded_decisions": [],
+        "unresolved_questions": [],
+        "assumptions": [],
+        "contradictions": [],
+        "question": None,
+        "suggestions": [],
+        "readiness": {"status": "ready", "reason": "All decisions are confirmed."},
+    }
+
+    with pytest.raises(ValidationError, match="user-confirmed formal title"):
+        BookDiscussionUpdateInput.model_validate(payload)
+
+    result = BookDiscussionUpdateInput.model_validate(
+        {**payload, "selected_title": "Harbor of Trust"}
+    )
+    assert result.readiness.status == "ready"
+    assert result.selected_title == "Harbor of Trust"
 
 
 def test_setup_suggestion_keeps_legacy_payloads_readable() -> None:
@@ -526,7 +553,7 @@ def test_explicit_approval_requires_latest_revision_and_commits_exact_candidate(
     assert approved.approved is True
     assert approved.phase == "approved"
     assert approved.approved_title == "Harbor of Trust"
-    assert approved.title_selection_source == "recommended"
+    assert approved.title_selection_source == "custom"
     assert (project_path / "book" / "direction.md").read_text(encoding="utf-8") == (
         synthesis.direction_markdown.rstrip() + "\n"
     )
@@ -545,7 +572,7 @@ def test_explicit_approval_requires_latest_revision_and_commits_exact_candidate(
     assert book_state["current_strategy"] == "rolling_story_arc_planning"
 
 
-def test_explicit_approval_accepts_custom_title(tmp_path: Path) -> None:
+def test_explicit_approval_rejects_title_not_confirmed_in_discussion(tmp_path: Path) -> None:
     project_path, state = _project_with_discussion(tmp_path)
     context_path = write_review_context_snapshot(
         project_path,
@@ -562,14 +589,13 @@ def test_explicit_approval_accepts_custom_title(tmp_path: Path) -> None:
         context_snapshot_path=context_path,
     )
 
-    approved = approve_setup(
-        project_path,
-        SetupApprovalRequest(candidate_revision=1, title="Saltwater Testimony"),
-    )
+    with pytest.raises(ValueError, match="confirmed discussion title"):
+        approve_setup(
+            project_path,
+            SetupApprovalRequest(candidate_revision=1, title="Saltwater Testimony"),
+        )
 
-    assert approved.approved_title == "Saltwater Testimony"
-    assert approved.title_selection_source == "custom"
-    assert read_json(project_path / "project.json")["title"] == "Saltwater Testimony"
+    assert read_setup_state(project_path).approved is False
 
 
 def test_approval_rechecks_confirmed_decisions_even_if_review_claims_passed(
@@ -681,6 +707,7 @@ def test_discussion_preserves_confirmed_decisions_until_user_supersedes_them(
         "Clues must remain fair",
         "Trust is the central change",
         "The ending remains hopeful",
+        "正式书名：《Harbor of Trust》",
     ]
 
     replacement_context = write_discussion_context_snapshot(
@@ -715,6 +742,49 @@ def test_discussion_preserves_confirmed_decisions_until_user_supersedes_them(
     assert "Clues must remain fair" not in updated.confirmed_decisions
     assert replacement in updated.confirmed_decisions
     assert updated.superseded_decisions[-1].decision == "Clues must remain fair"
+
+
+def test_agent_review_question_reopens_standard_discussion_without_fake_user_turn(
+    tmp_path: Path,
+) -> None:
+    project_path, state = _project_with_discussion(tmp_path)
+    previous_message_count = len(state.messages)
+
+    updated = record_agent_user_decision(
+        project_path,
+        state,
+        payload={
+            "checkpoint_id": "book-review-decision:1",
+            "question": "结局必须由哪段关系承担不可逆的代价？",
+            "context": "审查发现结局代价仍需要一个明确的人类决定。",
+            "suggestions": [
+                {
+                    "label": "师徒关系",
+                    "message": "让师徒关系承担不可逆的决裂代价。",
+                    "rationale": "与主角的信任成长直接相连。",
+                },
+                {
+                    "label": "手足关系",
+                    "message": "让手足关系承担永久分离的代价。",
+                    "rationale": "能将旧案后果落到家庭层面。",
+                },
+            ],
+        },
+        checkpoint_path="book/agent/a/review/wait.json",
+        profile_id="main",
+        model_snapshot="story-model",
+    )
+
+    assert updated.phase == "discussing"
+    assert updated.candidate is None
+    assert updated.question == "结局必须由哪段关系承担不可逆的代价？"
+    assert len(updated.suggestions) == 2
+    assert updated.selected_title == "Harbor of Trust"
+    assert "正式书名：《Harbor of Trust》" in updated.confirmed_decisions
+    assert len(updated.messages) == previous_message_count + 1
+    assert updated.messages[-1].role == "assistant"
+    assert updated.messages[-1].content == "审查发现结局代价仍需要一个明确的人类决定。"
+    assert read_setup_state(project_path).question == updated.question
 
 
 def test_stale_discussion_result_cannot_overwrite_newer_revision(tmp_path: Path) -> None:
@@ -1016,6 +1086,36 @@ def test_setup_stream_progress_coalesces_small_provider_fragments(tmp_path: Path
     assert [event.payload["received_characters"] for event in progress_events] == [1, 100]
 
 
+def test_setup_api_rejects_review_until_book_agent_marks_direction_ready(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_path = _make_project(tmp_path)
+    state = initialize_setup_state(project_path)
+    context_path = write_discussion_context_snapshot(
+        project_path,
+        turn=1,
+        snapshot={"sources": ["book/setup.json"]},
+    )
+    state = record_discussion_turn(
+        project_path,
+        state,
+        user_message="Use Harbor of Trust as the formal title, then continue planning.",
+        result=replace(_turn_result(), selected_title="Harbor of Trust"),
+        context_snapshot_path=context_path,
+        profile_id="main",
+    )
+    assert state.readiness.status == "continue"
+
+    monkeypatch.setattr(setup_api, "get_active_project_path", lambda: project_path)
+
+    with pytest.raises(HTTPException) as exc:
+        setup_api.prepare_setup_review()
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "Book Agent has not marked the direction ready for review."
+
+
 def test_setup_api_review_failure_preserves_attempt_and_never_unlocks_approval(
     tmp_path: Path,
     monkeypatch,
@@ -1072,6 +1172,66 @@ def test_setup_api_review_failure_preserves_attempt_and_never_unlocks_approval(
     assert first_context.exists()
 
 
+def test_setup_api_allows_explicit_new_revision_after_blocked_candidate(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_path, state = _project_with_discussion(tmp_path)
+    first_context = write_review_context_snapshot(
+        project_path,
+        candidate_revision=1,
+        snapshot={"sources": ["book/direction_draft.md"]},
+    )
+    blocked = BookDirectionReview(
+        status="blocked",
+        summary="The bounded automatic repair did not resolve the ending cost.",
+        issues=[
+            BookDirectionReviewIssue(
+                severity="blocking",
+                kind="ending_cost",
+                message="The ending cost is still not enforceable.",
+                evidence=["book/reviews/review-0001/candidate/direction.md"],
+            )
+        ],
+        signals=[],
+    )
+    state = save_book_direction_candidate(
+        project_path,
+        state,
+        synthesis=_synthesis(),
+        review=blocked,
+        profile_id="main",
+        review_model_snapshot="review-model",
+        context_snapshot_path=first_context,
+    )
+    assert state.phase == "review_blocked"
+    assert state.candidate_revision_counter == 1
+
+    monkeypatch.setattr(setup_api, "get_active_project_path", lambda: project_path)
+    monkeypatch.setattr(setup_api, "get_active_profile", lambda: _profile())
+    monkeypatch.setattr(
+        setup_api,
+        "synthesize_book_direction",
+        lambda *_args, **_kwargs: _synthesis(),
+    )
+    monkeypatch.setattr(
+        setup_api,
+        "review_book_direction",
+        lambda *_args: (_passing_review(), "review-model", {}),
+    )
+
+    retried = setup_api.prepare_setup_review()
+
+    assert retried.phase == "review_ready"
+    assert retried.candidate is not None
+    assert retried.candidate.revision == 2
+    assert retried.candidate.approval_allowed is True
+    assert retried.candidate_revision_counter == 2
+    assert retried.last_context_snapshot_path.endswith(
+        "book/reviews/review-0002/attempt-001/context_snapshot.json"
+    )
+
+
 def test_setup_api_runs_discussion_review_and_explicit_approval(
     tmp_path: Path,
     monkeypatch,
@@ -1102,7 +1262,17 @@ def test_setup_api_runs_discussion_review_and_explicit_approval(
                 provider_snapshot="openai-compatible",
             )
         )
-        return _turn_result()
+        return replace(
+            _turn_result(),
+            selected_title="Harbor of Trust",
+            unresolved_questions=[],
+            question=None,
+            suggestions=[],
+            readiness=SetupReadinessSignal(
+                status="ready",
+                reason="The direction and formal title are ready for review.",
+            ),
+        )
 
     monkeypatch.setattr(
         setup_api,
@@ -1121,7 +1291,9 @@ def test_setup_api_runs_discussion_review_and_explicit_approval(
     )
 
     discussed = setup_api.continue_setup_discussion(
-        SetupTurnRequest(message="A fair mystery with personal consequences.")
+        SetupTurnRequest(
+            message="A fair mystery with personal consequences. Use Harbor of Trust as the formal title."
+        )
     )
     reviewed = setup_api.prepare_setup_review()
     assert discussed.approved is False
@@ -1298,8 +1470,21 @@ def _project_with_discussion(tmp_path: Path) -> tuple[Path, SetupStateDocument]:
     state = record_discussion_turn(
         project_path,
         state,
-        user_message="A fair mystery with personal consequences.",
-        result=_turn_result(),
+        user_message=(
+            "A fair mystery with personal consequences. "
+            "Use Harbor of Trust as the formal title."
+        ),
+        result=replace(
+            _turn_result(),
+            selected_title="Harbor of Trust",
+            unresolved_questions=[],
+            question=None,
+            suggestions=[],
+            readiness=SetupReadinessSignal(
+                status="ready",
+                reason="The direction and formal title are ready for review.",
+            ),
+        ),
         context_snapshot_path=context_path,
         profile_id="main",
     )
@@ -1331,6 +1516,7 @@ def _turn_result(*, reply: str = "The next decision should identify the relation
         unresolved_questions=["Which relationship bears the final cost?"],
         assumptions=["The final cost will be personal"],
         contradictions=[],
+        selected_title=None,
         question="Which relationship must carry the emotional cost?",
         suggestions=[
             SetupSuggestion(
@@ -1362,6 +1548,7 @@ def _synthesis() -> BookDirectionSynthesis:
                 "Clues must remain fair",
                 "Trust is the central change",
                 "The central mystery uses fair clues.",
+                "正式书名：《Harbor of Trust》",
             ],
             must_preserve=["Every major reveal changes a relationship."],
             must_avoid=["No arbitrary supernatural solution."],
@@ -1376,6 +1563,10 @@ def _synthesis() -> BookDirectionSynthesis:
             ConfirmedDecisionCoverage(
                 decision="Trust is the central change",
                 candidate_evidence="earned trust",
+            ),
+            ConfirmedDecisionCoverage(
+                decision="正式书名：《Harbor of Trust》",
+                candidate_evidence="Harbor of Trust",
             ),
         ],
         recommended_titles=[

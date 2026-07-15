@@ -17,7 +17,12 @@ const candidate: BookDirectionCandidate = {
     open_decisions: []
   },
   confirmed_decision_coverage: [{ decision: "线索必须公平", candidate_evidence: "公平线索" }],
-  recommended_titles: [{ title: "星潮之下", rationale: "对应核心意象" }],
+  recommended_titles: [
+    { title: "星潮之下", rationale: "对应核心意象" },
+    { title: "无声潮汐", rationale: "突出封闭空间的压迫感" },
+    { title: "第七码头", rationale: "强调旧案留下的异常编号" },
+    { title: "退潮证词", rationale: "对应公平线索与证词冲突" }
+  ],
   rolling_plan_markdown: "只规划当前故事弧。",
   review: { status: "passed", summary: "候选可以批准。", issues: [], signals: ["confirmed_decision_coverage:1/1"] },
   direction_path: "book/reviews/1/direction.md",
@@ -38,11 +43,15 @@ function setupState(withCandidate = false): SetupStateDocument {
     approved: false,
     approved_at: null,
     approved_title: null,
+    selected_title: withCandidate ? "星潮之下" : null,
     title_selection_source: null,
     migrated_from_schema_version: null,
     turn_count: 1,
     candidate_revision_counter: withCandidate ? 1 : 0,
-    messages: [{ id: "m1", turn: 1, role: "user", content: "我要公平线索。", created_at: "2026-07-13T00:00:00Z", profile_id: null, model_snapshot: null, migrated: false }],
+    messages: [
+      { id: "m1", turn: 1, role: "user", content: "我要公平线索。", created_at: "2026-07-13T00:00:00Z", profile_id: null, model_snapshot: null, migrated: false },
+      { id: "m2", turn: 1, role: "assistant", content: "我会把公平线索作为全书方向的硬约束。", created_at: "2026-07-13T00:00:01Z", profile_id: "main", model_snapshot: "model", migrated: false }
+    ],
     direction_draft: "# 全书方向\n\n公平线索。",
     discussion_summary: "已确认公平线索。",
     confirmed_decisions: ["线索必须公平"],
@@ -66,6 +75,15 @@ function setupState(withCandidate = false): SetupStateDocument {
     last_profile_id: "main",
     last_model_snapshot: "model"
   };
+}
+
+function reviewableSetupState(): SetupStateDocument {
+  const state = setupState();
+  state.selected_title = "星潮之下";
+  state.question = null;
+  state.suggestions = [];
+  state.readiness = { status: "ready", reason: "方向与正式书名已经确认。" };
+  return state;
 }
 
 describe("SetupConversation", () => {
@@ -93,6 +111,35 @@ describe("SetupConversation", () => {
     await user.click(screen.getByRole("button", { name: /自己输入/ }));
     expect(input).toHaveValue("");
     expect(input).toHaveFocus();
+  });
+
+  it("uses the standard one-question flow for the final formal-title decision", async () => {
+    const user = userEvent.setup();
+    const titleQuestion = setupState();
+    titleQuestion.selected_title = null;
+    titleQuestion.question = "以下哪个书名最适合作为正式书名？";
+    titleQuestion.suggestions = [
+      { id: "title-1", label: "退潮前的十一分钟", message: "采用《退潮前的十一分钟》作为正式书名。", rationale: "对应核心倒计时意象。", recommended: true },
+      { id: "title-2", label: "缺失的潮窗", message: "采用《缺失的潮窗》作为正式书名。", rationale: "突出封闭空间与证据缺口。", recommended: false }
+    ];
+    const readyState: SetupStateDocument = {
+      ...titleQuestion,
+      selected_title: "退潮前的十一分钟",
+      question: null,
+      suggestions: [],
+      readiness: { status: "ready", reason: "方向与书名均已确认。" }
+    };
+    vi.spyOn(api, "setupState").mockResolvedValue(titleQuestion);
+    const turnSpy = vi.spyOn(api, "continueSetupDiscussion").mockResolvedValue(readyState);
+    render(<SetupConversation projectId="project-title" onApproved={() => undefined} onExit={() => undefined} />);
+
+    expect(await screen.findByRole("heading", { name: titleQuestion.question ?? "" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /退潮前的十一分钟/ }));
+    expect(screen.getByLabelText("你的意见")).toHaveValue("采用《退潮前的十一分钟》作为正式书名。");
+    await user.click(screen.getByRole("button", { name: "发送本轮讨论" }));
+
+    await waitFor(() => expect(turnSpy).toHaveBeenCalledWith("采用《退潮前的十一分钟》作为正式书名。"));
+    expect(await screen.findByRole("button", { name: "准备审阅" })).toBeEnabled();
   });
 
   it("does not turn legacy topic suggestions into a choose-the-next-topic question", async () => {
@@ -173,7 +220,7 @@ describe("SetupConversation", () => {
 
     const input = await screen.findByRole("textbox");
     await user.type(input, "retry this answer");
-    await user.click(screen.getByTitle("发送本轮讨论"));
+    await user.click(screen.getByRole("button", { name: "发送本轮讨论" }));
 
     await waitFor(() => expect(input).toHaveValue("retry this answer"));
     expect(window.sessionStorage.getItem("novelpilot:book-direction-input:project-1")).toBe("retry this answer");
@@ -181,38 +228,94 @@ describe("SetupConversation", () => {
 
   it("switches the main stage to review after synthesis", async () => {
     const user = userEvent.setup();
-    vi.spyOn(api, "setupState").mockResolvedValue(setupState());
+    vi.spyOn(api, "setupState").mockResolvedValue(reviewableSetupState());
     vi.spyOn(api, "prepareSetupReview").mockResolvedValue(setupState(true));
     render(<SetupConversation projectId="project-1" onApproved={() => undefined} onExit={() => undefined} />);
 
     await user.click(await screen.findByRole("button", { name: "准备审阅" }));
-    expect(await screen.findByRole("heading", { name: "确认方向与正式书名" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "确认全书方向" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Book Direction" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "文稿" }));
     expect(screen.getByRole("heading", { name: "Book Direction" })).toBeInTheDocument();
     expect(screen.getByText("这是一份经过综合的候选方向。")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "查看详情" }));
+    expect(screen.getByRole("dialog", { name: "方向详情" })).toBeInTheDocument();
     const rollingContract = screen.getByRole("heading", { name: "滚动故事弧契约" }).closest("section") as HTMLElement;
     expect(within(rollingContract).getByText("只规划当前故事弧。")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "关闭详情" }));
     expect(screen.getByRole("button", { name: "历史" })).toBeInTheDocument();
   });
 
-  it("locks approval while review feedback remains unsent", async () => {
+  it("renders the discussion-confirmed title without another title picker", async () => {
+    vi.spyOn(api, "setupState").mockResolvedValue(setupState(true));
+    render(<SetupConversation projectId="project-1" onApproved={() => undefined} onExit={() => undefined} />);
+
+    expect(await screen.findByText("《星潮之下》")).toBeInTheDocument();
+    expect(screen.getByText("正式书名已经在逐问讨论的最后一步由你确认。")).toBeInTheDocument();
+    expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("输入你自己设计的正式书名")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "批准并采用《星潮之下》" })).toBeEnabled();
+  });
+
+  it("locks approval only while review feedback remains unsent", async () => {
     const user = userEvent.setup();
     vi.spyOn(api, "setupState").mockResolvedValue(setupState(true));
     render(<SetupConversation projectId="project-1" onApproved={() => undefined} onExit={() => undefined} />);
 
-    await user.click(await screen.findByRole("button", { name: /星潮之下/ }));
-    const approve = screen.getByRole("button", { name: "批准候选 v1" });
+    const approve = await screen.findByRole("button", { name: "批准并采用《星潮之下》" });
     expect(approve).toBeEnabled();
-    await user.type(screen.getByPlaceholderText("补充、纠正或否定当前候选；发送后回到讨论阶段..."), "还要补充");
+    await user.click(screen.getByRole("button", { name: "对当前方向不满意？继续修改" }));
+    const feedback = screen.getByPlaceholderText("补充、纠正或否定当前候选；发送后将返回讨论阶段……");
+    await user.type(feedback, "还要补充");
     await waitFor(() => expect(approve).toBeDisabled());
+    await user.clear(feedback);
+    await waitFor(() => expect(approve).toBeEnabled());
   });
 
-  it("keeps the plan primary and opens the full transcript only on request", async () => {
+  it("keeps the discussion-confirmed title after an explicit approval request fails", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, "setupState").mockResolvedValue(setupState(true));
+    const approveSpy = vi.spyOn(api, "approveSetup").mockRejectedValue(new Error("approval failed"));
+    render(<SetupConversation projectId="project-1" onApproved={() => undefined} onExit={() => undefined} />);
+
+    expect(approveSpy).not.toHaveBeenCalled();
+    await user.click(await screen.findByRole("button", { name: "批准并采用《星潮之下》" }));
+
+    await waitFor(() => expect(approveSpy).toHaveBeenCalledWith(1, "星潮之下"));
+    expect(await screen.findByText(/approval failed/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "批准并采用《星潮之下》" })).toBeEnabled();
+  });
+
+  it("disables the explicit approval action while approval is pending", async () => {
+    const user = userEvent.setup();
+    let resolveApproval!: (state: SetupStateDocument) => void;
+    const pendingApproval = new Promise<SetupStateDocument>((resolve) => { resolveApproval = resolve; });
+    vi.spyOn(api, "setupState").mockResolvedValue(setupState(true));
+    vi.spyOn(api, "approveSetup").mockReturnValue(pendingApproval);
+    render(<SetupConversation projectId="project-1" onApproved={() => undefined} onExit={() => undefined} />);
+
+    await user.click(await screen.findByRole("button", { name: "批准并采用《星潮之下》" }));
+
+    expect(screen.getByRole("button", { name: "正在提交..." })).toBeDisabled();
+
+    const approvedState = setupState(true);
+    approvedState.approved = true;
+    approvedState.phase = "approved";
+    approvedState.approved_title = "星潮之下";
+    resolveApproval(approvedState);
+    expect(await screen.findByRole("heading", { name: "《星潮之下》" })).toBeInTheDocument();
+  });
+
+  it("keeps the full transcript primary while retaining the history dialog", async () => {
     const user = userEvent.setup();
     vi.spyOn(api, "setupState").mockResolvedValue(setupState());
     render(<SetupConversation projectId="project-1" onApproved={() => undefined} onExit={() => undefined} />);
 
-    expect(await screen.findByRole("heading", { name: "Book Direction" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "全书方向" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "全书共创" })).toBeInTheDocument();
+    const conversationPanel = screen.getByRole("tabpanel", { name: "对话" });
+    expect(within(conversationPanel).getByText("我要公平线索。")).toBeInTheDocument();
+    expect(within(conversationPanel).getByText("我会把公平线索作为全书方向的硬约束。")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Book Direction" })).not.toBeInTheDocument();
     expect(screen.queryByRole("dialog", { name: "全书共创讨论记录" })).not.toBeInTheDocument();
 
     const historyButton = screen.getByRole("button", { name: "历史" });
@@ -222,19 +325,20 @@ describe("SetupConversation", () => {
     await waitFor(() => expect(historyButton).toHaveFocus());
   });
 
-  it("preserves unsent input while switching planning tabs", async () => {
+  it("preserves unsent input while switching the document view and details sheet", async () => {
     const user = userEvent.setup();
     vi.spyOn(api, "setupState").mockResolvedValue(setupState());
     render(<SetupConversation projectId="project-1" onApproved={() => undefined} onExit={() => undefined} />);
 
     const input = await screen.findByLabelText("你的意见");
     await user.type(input, "不要丢失这段意见");
-    const planTab = screen.getByText("计划");
-    const workspaceTabs = planTab.parentElement as HTMLElement;
-    await user.click(planTab);
-    await user.click(within(workspaceTabs).getByText("当前决策"));
+    await user.click(screen.getByRole("tab", { name: "文稿" }));
+    expect(screen.getByRole("heading", { name: "Book Direction" })).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "对话" }));
     expect(input).toHaveValue("不要丢失这段意见");
-    await user.click(within(workspaceTabs).getByText("账本"));
+    expect(screen.queryByRole("dialog", { name: "方向详情" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "查看详情" }));
+    expect(screen.getByRole("dialog", { name: "方向详情" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "方向账本" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "已确认" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "待澄清" })).toBeInTheDocument();
@@ -245,6 +349,7 @@ describe("SetupConversation", () => {
   });
 
   it("shows a non-binding plan placeholder for a new project", async () => {
+    const user = userEvent.setup();
     const emptyState = setupState();
     emptyState.turn_count = 0;
     emptyState.messages = [];
@@ -254,17 +359,19 @@ describe("SetupConversation", () => {
     vi.spyOn(api, "setupState").mockResolvedValue(emptyState);
     render(<SetupConversation projectId="project-new" onApproved={() => undefined} onExit={() => undefined} />);
 
-    expect(await screen.findByRole("heading", { name: "Book Direction" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "全书共创" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Book Direction" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("你的意见")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "文稿" }));
+    expect(screen.getByRole("heading", { name: "Book Direction" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "方向会在讨论中逐步成形" })).toBeInTheDocument();
     expect(screen.getByText(/不会强迫你填写固定模板/)).toBeInTheDocument();
-    expect(screen.getByLabelText("你的意见")).toBeInTheDocument();
     const stages = screen.getByRole("list", { name: "全书方向规划阶段" });
     expect(within(stages).getByText("探索").closest("li")).toHaveAttribute("aria-current", "step");
   });
 
   it("keeps ready-for-review advisory inside convergence until the user acts", async () => {
-    const readyState = setupState();
-    readyState.readiness = { status: "ready", reason: "方向已经足够具体。" };
+    const readyState = reviewableSetupState();
     vi.spyOn(api, "setupState").mockResolvedValue(readyState);
     render(<SetupConversation projectId="project-ready" onApproved={() => undefined} onExit={() => undefined} />);
 
@@ -274,6 +381,7 @@ describe("SetupConversation", () => {
   });
 
   it("renders blocked review as the review stage with a return-to-discussion explanation", async () => {
+    const user = userEvent.setup();
     const blockedState = setupState(true);
     blockedState.phase = "review_blocked";
     blockedState.candidate = {
@@ -286,12 +394,16 @@ describe("SetupConversation", () => {
       }
     };
     vi.spyOn(api, "setupState").mockResolvedValue(blockedState);
+    const continueSpy = vi.spyOn(api, "prepareSetupReview").mockResolvedValue(blockedState);
     render(<SetupConversation projectId="project-blocked" onApproved={() => undefined} onExit={() => undefined} />);
 
     const stages = await screen.findByRole("list", { name: "全书方向规划阶段" });
     expect(within(stages).getByText("审阅").closest("li")).toHaveAttribute("aria-current", "step");
     expect(screen.getByText("候选仍有阻断问题，需要回到讨论修订")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "填入修改意见" })).toBeInTheDocument();
+    expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
+    expect(screen.getByText("本轮自动修订已停止")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "继续修订" }));
+    await waitFor(() => expect(continueSpy).toHaveBeenCalledOnce());
   });
 
   it("renders the approved execution handoff in the same planning shell", async () => {
@@ -323,6 +435,7 @@ describe("SetupConversation", () => {
     await user.type(input, "结局要有希望，但必须付出代价");
     await user.click(screen.getByRole("button", { name: "发送本轮讨论" }));
 
+    await user.click(screen.getByRole("tab", { name: "文稿" }));
     expect(await screen.findByText("本轮变更")).toBeInTheDocument();
     expect(screen.getByText(/更新章节：全书方向、结局/)).toBeInTheDocument();
     expect(screen.getByText(/已确认 \+1/)).toBeInTheDocument();
