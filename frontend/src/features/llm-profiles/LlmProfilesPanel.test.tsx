@@ -76,4 +76,38 @@ describe("LlmProfilesPanel", () => {
       }
     })));
   });
+
+  it("refreshes and shows both required Agent capabilities after a live test", async () => {
+    const user = userEvent.setup();
+    const unverified = { ...emptyProfiles, active_profile_id: "main", profiles: [savedProfile] };
+    const capabilityTest = {
+      schema_version: 1,
+      checked_at: "2026-07-14T00:00:00Z",
+      profile_fingerprint: "fingerprint",
+      tool_calling: { ok: true, message: "supported" },
+      structured_output: { ok: true, message: "supported" },
+      ready_for_harness: true
+    };
+    const verified = {
+      ...unverified,
+      profiles: [{ ...savedProfile, capability_test: capabilityTest }]
+    };
+    vi.mocked(api.profiles).mockReset();
+    vi.mocked(api.profiles).mockResolvedValueOnce(unverified).mockResolvedValueOnce(verified);
+    vi.spyOn(api, "testProfile").mockResolvedValue({
+      profile_id: "main",
+      ok: true,
+      model_snapshot: "story-model",
+      provider_snapshot: "provider",
+      message: "supported",
+      capability_test: capabilityTest
+    });
+
+    render(<LlmProfilesPanel />);
+    await user.click(await screen.findByTitle("测试连接"));
+
+    expect(await screen.findByText("Agent 能力已验证")).toBeInTheDocument();
+    expect(screen.getByText(/Tool Calling \+ Structured Output/)).toBeInTheDocument();
+    expect(api.profiles).toHaveBeenCalledTimes(2);
+  });
 });

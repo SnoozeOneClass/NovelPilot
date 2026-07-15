@@ -5,11 +5,16 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
+from app.harness.agents.evaluator import persist_evaluation_views
+from app.harness.agents.events import project_agent_event
+from app.harness.agents.loop_runners import AgentControlCheckpoint
+from app.harness.agents.models import EvaluationRecord
 from app.harness.run_control import (
     active_project_transition_lock,
     begin_active_runner,
     end_active_runner,
 )
+from app.harness.stream_progress import StreamProgressAccumulator
 from app.harness.loops.book import (
     assemble_discussion_context,
     build_review_context_snapshot,
@@ -93,17 +98,31 @@ def continue_setup_discussion(request: SetupTurnRequest) -> SetupStateDocument:
             payload={"profile_id": profile.id, "turn": state.turn_count + 1},
         )
 
+        stream_callback = _setup_stream_callback(
+            project_path,
+            metadata,
+            action="continue_book_discussion",
+        )
         try:
             result = continue_book_discussion(
                 profile,
                 state,
                 safe_message,
                 assembly,
-                _setup_stream_callback(
+                stream_callback,
+                on_event=_setup_agent_event_callback(
                     project_path,
                     metadata,
                     action="continue_book_discussion",
                 ),
+                on_tool_event=stream_callback,
+            )
+        except AgentControlCheckpoint as checkpoint:
+            _raise_setup_control_checkpoint(
+                project_path,
+                metadata,
+                checkpoint,
+                action="continue_book_discussion",
             )
         except Exception as exc:
             reason = redact_profile_secrets(str(exc), profile)
@@ -239,14 +258,21 @@ def prepare_setup_review() -> SetupStateDocument:
                 message="Synthesizing a candidate Book Direction for user review.",
                 payload={"profile_id": profile.id, "candidate_revision": candidate_revision},
             )
+            stream_callback = _setup_stream_callback(
+                project_path,
+                metadata,
+                action="synthesize_book_direction",
+            )
             synthesis = synthesize_book_direction(
                 profile,
                 state,
-                _setup_stream_callback(
+                stream_callback,
+                on_event=_setup_agent_event_callback(
                     project_path,
                     metadata,
                     action="synthesize_book_direction",
                 ),
+                on_tool_event=stream_callback,
             )
             _append_event(
                 project_path,
@@ -266,6 +292,13 @@ def prepare_setup_review() -> SetupStateDocument:
                     metadata,
                     action="review_book_direction",
                 ),
+            )
+        except AgentControlCheckpoint as checkpoint:
+            _raise_setup_control_checkpoint(
+                project_path,
+                metadata,
+                checkpoint,
+                action="synthesize_and_review_book_direction",
             )
         except Exception as exc:
             reason = redact_profile_secrets(str(exc), profile)
@@ -308,6 +341,16 @@ def prepare_setup_review() -> SetupStateDocument:
         candidate = updated.candidate
         if candidate is None:
             raise HTTPException(status_code=500, detail="Candidate book direction was not stored.")
+        if synthesis.evaluation_record is not None:
+            evaluation = EvaluationRecord.model_validate(synthesis.evaluation_record)
+            review_root = Path(candidate.direction_path).parent
+            persist_evaluation_views(
+                project_path,
+                evaluation,
+                evaluation_path=(review_root / "evaluation.json").as_posix(),
+                review_path=(review_root / "review.md").as_posix(),
+                verification_path=candidate.verification_path,
+            )
         for artifact_path, artifact_kind in [
             (candidate.direction_path, "book_direction_candidate_written"),
             (candidate.constraints_path, "book_direction_constraints_written"),
@@ -507,13 +550,12 @@ def _setup_stream_callback(
     *,
     action: str,
 ) -> Callable[[ChatChunk], None]:
-    received_characters = 0
+    progress = StreamProgressAccumulator()
 
     def emit_delta(chunk: ChatChunk) -> None:
-        nonlocal received_characters
-        if not chunk.text_delta:
+        received_characters = progress.observe(chunk)
+        if received_characters is None:
             return
-        received_characters += len(chunk.text_delta)
         _append_event(
             project_path,
             metadata,
@@ -525,3 +567,83 @@ def _setup_stream_callback(
         )
 
     return emit_delta
+
+
+def _setup_agent_event_callback(
+    project_path: Path,
+    metadata: ProjectMetadata,
+    *,
+    action: str,
+) -> Callable[[dict[str, Any]], None]:
+    def emit_agent_event(payload: dict[str, Any]) -> None:
+        projected = project_agent_event(payload)
+        if projected is None:
+            return
+        _append_event(
+            project_path,
+            metadata,
+            kind=projected.kind,
+            action=action,
+            status=projected.status,
+            artifact_path=projected.artifact_path,
+            routing=projected.routing_decision,
+            message=projected.message,
+            payload=projected.payload,
+        )
+
+    return emit_agent_event
+
+
+def _raise_setup_control_checkpoint(
+    project_path: Path,
+    metadata: ProjectMetadata,
+    checkpoint: AgentControlCheckpoint,
+    *,
+    action: str,
+) -> None:
+    payload = {
+        key: value
+        for key, value in checkpoint.payload.items()
+        if key
+        in {
+            "checkpoint_id",
+            "candidate_run_id",
+            "kind",
+            "summary",
+            "evidence",
+            "target_owner",
+            "contract_field",
+            "contract_revision",
+            "committed_evidence_locator",
+            "impossibility_reason",
+            "routing_status",
+            "question",
+            "suggestions",
+            "context",
+        }
+    }
+    waiting_user = checkpoint.run_result.outcome == "waiting_user"
+    _append_event(
+        project_path,
+        metadata,
+        kind=("agent_waiting_for_user" if waiting_user else "agent_blocker_recorded"),
+        action=action,
+        status="requested",
+        artifact_path=checkpoint.artifact_path,
+        routing=("pause" if waiting_user else "await_harness_routing"),
+        message=(
+            "Book Agent requested one explicit user decision."
+            if waiting_user
+            else "Book Agent blocker recorded at a durable checkpoint."
+        ),
+        payload=payload,
+    )
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "agent_control_checkpoint",
+            "outcome": checkpoint.run_result.outcome,
+            "artifact_path": checkpoint.artifact_path,
+            "checkpoint": payload,
+        },
+    )

@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
 import { ThemeProvider } from "../../app/theme";
-import type { ProjectSummary } from "../../types/domain";
+import type { LlmProfilesDocument, ProjectSummary } from "../../types/domain";
 import { SettingsView } from "./SettingsView";
 
 const project: ProjectSummary = {
@@ -44,5 +44,67 @@ describe("SettingsView", () => {
     await user.click(screen.getByRole("radio", { name: /暗色/ }));
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(window.localStorage.getItem("novelpilot.theme")).toBe("dark");
+  });
+
+  it("configures verified per-loop models and bounded Agent budgets", async () => {
+    const user = userEvent.setup();
+    const verifiedProfiles: LlmProfilesDocument = {
+      schema_version: 1,
+      active_profile_id: "main",
+      profiles: [{
+        id: "main",
+        name: "Main",
+        protocol: "openai-compatible",
+        base_url: "https://api.example.com/v1",
+        model: "story-model",
+        request_options: {},
+        enabled: true,
+        has_api_key: true,
+        capability_test: {
+          schema_version: 1,
+          checked_at: "2026-07-14T00:00:00Z",
+          profile_fingerprint: "fingerprint",
+          tool_calling: { ok: true, message: "supported" },
+          structured_output: { ok: true, message: "supported" },
+          ready_for_harness: true
+        }
+      }]
+    };
+    vi.spyOn(api, "profiles").mockResolvedValue(verifiedProfiles);
+    const changed = renderSettings();
+    const nextProject = {
+      ...project,
+      metadata: {
+        ...project.metadata,
+        agent_policy: {
+          schema_version: 1,
+          book_profile_id: "main",
+          story_arc_profile_id: null,
+          chapter_profile_id: null,
+          evaluator_profile_id: null,
+          book_max_turns: 20,
+          story_arc_max_turns: 20,
+          chapter_max_turns: 30,
+          tool_schema_repair_limit: 2,
+          semantic_revision_limit: 3,
+          transport_retry_limit: 3
+        }
+      }
+    };
+    const updatePolicy = vi.spyOn(api, "updateAgentPolicy").mockResolvedValue(nextProject);
+
+    await user.click(screen.getByRole("button", { name: /LLM Profile/ }));
+    await user.selectOptions(await screen.findByLabelText("全书 Loop 模型"), "main");
+    await user.clear(screen.getByLabelText("语义自动修订"));
+    await user.type(screen.getByLabelText("语义自动修订"), "3");
+    await user.click(screen.getByRole("button", { name: "保存 Agent 配置" }));
+
+    await waitFor(() => expect(updatePolicy).toHaveBeenCalledWith(expect.objectContaining({
+      book_profile_id: "main",
+      book_max_turns: 20,
+      chapter_max_turns: 30,
+      semantic_revision_limit: 3
+    })));
+    expect(changed).toHaveBeenCalledWith(nextProject);
   });
 });

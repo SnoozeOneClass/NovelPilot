@@ -2,7 +2,7 @@ import json
 
 from app.storage import profiles as profile_storage
 from app.storage.json_files import read_json
-from app.llm.gateway import ChatResult
+from app.llm.gateway import ChatResult, ToolCall
 from scripts import configure_llm_profile, test_llm_profile
 
 
@@ -204,9 +204,25 @@ def test_profile_test_cli_uses_active_profile_and_hides_secrets(
         select=True,
     )
 
-    def fake_call_llm(_profile, _request):
+    def fake_call_llm(_profile, request):
+        if request.tools:
+            return ChatResult(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="capability-tool",
+                        name="novelpilot_capability_echo",
+                        arguments={"value": "ok"},
+                        raw_arguments='{"value":"ok"}',
+                    )
+                ],
+                finish_reason="tool_call",
+                model_snapshot="example-model",
+                provider_snapshot="openai-compatible",
+            )
         return ChatResult(
-            content="Profile works for secret-key at https://api.example.com/v1.",
+            content='{"supported":true}',
+            structured_output={"supported": True},
             model_snapshot="example-model",
             provider_snapshot="openai-compatible",
         )
@@ -222,7 +238,7 @@ def test_profile_test_cli_uses_active_profile_and_hides_secrets(
     assert payload["profile_id"] == "main"
     assert "secret-key" not in output
     assert "https://api.example.com/v1" not in output
-    assert "[redacted]" in payload["message"]
+    assert payload["message"] == "Tool Calling and Structured Output are available."
 
 
 def test_profile_test_cli_redacts_provider_errors(

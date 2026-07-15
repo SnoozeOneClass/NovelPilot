@@ -10,6 +10,7 @@ from app.schemas.arcs import CurrentArcState
 from app.schemas.events import HarnessEvent
 from app.schemas.projects import (
     ActiveProjectDocument,
+    AgentPolicy,
     CreateProjectRequest,
     OperationMode,
     ProjectMetadata,
@@ -197,6 +198,44 @@ def update_operation_mode(
                 files=files,
             )
             return summarize_project(project_path)
+
+
+def update_agent_policy(project_path: Path, agent_policy: AgentPolicy) -> ProjectSummary:
+    with project_metadata_lock(project_path):
+        recover_file_transactions(project_path)
+        metadata = read_project_metadata(project_path)
+        if metadata.run_status in RUN_LOCK_STATUSES:
+            raise ActiveProjectBusyError(
+                "Cannot change Agent policy while the harness run is in progress."
+            )
+        if metadata.agent_policy == agent_policy:
+            return summarize_project(project_path)
+
+        metadata.agent_policy = agent_policy
+        metadata.updated_at = datetime.now(UTC)
+        event = HarnessEvent(
+            project_id=metadata.project_id,
+            kind="agent_policy_changed",
+            loop_layer="system",
+            atomic_action="update_agent_policy",
+            status="completed",
+            routing_decision="apply_at_next_candidate_run",
+            message="Agent model bindings and execution limits were updated.",
+            payload={
+                "agent_policy": agent_policy.model_dump(mode="json"),
+                "run_status": metadata.run_status,
+            },
+        )
+        event_path = Path("book") / ".event-outbox" / f"{event.event_id}.json"
+        commit_file_transaction(
+            project_path,
+            kind="agent-policy-update",
+            files={
+                "project.json": _json_document(metadata.model_dump(mode="json")),
+                event_path.as_posix(): _json_document(event.model_dump(mode="json")),
+            },
+        )
+        return summarize_project(project_path)
 
 
 def summarize_project(project_path: Path) -> ProjectSummary:

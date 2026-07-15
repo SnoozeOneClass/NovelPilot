@@ -11,6 +11,8 @@ import type {
   ExperimentFixtureStatus,
   ChapterRetryResponse,
   ArtifactSummary,
+  AgentPolicy,
+  BookRevisionState,
   OperationMode,
   ProjectCompletionAudit,
   ProjectReadiness,
@@ -125,6 +127,12 @@ export const api = {
       headers: jsonHeaders,
       body: JSON.stringify({ operation_mode })
     }),
+  updateAgentPolicy: (agent_policy: AgentPolicy) =>
+    request<ProjectSummary>("/api/projects/active/agent-policy", {
+      method: "PATCH",
+      headers: jsonHeaders,
+      body: JSON.stringify({ agent_policy })
+    }),
   profiles: () => request<LlmProfilesDocument>("/api/profiles"),
   upsertProfile: (payload: LlmProfileMutation) =>
     request<LlmProfilePublic>("/api/profiles", {
@@ -154,6 +162,14 @@ export const api = {
       method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify({ candidate_revision, title })
+    }),
+  pendingBookRevision: () =>
+    request<BookRevisionState | null>("/api/book-revisions/pending"),
+  approveBookRevision: (revision_id: string, expected_base_book_version: number) =>
+    request<BookRevisionState>("/api/book-revisions/approve", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ revision_id, expected_base_book_version })
     }),
   currentArc: () => request<CurrentArcState | null>("/api/arcs/current"),
   approveCurrentArc: (target_chapter_count: number) =>

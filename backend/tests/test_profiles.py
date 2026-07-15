@@ -5,7 +5,7 @@ from fastapi import HTTPException
 
 from app.api import profiles as profiles_api
 from app.harness.run_control import begin_active_runner, end_active_runner
-from app.llm.gateway import ChatResult
+from app.llm.gateway import ChatResult, ToolCall
 from app.schemas.projects import ProjectMetadata
 from app.schemas.profiles import LlmProfileUpsert
 from app.storage.json_files import read_json, write_json
@@ -231,15 +231,31 @@ def test_profile_connection_test_calls_configured_provider(tmp_path, monkeypatch
             model="example-model",
         )
     )
-    captured_profile_ids: list[str] = []
+    captured_modes: list[str] = []
 
     def fake_call_llm(profile, request):
-        captured_profile_ids.append(profile.id)
+        captured_modes.append(request.execution_mode)
         assert request.profile_id == "main"
-        assert request.stream is True
+        assert request.stream is False
         assert request.request_options == {}
+        if request.execution_mode == "tools":
+            return ChatResult(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="call-1",
+                        name="novelpilot_capability_echo",
+                        arguments={"value": "ok"},
+                        raw_arguments='{"value":"ok"}',
+                    )
+                ],
+                finish_reason="tool_call",
+                model_snapshot="example-model",
+                provider_snapshot="openai-compatible",
+            )
         return ChatResult(
-            content="Profile works.",
+            content='{"supported":true}',
+            structured_output={"supported": True},
             model_snapshot="example-model",
             provider_snapshot="openai-compatible",
         )
@@ -248,10 +264,14 @@ def test_profile_connection_test_calls_configured_provider(tmp_path, monkeypatch
 
     result = profiles_api.test_profile("main")
 
-    assert captured_profile_ids == ["main"]
+    assert captured_modes == ["tools", "structured_result"]
     assert result.ok is True
-    assert result.message == "Profile works."
+    assert result.message == "Tool Calling and Structured Output are available."
     assert result.model_snapshot == "example-model"
+    assert result.capability_test.ready_for_harness is True
+    stored = profile_storage.get_profile("main")
+    assert stored.capability_test is not None
+    assert stored.capability_test.ready_for_harness is True
 
 
 def test_profile_connection_test_rejects_disabled_profile(tmp_path, monkeypatch) -> None:

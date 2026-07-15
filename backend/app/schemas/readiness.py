@@ -8,6 +8,7 @@ RunNextActionId = Literal[
     "continue_book_discussion",
     "review_book_direction",
     "approve_book_direction",
+    "approve_book_revision",
     "configure_llm_profile",
     "repair_project_state",
     "wait_for_safe_checkpoint",

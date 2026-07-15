@@ -25,7 +25,7 @@ interface WorkspaceProps {
 }
 
 type WorkspaceLocation = TaskDomain | "settings";
-type WorkspaceCommand = "start" | "resume" | "pause" | "export" | "approve" | "retry" | "recover" | "revision" | "freeze";
+type WorkspaceCommand = "start" | "resume" | "pause" | "export" | "approve" | "approveBookRevision" | "retry" | "recover" | "revision" | "freeze";
 type WorkspaceNotice = { kind: "success" | "error"; text: string };
 
 function initialLocation(project: ProjectSummary): WorkspaceLocation {
@@ -59,6 +59,7 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
   const currentArc = queries.currentArc.data ?? null;
   const experimentFixture = queries.experimentFixture.data ?? null;
   const readiness = queries.readiness.data ?? null;
+  const bookRevision = queries.bookRevision.data ?? null;
   const profiles = queries.profiles.data ?? null;
   const artifactPaths = queries.artifactPaths.data ?? [];
   const artifactSummaries = queries.artifactSummaries.data ?? [];
@@ -153,6 +154,24 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
     return ok;
   }
 
+  async function approveBookRevision(): Promise<void> {
+    if (!bookRevision) return;
+    const ok = await runCommand("approveBookRevision", async () => {
+      await api.approveBookRevision(
+        bookRevision.revision_id,
+        bookRevision.base_book_version
+      );
+    });
+    if (ok) {
+      setFeedbackNotice({
+        kind: "success",
+        text: "全书修订已批准；正式契约已更新，继续运行后会修订尚未完成的故事弧。"
+      });
+    } else {
+      await refreshWorkspace();
+    }
+  }
+
   async function freezeExperimentFixture(): Promise<boolean> {
     let fixtureId = "";
     const ok = await runCommand("freeze", async () => {
@@ -230,11 +249,13 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
         activeArtifact={activeArtifact}
         canonCounts={canonCounts}
         readiness={readiness}
+        bookRevision={bookRevision}
         canStart={canStart}
         canResume={canResume}
         busy={commandBusy}
         onStart={startRun}
         onResume={resumeRun}
+        onApproveBookRevision={approveBookRevision}
         onExport={exportManuscript}
         onSelectArtifact={openArtifact}
         onOpenEvidence={() => setLocation("evidence")}

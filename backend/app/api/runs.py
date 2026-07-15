@@ -299,7 +299,11 @@ def _advance_run_until_stop(
         last_event = events[-1] if events else None
         if metadata.run_status in {"waiting_for_user", "failed", "pause_requested", "paused"}:
             break
-        if last_event and last_event.kind == "state_patch_rejected":
+        if (
+            last_event
+            and last_event.kind == "state_patch_rejected"
+            and last_event.routing_decision == "pause"
+        ):
             break
         if (
             advance_request.stop_after_chapter

@@ -9,12 +9,41 @@ export type RunStatus =
 
 export type LlmProtocol = "openai-compatible" | "anthropic-compatible";
 
+export interface AgentPolicy {
+  schema_version: number;
+  book_profile_id: string | null;
+  story_arc_profile_id: string | null;
+  chapter_profile_id: string | null;
+  evaluator_profile_id: string | null;
+  book_max_turns: number;
+  story_arc_max_turns: number;
+  chapter_max_turns: number;
+  tool_schema_repair_limit: number;
+  semantic_revision_limit: number;
+  transport_retry_limit: number;
+}
+
+export interface LlmCapabilityCheck {
+  ok: boolean;
+  message: string;
+}
+
+export interface LlmCapabilitySnapshot {
+  schema_version: number;
+  checked_at: string;
+  profile_fingerprint: string;
+  tool_calling: LlmCapabilityCheck;
+  structured_output: LlmCapabilityCheck;
+  ready_for_harness: boolean;
+}
+
 export interface ProjectMetadata {
   schema_version: number;
   project_id: string;
   title: string | null;
   operation_mode: OperationMode;
   active_profile_id: string | null;
+  agent_policy?: AgentPolicy;
   active_arc_id: string | null;
   active_chapter_id: string | null;
   run_status: RunStatus;
@@ -38,6 +67,7 @@ export interface LlmProfilePublic {
   request_options: Record<string, unknown>;
   enabled: boolean;
   has_api_key: boolean;
+  capability_test?: LlmCapabilitySnapshot | null;
 }
 
 export interface LlmProfilesDocument {
@@ -52,6 +82,7 @@ export interface LlmProfileTestResult {
   model_snapshot: string;
   provider_snapshot: string;
   message: string;
+  capability_test: LlmCapabilitySnapshot;
 }
 
 export interface LlmProfileMutation {
@@ -147,6 +178,31 @@ export interface BookDirectionCandidate {
   profile_id: string;
   model_snapshot: string;
   review_model_snapshot: string;
+}
+
+export interface BookRevisionState {
+  schema_version: number;
+  revision_id: string;
+  route_id: string;
+  status: "awaiting_approval" | "approved";
+  downstream_status: "pending" | "not_required" | "completed";
+  created_at: string;
+  approved_at: string | null;
+  base_book_version: number;
+  target_book_version: number;
+  source_loop: "story_arc" | "chapter";
+  source_artifact: string;
+  source_candidate_run_id: string | null;
+  summary: string;
+  contract_field: string;
+  committed_evidence_locator: string;
+  impossibility_reason: string;
+  candidate: BookDirectionCandidate;
+  evaluation_id: string;
+  evaluation_path: string;
+  review_path: string;
+  verification_path: string;
+  downstream_artifact_paths: string[];
 }
 
 export interface SetupStateDocument {
@@ -301,6 +357,17 @@ export function isHarnessEvent(value: unknown): value is HarnessEvent {
   );
 }
 
+export function harnessEventEvidencePaths(event: HarnessEvent): string[] {
+  const values: string[] = [];
+  if (event.artifact_path) values.push(event.artifact_path);
+  for (const key of ["evidence_paths", "artifact_paths"]) {
+    const paths = event.payload[key];
+    if (!Array.isArray(paths)) continue;
+    values.push(...paths.filter((path): path is string => typeof path === "string"));
+  }
+  return [...new Set(values)];
+}
+
 export function harnessEventTextDelta(event: HarnessEvent): string | null {
   const value = event.payload.text_delta;
   return typeof value === "string" ? value : null;
@@ -388,6 +455,7 @@ export type RunNextActionId =
   | "continue_book_discussion"
   | "review_book_direction"
   | "approve_book_direction"
+  | "approve_book_revision"
   | "configure_llm_profile"
   | "repair_project_state"
   | "wait_for_safe_checkpoint"

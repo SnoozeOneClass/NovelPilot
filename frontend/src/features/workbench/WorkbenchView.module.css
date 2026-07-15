@@ -290,6 +290,95 @@
   text-align: center;
 }
 
+.bookRevisionApproval {
+  min-height: 0;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--np-line);
+  padding: 16px 18px;
+  background: color-mix(in srgb, var(--np-accent) 6%, var(--np-surface));
+}
+
+.bookRevisionApproval header,
+.bookRevisionApproval footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.bookRevisionApproval h2,
+.bookRevisionApproval p {
+  margin: 0;
+}
+
+.bookRevisionApproval header p,
+.bookRevisionApproval header span {
+  color: var(--np-accent);
+  font-size: 10px;
+}
+
+.bookRevisionApproval h2 {
+  margin-top: 3px;
+  font-size: 15px;
+}
+
+.bookRevisionApproval > p {
+  margin-top: 10px;
+  color: var(--np-text-secondary);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.bookRevisionApproval dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.bookRevisionApproval dl div {
+  min-width: 0;
+  border: 1px solid var(--np-line);
+  border-radius: var(--np-radius-sm);
+  padding: 7px 8px;
+  background: var(--np-surface);
+}
+
+.bookRevisionApproval dt {
+  color: var(--np-text-muted);
+  font-size: 9px;
+}
+
+.bookRevisionApproval dd {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.bookRevisionApproval footer {
+  justify-content: flex-end;
+}
+
+.bookRevisionApproval footer button {
+  min-height: 30px;
+  border: 1px solid var(--np-line);
+  border-radius: var(--np-radius-sm);
+  padding: 0 9px;
+  background: var(--np-surface);
+  color: var(--np-text-secondary);
+  font-size: 10px;
+}
+
+.bookRevisionApproval footer .approveRevisionButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-color: var(--np-accent);
+  background: var(--np-accent);
+  color: #fff;
+}
+
 .idleState h2,
 .idleState p {
   margin: 0;

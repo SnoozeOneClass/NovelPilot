@@ -95,4 +95,46 @@ describe("EvidenceCenter", () => {
 
     expect(screen.queryByRole("heading", { name: "上下文装配快照" })).not.toBeInTheDocument();
   });
+
+  it("opens each safe Agent evidence path from the event inspector", async () => {
+    const user = userEvent.setup();
+    const onSelectArtifact = vi.fn();
+    const agentEvent: HarnessEvent = {
+      ...events[0],
+      event_id: "agent-completed",
+      kind: "agent_activation_completed",
+      status: "completed",
+      artifact_path: "book/agent/a/a1/telemetry.json",
+      payload: {
+        evidence_paths: [
+          "book/candidates/direction-1.json",
+          "book/agent/a/a1/telemetry.json"
+        ]
+      }
+    };
+    render(
+      <EvidenceCenter
+        events={[agentEvent]}
+        summaries={summaries}
+        artifactPaths={summaries.map((summary) => summary.path)}
+        selectedArtifactPath={null}
+        activeArtifact={null}
+        readiness={null}
+        completionAudit={null}
+        canPause={false}
+        canResume={false}
+        canRetry={false}
+        busy={false}
+        onSelectArtifact={onSelectArtifact}
+        onPause={vi.fn(async () => undefined)}
+        onResume={vi.fn(async () => undefined)}
+        onRetry={vi.fn(async () => undefined)}
+        onRefreshAudit={vi.fn(async () => undefined)}
+      />
+    );
+
+    await user.click(screen.getByRole("button", { name: /book\/candidates\/direction-1\.json/ }));
+
+    expect(onSelectArtifact).toHaveBeenCalledWith("book/candidates/direction-1.json");
+  });
 });

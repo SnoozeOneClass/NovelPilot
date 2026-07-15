@@ -14,9 +14,11 @@ from app.schemas.projects import (
     CreateProjectRequest,
     OpenProjectRequest,
     ProjectSummary,
+    UpdateAgentPolicyRequest,
     UpdateOperationModeRequest,
 )
 from app.storage import projects as project_storage
+from app.storage import profiles as profile_storage
 from app.storage import setup as setup_storage
 
 router = APIRouter()
@@ -101,6 +103,54 @@ def update_operation_mode(request: UpdateOperationModeRequest) -> ProjectSummary
         return summary
     finally:
         end_active_runner(project_path)
+
+
+@router.patch("/active/agent-policy", response_model=ProjectSummary)
+def update_agent_policy(request: UpdateAgentPolicyRequest) -> ProjectSummary:
+    with active_project_transition_lock():
+        project_path = project_storage.get_active_project_path()
+        if project_path is None:
+            raise HTTPException(status_code=404, detail="No active project.")
+        if not begin_active_runner(project_path):
+            raise HTTPException(
+                status_code=409,
+                detail="A harness runner is active; wait for a safe checkpoint.",
+            )
+
+    try:
+        _validate_policy_profiles(request)
+        try:
+            return project_storage.update_agent_policy(project_path, request.agent_policy)
+        except project_storage.ActiveProjectBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        end_active_runner(project_path)
+
+
+def _validate_policy_profiles(request: UpdateAgentPolicyRequest) -> None:
+    bindings = {
+        request.agent_policy.book_profile_id,
+        request.agent_policy.story_arc_profile_id,
+        request.agent_policy.chapter_profile_id,
+        request.agent_policy.evaluator_profile_id,
+    }
+    for profile_id in sorted(item for item in bindings if item is not None):
+        try:
+            profile = profile_storage.get_profile(profile_id)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Agent policy references unknown profile: {profile_id}",
+            ) from exc
+        if not profile.enabled:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Agent policy references disabled profile: {profile_id}",
+            )
+        try:
+            profile_storage.require_harness_capabilities(profile)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @contextmanager

@@ -1,5 +1,5 @@
 import { mergeHarnessEvent, refreshTargetsForEvent } from "./harness-events";
-import type { HarnessEvent } from "../types/domain";
+import { harnessEventEvidencePaths, type HarnessEvent } from "../types/domain";
 import { describe, expect, it } from "vitest";
 
 const event: HarnessEvent = {
@@ -47,5 +47,23 @@ describe("refreshTargetsForEvent", () => {
 
   it("refreshes current arc state for story arc events", () => {
     expect(refreshTargetsForEvent({ ...event, kind: "story_arc_planned", loop_layer: "story_arc" })).toContain("arc");
+  });
+});
+
+describe("harnessEventEvidencePaths", () => {
+  it("normalizes the primary artifact and Agent evidence paths once", () => {
+    expect(harnessEventEvidencePaths({
+      ...event,
+      artifact_path: "book/agent/a/a1/failure.json",
+      payload: {
+        evidence_paths: [
+          "book/agent/a/a1/failure.json",
+          "book/agent/a/a1/telemetry.json"
+        ]
+      }
+    })).toEqual([
+      "book/agent/a/a1/failure.json",
+      "book/agent/a/a1/telemetry.json"
+    ]);
   });
 });

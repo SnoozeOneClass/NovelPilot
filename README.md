@@ -38,15 +38,18 @@ Novelpilot 是一个本地、单用户的长篇 AI 小说创作工作台。
 
 ## 安装与启动
 
-创建项目专用的 Python 3.13 环境，并安装 Python 和前端依赖：
+推荐为每台电脑分别创建项目专用的 Python 3.13 环境，并安装 Python 和前端依赖：
 
 ```powershell
-py -3.13 -m venv .venv
-.\.venv\python.exe -m pip install -e .[dev]
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 npm.cmd --prefix frontend install
 ```
 
-仓库根目录的 npm 脚本会直接调用 `.venv\python.exe`，不会使用 PATH 中的 Anaconda 或系统 Python。
+仓库根目录的 npm 脚本通过 `scripts\python.cmd` 选择解释器：优先使用标准
+venv 的 `.venv\Scripts\python.exe`，其次使用 Conda 前缀的
+`.venv\python.exe`，两者都不存在时使用当前 PATH 中已激活的 `python`。
+Python 环境不会随 Git 仓库同步，因此每台电脑需要单独创建环境或激活已有环境。
 
 分别在两个终端启动后端和前端：
 

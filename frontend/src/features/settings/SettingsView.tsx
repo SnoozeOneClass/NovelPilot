@@ -6,6 +6,7 @@ import type { SettingsSection, ThemePreference } from "../../app/types";
 import { formatOperationMode } from "../../types/display";
 import type { LlmProfilesDocument, OperationMode, ProjectSummary } from "../../types/domain";
 import { LlmProfilesPanel } from "../llm-profiles/LlmProfilesPanel";
+import { AgentPolicyPanel } from "./AgentPolicyPanel";
 import styles from "./SettingsView.module.css";
 
 interface SettingsViewProps {
@@ -28,6 +29,7 @@ const themes: Array<{ id: ThemePreference; label: string; detail: string; icon: 
 
 export function SettingsView({ project, onProjectChanged, onProfilesChanged }: SettingsViewProps) {
   const [section, setSection] = useState<SettingsSection>("project");
+  const [profiles, setProfiles] = useState<LlmProfilesDocument | null>(null);
   const [savingMode, setSavingMode] = useState(false);
   const [notice, setNotice] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const { preference, resolvedTheme, setPreference } = useTheme();
@@ -80,7 +82,22 @@ export function SettingsView({ project, onProjectChanged, onProfilesChanged }: S
           </section>
         )}
 
-        {section === "models" && <LlmProfilesPanel onProfilesChanged={onProfilesChanged} />}
+        {section === "models" && (
+          <div className={styles.modelsPage}>
+            <LlmProfilesPanel
+              onProfilesChanged={(nextProfiles) => {
+                setProfiles(nextProfiles);
+                onProfilesChanged(nextProfiles);
+              }}
+            />
+            <AgentPolicyPanel
+              project={project}
+              profiles={profiles}
+              locked={modeLocked}
+              onProjectChanged={onProjectChanged}
+            />
+          </div>
+        )}
 
         {section === "appearance" && (
           <section className={styles.preferencePage}>

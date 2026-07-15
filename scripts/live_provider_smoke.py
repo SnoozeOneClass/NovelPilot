@@ -339,12 +339,27 @@ def _test_profile(
 ) -> LlmProfileTestResult:
     if skip_profile_test:
         profile = profile_storage.get_profile(profile_id)
+        try:
+            profile_storage.require_harness_capabilities(profile)
+        except ValueError as exc:
+            raise LiveProviderSmokeError(
+                "Cannot skip profile test without a current passing Tool Calling and "
+                "Structured Output capability result.",
+                exit_code=2,
+            ) from exc
+        capability_test = profile.capability_test
+        if capability_test is None:
+            raise LiveProviderSmokeError(
+                "Cannot skip profile test without a cached capability result.",
+                exit_code=2,
+            )
         return LlmProfileTestResult(
             profile_id=profile.id,
             ok=True,
             model_snapshot=profile.model,
             provider_snapshot=profile.protocol,
             message="Profile test skipped by CLI flag.",
+            capability_test=capability_test,
         )
     return _call_user_action(
         "test LLM profile",

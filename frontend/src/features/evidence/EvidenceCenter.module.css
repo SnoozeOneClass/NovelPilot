@@ -44,6 +44,11 @@
 .inspector dl div { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 10px; border-bottom: 1px solid var(--np-line); padding: 8px 0; }
 .inspector dt { color: var(--np-text-muted); font-size: 10px; }
 .inspector dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--np-text); font: 10px var(--np-font-mono); }
+.evidenceLinks { display: grid; gap: 5px; margin: 8px 13px; }
+.evidenceLinks h3 { margin: 0 0 2px; color: var(--np-text); font-size: 11px; }
+.evidenceLinks button { min-width: 0; display: flex; align-items: center; gap: 6px; border: 1px solid var(--np-line); border-radius: var(--np-radius-sm); padding: 7px 8px; background: var(--np-surface); color: var(--np-text-secondary); text-align: left; }
+.evidenceLinks button:hover { border-color: var(--np-accent); color: var(--np-accent); }
+.evidenceLinks span { overflow: hidden; font: 9px var(--np-font-mono); text-overflow: ellipsis; white-space: nowrap; }
 .snapshot { margin: 8px 13px; border-left: 3px solid var(--np-info); padding: 8px 10px; background: var(--np-info-soft); }
 .snapshot h3 { margin: 0 0 6px; color: var(--np-text); font-size: 11px; }
 .snapshot p, .snapshot small { margin: 3px 0; color: var(--np-text-secondary); font-size: 9px; }

@@ -117,10 +117,20 @@ export function LlmProfilesPanel({ onProfilesChanged }: LlmProfilesPanelProps) {
     setNotice(null);
     try {
       const result = await api.testProfile(profileId);
-      setNotice({ kind: "success", text: `连接测试通过：${result.model_snapshot || result.profile_id}` });
+      setNotice({
+        kind: "success",
+        text: `Agent 能力测试通过：${result.model_snapshot || result.profile_id}（Tool Calling + Structured Output）`
+      });
     } catch (error) {
       setNotice({ kind: "error", text: formatApiError(error) });
     } finally {
+      try {
+        const nextProfiles = await api.profiles();
+        setProfiles(nextProfiles);
+        onProfilesChanged?.(nextProfiles);
+      } catch {
+        // Keep the capability test result or failure visible; a later refresh retries this read.
+      }
       setTestingProfileId(null);
     }
   }
@@ -153,6 +163,7 @@ export function LlmProfilesPanel({ onProfilesChanged }: LlmProfilesPanelProps) {
                       <strong>{profile.name}</strong>
                       {active && <span className={styles.activeBadge}><Check size={13} /> 当前配置</span>}
                     </div>
+                    <CapabilityBadge profile={profile} />
                     <p>{formatProtocol(profile.protocol)} · {profile.model}</p>
                     <small>{profile.base_url} · {profile.has_api_key ? "已保存密钥" : "未保存密钥"}</small>
                   </div>
@@ -191,4 +202,14 @@ export function LlmProfilesPanel({ onProfilesChanged }: LlmProfilesPanelProps) {
       </div>
     </section>
   );
+}
+
+function CapabilityBadge({ profile }: { profile: LlmProfilePublic }) {
+  if (profile.capability_test?.ready_for_harness) {
+    return <span className={`${styles.capabilityBadge} ${styles.capabilityReady}`}>Agent 能力已验证</span>;
+  }
+  if (profile.capability_test) {
+    return <span className={`${styles.capabilityBadge} ${styles.capabilityFailed}`}>Harness 不可用</span>;
+  }
+  return <span className={`${styles.capabilityBadge} ${styles.capabilityUnknown}`}>尚未验证 Agent 能力</span>;
 }

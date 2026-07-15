@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 from app.api import exports as exports_api
@@ -8,9 +9,10 @@ from app.api import runs as runs_api
 from app.api import setup as setup_api
 from app.core import config as core_config
 from app.core import paths as core_paths
-from app.harness import orchestrator
-from app.harness.loops import book as book_loop
-from app.llm.gateway import ChatRequest, ChatResult
+from app.harness.agents import evaluator as agent_evaluator
+from app.harness.agents import loop_runners
+from app.harness.agents import runtime as agent_runtime
+from app.llm.gateway import ChatRequest, ChatResult, ToolCall
 from app.schemas.profiles import LlmProfileUpsert
 from app.schemas.projects import CreateProjectRequest
 from app.schemas.runs import RunAdvanceRequest
@@ -26,8 +28,10 @@ def test_local_happy_path_creates_writes_commits_and_exports(
     monkeypatch,
 ) -> None:
     _isolate_runtime_paths(tmp_path, monkeypatch)
-    monkeypatch.setattr(book_loop, "call_llm", _fixture_call_llm)
-    monkeypatch.setattr(orchestrator, "call_llm", _fixture_call_llm)
+    monkeypatch.setattr(agent_runtime, "call_llm", _fixture_agent_call_llm)
+    monkeypatch.setattr(agent_evaluator, "call_llm", _fixture_agent_call_llm)
+    monkeypatch.setattr(loop_runners, "require_harness_capabilities", lambda _profile: None)
+    monkeypatch.setattr(profile_storage, "require_harness_capabilities", lambda _profile: None)
 
     project = projects_api.create_project(
         CreateProjectRequest(operation_mode="full_auto")
@@ -198,6 +202,190 @@ def _fixture_call_llm(_profile: object, request: ChatRequest) -> ChatResult:
         model_snapshot="fixture-model",
         provider_snapshot="openai-compatible",
     )
+
+
+def _fixture_agent_call_llm(_profile: object, request: ChatRequest) -> ChatResult:
+    if request.response_schema is not None:
+        payload = {
+            "schema_version": 1,
+            "outcome": "pass",
+            "contract_satisfied": True,
+            "summary": "The fixed candidate satisfies its contract.",
+            "issues": [],
+            "signals": [],
+            "repair_brief": None,
+            "upstream_blocker": None,
+        }
+        return ChatResult(
+            content=json.dumps(payload),
+            structured_output=payload,
+            finish_reason="stop",
+            model_snapshot="fixture-model",
+            provider_snapshot="openai-compatible",
+        )
+
+    tool_names = {tool.name for tool in request.tools}
+    prior_calls = {
+        call.name for message in request.messages for call in message.tool_calls
+    }
+    if "submit_book_discussion_update" in tool_names:
+        name = "submit_book_discussion_update"
+        arguments = _book_discussion_arguments(_expected_revision(request))
+    elif "submit_book_direction_candidate" in tool_names:
+        name = "submit_book_direction_candidate"
+        arguments = _book_direction_arguments(_expected_revision(request))
+    elif "submit_story_arc_candidate" in tool_names:
+        name = "submit_story_arc_candidate"
+        arguments = {
+            "expected_revision": 0,
+            "intent": "create",
+            "arc_id": "arc-001",
+            "plan_markdown": "# Arc 1\n\nA rolling first arc focused on earned trust.",
+            "target_chapter_count": 3,
+            "change_summary": "Create the first rolling arc.",
+        }
+    elif "plan_chapter_candidate" in tool_names:
+        name, arguments = _next_chapter_tool(prior_calls)
+    else:
+        raise AssertionError(f"Unexpected fixture request: {request}")
+
+    call = ToolCall(
+        id=f"fixture-{name}",
+        name=name,
+        arguments=arguments,
+        raw_arguments=json.dumps(arguments),
+    )
+    return ChatResult(
+        content="",
+        tool_calls=[call],
+        finish_reason="tool_call",
+        model_snapshot="fixture-model",
+        provider_snapshot="openai-compatible",
+        usage={"input_tokens": 10, "output_tokens": 20, "total_tokens": 30},
+    )
+
+
+def _book_discussion_arguments(expected_revision: int) -> dict[str, object]:
+    return {
+        "expected_revision": expected_revision,
+        "reply": "The direction is concrete enough to review.",
+        "direction_draft": _fixture_direction(),
+        "discussion_summary": "A fair mystery about earned trust and visible costs.",
+        "confirmed_decisions": ["Fair clues", "Earned trust", "Visible costs"],
+        "superseded_decisions": [],
+        "unresolved_questions": [],
+        "assumptions": [],
+        "contradictions": [],
+        "question": None,
+        "suggestions": [],
+        "readiness": {
+            "status": "ready",
+            "reason": "Stable promises and rolling freedoms are explicit.",
+        },
+    }
+
+
+def _book_direction_arguments(expected_revision: int) -> dict[str, object]:
+    return {
+        "expected_revision": expected_revision,
+        "candidate_revision": 1,
+        "direction_markdown": _fixture_direction(),
+        "constraints": {
+            "confirmed": ["Fair clues", "Earned trust", "Visible costs"],
+            "must_preserve": ["Reveals alter meaningful relationships."],
+            "must_avoid": ["No arbitrary solution."],
+            "creative_freedoms": ["Choose the current arc antagonist from committed canon."],
+            "open_decisions": [],
+        },
+        "confirmed_decision_coverage": [
+            {"decision": "Fair clues", "candidate_evidence": "visible clues"},
+            {"decision": "Earned trust", "candidate_evidence": "earned trust"},
+            {"decision": "Visible costs", "candidate_evidence": "personal costs"},
+        ],
+        "recommended_titles": [
+            {"title": "Fixture Novel", "rationale": "Names the fixture clearly."},
+            {"title": "Visible Costs", "rationale": "Highlights the core promise."},
+            {"title": "Earned Trust", "rationale": "Centers the emotional arc."},
+        ],
+        "rolling_plan_markdown": _fixture_rolling_contract(),
+    }
+
+
+def _next_chapter_tool(
+    prior_calls: set[str],
+) -> tuple[str, dict[str, object]]:
+    if "plan_chapter_candidate" not in prior_calls:
+        return "plan_chapter_candidate", {
+            "chapter_id": "chapter-001",
+            "expected_revision": 0,
+            "plan_revision": 1,
+            "plan_markdown": "# Chapter Goal\n\nProve earned trust.",
+        }
+    if "write_chapter_draft" not in prior_calls:
+        return "write_chapter_draft", {
+            "chapter_id": "chapter-001",
+            "expected_revision": 0,
+            "plan_revision": 1,
+            "draft_revision": 1,
+            "mode": "write",
+            "content": "The protagonist trusts companions after the trial.",
+        }
+    if "inspect_chapter_consistency" not in prior_calls:
+        return "inspect_chapter_consistency", {
+            "chapter_id": "chapter-001",
+            "expected_revision": 0,
+            "draft_revision": 1,
+        }
+    return "submit_chapter_candidate", {
+        "chapter_id": "chapter-001",
+        "expected_revision": 0,
+        "candidate_revision": 1,
+        "plan_revision": 1,
+        "draft_revision": 1,
+        "summary": "The chapter makes the trust change visible.",
+        "observations": {
+            "events": [
+                {
+                    "summary": "The protagonist chooses trust.",
+                    "evidence_quote": "trusts companions",
+                }
+            ],
+            "character_changes": [],
+            "relationship_changes": [],
+            "world_fact_candidates": [],
+            "foreshadowing_candidates": [],
+            "requires_commit": True,
+        },
+        "state_patch": {
+            "operations": [
+                {
+                    "op": "upsert",
+                    "target_file": "canon/characters.json",
+                    "target_id": "protagonist",
+                    "expected_version": 1,
+                    "value_fields": [
+                        {"key": "belief", "json_value": '"trusts companions"'}
+                    ],
+                    "evidence_quotes": ["trusts companions"],
+                    "rationale": "The candidate prose proves the trust change.",
+                }
+            ],
+        },
+    }
+
+
+def _expected_revision(request: ChatRequest) -> int:
+    for message in reversed(request.messages):
+        match = re.search(r"expected_revision[=:](\d+)", message.content)
+        if match is not None:
+            return int(match.group(1))
+        try:
+            payload = json.loads(message.content)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and isinstance(payload.get("state_revision"), int):
+            return int(payload["state_revision"])
+    raise AssertionError("Fixture request did not expose its Harness revision.")
 
 
 def _fixture_direction() -> str:

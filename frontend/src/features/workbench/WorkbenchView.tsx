@@ -14,7 +14,7 @@ import {
   formatRunNextActionMessage,
   formatRunStatus
 } from "../../types/display";
-import type { ArtifactSummary, CurrentArcState, HarnessEvent, ProjectReadiness, ProjectSummary } from "../../types/domain";
+import type { ArtifactSummary, BookRevisionState, CurrentArcState, HarnessEvent, ProjectReadiness, ProjectSummary } from "../../types/domain";
 import { artifactForChapter, chapterPipeline, eventBelongsToChapter, formatClock, pipelineState } from "../workspace/workspace-utils";
 import styles from "./WorkbenchView.module.css";
 
@@ -27,11 +27,13 @@ interface WorkbenchViewProps {
   activeArtifact: { path: string; content: string } | null;
   canonCounts: Record<string, number>;
   readiness: ProjectReadiness | null;
+  bookRevision: BookRevisionState | null;
   canStart: boolean;
   canResume: boolean;
   busy: boolean;
   onStart: () => Promise<void>;
   onResume: () => Promise<void>;
+  onApproveBookRevision: () => Promise<void>;
   onExport: () => Promise<void>;
   onSelectArtifact: (path: string) => void;
   onOpenEvidence: () => void;
@@ -55,7 +57,7 @@ function eventTone(status: HarnessEvent["status"]): string {
   return "neutral";
 }
 
-export function WorkbenchView({ project, events, currentArc, summaries, modelOutput, activeArtifact, canonCounts, readiness, canStart, canResume, busy, onStart, onResume, onExport, onSelectArtifact, onOpenEvidence, onOpenStory }: WorkbenchViewProps) {
+export function WorkbenchView({ project, events, currentArc, summaries, modelOutput, activeArtifact, canonCounts, readiness, bookRevision, canStart, canResume, busy, onStart, onResume, onApproveBookRevision, onExport, onSelectArtifact, onOpenEvidence, onOpenStory }: WorkbenchViewProps) {
   const [auxPanel, setAuxPanel] = useState<"runtime" | "context" | null>(null);
   const metadata = project.metadata;
   const statusEvents = events.filter(
@@ -118,7 +120,27 @@ export function WorkbenchView({ project, events, currentArc, summaries, modelOut
           </div>
         </header>
 
-        {recentEvents.length === 0 ? (
+        {bookRevision ? (
+          <section className={styles.bookRevisionApproval}>
+            <header>
+              <div><p>全书契约修订</p><h2>候选已通过评测，等待你的明确批准</h2></div>
+              <span>v{bookRevision.base_book_version} → v{bookRevision.target_book_version}</span>
+            </header>
+            <p>{bookRevision.summary}</p>
+            <dl>
+              <div><dt>冲突字段</dt><dd>{bookRevision.contract_field}</dd></div>
+              <div><dt>修订原因</dt><dd>{bookRevision.impossibility_reason}</dd></div>
+              <div><dt>来源</dt><dd>{bookRevision.source_loop} / {bookRevision.source_artifact}</dd></div>
+            </dl>
+            <footer>
+              <button onClick={() => onSelectArtifact(bookRevision.candidate.direction_path)}>查看候选方向</button>
+              <button onClick={() => onSelectArtifact(bookRevision.review_path)}>查看评测</button>
+              <button className={styles.approveRevisionButton} disabled={busy} onClick={() => void onApproveBookRevision()}>
+                <ShieldCheck size={15} />{busy ? "正在批准..." : "批准并替换未来全书契约"}
+              </button>
+            </footer>
+          </section>
+        ) : recentEvents.length === 0 ? (
           <section className={styles.idleState}>
             <ShieldCheck size={24} />
             <h2>{readiness ? formatRunNextActionMessage(readiness.next_action.message) : "正在检查运行条件"}</h2>

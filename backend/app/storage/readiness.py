@@ -5,6 +5,7 @@ from app.schemas.events import HarnessEvent
 from app.schemas.projects import ProjectMetadata
 from app.schemas.readiness import ProjectReadiness, ReadinessGate, RunNextAction
 from app.storage import arcs as arc_storage
+from app.storage import book_revisions as book_revision_storage
 from app.storage.completion import audit_project_completion
 from app.storage.events import read_events
 from app.storage.json_files import read_json
@@ -31,6 +32,7 @@ def build_project_readiness(
     metadata = read_project_metadata(project_path)
     gates = [
         _book_setup_gate(project_path, metadata),
+        _book_revision_gate(project_path),
         _active_profile_gate(),
         _run_control_gate(metadata.run_status),
         _completion_gate(project_path),
@@ -132,6 +134,31 @@ def _active_profile_gate() -> ReadinessGate:
         status="passed",
         message=f"Active LLM profile is ready: {active.id}",
         evidence=[active.id, active.model, active.protocol],
+    )
+
+
+def _book_revision_gate(project_path: Path) -> ReadinessGate:
+    revision = book_revision_storage.read_pending_book_revision(project_path)
+    if revision is None:
+        return ReadinessGate(
+            id="book_revision",
+            status="passed",
+            message="No Book revision is awaiting explicit approval.",
+            evidence=[],
+        )
+    return ReadinessGate(
+        id="book_revision",
+        status="pending",
+        message=(
+            "An evaluated Book revision requires explicit user approval, including in "
+            "full-auto mode."
+        ),
+        evidence=[
+            revision.revision_id,
+            f"base_book_version:{revision.base_book_version}",
+            revision.candidate.direction_path,
+            revision.verification_path,
+        ],
     )
 
 
@@ -264,6 +291,25 @@ def _next_action(
             ],
         )
 
+    book_revision = book_revision_storage.read_pending_book_revision(project_path)
+    if book_revision is not None:
+        return RunNextAction(
+            id="approve_book_revision",
+            command="POST /api/book-revisions/approve",
+            requires_user=True,
+            message=(
+                "Explicitly approve the evaluated Book revision before any approved "
+                "Book contract changes."
+            ),
+            evidence=[
+                book_revision.revision_id,
+                f"base_book_version:{book_revision.base_book_version}",
+                book_revision.candidate.direction_path,
+                book_revision.review_path,
+                book_revision.verification_path,
+            ],
+        )
+
     profile_gate = gate_by_id["active_llm_profile"]
     if profile_gate.status != "passed":
         return RunNextAction(
@@ -272,6 +318,27 @@ def _next_action(
             requires_user=True,
             message="Select an enabled LLM profile with a stored API key.",
             evidence=profile_gate.evidence,
+        )
+
+    approved_book_revision = (
+        book_revision_storage.read_approved_book_revision_with_pending_downstream(
+            project_path
+        )
+    )
+    if approved_book_revision is not None:
+        return RunNextAction(
+            id="resume_run",
+            command="POST /api/runs/resume",
+            can_auto_continue=True,
+            message=(
+                "Continue the Harness so the approved Book revision can update only "
+                "uncommitted downstream planning."
+            ),
+            evidence=[
+                approved_book_revision.revision_id,
+                f"book_version:{approved_book_revision.target_book_version}",
+                approved_book_revision.candidate.direction_path,
+            ],
         )
 
     if metadata.run_status == "failed":

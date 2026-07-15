@@ -61,6 +61,8 @@ const loopLayerLabels: Record<HarnessEvent["loop_layer"], string> = {
 };
 
 const atomicActionLabels: Record<string, string> = {
+  approve_book_revision: "批准全书修订",
+  apply_approved_book_revision: "应用已批准的全书修订",
   advance_run_until_stop: "推进运行到停止点",
   advance_to_next_checkpoint: "推进到下一安全检查点",
   approve_book_direction: "批准全书方向",
@@ -99,6 +101,26 @@ const atomicActionLabels: Record<string, string> = {
 };
 
 const eventKindLabels: Record<string, string> = {
+  book_revision_approval_required: "全书修订等待明确批准",
+  book_revision_approved: "全书修订已批准",
+  book_revision_downstream_completed: "全书修订已同步到未完成规划",
+  agent_activation_started: "Loop Agent 已启动",
+  agent_tool_result: "Agent Tool 调用结果",
+  agent_transport_retry: "Agent 传输重试",
+  agent_semantic_revision_scheduled: "Agent 语义修订已安排",
+  agent_evaluation_started: "语义评测已开始",
+  agent_evaluation_completed: "语义评测已完成",
+  agent_evaluation_failed: "语义评测失败关闭",
+  agent_activation_completed: "Loop Agent 已到达检查点",
+  agent_activation_failed: "Loop Agent 已失败关闭",
+  agent_waiting_for_user: "Loop Agent 等待用户决策",
+  agent_blocker_recorded: "Agent 阻塞点已记录",
+  cross_loop_proposal_recorded: "跨 Loop 提案已记录",
+  cross_loop_route_accepted: "跨 Loop 路由已由 Harness 接受",
+  cross_loop_route_rejected: "跨 Loop 路由已由 Harness 拒绝",
+  cross_loop_route_deferred: "跨 Loop 路由等待上层检查点",
+  cross_loop_route_completed: "跨 Loop 上层修订已完成",
+  agent_semantic_revision_exhausted: "Agent 语义修订预算已耗尽",
   artifact_written: "产物已写入",
   atomic_action_started: "原子动作开始",
   approved_book_artifact_written: "已批准全书产物已写入",
@@ -205,6 +227,7 @@ const artifactKindLabels: Record<string, string> = {
 };
 
 const gateIdLabels: Record<string, string> = {
+  book_revision: "全书修订审批",
   active_llm_profile: "LLM 配置",
   book_setup: "全书设定",
   completion_evidence: "完成证据",
@@ -215,6 +238,7 @@ const gateIdLabels: Record<string, string> = {
 };
 
 const runNextActionLabels: Record<RunNextAction["id"], string> = {
+  approve_book_revision: "批准全书修订候选",
   continue_book_discussion: "继续全书方向讨论",
   review_book_direction: "整理并审阅全书方向",
   approve_book_direction: "批准全书方向候选",

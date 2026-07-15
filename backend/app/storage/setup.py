@@ -14,6 +14,7 @@ from app.schemas.setup import (
     SetupMessage,
     SetupReadinessSignal,
     SetupStateDocument,
+    missing_confirmed_decisions,
 )
 from app.schemas.events import HarnessEvent
 from app.schemas.projects import ProjectMetadata
@@ -586,28 +587,11 @@ def _candidate_missing_confirmed_decisions(
     state: SetupStateDocument,
     candidate: BookDirectionCandidate,
 ) -> list[str]:
-    constraints = candidate.constraints
-    candidate_text = "\n".join(
-        [
-            candidate.direction_markdown,
-            candidate.rolling_plan_markdown,
-            *constraints.confirmed,
-            *constraints.must_preserve,
-            *constraints.must_avoid,
-            *constraints.creative_freedoms,
-            *constraints.open_decisions,
-        ]
+    return missing_confirmed_decisions(
+        state.confirmed_decisions,
+        constraints=candidate.constraints,
+        coverage=candidate.confirmed_decision_coverage,
     )
-    covered = {
-        item.decision
-        for item in candidate.confirmed_decision_coverage
-        if item.candidate_evidence.strip() in candidate_text
-    }
-    return [
-        decision
-        for decision in state.confirmed_decisions
-        if decision not in constraints.confirmed or decision not in covered
-    ]
 
 
 def _migrate_legacy_setup(

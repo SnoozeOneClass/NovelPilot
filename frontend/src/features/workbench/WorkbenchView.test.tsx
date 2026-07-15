@@ -1,6 +1,6 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { HarnessEvent, ProjectReadiness, ProjectSummary } from "../../types/domain";
+import type { BookRevisionState, HarnessEvent, ProjectReadiness, ProjectSummary } from "../../types/domain";
 import { WorkbenchView } from "./WorkbenchView";
 
 const project: ProjectSummary = {
@@ -31,13 +31,14 @@ const readiness: ProjectReadiness = {
 const handlers = {
   onStart: vi.fn(async () => undefined),
   onResume: vi.fn(async () => undefined),
+  onApproveBookRevision: vi.fn(async () => undefined),
   onExport: vi.fn(async () => undefined),
   onSelectArtifact: vi.fn(),
   onOpenEvidence: vi.fn(),
   onOpenStory: vi.fn()
 };
 
-function renderWorkbench(events: HarnessEvent[] = [], modelOutput = "") {
+function renderWorkbench(events: HarnessEvent[] = [], modelOutput = "", bookRevision: BookRevisionState | null = null) {
   render(
     <WorkbenchView
       project={events.length ? { ...project, metadata: { ...project.metadata, run_status: "running", active_arc_id: "arc-001" } } : project}
@@ -48,6 +49,7 @@ function renderWorkbench(events: HarnessEvent[] = [], modelOutput = "") {
       activeArtifact={null}
       canonCounts={{}}
       readiness={readiness}
+      bookRevision={bookRevision}
       canStart={!events.length}
       canResume={false}
       busy={false}
@@ -90,6 +92,30 @@ describe("WorkbenchView", () => {
     expect(screen.getByText("这是 Provider 返回的可见输出")).toBeInTheDocument();
   });
 
+  it("requires an explicit click before approving a pending Book revision", () => {
+    const bookRevision = {
+      revision_id: "revision-0003",
+      base_book_version: 4,
+      target_book_version: 5,
+      summary: "只修改尚未兑现的反转约束。",
+      contract_field: "ending.reveal",
+      impossibility_reason: "现有反转与已提交证据冲突。",
+      source_loop: "chapter",
+      source_artifact: "chapters/chapter-003/candidate.json",
+      review_path: "book/revisions/revision-0003/review.md",
+      candidate: {
+        direction_path: "book/revisions/revision-0003/candidate_direction.md"
+      }
+    } as BookRevisionState;
+
+    renderWorkbench([], "", bookRevision);
+
+    expect(screen.getByText("候选已通过评测，等待你的明确批准")).toBeInTheDocument();
+    expect(handlers.onApproveBookRevision).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /批准并替换未来全书契约/ }));
+    expect(handlers.onApproveBookRevision).toHaveBeenCalledTimes(1);
+  });
+
   it("scopes pipeline progress and checkpoints to the active chapter", () => {
     const previousCheckpoint: HarnessEvent = {
       seq: 1, event_id: "old", timestamp: "2026-07-13T00:00:00Z", project_id: "project-1", run_id: "run-1", kind: "safe_checkpoint_reached", loop_layer: "chapter", atomic_action: "semantic_review", status: "completed", artifact_path: "chapters/chapter-001/review.md", routing_decision: null, message: "chapter-001 complete", payload: { chapter_id: "chapter-001" }
@@ -107,6 +133,7 @@ describe("WorkbenchView", () => {
         activeArtifact={null}
         canonCounts={{}}
         readiness={readiness}
+        bookRevision={null}
         canStart={false}
         canResume={false}
         busy={false}

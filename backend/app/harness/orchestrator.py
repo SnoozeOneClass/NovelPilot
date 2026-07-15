@@ -2,41 +2,47 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, Literal
+from uuid import uuid4
 
 from app.core.paths import resolve_artifact_path
+from app.harness.agents.evaluator import persist_evaluation_views
+from app.harness.agents.events import project_agent_event
+from app.harness.agents.loop_runners import (
+    AgentControlCheckpoint,
+    run_book_revision_agent,
+    run_chapter_agent,
+    run_chapter_patch_evidence_repair_agent,
+    run_story_arc_agent,
+)
+from app.harness.agents.models import AgentIdentity, EvaluationRecord
+from app.harness.agents.persistence import read_agent_state, save_agent_state
+from app.harness.agents.policy import ResolvedAgentPolicy, resolve_agent_policy
+from app.harness.stream_progress import StreamProgressAccumulator
 from app.llm.gateway import ChatChunk, ChatMessage, ChatRequest, ChatResult, call_llm
 from app.llm.profiles import get_active_profile
 from app.llm.redaction import redact_profile_secrets
 from app.schemas.artifacts import (
-    CandidateObservations,
     ChapterVerification,
     ContextExclusion,
     ContextSnapshot,
     ContextSource,
-    VerificationSignal,
 )
 from app.schemas.events import EventStatus, HarnessEvent, LoopLayer
-from app.schemas.arcs import StoryArcPlanProposal
-from app.schemas.patches import CandidateStatePatch, PatchValidationResult
+from app.schemas.patches import CandidateStatePatch
 from app.schemas.profiles import LlmProfile
 from app.schemas.projects import ProjectMetadata, RunStatus
 from app.storage import arcs as arc_storage
+from app.storage import book_revisions as book_revision_storage
 from app.storage.events import append_event, read_events
 from app.storage.json_files import read_json, write_json
 from app.storage.patches import PatchValidationError, commit_candidate_state_patch
 from app.storage.projects import read_project_metadata, write_project_metadata
 from app.storage.setup import read_setup_state
 from app.storage.text_files import read_text_file, write_text_file
+from app.storage.transactions import commit_file_transaction
 
-ChapterRoutingDecision = Literal[
-    "commit",
-    "revise",
-    "rewrite",
-    "pause",
-    "escalate_to_arc",
-    "escalate_to_book",
-]
 CANON_CONTEXT_FILES = (
     "canon/characters.json",
     "canon/relationships.json",
@@ -74,6 +80,31 @@ class HarnessOrchestrator:
             )
             return
 
+        pending_book_revision = book_revision_storage.read_pending_book_revision(
+            self.context.project_path
+        )
+        if pending_book_revision is not None:
+            metadata.run_status = "waiting_for_user"
+            write_project_metadata(self.context.project_path, metadata)
+            self._emit(
+                metadata,
+                kind="book_revision_approval_required",
+                loop_layer="book",
+                atomic_action="approve_book_revision",
+                status="requested",
+                artifact_path=pending_book_revision.candidate.direction_path,
+                routing_decision="await_user_approval",
+                message=(
+                    "The evaluated Book revision still requires explicit user approval; "
+                    "full-auto mode cannot bypass this gate."
+                ),
+                payload={
+                    "revision_id": pending_book_revision.revision_id,
+                    "base_book_version": pending_book_revision.base_book_version,
+                },
+            )
+            return
+
         profile = get_active_profile()
         if profile is None:
             metadata.run_status = "waiting_for_user"
@@ -91,6 +122,9 @@ class HarnessOrchestrator:
 
         metadata.active_profile_id = profile.id
         try:
+            if self._process_approved_book_revision(metadata, profile):
+                return
+
             if self._process_pending_feedback(metadata):
                 return
 
@@ -142,26 +176,19 @@ class HarnessOrchestrator:
         if not (chapter_path / "context_snapshot.json").exists():
             self._write_context_snapshot(metadata, chapter_id, chapter_path)
             return
-        if not (chapter_path / "goal.md").exists():
-            self._generate_chapter_goal(profile, metadata, chapter_id, chapter_path)
-            return
-        if not (chapter_path / "draft.md").exists():
-            self._draft_chapter(profile, metadata, chapter_id, chapter_path)
-            return
-        if not (chapter_path / "observations.json").exists():
-            self._extract_observations(profile, metadata, chapter_id, chapter_path)
-            return
-        if not (chapter_path / "review.md").exists():
-            self._review_chapter(profile, metadata, chapter_id, chapter_path)
-            return
         if not (chapter_path / "verification.json").exists():
-            self._verify_chapter(profile, metadata, chapter_id, chapter_path)
+            self._run_chapter_agent(profile, metadata, chapter_id, chapter_path)
             return
         if not (chapter_path / "final.md").exists():
             self._write_final_chapter(metadata, chapter_id, chapter_path)
             return
-        if not (chapter_path / "candidate_state_patch.json").exists():
-            self._generate_candidate_state_patch(profile, metadata, chapter_id, chapter_path)
+        if (chapter_path / "state_patch_rejection.json").exists():
+            self._repair_state_patch_evidence(
+                profile,
+                metadata,
+                chapter_id,
+                chapter_path,
+            )
             return
         if not (chapter_path / "committed_state_patch.json").exists():
             self._commit_state_patch(metadata, chapter_id, chapter_path)
@@ -228,8 +255,8 @@ class HarnessOrchestrator:
                 [
                     "Create the first rolling story arc plan for this novel.",
                     "Do not plan the full book. Plan only the current arc from committed state.",
-                    "Return one JSON object with plan_markdown and target_chapter_count. "
-                    "plan_markdown must be a concise Markdown plan with arc goal, conflicts, "
+                    "Submit the complete plan with the Story Arc candidate Tool. "
+                    "The Markdown plan must include arc goal, conflicts, "
                     "chapter direction, pacing signal, foreshadowing movement, and stop "
                     "conditions. target_chapter_count must be an integer from 1 through 30 "
                     "chosen from the approved rolling contract and current pacing needs.",
@@ -242,16 +269,75 @@ class HarnessOrchestrator:
                 ]
             )
         )
-        result, proposal = self._call_story_arc_plan_action(
-            profile,
+        policy = self._resolve_agent_policy(metadata, "story_arc", profile)
+        stream_callback = self._agent_stream_callback(
             metadata,
-            action="plan_current_arc",
-            system=(
-                "You are Novelpilot's story arc loop. Produce visible planning output only, "
-                "not private chain-of-thought. Return the requested JSON object only."
+            "story_arc",
+            "plan_current_arc",
+        )
+        try:
+            agent_result = run_story_arc_agent(
+                self.context.project_path,
+                metadata,
+                policy,
+                arc_id=arc_id,
+                intent="create",
+                expected_revision=0,
+                instruction=prompt,
+                candidate_run_id=self._story_arc_resume_candidate_run_id(arc_path),
+                on_event=self._agent_event_callback(
+                    metadata,
+                    "story_arc",
+                    "plan_current_arc",
+                ),
+                on_text_delta=stream_callback,
+                on_tool_event=stream_callback,
+            )
+        except AgentControlCheckpoint as checkpoint:
+            self._handle_agent_control_checkpoint(
+                metadata,
+                checkpoint,
+                loop_layer="story_arc",
+                action="plan_current_arc",
+            )
+            return
+        if agent_result.evaluation.result.outcome != "pass":
+            if self._handle_evaluation_control(
+                metadata,
+                agent_result.evaluation,
+                loop_layer="story_arc",
+                action="plan_current_arc",
+                candidate_run_id=agent_result.run_result.candidate_run_id,
+            ):
+                return
+            raise ValueError(
+                "Story Arc candidate did not pass evaluation: "
+                + agent_result.evaluation.result.summary
+            )
+        proposal = agent_result.proposal
+        self._emit_model_output(
+            metadata,
+            "story_arc",
+            "plan_current_arc",
+            proposal.plan_markdown,
+        )
+        result = ChatResult(
+            content="",
+            model_snapshot=(
+                agent_result.run_result.model_snapshot or policy.profile.model
             ),
-            user=prompt,
-            arc_id=arc_id,
+            provider_snapshot=(
+                agent_result.run_result.provider_snapshot or policy.profile.protocol
+            ),
+            usage=agent_result.run_result.usage,
+        )
+        review_root = Path("arcs") / arc_id / "reviews" / "review-0001"
+        persist_evaluation_views(
+            self.context.project_path,
+            agent_result.evaluation,
+            evaluation_path=(review_root / "evaluation.json").as_posix(),
+            review_path=(review_root / "review.md").as_posix(),
+            verification_path=(review_root / "verification.json").as_posix(),
         )
 
         plan_path = arc_path / "plan.md"
@@ -279,6 +365,7 @@ class HarnessOrchestrator:
                 "completed_at": None,
             },
         )
+        (arc_path / "book-upstream-resume.json").unlink(missing_ok=True)
         metadata.active_arc_id = arc_id
         status_after_checkpoint: RunStatus = (
             "waiting_for_user" if metadata.operation_mode == "participatory" else "idle"
@@ -491,6 +578,8 @@ class HarnessOrchestrator:
         profile: LlmProfile,
         metadata: ProjectMetadata,
         feedback: str,
+        *,
+        source_label: str = "User Feedback",
     ) -> str | None:
         if metadata.active_arc_id is None:
             return None
@@ -507,7 +596,7 @@ class HarnessOrchestrator:
             loop_layer="story_arc",
             atomic_action="revise_current_arc_plan",
             status="started",
-            message=f"Revising {arc_id} from user feedback.",
+            message=f"Revising {arc_id} from {source_label.lower()}.",
         )
         current_plan = _read_text(plan_path)
         prompt = "\n\n".join(
@@ -516,9 +605,9 @@ class HarnessOrchestrator:
                     "Revise the current rolling story arc plan using the user feedback.",
                     "Keep the plan current-arc-only. Preserve useful constraints, but update pacing, "
                     "focus, or chapter direction where the feedback requires it.",
-                    "Return one JSON object with the complete revised Markdown in "
-                    "plan_markdown and a revised target_chapter_count integer from 1 through 30.",
-                    f"User feedback:\n{feedback}",
+                    "Submit the complete revised Markdown and target chapter count through the "
+                    "Story Arc candidate Tool.",
+                    f"Revision request source: {source_label}\n{feedback}",
                     f"Current arc plan:\n{current_plan}",
                     f"Book settings:\n{_read_text(self.context.project_path / 'book' / 'settings.md')}",
                     "Approved rolling story arc contract:\n"
@@ -527,16 +616,87 @@ class HarnessOrchestrator:
                 ]
             )
         )
-        result, proposal = self._call_story_arc_plan_action(
-            profile,
+        state_payload = read_json(arc_path / "state.json", default={})
+        expected_revision = (
+            state_payload.get("version", 1)
+            if isinstance(state_payload, dict)
+            and isinstance(state_payload.get("version", 1), int)
+            else 1
+        )
+        policy = self._resolve_agent_policy(metadata, "story_arc", profile)
+        stream_callback = self._agent_stream_callback(
             metadata,
-            action="revise_current_arc_plan",
-            system=(
-                "You are Novelpilot's story arc loop. Revise visible planning artifacts only; "
-                "do not reveal private chain-of-thought."
+            "story_arc",
+            "revise_current_arc_plan",
+        )
+        try:
+            agent_result = run_story_arc_agent(
+                self.context.project_path,
+                metadata,
+                policy,
+                arc_id=arc_id,
+                intent="revise",
+                expected_revision=expected_revision,
+                instruction=prompt,
+                candidate_run_id=self._story_arc_resume_candidate_run_id(arc_path),
+                on_event=self._agent_event_callback(
+                    metadata,
+                    "story_arc",
+                    "revise_current_arc_plan",
+                ),
+                on_text_delta=stream_callback,
+                on_tool_event=stream_callback,
+            )
+        except AgentControlCheckpoint as checkpoint:
+            self._handle_agent_control_checkpoint(
+                metadata,
+                checkpoint,
+                loop_layer="story_arc",
+                action="revise_current_arc_plan",
+            )
+            return None
+        if agent_result.evaluation.result.outcome != "pass":
+            if self._handle_evaluation_control(
+                metadata,
+                agent_result.evaluation,
+                loop_layer="story_arc",
+                action="revise_current_arc_plan",
+                candidate_run_id=agent_result.run_result.candidate_run_id,
+            ):
+                return None
+            raise ValueError(
+                "Revised Story Arc candidate did not pass evaluation: "
+                + agent_result.evaluation.result.summary
+            )
+        proposal = agent_result.proposal
+        self._emit_model_output(
+            metadata,
+            "story_arc",
+            "revise_current_arc_plan",
+            proposal.plan_markdown,
+        )
+        result = ChatResult(
+            content="",
+            model_snapshot=(
+                agent_result.run_result.model_snapshot or policy.profile.model
             ),
-            user=prompt,
-            arc_id=arc_id,
+            provider_snapshot=(
+                agent_result.run_result.provider_snapshot or policy.profile.protocol
+            ),
+            usage=agent_result.run_result.usage,
+        )
+        review_root = (
+            Path("arcs")
+            / arc_id
+            / "reviews"
+            / f"review-{expected_revision + 1:04d}"
+        )
+        persist_evaluation_views(
+            self.context.project_path,
+            agent_result.evaluation,
+            evaluation_path=(review_root / "evaluation.json").as_posix(),
+            review_path=(review_root / "review.md").as_posix(),
+            verification_path=(review_root / "verification.json").as_posix(),
         )
         revised_plan = proposal.plan_markdown.strip() + "\n"
         write_text_file(plan_path, revised_plan)
@@ -545,7 +705,8 @@ class HarnessOrchestrator:
             "\n\n".join(
                 [
                     "# Arc Revision",
-                    f"## User Feedback\n{feedback}",
+                    f"## Revision Source\n{source_label}",
+                    f"## Revision Request\n{feedback}",
                     f"## Revised Plan\n{proposal.plan_markdown.strip()}",
                 ]
             )
@@ -556,12 +717,13 @@ class HarnessOrchestrator:
             result,
             target_chapter_count=proposal.target_chapter_count,
         )
+        (arc_path / "book-upstream-resume.json").unlink(missing_ok=True)
         self._finish_feedback_artifact_step(
             metadata,
             loop_layer="story_arc",
             atomic_action="revise_current_arc_plan",
             artifact_path=f"arcs/{arc_id}/plan.md",
-            message=f"{arc_id} plan revised from user feedback.",
+            message=f"{arc_id} plan revised from {source_label.lower()}.",
             routing_decision=(
                 "pause" if metadata.operation_mode == "participatory" else "continue"
             ),
@@ -897,48 +1059,1097 @@ class HarnessOrchestrator:
             state["approved_at"] = None
         write_json(state_path, state)
 
-    def _call_story_arc_plan_action(
+    def _run_chapter_agent(
         self,
         profile: LlmProfile,
         metadata: ProjectMetadata,
-        *,
-        action: str,
-        system: str,
-        user: str,
-        arc_id: str,
-    ) -> tuple[ChatResult, StoryArcPlanProposal]:
-        received_characters = 0
+        chapter_id: str,
+        chapter_path: Path,
+    ) -> None:
+        self._emit_started(
+            metadata,
+            "run_chapter_agent",
+            f"Running bounded Chapter Agent for {chapter_id}.",
+        )
+        policy = self._resolve_agent_policy(metadata, "chapter", profile)
+        instruction = "\n\n".join(
+            [
+                f"Create the complete candidate transaction for {chapter_id}.",
+                "The draft should be visible chapter prose, while observations and state patch "
+                "remain candidate-only until Harness promotion.",
+                "Assembled context snapshot:\n"
+                + self._assembled_context_block(chapter_path / "context_snapshot.json"),
+                "Current Story Arc plan:\n"
+                + _read_text(
+                    self.context.project_path
+                    / "arcs"
+                    / (metadata.active_arc_id or "arc-001")
+                    / "plan.md"
+                ),
+                self._feedback_prompt_block(
+                    {
+                        "apply_to_current_chapter_context",
+                        "revise_current_arc_plan",
+                        "escalate_to_book_loop",
+                    }
+                ),
+            ]
+        )
+        stream_callback = self._agent_stream_callback(
+            metadata,
+            "chapter",
+            "run_chapter_agent",
+        )
+        resume_payload = read_json(chapter_path / "upstream-resume.json", default={})
+        resume_candidate_run_id = (
+            resume_payload.get("candidate_run_id")
+            if isinstance(resume_payload, dict)
+            and isinstance(resume_payload.get("candidate_run_id"), str)
+            else None
+        )
+        try:
+            agent_result = run_chapter_agent(
+                self.context.project_path,
+                metadata,
+                policy,
+                chapter_id=chapter_id,
+                expected_revision=0,
+                instruction=instruction,
+                candidate_run_id=resume_candidate_run_id,
+                on_event=self._agent_event_callback(
+                    metadata,
+                    "chapter",
+                    "run_chapter_agent",
+                ),
+                on_text_delta=stream_callback,
+                on_tool_event=stream_callback,
+            )
+        except AgentControlCheckpoint as checkpoint:
+            self._handle_agent_control_checkpoint(
+                metadata,
+                checkpoint,
+                loop_layer="chapter",
+                action="run_chapter_agent",
+            )
+            return
+        (chapter_path / "upstream-resume.json").unlink(missing_ok=True)
+        root = self.context.project_path / agent_result.candidate_root
+        plan = _read_text(root / "plan.md")
+        draft = _read_text(root / "draft.md")
+        if not plan.strip() or not draft.strip():
+            raise ValueError("Chapter Agent candidate is missing plan or draft content.")
 
-        def on_text_delta(chunk: ChatChunk) -> None:
-            nonlocal received_characters
-            received_characters += len(chunk.text_delta)
+        draft_path = f"chapters/{chapter_id}/draft.md"
+        final_path = f"chapters/{chapter_id}/final.md"
+        observations_path = f"chapters/{chapter_id}/observations.json"
+        observations = agent_result.submission.observations.model_copy(
+            update={"based_on": draft_path}
+        )
+        operations = [
+            operation.model_copy(
+                update={
+                    "evidence": [
+                        item.model_copy(update={"file": final_path})
+                        for item in operation.evidence
+                    ]
+                }
+            )
+            for operation in agent_result.submission.state_patch.operations
+        ]
+        patch = agent_result.submission.state_patch.model_copy(
+            update={
+                "based_on": {
+                    "chapter_final": final_path,
+                    "observations": observations_path,
+                },
+                "operations": operations,
+            }
+        )
+        candidate_document = {
+            "schema_version": 1,
+            "chapter_id": chapter_id,
+            "source_candidate_root": agent_result.candidate_root,
+            "candidate_revision": agent_result.submission.candidate_revision,
+            "plan_revision": agent_result.submission.plan_revision,
+            "draft_revision": agent_result.submission.draft_revision,
+            "evaluation_id": agent_result.evaluation.evaluation_id,
+            "promotable": agent_result.verification.commit_allowed,
+        }
+        commit_file_transaction(
+            self.context.project_path,
+            kind=f"chapter-agent-candidate-{chapter_id}",
+            files={
+                f"chapters/{chapter_id}/goal.md": plan.rstrip() + "\n",
+                draft_path: draft.rstrip() + "\n",
+                observations_path: json.dumps(
+                    observations.model_dump(mode="json"),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                f"chapters/{chapter_id}/candidate_state_patch.json": json.dumps(
+                    patch.model_dump(mode="json"),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                f"chapters/{chapter_id}/agent_candidate.json": json.dumps(
+                    candidate_document,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+            },
+        )
+        persist_evaluation_views(
+            self.context.project_path,
+            agent_result.evaluation,
+            evaluation_path=f"chapters/{chapter_id}/evaluation.json",
+            review_path=f"chapters/{chapter_id}/review.md",
+            verification_path=f"chapters/{chapter_id}/verification.json",
+            verification_payload=agent_result.verification.model_dump(mode="json"),
+        )
+        self._finish_artifact_step(
+            metadata,
+            kind="verification_completed",
+            atomic_action="run_chapter_agent",
+            artifact_path=f"chapters/{chapter_id}/verification.json",
+            message=f"Chapter Agent candidate evaluated for {chapter_id}.",
+            routing_decision=agent_result.verification.routing_decision,
+            payload={
+                "profile_id": policy.profile.id,
+                "model_snapshot": agent_result.run_result.model_snapshot,
+                "evaluation_id": agent_result.evaluation.evaluation_id,
+                "candidate_root": agent_result.candidate_root,
+            },
+        )
+        self._handle_evaluation_control(
+            metadata,
+            agent_result.evaluation,
+            loop_layer="chapter",
+            action="run_chapter_agent",
+            candidate_run_id=agent_result.run_result.candidate_run_id,
+        )
+
+    def _agent_stream_callback(
+        self,
+        metadata: ProjectMetadata,
+        loop_layer: LoopLayer,
+        action: str,
+    ) -> Callable[[ChatChunk], None]:
+        progress = StreamProgressAccumulator()
+
+        def on_delta(chunk: ChatChunk) -> None:
+            received_characters = progress.observe(chunk)
+            if received_characters is None:
+                return
             self._emit_model_stream_progress(
                 metadata,
-                "story_arc",
+                loop_layer,
                 action,
                 received_characters,
             )
 
-        result = call_llm(
-            profile,
-            ChatRequest(
-                profile_id=profile.id,
-                messages=[
-                    ChatMessage(role="system", content=system),
-                    ChatMessage(role="user", content=user),
-                ],
-                metadata={
-                    "loop_layer": "story_arc",
-                    "atomic_action": action,
-                    "project_id": metadata.project_id,
-                    "arc_id": arc_id,
-                    "on_text_delta": on_text_delta,
-                },
-            ),
+        return on_delta
+
+    def _agent_event_callback(
+        self,
+        metadata: ProjectMetadata,
+        loop_layer: LoopLayer,
+        action: str,
+    ) -> Callable[[dict[str, Any]], None]:
+        def on_event(payload: dict[str, Any]) -> None:
+            projected = project_agent_event(payload)
+            if projected is None:
+                return
+            self._emit(
+                metadata,
+                kind=projected.kind,
+                loop_layer=loop_layer,
+                atomic_action=action,
+                status=projected.status,
+                artifact_path=projected.artifact_path,
+                routing_decision=projected.routing_decision,
+                message=projected.message,
+                payload=projected.payload,
+            )
+
+        return on_event
+
+    def _handle_agent_control_checkpoint(
+        self,
+        metadata: ProjectMetadata,
+        checkpoint: AgentControlCheckpoint,
+        *,
+        loop_layer: LoopLayer,
+        action: str,
+    ) -> None:
+        payload = {
+            key: value
+            for key, value in checkpoint.payload.items()
+            if key
+            in {
+                "checkpoint_id",
+                "candidate_run_id",
+                "kind",
+                "summary",
+                "evidence",
+                "target_owner",
+                "contract_field",
+                "contract_revision",
+                "committed_evidence_locator",
+                "impossibility_reason",
+                "routing_status",
+                "question",
+                "suggestions",
+                "context",
+            }
+        }
+        payload.setdefault("candidate_run_id", checkpoint.run_result.candidate_run_id)
+        outcome = checkpoint.run_result.outcome
+        blocker_kind = payload.get("kind")
+        if outcome == "waiting_user":
+            kind = "agent_waiting_for_user"
+            routing_decision = "pause"
+            message = "Loop Agent requested one explicit user decision."
+        elif blocker_kind == "cross_loop":
+            kind = "cross_loop_proposal_recorded"
+            target_owner = payload.get("target_owner")
+            routing_decision = (
+                f"propose_to_{target_owner}"
+                if isinstance(target_owner, str)
+                else "await_harness_routing"
+            )
+            message = (
+                "Cross-Loop blocker proposal recorded; only the Harness may route it."
+            )
+        else:
+            kind = "agent_blocker_recorded"
+            routing_decision = "pause"
+            message = "Loop Agent blocker recorded at a durable checkpoint."
+        self._emit(
+            metadata,
+            kind=kind,
+            loop_layer=loop_layer,
+            atomic_action=action,
+            status="requested",
+            artifact_path=checkpoint.artifact_path,
+            routing_decision=routing_decision,
+            message=message,
+            payload=payload,
         )
-        proposal = _story_arc_plan_from_llm(result.content)
-        self._emit_model_output(metadata, "story_arc", action, proposal.plan_markdown)
-        return result, proposal
+        if blocker_kind == "cross_loop" and self._route_cross_loop_proposal(
+            metadata,
+            loop_layer=loop_layer,
+            action=action,
+            proposal=payload,
+            source_artifact=checkpoint.artifact_path,
+        ):
+            return
+        metadata.run_status = "waiting_for_user"
+        write_project_metadata(self.context.project_path, metadata)
+
+    def _handle_evaluation_control(
+        self,
+        metadata: ProjectMetadata,
+        evaluation: EvaluationRecord,
+        *,
+        loop_layer: LoopLayer,
+        action: str,
+        candidate_run_id: str | None = None,
+    ) -> bool:
+        result = evaluation.result
+        if result.outcome == "pass":
+            return False
+        if result.outcome == "cross_loop_escalation":
+            kind = "cross_loop_proposal_recorded"
+            owner = (
+                result.upstream_blocker.owner
+                if result.upstream_blocker is not None
+                else None
+            )
+            routing_decision = (
+                f"propose_to_{owner}" if owner is not None else "await_harness_routing"
+            )
+            message = (
+                "Evaluator cross-Loop proposal recorded; only the Harness may route it."
+            )
+        elif result.outcome == "needs_user":
+            kind = "agent_waiting_for_user"
+            routing_decision = "pause"
+            message = "Evaluator requires an explicit user decision."
+        else:
+            kind = "agent_semantic_revision_exhausted"
+            routing_decision = "pause"
+            message = "Candidate remains blocked after bounded semantic revision."
+        blocker_payload = (
+            result.upstream_blocker.model_dump(mode="json")
+            if result.upstream_blocker is not None
+            else None
+        )
+        self._emit(
+            metadata,
+            kind=kind,
+            loop_layer=loop_layer,
+            atomic_action=action,
+            status="requested",
+            artifact_path=evaluation.candidate_artifact_id,
+            routing_decision=routing_decision,
+            message=message,
+            payload={
+                "evaluation_id": evaluation.evaluation_id,
+                "candidate_revision": evaluation.candidate_revision,
+                "outcome": result.outcome,
+                "summary": result.summary,
+                "upstream_blocker": blocker_payload,
+            },
+        )
+        if (
+            result.outcome == "cross_loop_escalation"
+            and blocker_payload is not None
+            and self._route_cross_loop_proposal(
+                metadata,
+                loop_layer=loop_layer,
+                action=action,
+                proposal={
+                    **blocker_payload,
+                    "summary": result.summary,
+                    "evaluation_id": evaluation.evaluation_id,
+                    "candidate_revision": evaluation.candidate_revision,
+                    "candidate_run_id": candidate_run_id,
+                },
+                source_artifact=evaluation.candidate_artifact_id,
+            )
+        ):
+            return True
+        metadata.run_status = "waiting_for_user"
+        write_project_metadata(self.context.project_path, metadata)
+        return True
+
+    def _process_approved_book_revision(
+        self,
+        metadata: ProjectMetadata,
+        profile: LlmProfile,
+    ) -> bool:
+        revision = (
+            book_revision_storage.read_approved_book_revision_with_pending_downstream(
+                self.context.project_path
+            )
+        )
+        if revision is None:
+            return False
+
+        if metadata.active_arc_id is None:
+            book_revision_storage.mark_book_revision_downstream_completed(
+                self.context.project_path,
+                revision.revision_id,
+                artifact_paths=[],
+            )
+            self._emit(
+                metadata,
+                kind="book_revision_downstream_completed",
+                loop_layer="book",
+                atomic_action="apply_approved_book_revision",
+                status="completed",
+                artifact_path=f"book/revisions/{revision.revision_id}/state.json",
+                routing_decision="plan_story_arc",
+                message="Approved Book revision is active; no existing Story Arc required repair.",
+                payload={"revision_id": revision.revision_id},
+            )
+            metadata.run_status = "idle"
+            write_project_metadata(self.context.project_path, metadata)
+            return True
+
+        revision_request = json.dumps(
+            {
+                "book_revision_id": revision.revision_id,
+                "base_book_version": revision.base_book_version,
+                "approved_book_version": revision.target_book_version,
+                "source_loop": revision.source_loop,
+                "source_artifact": revision.source_artifact,
+                "contract_field": revision.contract_field,
+                "committed_evidence_locator": revision.committed_evidence_locator,
+                "impossibility_reason": revision.impossibility_reason,
+                "instruction": (
+                    "Preserve completed chapters as immutable history. Revise only the "
+                    "unfulfilled remainder of the active Story Arc against the newly approved "
+                    "Book contract."
+                ),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        revised_path = self._revise_current_arc_plan_from_feedback(
+            profile,
+            metadata,
+            revision_request,
+            source_label="approved Book revision",
+        )
+        if revised_path is None:
+            return True
+
+        artifact_paths = [revised_path]
+        if revision.source_loop == "chapter" and metadata.active_chapter_id is not None:
+            route_path, invalidated = (
+                self._invalidate_uncommitted_chapter_after_arc_revision(
+                    metadata,
+                    route_id=revision.route_id,
+                    source_artifact=revision.source_artifact,
+                    revised_arc_path=revised_path,
+                    proposal={
+                        "candidate_run_id": revision.source_candidate_run_id,
+                        "summary": revision.summary,
+                        "contract_field": revision.contract_field,
+                        "contract_revision": revision.base_book_version,
+                        "committed_evidence_locator": (
+                            revision.committed_evidence_locator
+                        ),
+                        "impossibility_reason": revision.impossibility_reason,
+                    },
+                )
+            )
+            artifact_paths.extend([route_path, *invalidated])
+
+        book_revision_storage.mark_book_revision_downstream_completed(
+            self.context.project_path,
+            revision.revision_id,
+            artifact_paths=artifact_paths,
+        )
+        self._emit(
+            metadata,
+            kind="book_revision_downstream_completed",
+            loop_layer="book",
+            atomic_action="apply_approved_book_revision",
+            status="completed",
+            artifact_path=f"book/revisions/{revision.revision_id}/state.json",
+            routing_decision=(
+                "pause_for_arc_review"
+                if metadata.operation_mode == "participatory"
+                else "resume_lower_loop"
+            ),
+            message=(
+                "Approved Book revision was propagated only into uncommitted downstream work."
+            ),
+            payload={
+                "revision_id": revision.revision_id,
+                "artifact_paths": artifact_paths,
+            },
+        )
+        return True
+
+    def _route_cross_loop_proposal(
+        self,
+        metadata: ProjectMetadata,
+        *,
+        loop_layer: LoopLayer,
+        action: str,
+        proposal: dict[str, object],
+        source_artifact: str,
+    ) -> bool:
+        """Validate and execute a Harness-owned upper route.
+
+        Lower Agents and the Evaluator can only submit proposals. This method is the
+        Harness authority boundary that may activate the owning upper Agent.
+        """
+
+        target_owner = proposal.get("target_owner", proposal.get("owner"))
+        if target_owner == "book":
+            return self._route_book_revision_proposal(
+                metadata,
+                loop_layer=loop_layer,
+                action=action,
+                proposal=proposal,
+                source_artifact=source_artifact,
+            )
+
+        rejection = self._story_arc_route_rejection(metadata, loop_layer, proposal)
+        if rejection is not None:
+            self._emit(
+                metadata,
+                kind="cross_loop_route_rejected",
+                loop_layer=loop_layer,
+                atomic_action=action,
+                status="failed",
+                artifact_path=source_artifact,
+                routing_decision="pause",
+                message="Harness rejected automatic cross-Loop routing.",
+                payload={"reason": rejection},
+            )
+            return False
+
+        profile = get_active_profile()
+        if profile is None:
+            self._emit(
+                metadata,
+                kind="cross_loop_route_rejected",
+                loop_layer=loop_layer,
+                atomic_action=action,
+                status="failed",
+                artifact_path=source_artifact,
+                routing_decision="pause",
+                message="Harness could not route the proposal without an active profile.",
+                payload={"reason": "missing_active_profile"},
+            )
+            return False
+
+        route_id = f"route-{uuid4().hex}"
+        self._emit(
+            metadata,
+            kind="cross_loop_route_accepted",
+            loop_layer=loop_layer,
+            atomic_action=action,
+            status="started",
+            artifact_path=source_artifact,
+            routing_decision="activate_story_arc",
+            message="Harness accepted the evidenced blocker and activated Story Arc Agent.",
+            payload={
+                "route_id": route_id,
+                "target_owner": "story_arc",
+                "contract_field": proposal.get("contract_field"),
+                "contract_revision": proposal.get("contract_revision"),
+            },
+        )
+        self._mark_lower_agent_blocked(
+            metadata,
+            {**proposal, "source_artifact": source_artifact},
+            loop_layer=loop_layer,
+        )
+        revision_request = json.dumps(
+            {
+                "route_id": route_id,
+                "lower_loop": loop_layer,
+                "source_artifact": source_artifact,
+                "summary": proposal.get("summary"),
+                "contract_field": proposal.get("contract_field"),
+                "contract_revision": proposal.get("contract_revision"),
+                "committed_evidence_locator": proposal.get(
+                    "committed_evidence_locator"
+                ),
+                "impossibility_reason": proposal.get("impossibility_reason"),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        revised_path = self._revise_current_arc_plan_from_feedback(
+            profile,
+            metadata,
+            revision_request,
+            source_label="Harness-routed Chapter blocker",
+        )
+        if revised_path is None:
+            self._emit(
+                metadata,
+                kind="cross_loop_route_deferred",
+                loop_layer="story_arc",
+                atomic_action="revise_current_arc_plan",
+                status="requested",
+                artifact_path=source_artifact,
+                routing_decision="pause",
+                message="The routed Story Arc revision reached another durable wait.",
+                payload={"route_id": route_id},
+            )
+            return True
+
+        route_path, invalidated = self._invalidate_uncommitted_chapter_after_arc_revision(
+            metadata,
+            route_id=route_id,
+            source_artifact=source_artifact,
+            revised_arc_path=revised_path,
+            proposal=proposal,
+        )
+        self._emit(
+            metadata,
+            kind="cross_loop_route_completed",
+            loop_layer="story_arc",
+            atomic_action="revise_current_arc_plan",
+            status="completed",
+            artifact_path=route_path,
+            routing_decision=(
+                "pause_for_arc_review"
+                if metadata.operation_mode == "participatory"
+                else "retry_chapter"
+            ),
+            message="Story Arc revision passed; only uncommitted Chapter derivatives were invalidated.",
+            payload={
+                "route_id": route_id,
+                "revised_arc_path": revised_path,
+                "invalidated_paths": invalidated,
+            },
+        )
+        return True
+
+    def _route_book_revision_proposal(
+        self,
+        metadata: ProjectMetadata,
+        *,
+        loop_layer: LoopLayer,
+        action: str,
+        proposal: dict[str, object],
+        source_artifact: str,
+    ) -> bool:
+        rejection = self._book_route_rejection(metadata, loop_layer, proposal)
+        if rejection is not None:
+            self._emit(
+                metadata,
+                kind="cross_loop_route_rejected",
+                loop_layer=loop_layer,
+                atomic_action=action,
+                status="failed",
+                artifact_path=source_artifact,
+                routing_decision="pause",
+                message="Harness rejected the proposed Book revision route.",
+                payload={"reason": rejection},
+            )
+            return False
+
+        profile = get_active_profile()
+        if profile is None:
+            self._emit(
+                metadata,
+                kind="cross_loop_route_rejected",
+                loop_layer=loop_layer,
+                atomic_action=action,
+                status="failed",
+                artifact_path=source_artifact,
+                routing_decision="pause",
+                message="Harness could not route the proposal without an active profile.",
+                payload={"reason": "missing_active_profile"},
+            )
+            return False
+
+        book_state = read_json(
+            self.context.project_path / "book" / "state.json",
+            default={},
+        )
+        assert isinstance(book_state, dict)
+        base_book_version = int(book_state["version"])
+        target_direction_version = int(book_state.get("book_direction_version", 1)) + 1
+        route_id = f"route-{uuid4().hex}"
+        self._emit(
+            metadata,
+            kind="cross_loop_route_accepted",
+            loop_layer=loop_layer,
+            atomic_action=action,
+            status="started",
+            artifact_path=source_artifact,
+            routing_decision="activate_book",
+            message="Harness accepted the evidenced blocker and activated Book Agent.",
+            payload={
+                "route_id": route_id,
+                "target_owner": "book",
+                "contract_field": proposal.get("contract_field"),
+                "contract_revision": base_book_version,
+            },
+        )
+        self._mark_lower_agent_blocked(
+            metadata,
+            {**proposal, "source_artifact": source_artifact},
+            loop_layer=loop_layer,
+        )
+
+        setup_state = read_setup_state(self.context.project_path).model_copy(deep=True)
+        setup_state.revision = base_book_version
+        setup_state.candidate_revision_counter = target_direction_version - 1
+        setup_state.direction_draft = _read_text(
+            self.context.project_path / "book" / "direction.md"
+        )
+        confirmed = book_state.get("confirmed_decisions", [])
+        if isinstance(confirmed, list):
+            setup_state.confirmed_decisions = [
+                str(item) for item in confirmed if isinstance(item, str)
+            ]
+        setup_state.unresolved_questions = []
+        setup_state.contradictions = [
+            str(proposal["impossibility_reason"]),
+        ]
+        revision_request = {
+            "route_id": route_id,
+            "source_loop": loop_layer,
+            "source_artifact": source_artifact,
+            "summary": proposal.get("summary"),
+            "contract_field": proposal.get("contract_field"),
+            "contract_revision": proposal.get("contract_revision"),
+            "committed_evidence_locator": proposal.get(
+                "committed_evidence_locator"
+            ),
+            "impossibility_reason": proposal.get("impossibility_reason"),
+            "immutable_history_rule": (
+                "Committed prose and canon cannot be rewritten; revise only future or "
+                "unfulfilled Book instructions."
+            ),
+        }
+        policy = self._resolve_agent_policy(metadata, "book", profile)
+        stream_callback = self._agent_stream_callback(
+            metadata,
+            "book",
+            "revise_book_direction",
+        )
+        try:
+            synthesis, evaluation, review = run_book_revision_agent(
+                self.context.project_path,
+                metadata,
+                setup_state,
+                policy,
+                target_direction_version=target_direction_version,
+                revision_request=revision_request,
+                on_event=self._agent_event_callback(
+                    metadata,
+                    "book",
+                    "revise_book_direction",
+                ),
+                on_text_delta=stream_callback,
+                on_tool_event=stream_callback,
+            )
+        except AgentControlCheckpoint as checkpoint:
+            self._handle_agent_control_checkpoint(
+                metadata,
+                checkpoint,
+                loop_layer="book",
+                action="revise_book_direction",
+            )
+            return True
+        if evaluation.result.outcome != "pass":
+            self._handle_evaluation_control(
+                metadata,
+                evaluation,
+                loop_layer="book",
+                action="revise_book_direction",
+            )
+            return True
+
+        source_loop: Literal["story_arc", "chapter"] = (
+            "chapter" if loop_layer == "chapter" else "story_arc"
+        )
+        revision = book_revision_storage.save_book_revision_candidate(
+            self.context.project_path,
+            route_id=route_id,
+            base_book_version=base_book_version,
+            source_loop=source_loop,
+            source_artifact=source_artifact,
+            source_candidate_run_id=(
+                str(proposal["candidate_run_id"])
+                if isinstance(proposal.get("candidate_run_id"), str)
+                else None
+            ),
+            summary=str(proposal.get("summary", "Book contract revision required.")),
+            contract_field=str(proposal["contract_field"]),
+            committed_evidence_locator=str(proposal["committed_evidence_locator"]),
+            impossibility_reason=str(proposal["impossibility_reason"]),
+            synthesis=synthesis,
+            evaluation=evaluation,
+            review=review,
+            profile_id=policy.profile.id,
+        )
+        if source_loop == "story_arc" and revision.source_candidate_run_id is not None:
+            scope_id = self._story_arc_scope_id(metadata, source_artifact)
+            if scope_id is not None:
+                write_json(
+                    self.context.project_path
+                    / "arcs"
+                    / scope_id
+                    / "book-upstream-resume.json",
+                    {
+                        "schema_version": 1,
+                        "route_id": route_id,
+                        "candidate_run_id": revision.source_candidate_run_id,
+                        "book_revision_id": revision.revision_id,
+                    },
+                )
+        metadata.run_status = "waiting_for_user"
+        write_project_metadata(self.context.project_path, metadata)
+        self._emit(
+            metadata,
+            kind="book_revision_approval_required",
+            loop_layer="book",
+            atomic_action="revise_book_direction",
+            status="requested",
+            artifact_path=revision.candidate.direction_path,
+            routing_decision="await_user_approval",
+            message=(
+                "Book revision passed evaluation and requires explicit user approval, "
+                "including in full-auto mode."
+            ),
+            payload={
+                "revision_id": revision.revision_id,
+                "base_book_version": revision.base_book_version,
+                "candidate_revision": revision.candidate.revision,
+                "evidence_paths": [
+                    revision.candidate.direction_path,
+                    revision.review_path,
+                    revision.verification_path,
+                    f"book/revisions/{revision.revision_id}/state.json",
+                ],
+            },
+        )
+        return True
+
+    def _mark_lower_agent_blocked(
+        self,
+        metadata: ProjectMetadata,
+        proposal: dict[str, object],
+        *,
+        loop_layer: LoopLayer,
+    ) -> None:
+        candidate_run_id = proposal.get("candidate_run_id")
+        if not isinstance(candidate_run_id, str):
+            return
+        if loop_layer == "chapter":
+            scope_id = metadata.active_chapter_id
+        elif loop_layer == "story_arc":
+            source_artifact = proposal.get("source_artifact")
+            scope_id = self._story_arc_scope_id(
+                metadata,
+                source_artifact if isinstance(source_artifact, str) else "",
+            )
+        else:
+            return
+        if scope_id is None:
+            return
+        identity = AgentIdentity(
+            project_id=metadata.project_id,
+            role=loop_layer,
+            scope_id=scope_id,
+        )
+        state = read_agent_state(self.context.project_path, identity)
+        if state.candidate_run_id != candidate_run_id:
+            return
+        state.lifecycle = "blocked"
+        target_owner = proposal.get("target_owner", proposal.get("owner"))
+        state.phase = f"waiting_for_{target_owner}_revision"
+        state.summary = f"Harness routed an evidenced blocker to {target_owner} Agent."
+        save_agent_state(self.context.project_path, state)
+
+    @staticmethod
+    def _story_arc_scope_id(
+        metadata: ProjectMetadata,
+        source_artifact: str,
+    ) -> str | None:
+        if metadata.active_arc_id is not None:
+            return metadata.active_arc_id
+        parts = Path(source_artifact).parts
+        if len(parts) >= 2 and parts[0] == "arcs":
+            return parts[1]
+        return None
+
+    @staticmethod
+    def _story_arc_resume_candidate_run_id(arc_path: Path) -> str | None:
+        payload = read_json(arc_path / "book-upstream-resume.json", default={})
+        if not isinstance(payload, dict):
+            return None
+        candidate_run_id = payload.get("candidate_run_id")
+        return candidate_run_id if isinstance(candidate_run_id, str) else None
+
+    def _book_route_rejection(
+        self,
+        metadata: ProjectMetadata,
+        loop_layer: LoopLayer,
+        proposal: dict[str, object],
+    ) -> str | None:
+        if loop_layer not in {"story_arc", "chapter"}:
+            return "book_route_requires_lower_loop_source"
+        if proposal.get("target_owner", proposal.get("owner")) != "book":
+            return "book_route_requires_book_owner"
+        if not isinstance(proposal.get("candidate_run_id"), str):
+            return "book_route_requires_source_candidate_run"
+        if book_revision_storage.read_pending_book_revision(self.context.project_path):
+            return "book_revision_already_awaiting_approval"
+
+        book_state = read_json(
+            self.context.project_path / "book" / "state.json",
+            default={},
+        )
+        current_revision = (
+            book_state.get("version") if isinstance(book_state, dict) else None
+        )
+        if not isinstance(current_revision, int):
+            return "missing_book_contract_revision"
+        if proposal.get("contract_revision") != current_revision:
+            return "stale_or_unknown_book_revision"
+
+        locator = proposal.get("committed_evidence_locator")
+        allowed_locators = {
+            "book/direction.md",
+            "book/settings.md",
+            "book/outline.md",
+            "book/constraints.json",
+            "book/state.json",
+        }
+        if locator not in allowed_locators:
+            return "book_route_requires_approved_book_evidence"
+        assert isinstance(locator, str)
+        try:
+            evidence_path = resolve_artifact_path(self.context.project_path, locator)
+        except ValueError:
+            return "invalid_book_evidence_path"
+        if not evidence_path.is_file():
+            return "missing_book_evidence"
+        if not isinstance(proposal.get("contract_field"), str) or not isinstance(
+            proposal.get("impossibility_reason"), str
+        ):
+            return "incomplete_book_contract_evidence"
+
+        if loop_layer == "chapter" and metadata.active_chapter_id is not None:
+            chapter_path = (
+                self.context.project_path / "chapters" / metadata.active_chapter_id
+            )
+            if (chapter_path / "final.md").exists() or (
+                chapter_path / "committed_state_patch.json"
+            ).exists():
+                return "committed_chapter_work_cannot_be_invalidated"
+        return None
+
+    def _story_arc_route_rejection(
+        self,
+        metadata: ProjectMetadata,
+        loop_layer: LoopLayer,
+        proposal: dict[str, object],
+    ) -> str | None:
+        if loop_layer != "chapter" or proposal.get("target_owner", proposal.get("owner")) != "story_arc":
+            return "automatic_route_not_supported_for_loop_pair"
+        if metadata.active_arc_id is None or metadata.active_chapter_id is None:
+            return "missing_active_arc_or_chapter"
+
+        chapter_path = self.context.project_path / "chapters" / metadata.active_chapter_id
+        if (chapter_path / "final.md").exists() or (
+            chapter_path / "committed_state_patch.json"
+        ).exists():
+            return "committed_chapter_work_cannot_be_invalidated"
+
+        state_payload = read_json(
+            self.context.project_path / "arcs" / metadata.active_arc_id / "state.json",
+            default={},
+        )
+        current_revision = (
+            state_payload.get("version") if isinstance(state_payload, dict) else None
+        )
+        if proposal.get("contract_revision") != current_revision:
+            return "stale_or_unknown_story_arc_revision"
+
+        locator = proposal.get("committed_evidence_locator")
+        expected_locator = f"arcs/{metadata.active_arc_id}/plan.md"
+        if locator != expected_locator:
+            return "story_arc_route_requires_current_plan_evidence"
+        try:
+            evidence_path = resolve_artifact_path(
+                self.context.project_path,
+                expected_locator,
+            )
+        except ValueError:
+            return "invalid_story_arc_evidence_path"
+        if not evidence_path.is_file():
+            return "missing_story_arc_evidence"
+        if not isinstance(proposal.get("contract_field"), str) or not isinstance(
+            proposal.get("impossibility_reason"), str
+        ):
+            return "incomplete_story_arc_contract_evidence"
+        return None
+
+    def _invalidate_uncommitted_chapter_after_arc_revision(
+        self,
+        metadata: ProjectMetadata,
+        *,
+        route_id: str,
+        source_artifact: str,
+        revised_arc_path: str,
+        proposal: dict[str, object],
+    ) -> tuple[str, list[str]]:
+        chapter_id = metadata.active_chapter_id
+        if chapter_id is None:
+            raise ValueError("Cannot invalidate Chapter derivatives without an active chapter.")
+        chapter_path = self.context.project_path / "chapters" / chapter_id
+        if (chapter_path / "final.md").exists() or (
+            chapter_path / "committed_state_patch.json"
+        ).exists():
+            raise ValueError("Harness cannot invalidate committed Chapter artifacts.")
+
+        relative_names = [
+            "context_snapshot.json",
+            "goal.md",
+            "draft.md",
+            "observations.json",
+            "candidate_state_patch.json",
+            "agent_candidate.json",
+            "evaluation.json",
+            "review.md",
+            "verification.json",
+        ]
+        invalidated = [
+            f"chapters/{chapter_id}/{name}"
+            for name in relative_names
+            if (chapter_path / name).is_file()
+        ]
+        route_relative = (
+            Path("chapters") / chapter_id / "upstream-routes" / f"{route_id}.json"
+        )
+        write_json(
+            self.context.project_path / route_relative,
+            {
+                "schema_version": 1,
+                "route_id": route_id,
+                "source_artifact": source_artifact,
+                "revised_arc_path": revised_arc_path,
+                "proposal": proposal,
+                "invalidated_paths": invalidated,
+                "committed_artifacts_touched": False,
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+        )
+        for name in relative_names:
+            (chapter_path / name).unlink(missing_ok=True)
+        candidate_run_id = proposal.get("candidate_run_id")
+        if isinstance(candidate_run_id, str) and candidate_run_id:
+            write_json(
+                chapter_path / "upstream-resume.json",
+                {
+                    "schema_version": 1,
+                    "route_id": route_id,
+                    "candidate_run_id": candidate_run_id,
+                    "revised_arc_path": revised_arc_path,
+                },
+            )
+        return route_relative.as_posix(), invalidated
+
+    @staticmethod
+    def _resolve_agent_policy(
+        metadata: ProjectMetadata,
+        role: Literal["book", "story_arc", "chapter"],
+        active_profile: LlmProfile | None,
+    ) -> ResolvedAgentPolicy:
+        try:
+            return resolve_agent_policy(metadata, role)
+        except ValueError:
+            override_id = (
+                metadata.agent_policy.book_profile_id
+                if role == "book"
+                else (
+                    metadata.agent_policy.story_arc_profile_id
+                    if role == "story_arc"
+                    else metadata.agent_policy.chapter_profile_id
+                )
+            )
+            if (
+                active_profile is None
+                or override_id is not None
+                or metadata.agent_policy.evaluator_profile_id is not None
+            ):
+                raise
+            return ResolvedAgentPolicy(
+                role=role,
+                profile=active_profile,
+                evaluator_profile=active_profile,
+                max_turns=(
+                    metadata.agent_policy.book_max_turns
+                    if role == "book"
+                    else (
+                        metadata.agent_policy.story_arc_max_turns
+                        if role == "story_arc"
+                        else metadata.agent_policy.chapter_max_turns
+                    )
+                ),
+                tool_schema_repair_limit=metadata.agent_policy.tool_schema_repair_limit,
+                semantic_revision_limit=metadata.agent_policy.semantic_revision_limit,
+                transport_retry_limit=metadata.agent_policy.transport_retry_limit,
+            )
 
     def _bump_book_feedback_state(self) -> None:
         state_path = self.context.project_path / "book" / "state.json"
@@ -950,207 +2161,6 @@ class HarnessOrchestrator:
         state["feedback_path"] = "book/feedback.md"
         state["feedback_updated_at"] = datetime.now(UTC).isoformat()
         write_json(state_path, state)
-
-    def _generate_chapter_goal(
-        self,
-        profile: LlmProfile,
-        metadata: ProjectMetadata,
-        chapter_id: str,
-        chapter_path: Path,
-    ) -> None:
-        self._emit_started(metadata, "generate_chapter_goal", f"Generating goal for {chapter_id}.")
-        result = self._call_text_action(
-            profile,
-            metadata,
-            action="generate_chapter_goal",
-            system="You are Novelpilot's chapter loop. Produce concise visible planning output.",
-            user="\n\n".join(
-                [
-                    f"Write the chapter goal and contract for {chapter_id}.",
-                    "Include required scene movement, character pressure, continuity constraints, "
-                    "and verification criteria.",
-                    "Use the assembled context below. Treat excluded sources as unavailable.",
-                    "Assembled context:\n"
-                    + self._assembled_context_block(chapter_path / "context_snapshot.json"),
-                    f"Arc plan:\n{_read_text(self.context.project_path / 'arcs' / (metadata.active_arc_id or 'arc-001') / 'plan.md')}",
-                ]
-            ),
-        )
-        write_text_file(chapter_path / "goal.md", result.content.strip() + "\n")
-        self._finish_artifact_step(
-            metadata,
-            kind="artifact_written",
-            atomic_action="generate_chapter_goal",
-            artifact_path=f"chapters/{chapter_id}/goal.md",
-            message=f"Chapter goal written for {chapter_id}.",
-            payload=_llm_usage_payload(profile, result),
-        )
-
-    def _draft_chapter(
-        self,
-        profile: LlmProfile,
-        metadata: ProjectMetadata,
-        chapter_id: str,
-        chapter_path: Path,
-    ) -> None:
-        self._emit_started(metadata, "draft_chapter", f"Drafting {chapter_id}.")
-        result = self._call_text_action(
-            profile,
-            metadata,
-            action="draft_chapter",
-            system=(
-                "You are Novelpilot's drafting action. Write only visible chapter prose, "
-                "not analysis."
-            ),
-            user="\n\n".join(
-                [
-                    f"Draft {chapter_id} according to the chapter contract.",
-                    f"Goal:\n{_read_text(chapter_path / 'goal.md')}",
-                    f"Book settings:\n{_read_text(self.context.project_path / 'book' / 'settings.md')}",
-                ]
-            ),
-        )
-        write_text_file(chapter_path / "draft.md", result.content.strip() + "\n")
-        self._finish_artifact_step(
-            metadata,
-            kind="artifact_written",
-            atomic_action="draft_chapter",
-            artifact_path=f"chapters/{chapter_id}/draft.md",
-            message=f"Candidate draft written for {chapter_id}.",
-            payload=_llm_usage_payload(profile, result),
-        )
-
-    def _extract_observations(
-        self,
-        profile: LlmProfile,
-        metadata: ProjectMetadata,
-        chapter_id: str,
-        chapter_path: Path,
-    ) -> None:
-        self._emit_started(
-            metadata,
-            "extract_candidate_observations",
-            f"Extracting candidate observations for {chapter_id}.",
-        )
-        result = self._call_text_action(
-            profile,
-            metadata,
-            action="extract_candidate_observations",
-            system=(
-                "Extract candidate observations as JSON only. These are not canon and must "
-                "not be treated as committed state."
-            ),
-            user="\n\n".join(
-                [
-                    "Return JSON matching this shape: "
-                    '{"schema_version":1,"status":"candidate","based_on":"chapters/.../draft.md",'
-                    '"events":[],"character_changes":[],"relationship_changes":[],'
-                    '"world_fact_candidates":[],"foreshadowing_candidates":[],'
-                    '"requires_commit":true}',
-                    f"Draft:\n{_read_text(chapter_path / 'draft.md')}",
-                ]
-            ),
-        )
-        payload = _parse_json_object(result.content) or {}
-        payload["based_on"] = f"chapters/{chapter_id}/draft.md"
-        try:
-            observations = CandidateObservations.model_validate(payload)
-        except ValueError:
-            observations = CandidateObservations(
-                based_on=f"chapters/{chapter_id}/draft.md",
-                events=[{"raw_observation": result.content.strip()}],
-            )
-        write_json(chapter_path / "observations.json", observations.model_dump(mode="json"))
-        self._finish_artifact_step(
-            metadata,
-            kind="artifact_written",
-            atomic_action="extract_candidate_observations",
-            artifact_path=f"chapters/{chapter_id}/observations.json",
-            message=f"Candidate observations written for {chapter_id}.",
-            payload=_llm_usage_payload(profile, result),
-        )
-
-    def _review_chapter(
-        self,
-        profile: LlmProfile,
-        metadata: ProjectMetadata,
-        chapter_id: str,
-        chapter_path: Path,
-    ) -> None:
-        self._emit_started(metadata, "semantic_review", f"Reviewing {chapter_id}.")
-        result = self._call_text_action(
-            profile,
-            metadata,
-            action="semantic_review",
-            system=(
-                "You are Novelpilot's semantic review action. Produce a readable review with "
-                "issues, evidence, literary signals, and revision suggestions."
-            ),
-            user="\n\n".join(
-                [
-                    f"Review {chapter_id} against its goal.",
-                    f"Goal:\n{_read_text(chapter_path / 'goal.md')}",
-                    f"Draft:\n{_read_text(chapter_path / 'draft.md')}",
-                    f"Candidate observations:\n{_read_text(chapter_path / 'observations.json')}",
-                ]
-            ),
-        )
-        write_text_file(chapter_path / "review.md", result.content.strip() + "\n")
-        self._finish_artifact_step(
-            metadata,
-            kind="artifact_written",
-            atomic_action="semantic_review",
-            artifact_path=f"chapters/{chapter_id}/review.md",
-            message=f"Semantic review written for {chapter_id}.",
-            payload=_llm_usage_payload(profile, result),
-        )
-
-    def _verify_chapter(
-        self,
-        profile: LlmProfile,
-        metadata: ProjectMetadata,
-        chapter_id: str,
-        chapter_path: Path,
-    ) -> None:
-        self._emit_started(metadata, "verify_chapter", f"Verifying {chapter_id}.")
-        result = self._call_text_action(
-            profile,
-            metadata,
-            action="verify_chapter",
-            system=(
-                "You are Novelpilot's chapter verifier. Return JSON only. "
-                "Judge whether the candidate chapter satisfies its goal and can be committed."
-            ),
-            user="\n\n".join(
-                [
-                    "Return JSON with keys: goal_satisfied, commit_allowed, routing_decision, "
-                    "signals, reasons.",
-                    "routing_decision must be one of: commit, revise, rewrite, pause, "
-                    "escalate_to_arc, escalate_to_book.",
-                    "signals must be objects with name, status, evidence. "
-                    "status must be passed, failed, or warning.",
-                    f"Chapter id: {chapter_id}",
-                    f"Goal:\n{_read_text(chapter_path / 'goal.md')}",
-                    f"Draft:\n{_read_text(chapter_path / 'draft.md')}",
-                    f"Candidate observations:\n{_read_text(chapter_path / 'observations.json')}",
-                    f"Semantic review:\n{_read_text(chapter_path / 'review.md')}",
-                ]
-            ),
-        )
-        verification = _chapter_verification_from_llm(
-            chapter_id,
-            result.content,
-        )
-        write_json(chapter_path / "verification.json", verification.model_dump(mode="json"))
-        self._finish_artifact_step(
-            metadata,
-            kind="verification_completed",
-            atomic_action="verify_chapter",
-            artifact_path=f"chapters/{chapter_id}/verification.json",
-            message=f"Verification completed for {chapter_id}.",
-            routing_decision=verification.routing_decision,
-            payload=_llm_usage_payload(profile, result),
-        )
 
     def _write_final_chapter(
         self,
@@ -1188,110 +2198,6 @@ class HarnessOrchestrator:
             routing_decision="commit",
         )
 
-    def _generate_candidate_state_patch(
-        self,
-        profile: LlmProfile,
-        metadata: ProjectMetadata,
-        chapter_id: str,
-        chapter_path: Path,
-    ) -> None:
-        self._emit_started(
-            metadata,
-            "generate_candidate_state_patch",
-            f"Generating candidate state patch for {chapter_id}.",
-        )
-        canon_summary = _read_canon_summary(self.context.project_path)
-        result = self._call_text_action(
-            profile,
-            metadata,
-            action="generate_candidate_state_patch",
-            system=(
-                "Generate candidate_state_patch.json as JSON only. The patch is candidate "
-                "material; the harness will validate it before canon changes."
-            ),
-            user="\n\n".join(
-                [
-                    "Allowed target_file values: canon/characters.json, "
-                    "canon/relationships.json, canon/world_facts.json, canon/foreshadowing.json.",
-                    "Each operation needs op, target_file, target_id, expected_version, value, "
-                    "evidence, and rationale. Evidence quotes from final.md must be exact substrings.",
-                    f"Final chapter path: chapters/{chapter_id}/final.md",
-                    f"Final chapter:\n{_read_text(chapter_path / 'final.md')}",
-                    f"Candidate observations:\n{_read_text(chapter_path / 'observations.json')}",
-                    f"Current canon:\n{canon_summary}",
-                ]
-            ),
-        )
-        based_on = {
-            "chapter_final": f"chapters/{chapter_id}/final.md",
-            "observations": f"chapters/{chapter_id}/observations.json",
-        }
-        payload = _parse_json_object(result.content)
-        if payload is None:
-            self._reject_candidate_state_patch_generation(
-                metadata,
-                chapter_id,
-                chapter_path,
-                ["State patch generator output could not be parsed as JSON."],
-                payload=_llm_usage_payload(profile, result),
-            )
-            return
-
-        payload["based_on"] = based_on
-        try:
-            patch = CandidateStatePatch.model_validate(payload)
-        except ValueError as exc:
-            self._reject_candidate_state_patch_generation(
-                metadata,
-                chapter_id,
-                chapter_path,
-                ["State patch generator output failed schema validation: " + _error_summary(exc)],
-                payload=_llm_usage_payload(profile, result),
-            )
-            return
-        write_json(chapter_path / "candidate_state_patch.json", patch.model_dump(mode="json"))
-        self._finish_artifact_step(
-            metadata,
-            kind="state_patch_candidate_created",
-            atomic_action="generate_candidate_state_patch",
-            artifact_path=f"chapters/{chapter_id}/candidate_state_patch.json",
-            message=f"Candidate state patch written for {chapter_id}.",
-            payload=_llm_usage_payload(profile, result),
-        )
-
-    def _reject_candidate_state_patch_generation(
-        self,
-        metadata: ProjectMetadata,
-        chapter_id: str,
-        chapter_path: Path,
-        reasons: list[str],
-        *,
-        payload: dict[str, object] | None = None,
-    ) -> None:
-        metadata.run_status = "waiting_for_user"
-        write_project_metadata(self.context.project_path, metadata)
-        write_json(
-            chapter_path / "state_patch_rejection.json",
-            PatchValidationResult(
-                schema="failed",
-                versions="passed",
-                evidence="passed",
-                conflicts="passed",
-                reasons=reasons,
-            ).model_dump(mode="json", by_alias=True),
-        )
-        self._emit(
-            metadata,
-            kind="state_patch_rejected",
-            loop_layer="chapter",
-            atomic_action="generate_candidate_state_patch",
-            status="failed",
-            artifact_path=f"chapters/{chapter_id}/state_patch_rejection.json",
-            routing_decision="pause",
-            message=f"Candidate state patch generation failed for {chapter_id}.",
-            payload={**(payload or {}), "reasons": reasons},
-        )
-
     def _commit_state_patch(
         self,
         metadata: ProjectMetadata,
@@ -1313,7 +2219,22 @@ class HarnessOrchestrator:
                 chapter_path / "committed_state_patch.json",
             )
         except PatchValidationError as exc:
-            metadata.run_status = "waiting_for_user"
+            repair_state = read_json(
+                chapter_path / "state_patch_repair_state.json",
+                default={},
+            )
+            attempts = (
+                repair_state.get("attempts", 0)
+                if isinstance(repair_state, dict)
+                else 0
+            )
+            repair_limit = metadata.agent_policy.semantic_revision_limit
+            auto_repair = (
+                metadata.operation_mode == "full_auto"
+                and attempts < repair_limit
+                and _is_evidence_quote_repairable(exc.result.reasons)
+            )
+            metadata.run_status = "running" if auto_repair else "waiting_for_user"
             write_project_metadata(self.context.project_path, metadata)
             write_json(
                 chapter_path / "state_patch_rejection.json",
@@ -1326,9 +2247,15 @@ class HarnessOrchestrator:
                 atomic_action="commit_state_patch",
                 status="failed",
                 artifact_path=f"chapters/{chapter_id}/state_patch_rejection.json",
-                routing_decision="pause",
+                routing_decision=(
+                    "repair_current_candidate" if auto_repair else "pause"
+                ),
                 message=f"Candidate state patch rejected for {chapter_id}.",
-                payload={"reasons": exc.result.reasons},
+                payload={
+                    "reasons": exc.result.reasons,
+                    "repair_attempts": attempts,
+                    "repair_limit": repair_limit,
+                },
             )
             return
 
@@ -1342,49 +2269,133 @@ class HarnessOrchestrator:
             payload={"operation_count": len(committed.operations)},
         )
 
-    def _call_text_action(
+    def _repair_state_patch_evidence(
         self,
         profile: LlmProfile,
         metadata: ProjectMetadata,
-        *,
-        action: str,
-        system: str,
-        user: str,
-    ) -> ChatResult:
-        emitted_delta = False
-        feedback_block = self._feedback_prompt_block(
+        chapter_id: str,
+        chapter_path: Path,
+    ) -> None:
+        state_path = chapter_path / "state_patch_repair_state.json"
+        state_payload = read_json(state_path, default={})
+        state = state_payload if isinstance(state_payload, dict) else {}
+        attempts = state.get("attempts", 0)
+        attempts = attempts if isinstance(attempts, int) else 0
+        rejection_payload = read_json(
+            chapter_path / "state_patch_rejection.json",
+            default={},
+        )
+        reasons = (
+            rejection_payload.get("reasons", [])
+            if isinstance(rejection_payload, dict)
+            else []
+        )
+        repair_limit = metadata.agent_policy.semantic_revision_limit
+        if (
+            metadata.operation_mode != "full_auto"
+            or attempts >= repair_limit
+            or not _is_evidence_quote_repairable(reasons)
+        ):
+            metadata.run_status = "waiting_for_user"
+            write_project_metadata(self.context.project_path, metadata)
+            return
+
+        self._emit_started(
+            metadata,
+            "repair_state_patch_evidence",
+            f"Repairing rejected state-patch evidence for {chapter_id}.",
+        )
+        policy = self._resolve_agent_policy(metadata, "chapter", profile)
+        instruction = json.dumps(
             {
-                "apply_to_current_chapter_context",
-                "revise_current_arc_plan",
-                "escalate_to_book_loop",
-            }
+                "chapter_id": chapter_id,
+                "final_markdown": _read_text(chapter_path / "final.md"),
+                "candidate_state_patch": read_json(
+                    chapter_path / "candidate_state_patch.json"
+                ),
+                "rejection_reasons": reasons,
+            },
+            ensure_ascii=False,
         )
-        effective_user = "\n\n".join(_without_empty([user, feedback_block]))
-
-        def on_text_delta(chunk: ChatChunk) -> None:
-            nonlocal emitted_delta
-            emitted_delta = True
-            self._emit_model_output_delta(metadata, "chapter", action, chunk.text_delta)
-
-        result = call_llm(
-            profile,
-            ChatRequest(
-                profile_id=profile.id,
-                messages=[
-                    ChatMessage(role="system", content=system),
-                    ChatMessage(role="user", content=effective_user),
-                ],
-                metadata={
-                    "loop_layer": "chapter",
-                    "atomic_action": action,
-                    "project_id": metadata.project_id,
-                    "on_text_delta": on_text_delta,
-                },
-            ),
+        stream_callback = self._agent_stream_callback(
+            metadata,
+            "chapter",
+            "repair_state_patch_evidence",
         )
-        if not emitted_delta:
-            self._emit_model_output(metadata, "chapter", action, result.content)
-        return result
+        try:
+            repair = run_chapter_patch_evidence_repair_agent(
+                self.context.project_path,
+                metadata,
+                policy,
+                chapter_id=chapter_id,
+                expected_revision=attempts,
+                instruction=instruction,
+                on_event=self._agent_event_callback(
+                    metadata,
+                    "chapter",
+                    "repair_state_patch_evidence",
+                ),
+                on_text_delta=stream_callback,
+                on_tool_event=stream_callback,
+            )
+        except AgentControlCheckpoint as checkpoint:
+            self._handle_agent_control_checkpoint(
+                metadata,
+                checkpoint,
+                loop_layer="chapter",
+                action="repair_state_patch_evidence",
+            )
+            return
+
+        attempt_number = attempts + 1
+        state = {
+            "schema_version": 1,
+            "attempts": attempt_number,
+            "limit": repair_limit,
+            "last_candidate_artifact": repair.candidate_artifact_path,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        patch_document = json.dumps(
+            repair.patch.model_dump(mode="json"),
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n"
+        commit_file_transaction(
+            self.context.project_path,
+            kind=f"chapter-state-patch-repair-{chapter_id}-{attempt_number}",
+            files={
+                f"chapters/{chapter_id}/candidate_state_patch.json": patch_document,
+                f"chapters/{chapter_id}/state_patch_repair_state.json": (
+                    json.dumps(state, ensure_ascii=False, indent=2) + "\n"
+                ),
+                (
+                    f"chapters/{chapter_id}/state_patch_repairs/"
+                    f"attempt-{attempt_number:03d}/rejection.json"
+                ): json.dumps(rejection_payload, ensure_ascii=False, indent=2) + "\n",
+                (
+                    f"chapters/{chapter_id}/state_patch_repairs/"
+                    f"attempt-{attempt_number:03d}/candidate_state_patch.json"
+                ): patch_document,
+            },
+        )
+        (chapter_path / "state_patch_rejection.json").unlink(missing_ok=True)
+        metadata.run_status = "running"
+        write_project_metadata(self.context.project_path, metadata)
+        self._emit(
+            metadata,
+            kind="state_patch_evidence_repaired",
+            loop_layer="chapter",
+            atomic_action="repair_state_patch_evidence",
+            status="completed",
+            artifact_path=f"chapters/{chapter_id}/candidate_state_patch.json",
+            routing_decision="retry_commit",
+            message=f"Rejected state-patch evidence repaired for {chapter_id}.",
+            payload={
+                "repair_attempt": attempt_number,
+                "repair_limit": repair_limit,
+                "candidate_artifact": repair.candidate_artifact_path,
+            },
+        )
 
     def _call_feedback_llm_action(
         self,
@@ -1670,6 +2681,7 @@ def _next_arc_id(project_path: Path) -> str:
     arcs_path = project_path / "arcs"
     arcs_path.mkdir(parents=True, exist_ok=True)
     existing_numbers: list[int] = []
+    reusable_ids: list[str] = []
     for entry in arcs_path.iterdir():
         if not entry.is_dir() or not entry.name.startswith("arc-"):
             continue
@@ -1677,41 +2689,26 @@ def _next_arc_id(project_path: Path) -> str:
             existing_numbers.append(int(entry.name.removeprefix("arc-")))
         except ValueError:
             continue
+        if not (entry / "plan.md").exists() and not (entry / "state.json").exists():
+            reusable_ids.append(entry.name)
+    if reusable_ids:
+        return sorted(reusable_ids)[0]
     next_number = max(existing_numbers, default=0) + 1
     return f"arc-{next_number:03d}"
 
 
-def _parse_json_object(text: str) -> dict[str, object] | None:
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        stripped = stripped.strip("`")
-        if stripped.startswith("json"):
-            stripped = stripped[4:].strip()
-    decoder = json.JSONDecoder()
-    for index, char in enumerate(stripped):
-        if char != "{":
-            continue
-        try:
-            value, _ = decoder.raw_decode(stripped[index:])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            return value
-    return None
-
-
-def _story_arc_plan_from_llm(content: str) -> StoryArcPlanProposal:
-    payload = _parse_json_object(content)
-    if payload is None:
-        raise ValueError("Story arc planner output could not be parsed as JSON.")
-    try:
-        proposal = StoryArcPlanProposal.model_validate(payload)
-    except ValueError as exc:
-        raise ValueError("Story arc planner output did not match the required schema.") from exc
-    plan_markdown = proposal.plan_markdown.strip()
-    if not plan_markdown:
-        raise ValueError("Story arc planner returned an empty Markdown plan.")
-    return proposal.model_copy(update={"plan_markdown": plan_markdown})
+def _is_evidence_quote_repairable(reasons: object) -> bool:
+    return (
+        isinstance(reasons, list)
+        and bool(reasons)
+        and all(
+            isinstance(reason, str)
+            and reason.startswith("Operation ")
+            and " evidence " in reason
+            and " quote " in reason
+            for reason in reasons
+        )
+    )
 
 
 def _text_chunks(text: str, chunk_size: int = 1000) -> list[str]:
@@ -1722,94 +2719,6 @@ def _text_chunks(text: str, chunk_size: int = 1000) -> list[str]:
 
 def _without_empty(parts: list[str]) -> list[str]:
     return [part for part in parts if part.strip()]
-
-
-def _chapter_verification_from_llm(
-    chapter_id: str,
-    content: str,
-) -> ChapterVerification:
-    payload = _parse_json_object(content)
-    if payload is None:
-        return _failed_chapter_verification(
-            chapter_id,
-            "Verifier output could not be parsed as JSON; chapter must be retried.",
-        )
-
-    signals = _verification_signals_from_payload(payload.get("signals"))
-    if not signals:
-        signals = [
-            VerificationSignal(
-                name="semantic_verifier_payload",
-                status="warning",
-                evidence="Verifier returned no structured signals.",
-            )
-        ]
-
-    goal_satisfied = _bool_value(payload.get("goal_satisfied"), False)
-    commit_allowed = goal_satisfied and _bool_value(payload.get("commit_allowed"), False)
-    routing_decision = _routing_decision_value(
-        payload.get("routing_decision"),
-        "commit" if commit_allowed else "rewrite",
-    )
-    raw_reasons = payload.get("reasons")
-    reasons = (
-        [reason for reason in raw_reasons if isinstance(reason, str) and reason.strip()]
-        if isinstance(raw_reasons, list)
-        else []
-    )
-    if not isinstance(payload.get("goal_satisfied"), bool):
-        reasons.append("Verifier output is missing boolean goal_satisfied.")
-    if not isinstance(payload.get("commit_allowed"), bool):
-        reasons.append("Verifier output is missing boolean commit_allowed.")
-    if not commit_allowed and routing_decision == "commit":
-        routing_decision = "rewrite"
-        reasons.append(
-            "Verifier cannot route to commit when goal_satisfied or commit_allowed is false."
-        )
-
-    try:
-        return ChapterVerification(
-            chapter_id=chapter_id,
-            goal_satisfied=goal_satisfied,
-            commit_allowed=commit_allowed,
-            routing_decision=routing_decision,
-            signals=[
-                *signals,
-                VerificationSignal(
-                    name="candidate_boundary",
-                    status="passed",
-                    evidence="observations.json remains candidate-only and has not updated canon.",
-                ),
-            ],
-            reasons=reasons,
-        )
-    except ValueError as exc:
-        return _failed_chapter_verification(
-            chapter_id,
-            "Verifier output failed schema validation: " + _error_summary(exc),
-        )
-
-
-def _failed_chapter_verification(chapter_id: str, reason: str) -> ChapterVerification:
-    return ChapterVerification(
-        chapter_id=chapter_id,
-        goal_satisfied=False,
-        commit_allowed=False,
-        routing_decision="rewrite",
-        signals=[
-            VerificationSignal(
-                name="semantic_verifier_payload",
-                status="failed",
-                evidence=reason,
-            ),
-            VerificationSignal(
-                name="candidate_boundary",
-                status="passed",
-                evidence="observations.json remains candidate-only and has not updated canon.",
-            ),
-        ],
-        reasons=[reason],
-    )
 
 
 def _llm_usage_payload(
@@ -1824,52 +2733,6 @@ def _llm_usage_payload(
     if extra is not None:
         payload.update(extra)
     return payload
-
-
-def _verification_signals_from_payload(value: Any) -> list[VerificationSignal]:
-    if not isinstance(value, list):
-        return []
-
-    signals: list[VerificationSignal] = []
-    for item in value:
-        if not isinstance(item, dict):
-            continue
-        name = item.get("name")
-        status = item.get("status")
-        if not isinstance(name, str) or status not in {"passed", "failed", "warning"}:
-            continue
-        evidence = item.get("evidence")
-        signals.append(
-            VerificationSignal(
-                name=name,
-                status=status,
-                evidence=evidence if isinstance(evidence, str) else None,
-            )
-        )
-    return signals
-
-
-def _bool_value(value: Any, fallback: bool) -> bool:
-    return value if isinstance(value, bool) else fallback
-
-
-def _error_summary(exc: ValueError) -> str:
-    return str(exc).splitlines()[0]
-
-
-def _routing_decision_value(
-    value: Any,
-    fallback: ChapterRoutingDecision,
-) -> ChapterRoutingDecision:
-    allowed: set[ChapterRoutingDecision] = {
-        "commit",
-        "revise",
-        "rewrite",
-        "pause",
-        "escalate_to_arc",
-        "escalate_to_book",
-    }
-    return value if isinstance(value, str) and value in allowed else fallback
 
 
 def _route_feedback(metadata: ProjectMetadata, feedback: str) -> str:

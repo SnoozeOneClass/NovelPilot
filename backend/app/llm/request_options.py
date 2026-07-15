@@ -1,7 +1,16 @@
 from typing import Any
 
 
-PROTECTED_REQUEST_FIELDS = {"model", "messages", "system", "stream"}
+PROTECTED_REQUEST_FIELDS = {
+    "model",
+    "messages",
+    "system",
+    "stream",
+    "tools",
+    "tool_choice",
+    "response_format",
+    "output_config",
+}
 
 
 def merge_request_options(
@@ -15,4 +24,6 @@ def merge_request_options(
     for field in PROTECTED_REQUEST_FIELDS:
         if field in base_payload:
             payload[field] = base_payload[field]
+        else:
+            payload.pop(field, None)
     return {key: value for key, value in payload.items() if value is not None}

@@ -1,5 +1,8 @@
+from hashlib import sha256
+
 from app.core.config import LLM_PROFILES_PATH, ensure_runtime_dirs
 from app.schemas.profiles import (
+    LlmCapabilitySnapshot,
     LlmProfile,
     LlmProfilePublic,
     LlmProfileUpsert,
@@ -20,6 +23,11 @@ def _profile_to_storage(profile: LlmProfile) -> dict[str, object]:
         "model": profile.model,
         "request_options": profile.request_options,
         "enabled": profile.enabled,
+        "capability_test": (
+            profile.capability_test.model_dump(mode="json")
+            if profile.capability_test is not None
+            else None
+        ),
     }
 
 
@@ -75,7 +83,10 @@ def upsert_profile(payload: LlmProfileUpsert) -> LlmProfilePublic:
     profile_payload = payload.model_dump()
     profile_payload["api_key"] = api_key
     profile_payload["request_options"] = request_options
+    profile_payload["capability_test"] = None
     profile = LlmProfile(**profile_payload)
+    if existing is not None and profile_fingerprint(existing) == profile_fingerprint(profile):
+        profile.capability_test = existing.capability_test
     remaining = [item for item in document.profiles if item.id != profile.id]
     remaining.append(profile)
     document.profiles = sorted(remaining, key=lambda item: item.name.lower())
@@ -83,6 +94,40 @@ def upsert_profile(payload: LlmProfileUpsert) -> LlmProfilePublic:
         document.active_profile_id = profile.id
     save_profiles(document)
     return to_public_profile(profile)
+
+
+def record_capability_test(
+    profile_id: str,
+    capability_test: LlmCapabilitySnapshot,
+) -> LlmProfilePublic:
+    document = load_profiles()
+    profile = next((item for item in document.profiles if item.id == profile_id), None)
+    if profile is None:
+        raise KeyError(profile_id)
+    if capability_test.profile_fingerprint != profile_fingerprint(profile):
+        raise ValueError("Capability result does not match the current profile configuration.")
+    profile.capability_test = capability_test
+    save_profiles(document)
+    return to_public_profile(profile)
+
+
+def profile_fingerprint(profile: LlmProfile) -> str:
+    identity = "\0".join(
+        [profile.protocol, str(profile.base_url).rstrip("/"), profile.model]
+    )
+    return sha256(identity.encode("utf-8")).hexdigest()
+
+
+def require_harness_capabilities(profile: LlmProfile) -> None:
+    snapshot = profile.capability_test
+    if snapshot is None or snapshot.profile_fingerprint != profile_fingerprint(profile):
+        raise ValueError(
+            f"LLM profile '{profile.id}' must pass Tool Calling and Structured Output tests."
+        )
+    if not snapshot.ready_for_harness:
+        raise ValueError(
+            f"LLM profile '{profile.id}' does not support the required Harness protocol."
+        )
 
 
 def select_profile(profile_id: str) -> LlmProfilesPublicDocument:

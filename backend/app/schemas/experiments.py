@@ -1,11 +1,31 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.schemas.projects import AgentPolicy
 
 
 class _StrictExperimentModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class ExperimentHookStrategy(_StrictExperimentModel):
+    schema_version: Literal[1] = 1
+    mode: Literal["none", "full", "ablation"]
+    disabled_hook_ids: list[str] = Field(default_factory=list, max_length=100)
+    none_baseline_version: Literal["direct-v1"] = "direct-v1"
+
+    @model_validator(mode="after")
+    def validate_mode(self) -> "ExperimentHookStrategy":
+        normalized = sorted(set(self.disabled_hook_ids))
+        if normalized != self.disabled_hook_ids:
+            raise ValueError("Disabled experiment hook IDs must be unique and sorted.")
+        if self.mode in {"none", "full"} and self.disabled_hook_ids:
+            raise ValueError(f"{self.mode} strategy cannot disable named hooks.")
+        if self.mode == "ablation" and not self.disabled_hook_ids:
+            raise ValueError("Ablation strategy must disable at least one named hook.")
+        return self
 
 
 class ExperimentFixtureFile(_StrictExperimentModel):
@@ -68,3 +88,68 @@ class ExperimentFixtureStatus(_StrictExperimentModel):
 class ExperimentFixtureCreateResponse(_StrictExperimentModel):
     created: bool
     fixture: ExperimentFixtureSummary
+
+
+class ExperimentArmRequest(_StrictExperimentModel):
+    arm_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    strategy: ExperimentHookStrategy
+
+
+class ExperimentRunConfigurationRequest(_StrictExperimentModel):
+    fixture_id: str = Field(
+        pattern=(
+            r"^fixture-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12}$"
+        )
+    )
+    arms: list[ExperimentArmRequest] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_arms(self) -> "ExperimentRunConfigurationRequest":
+        arm_ids = [arm.arm_id for arm in self.arms]
+        if len(arm_ids) != len(set(arm_ids)):
+            raise ValueError("Experiment arm IDs must be unique.")
+        return self
+
+
+class ExperimentModelBinding(_StrictExperimentModel):
+    role: Literal["book", "story_arc", "chapter"]
+    purpose: Literal["agent", "evaluator"]
+    profile_id: str
+    protocol: Literal["openai-compatible", "anthropic-compatible"]
+    model: str
+    profile_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ExperimentSchemaSnapshot(_StrictExperimentModel):
+    tool_registry: dict[str, int]
+    context_policy_version: Literal["context-policy-v1"] = "context-policy-v1"
+    evaluation_schema_version: Literal["evaluation-v1"] = "evaluation-v1"
+    telemetry_schema_version: Literal[1] = 1
+
+
+class ExperimentRunConfiguration(_StrictExperimentModel):
+    schema_version: Literal[1] = 1
+    run_id: str = Field(
+        pattern=(
+            r"^experiment-run-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12}$"
+        )
+    )
+    created_at: datetime
+    fixture_id: str = Field(
+        pattern=(
+            r"^fixture-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12}$"
+        )
+    )
+    checkpoint_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    agent_policy: AgentPolicy
+    model_bindings: list[ExperimentModelBinding]
+    schemas: ExperimentSchemaSnapshot
+    arms: list[ExperimentArmRequest]
+    configuration_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ExperimentRunConfigurationResponse(_StrictExperimentModel):
+    configuration: ExperimentRunConfiguration

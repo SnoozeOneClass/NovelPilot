@@ -13,6 +13,27 @@
 .sectionNav footer strong { color: var(--np-text); font-size: 11px; }
 .sectionNav footer small { font-family: var(--np-font-mono); }
 .settingsContent { min-width: 0; min-height: 0; overflow: auto; }
+.modelsPage { min-width: 0; display: grid; align-content: start; }
+.agentPolicy { min-width: 0; display: grid; gap: 14px; margin: 0 20px 24px; border: 1px solid var(--np-line); border-radius: var(--np-radius-md); padding: 18px; background: var(--np-surface-raised); }
+.agentPolicy > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--np-line); padding-bottom: 12px; }
+.agentPolicy > header p { margin: 0 0 3px; color: var(--np-accent); font-size: 9px; font-weight: 800; text-transform: uppercase; }
+.agentPolicy h3 { margin: 0; color: var(--np-text); font-size: 15px; }
+.readyBadge, .missingBadge { display: inline-flex; align-items: center; gap: 4px; border-radius: 999px; padding: 4px 7px; font-size: 8px; white-space: nowrap; }
+.readyBadge { background: var(--np-success-soft); color: var(--np-success); }
+.missingBadge { background: var(--np-warning-soft); color: var(--np-warning); }
+.agentPolicyIntro { margin: 0; color: var(--np-text-secondary); font-size: 10px; line-height: 1.7; }
+.bindingGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.bindingGrid > label { min-width: 0; display: grid; gap: 6px; }
+.bindingGrid > label > span { min-width: 0; display: grid; gap: 2px; }
+.bindingGrid strong { color: var(--np-text); font-size: 10px; }
+.bindingGrid small { color: var(--np-text-muted); font-size: 8px; }
+.bindingGrid select, .budgetGrid input { min-width: 0; height: 34px; border: 1px solid var(--np-line); border-radius: var(--np-radius-sm); padding: 0 8px; background: var(--np-surface); color: var(--np-text); font-size: 10px; }
+.budgetGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; border-top: 1px solid var(--np-line); padding-top: 14px; }
+.budgetGrid > label { min-width: 0; display: grid; gap: 5px; }
+.budgetGrid span { color: var(--np-text-secondary); font-size: 9px; }
+.agentPolicy > footer { display: flex; justify-content: flex-end; }
+.agentPolicy > footer button { min-height: 32px; border: 1px solid var(--np-accent); border-radius: var(--np-radius-sm); padding: 0 11px; background: var(--np-accent); color: #fff; font-size: 10px; }
+.agentPolicy select:disabled, .agentPolicy input:disabled, .agentPolicy button:disabled { cursor: not-allowed; opacity: .58; }
 .preferencePage { max-width: 820px; display: grid; align-content: start; gap: 18px; padding: 26px; }
 .preferencePage > header { display: grid; gap: 4px; border-bottom: 1px solid var(--np-line); padding-bottom: 16px; }
 .preferencePage h2 { margin: 0; color: var(--np-text); font-size: 20px; }
@@ -47,5 +68,9 @@
   .sectionNav nav button { justify-content: center; padding: 0 4px; font-size: 10px; }
   .sectionNav footer { display: none; }
   .preferencePage { padding: 16px; }
+  .agentPolicy { margin: 0 12px 16px; padding: 14px; }
+  .agentPolicy > header { align-items: stretch; flex-direction: column; }
+  .readyBadge, .missingBadge { width: fit-content; white-space: normal; }
+  .bindingGrid, .budgetGrid { grid-template-columns: 1fr; }
   .themeOptions { grid-template-columns: 1fr; }
 }

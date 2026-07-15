@@ -1,15 +1,673 @@
+import json
+from pathlib import Path
+
+import pytest
 from pydantic import SecretStr
 
 from app.harness import orchestrator
+from app.harness.agents.loop_runners import (
+    ChapterAgentResult,
+    ChapterPatchEvidenceRepairResult,
+    StoryArcAgentResult,
+)
+from app.harness.agents.models import (
+    AgentBudgets,
+    AgentIdentity,
+    AgentRunResult,
+    AgentState,
+    EvaluationRecord,
+    EvaluationResult,
+    UpstreamBlockerProposal,
+)
+from app.harness.agents.persistence import read_agent_state, save_agent_state
+from app.harness.loops.book import BookDirectionSynthesis
 from app.harness.orchestrator import HarnessOrchestrator, HarnessRunContext
-from app.llm.gateway import ChatResult
+from app.llm.gateway import ChatMessage, ChatRequest, ChatResult
+from app.schemas.arcs import StoryArcPlanProposal
+from app.schemas.artifacts import CandidateObservations, ChapterVerification
 from app.schemas.events import HarnessEvent
+from app.schemas.patches import CandidateStatePatch
 from app.schemas.profiles import LlmProfile
 from app.schemas.projects import ProjectMetadata
+from app.schemas.setup import (
+    BookDirectionConstraints,
+    BookDirectionReview,
+    BookTitleSuggestion,
+    ConfirmedDecisionCoverage,
+    SetupStateDocument,
+)
 from app.storage import arcs as arc_storage
+from app.storage import book_revisions as book_revision_storage
 from app.storage.events import append_event
 from app.storage.events import read_events
 from app.storage.json_files import read_json, write_json
+
+
+@pytest.fixture(autouse=True)
+def _bridge_legacy_llm_fixtures_to_agent_results(monkeypatch) -> None:
+    monkeypatch.setattr(orchestrator, "run_story_arc_agent", _fixture_story_arc_agent)
+    monkeypatch.setattr(orchestrator, "run_chapter_agent", _fixture_chapter_agent)
+
+
+def _fixture_story_arc_agent(
+    project_path,
+    metadata,
+    policy,
+    *,
+    arc_id,
+    intent,
+    expected_revision,
+    instruction,
+    **_kwargs,
+) -> StoryArcAgentResult:
+    action = "plan_current_arc" if intent == "create" else "revise_current_arc_plan"
+    response = orchestrator.call_llm(
+        policy.profile,
+        ChatRequest(
+            profile_id=policy.profile.id,
+            messages=[ChatMessage(role="user", content=instruction)],
+            metadata={"atomic_action": action},
+        ),
+    )
+    payload = json.loads(response.content)
+    proposal = StoryArcPlanProposal.model_validate(payload)
+    identity = AgentIdentity(
+        project_id=metadata.project_id,
+        role="story_arc",
+        scope_id=arc_id,
+    )
+    evaluation = _passing_evaluation(
+        identity,
+        f"arcs/{arc_id}/agent-fixture-candidate.json",
+        expected_revision + 1,
+        profile_id=policy.evaluator_profile.id,
+    )
+    return StoryArcAgentResult(
+        proposal=proposal,
+        evaluation=evaluation,
+        run_result=AgentRunResult(
+            outcome="candidate",
+            identity=identity,
+            candidate_run_id="fixture-run",
+            activation_id="fixture-activation",
+            turns_used=1,
+            model_snapshot=response.model_snapshot,
+            provider_snapshot=response.provider_snapshot,
+            usage=response.usage,
+        ),
+        candidate_artifact_path=evaluation.candidate_artifact_id,
+    )
+
+
+def _fixture_chapter_agent(
+    project_path: Path,
+    metadata,
+    policy,
+    *,
+    chapter_id: str,
+    instruction: str,
+    **_kwargs,
+) -> ChapterAgentResult:
+    chapter_path = project_path / "chapters" / chapter_id
+
+    def action(name: str, fallback: str = "") -> str:
+        response = orchestrator.call_llm(
+            policy.profile,
+            ChatRequest(
+                profile_id=policy.profile.id,
+                messages=[ChatMessage(role="user", content=instruction)],
+                metadata={"atomic_action": name},
+            ),
+        )
+        return response.content or fallback
+
+    plan = (
+        (chapter_path / "goal.md").read_text(encoding="utf-8")
+        if (chapter_path / "goal.md").exists()
+        else action("generate_chapter_goal", "# Goal")
+    )
+    draft = (
+        (chapter_path / "draft.md").read_text(encoding="utf-8")
+        if (chapter_path / "draft.md").exists()
+        else action("draft_chapter", "Draft")
+    )
+    if (chapter_path / "observations.json").exists():
+        raw_observations = read_json(chapter_path / "observations.json")
+    else:
+        raw_observations = json.loads(action("extract_candidate_observations", "{}"))
+    raw_observations = raw_observations if isinstance(raw_observations, dict) else {}
+    raw_observations["based_on"] = f"chapters/{chapter_id}/draft.md"
+    raw_observations.setdefault("status", "candidate")
+    observations = CandidateObservations.model_validate(raw_observations)
+    if not (chapter_path / "review.md").exists():
+        action("semantic_review", "# Review")
+    verification = _fixture_chapter_verification(
+        chapter_id,
+        action("verify_chapter", ""),
+    )
+    if (chapter_path / "candidate_state_patch.json").exists():
+        raw_patch = read_json(chapter_path / "candidate_state_patch.json")
+    else:
+        try:
+            raw_patch = json.loads(action("generate_candidate_state_patch", "{}"))
+        except json.JSONDecodeError:
+            raw_patch = {}
+    raw_patch = raw_patch if isinstance(raw_patch, dict) else {}
+    raw_patch.setdefault("status", "candidate")
+    raw_patch["based_on"] = {
+        "chapter_final": f"chapters/{chapter_id}/final.md",
+        "observations": f"chapters/{chapter_id}/observations.json",
+    }
+    raw_patch.setdefault("operations", [])
+    patch = CandidateStatePatch.model_validate(raw_patch)
+    root = chapter_path / "agent-fixture" / "candidate"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "plan.md").write_text(plan, encoding="utf-8")
+    (root / "draft.md").write_text(draft, encoding="utf-8")
+    identity = AgentIdentity(
+        project_id=metadata.project_id,
+        role="chapter",
+        scope_id=chapter_id,
+    )
+    evaluation = _evaluation_from_verification(
+        identity,
+        verification,
+        profile_id=policy.evaluator_profile.id,
+    )
+    from app.harness.agents.domain_tools import SubmitChapterCandidateInput
+
+    return ChapterAgentResult(
+        submission=SubmitChapterCandidateInput(
+            chapter_id=chapter_id,
+            expected_revision=0,
+            candidate_revision=1,
+            plan_revision=1,
+            draft_revision=1,
+            summary="Fixture chapter candidate.",
+            observations=observations,
+            state_patch=patch,
+        ),
+        evaluation=evaluation,
+        verification=verification,
+        run_result=AgentRunResult(
+            outcome="candidate",
+            identity=identity,
+            candidate_run_id="fixture-run",
+            activation_id="fixture-activation",
+            turns_used=1,
+            model_snapshot=policy.profile.model,
+            provider_snapshot=policy.profile.protocol,
+        ),
+        candidate_root=root.relative_to(project_path).as_posix(),
+    )
+
+
+def _fixture_chapter_verification(chapter_id: str, content: str) -> ChapterVerification:
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return ChapterVerification(
+            chapter_id=chapter_id,
+            goal_satisfied=False,
+            commit_allowed=False,
+            routing_decision="rewrite",
+            reasons=["Fixture verifier output was not JSON."],
+        )
+    if not isinstance(payload, dict):
+        raise AssertionError("Fixture verifier output must be an object.")
+    payload["chapter_id"] = chapter_id
+    return ChapterVerification.model_validate(payload)
+
+
+def _passing_evaluation(
+    identity: AgentIdentity,
+    artifact: str,
+    revision: int,
+    *,
+    profile_id: str,
+) -> EvaluationRecord:
+    return EvaluationRecord(
+        candidate_artifact_id=artifact,
+        candidate_revision=revision,
+        evaluator_profile_id=profile_id,
+        evaluator_model_snapshot="fixture-model",
+        evaluator_provider_snapshot="openai-compatible",
+        rubric_version="fixture-v1",
+        result=EvaluationResult(
+            schema_version=1,
+            outcome="pass",
+            contract_satisfied=True,
+            summary="Fixture candidate passes.",
+            issues=[],
+            signals=[],
+            repair_brief=None,
+            upstream_blocker=None,
+        ),
+    )
+
+
+def _evaluation_from_verification(
+    identity: AgentIdentity,
+    verification: ChapterVerification,
+    *,
+    profile_id: str,
+) -> EvaluationRecord:
+    if verification.commit_allowed:
+        return _passing_evaluation(identity, "fixture/chapter.json", 1, profile_id=profile_id)
+    return EvaluationRecord(
+        candidate_artifact_id="fixture/chapter.json",
+        candidate_revision=1,
+        evaluator_profile_id=profile_id,
+        evaluator_model_snapshot="fixture-model",
+        evaluator_provider_snapshot="openai-compatible",
+        rubric_version="fixture-v1",
+        result=EvaluationResult(
+            schema_version=1,
+            outcome="local_repair",
+            contract_satisfied=False,
+            summary="Fixture candidate needs repair.",
+            issues=[],
+            signals=[],
+            repair_brief="Repair the chapter contract failure.",
+            upstream_blocker=None,
+        ),
+    )
+
+
+def test_harness_rejects_ineligible_cross_loop_proposal_without_direct_activation(
+    tmp_path: Path,
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    metadata = ProjectMetadata(
+        project_id="project-1",
+        title="Novel",
+        active_arc_id="arc-001",
+        active_chapter_id="chapter-001",
+    )
+    write_json(project_path / "project.json", metadata.model_dump(mode="json"))
+    runner = HarnessOrchestrator(
+        HarnessRunContext(project_path=project_path, run_id="run-1")
+    )
+    evaluation = EvaluationRecord(
+        candidate_artifact_id="chapters/chapter-001/candidates/c1/manifest.json",
+        candidate_revision=1,
+        evaluator_profile_id="main",
+        evaluator_model_snapshot="model",
+        evaluator_provider_snapshot="openai-compatible",
+        rubric_version="chapter-v1",
+        result=EvaluationResult(
+            schema_version=1,
+            outcome="cross_loop_escalation",
+            contract_satisfied=False,
+            summary="The active arc contract conflicts with committed chapter evidence.",
+            issues=[],
+            signals=[],
+            repair_brief=None,
+            upstream_blocker=UpstreamBlockerProposal(
+                owner="story_arc",
+                contract_field="ending_instruction",
+                contract_revision=2,
+                committed_evidence_locator="chapters/chapter-001/final.md#ending",
+                impossibility_reason="The current candidate cannot satisfy both facts.",
+            ),
+        ),
+    )
+
+    handled = runner._handle_evaluation_control(
+        metadata,
+        evaluation,
+        loop_layer="chapter",
+        action="run_chapter_agent",
+    )
+
+    assert handled is True
+    assert read_json(project_path / "project.json")["run_status"] == "waiting_for_user"
+    events = read_events(project_path)
+    assert events[-2].kind == "cross_loop_proposal_recorded"
+    assert events[-2].routing_decision == "propose_to_story_arc"
+    assert events[-2].payload["upstream_blocker"]["owner"] == "story_arc"
+    assert events[-1].kind == "cross_loop_route_rejected"
+    assert events[-1].payload["reason"] == "stale_or_unknown_story_arc_revision"
+    assert not any(item.kind == "atomic_action_started" for item in read_events(project_path))
+
+
+def test_harness_routes_eligible_chapter_blocker_to_story_arc_agent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_path = tmp_path / "project"
+    chapter_path = project_path / "chapters" / "chapter-001"
+    arc_path = project_path / "arcs" / "arc-001"
+    chapter_path.mkdir(parents=True)
+    arc_path.mkdir(parents=True)
+    metadata = ProjectMetadata(
+        project_id="project-1",
+        title="Novel",
+        active_arc_id="arc-001",
+        active_chapter_id="chapter-001",
+    )
+    write_json(project_path / "project.json", metadata.model_dump(mode="json"))
+    write_json(arc_path / "state.json", {"schema_version": 1, "version": 2})
+    (arc_path / "plan.md").write_text("# Current Arc\n", encoding="utf-8")
+    chapter_identity = AgentIdentity(
+        project_id="project-1",
+        role="chapter",
+        scope_id="chapter-001",
+    )
+    save_agent_state(
+        project_path,
+        AgentState(
+            identity=chapter_identity,
+            lifecycle="completed",
+            candidate_run_id="chapter-run-1",
+            budgets=AgentBudgets(max_turns=30, used_turns=7),
+        ),
+    )
+    for name in ["context_snapshot.json", "draft.md", "evaluation.json", "verification.json"]:
+        (chapter_path / name).write_text("candidate\n", encoding="utf-8")
+
+    profile = LlmProfile(
+        id="main",
+        name="Main",
+        protocol="openai-compatible",
+        base_url="https://api.example.com/v1",
+        api_key=SecretStr("secret"),
+        model="story-model",
+    )
+    monkeypatch.setattr(orchestrator, "get_active_profile", lambda: profile)
+    routed: list[str] = []
+    runner = HarnessOrchestrator(
+        HarnessRunContext(project_path=project_path, run_id="run-1")
+    )
+
+    def fake_revise(_profile, _metadata, feedback, *, source_label="User feedback"):
+        routed.append(f"{source_label}\n{feedback}")
+        return "arcs/arc-001/plan.md"
+
+    monkeypatch.setattr(runner, "_revise_current_arc_plan_from_feedback", fake_revise)
+    evaluation = EvaluationRecord(
+        candidate_artifact_id="agents/chapter/candidate/manifest.json",
+        candidate_revision=1,
+        evaluator_profile_id="main",
+        evaluator_model_snapshot="model",
+        evaluator_provider_snapshot="openai-compatible",
+        rubric_version="chapter-v1",
+        result=EvaluationResult(
+            schema_version=1,
+            outcome="cross_loop_escalation",
+            contract_satisfied=False,
+            summary="The current Arc ending instruction is impossible.",
+            issues=[],
+            signals=[],
+            repair_brief=None,
+            upstream_blocker=UpstreamBlockerProposal(
+                owner="story_arc",
+                contract_field="ending_instruction",
+                contract_revision=2,
+                committed_evidence_locator="arcs/arc-001/plan.md",
+                impossibility_reason="It conflicts with committed canon evidence.",
+            ),
+        ),
+    )
+
+    assert runner._handle_evaluation_control(
+        metadata,
+        evaluation,
+        loop_layer="chapter",
+        action="run_chapter_agent",
+        candidate_run_id="chapter-run-1",
+    )
+
+    assert len(routed) == 1
+    assert "Harness-routed Chapter blocker" in routed[0]
+    assert not (chapter_path / "context_snapshot.json").exists()
+    assert not (chapter_path / "draft.md").exists()
+    assert not (chapter_path / "evaluation.json").exists()
+    assert not (chapter_path / "verification.json").exists()
+    route_files = list((chapter_path / "upstream-routes").glob("route-*.json"))
+    assert len(route_files) == 1
+    route_record = read_json(route_files[0])
+    assert route_record["committed_artifacts_touched"] is False
+    assert route_record["revised_arc_path"] == "arcs/arc-001/plan.md"
+    assert read_json(chapter_path / "upstream-resume.json") == {
+        "schema_version": 1,
+        "route_id": route_record["route_id"],
+        "candidate_run_id": "chapter-run-1",
+        "revised_arc_path": "arcs/arc-001/plan.md",
+    }
+    blocked_state = read_agent_state(project_path, chapter_identity)
+    assert blocked_state.lifecycle == "blocked"
+    assert blocked_state.budgets is not None
+    assert blocked_state.budgets.used_turns == 7
+    events = read_events(project_path)
+    assert [item.kind for item in events] == [
+        "cross_loop_proposal_recorded",
+        "cross_loop_route_accepted",
+        "cross_loop_route_completed",
+    ]
+    assert events[-1].routing_decision == "retry_chapter"
+
+
+def test_cross_loop_route_never_invalidates_committed_chapter_work(tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    chapter_path = project_path / "chapters" / "chapter-001"
+    arc_path = project_path / "arcs" / "arc-001"
+    chapter_path.mkdir(parents=True)
+    arc_path.mkdir(parents=True)
+    metadata = ProjectMetadata(
+        project_id="project-1",
+        title="Novel",
+        active_arc_id="arc-001",
+        active_chapter_id="chapter-001",
+    )
+    write_json(project_path / "project.json", metadata.model_dump(mode="json"))
+    write_json(arc_path / "state.json", {"schema_version": 1, "version": 2})
+    (arc_path / "plan.md").write_text("# Current Arc\n", encoding="utf-8")
+    (chapter_path / "final.md").write_text("Committed prose\n", encoding="utf-8")
+    runner = HarnessOrchestrator(
+        HarnessRunContext(project_path=project_path, run_id="run-1")
+    )
+
+    rejection = runner._story_arc_route_rejection(
+        metadata,
+        "chapter",
+        {
+            "owner": "story_arc",
+            "contract_field": "ending_instruction",
+            "contract_revision": 2,
+            "committed_evidence_locator": "arcs/arc-001/plan.md",
+            "impossibility_reason": "The current contract is impossible.",
+        },
+    )
+
+    assert rejection == "committed_chapter_work_cannot_be_invalidated"
+    assert (chapter_path / "final.md").read_text(encoding="utf-8") == "Committed prose\n"
+
+
+def test_full_auto_book_route_waits_for_explicit_user_approval(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_path = tmp_path / "project"
+    book_path = project_path / "book"
+    chapter_path = project_path / "chapters" / "chapter-001"
+    arc_path = project_path / "arcs" / "arc-001"
+    book_path.mkdir(parents=True)
+    chapter_path.mkdir(parents=True)
+    arc_path.mkdir(parents=True)
+    metadata = ProjectMetadata(
+        project_id="project-1",
+        title="Novel",
+        operation_mode="full_auto",
+        active_arc_id="arc-001",
+        active_chapter_id="chapter-001",
+    )
+    write_json(project_path / "project.json", metadata.model_dump(mode="json"))
+    write_json(
+        book_path / "setup.json",
+        SetupStateDocument(
+            phase="approved",
+            approved=True,
+            approved_title="Novel",
+            direction_draft="# Approved direction",
+            confirmed_decisions=["Keep committed history."],
+        ).model_dump(mode="json"),
+    )
+    (book_path / "direction.md").write_text(
+        "# Approved direction\n", encoding="utf-8"
+    )
+    (book_path / "settings.md").write_text(
+        "# Approved direction\n", encoding="utf-8"
+    )
+    (book_path / "outline.md").write_text("# Approved outline\n", encoding="utf-8")
+    write_json(book_path / "constraints.json", {"schema_version": 1})
+    write_json(
+        book_path / "state.json",
+        {
+            "schema_version": 2,
+            "version": 4,
+            "book_direction_version": 2,
+            "setup_approved": True,
+            "confirmed_decisions": ["Keep committed history."],
+        },
+    )
+    (arc_path / "plan.md").write_text("# Arc\n", encoding="utf-8")
+    write_json(arc_path / "state.json", {"schema_version": 1, "version": 1})
+
+    profile = LlmProfile(
+        id="main",
+        name="Main",
+        protocol="openai-compatible",
+        base_url="https://api.example.com/v1",
+        api_key=SecretStr("secret"),
+        model="book-model",
+    )
+    monkeypatch.setattr(orchestrator, "get_active_profile", lambda: profile)
+    evaluation = _passing_evaluation(
+        AgentIdentity(project_id="project-1", role="book"),
+        "book/agent/a/test/candidates/book-direction.json",
+        3,
+        profile_id="main",
+    )
+    synthesis = BookDirectionSynthesis(
+        direction_markdown="# Candidate revision\n\nFuture-only change.",
+        constraints=BookDirectionConstraints(
+            confirmed=["Keep committed history."],
+            must_preserve=["Committed prose and canon."],
+            must_avoid=["Retcons."],
+            creative_freedoms=["Future reveal."],
+            open_decisions=[],
+        ),
+        confirmed_decision_coverage=[
+            ConfirmedDecisionCoverage(
+                decision="Keep committed history.",
+                candidate_evidence="Committed history remains fixed.",
+            )
+        ],
+        recommended_titles=[
+            BookTitleSuggestion(title=f"Title {index}", rationale="Keep current title.")
+            for index in range(1, 4)
+        ],
+        rolling_plan_markdown="# Candidate outline\n\nRevise future arcs only.",
+        model_snapshot="book-model",
+        provider_snapshot="openai-compatible",
+        usage={},
+    )
+    review = BookDirectionReview(
+        status="passed",
+        summary="Candidate preserves history.",
+        issues=[],
+        signals=[],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "run_book_revision_agent",
+        lambda *_args, **_kwargs: (synthesis, evaluation, review),
+    )
+    runner = HarnessOrchestrator(
+        HarnessRunContext(project_path=project_path, run_id="run-1")
+    )
+
+    assert runner._route_cross_loop_proposal(
+        metadata,
+        loop_layer="chapter",
+        action="run_chapter_agent",
+        proposal={
+            "owner": "book",
+            "candidate_run_id": "chapter-run-1",
+            "summary": "The future reveal is impossible.",
+            "contract_field": "ending.reveal",
+            "contract_revision": 4,
+            "committed_evidence_locator": "book/direction.md",
+            "impossibility_reason": "It conflicts with committed chapter evidence.",
+        },
+        source_artifact="chapters/chapter-001/agent-candidate.json",
+    )
+
+    pending = book_revision_storage.read_pending_book_revision(project_path)
+    assert pending is not None
+    assert pending.status == "awaiting_approval"
+    assert (book_path / "direction.md").read_text(encoding="utf-8") == (
+        "# Approved direction\n"
+    )
+    assert read_json(project_path / "project.json")["run_status"] == "waiting_for_user"
+    assert read_events(project_path)[-1].kind == "book_revision_approval_required"
+
+
+def test_chapter_retry_reuses_routed_candidate_run_budget(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_path = tmp_path / "project"
+    chapter_path = project_path / "chapters" / "chapter-001"
+    chapter_path.mkdir(parents=True)
+    write_json(
+        chapter_path / "upstream-resume.json",
+        {
+            "schema_version": 1,
+            "route_id": "route-1",
+            "candidate_run_id": "chapter-run-1",
+            "revised_arc_path": "arcs/arc-001/plan.md",
+        },
+    )
+    write_json(chapter_path / "context_snapshot.json", {"sources": []})
+    metadata = ProjectMetadata(
+        project_id="project-1",
+        title="Novel",
+        active_arc_id="arc-001",
+        active_chapter_id="chapter-001",
+    )
+    write_json(project_path / "project.json", metadata.model_dump(mode="json"))
+    profile = LlmProfile(
+        id="main",
+        name="Main",
+        protocol="openai-compatible",
+        base_url="https://api.example.com/v1",
+        api_key=SecretStr("secret"),
+        model="chapter-model",
+    )
+    captured: list[str | None] = []
+
+    def stop_after_capture(*_args, candidate_run_id=None, **_kwargs):
+        captured.append(candidate_run_id)
+        raise RuntimeError("stop after candidate-run capture")
+
+    monkeypatch.setattr(orchestrator, "run_chapter_agent", stop_after_capture)
+    runner = HarnessOrchestrator(
+        HarnessRunContext(project_path=project_path, run_id="run-1")
+    )
+
+    with pytest.raises(RuntimeError, match="stop after candidate-run capture"):
+        runner._run_chapter_agent(
+            profile,
+            metadata,
+            "chapter-001",
+            chapter_path,
+        )
+
+    assert captured == ["chapter-run-1"]
+    assert (chapter_path / "upstream-resume.json").exists()
 
 
 def _make_project(tmp_path, *, setup_approved: bool = False):
@@ -876,128 +1534,14 @@ def test_orchestrator_uses_semantic_verifier_routing(tmp_path, monkeypatch) -> N
     assert verification["routing_decision"] == "rewrite"
     assert verification["signals"][0]["name"] == "chapter_contract"
     assert not (chapter_path / "final.md").exists()
-    assert events[-1].kind == "verification_completed"
-    assert events[-1].routing_decision == "rewrite"
-
-
-def test_chapter_actions_stream_without_forced_provider_request_fields(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    project_path = _make_project(tmp_path, setup_approved=True)
-    metadata = ProjectMetadata(title="Novel", active_arc_id="arc-001", active_chapter_id="chapter-001")
-    write_json(project_path / "project.json", metadata.model_dump(mode="json"))
-    (project_path / "arcs" / "arc-001").mkdir(parents=True)
-    (project_path / "arcs" / "arc-001" / "plan.md").write_text("# Arc 1\n", encoding="utf-8")
-    chapter_path = project_path / "chapters" / "chapter-001"
-    chapter_path.mkdir(parents=True)
-    write_json(chapter_path / "context_snapshot.json", {"schema_version": 1})
-    (chapter_path / "goal.md").write_text("Build trust.", encoding="utf-8")
-    (chapter_path / "draft.md").write_text("The protagonist trusts companions.", encoding="utf-8")
-    profile = LlmProfile(
-        id="main",
-        name="Main",
-        protocol="openai-compatible",
-        base_url="https://api.example.com/v1",
-        api_key=SecretStr("secret"),
-        model="story-model",
+    assert any(
+        event.kind == "verification_completed"
+        and event.routing_decision == "rewrite"
+        for event in events
     )
-    captured_requests = {}
-
-    def fake_call_llm(_profile, request):
-        action = request.metadata["atomic_action"]
-        captured_requests[action] = request
-        if action == "extract_candidate_observations":
-            content = (
-                '{"schema_version":1,"status":"candidate",'
-                '"based_on":"chapters/chapter-001/draft.md","events":[],'
-                '"character_changes":[],"relationship_changes":[],"world_fact_candidates":[],'
-                '"foreshadowing_candidates":[],"requires_commit":true}'
-            )
-        elif action == "verify_chapter":
-            content = (
-                '{"goal_satisfied":true,"commit_allowed":true,"routing_decision":"commit",'
-                '"signals":[],"reasons":[]}'
-            )
-        elif action == "generate_candidate_state_patch":
-            content = '{"schema_version":1,"status":"candidate","based_on":{},"operations":[]}'
-        else:
-            content = "# Review\n\nLooks coherent."
-        return ChatResult(
-            content=content,
-            model_snapshot="story-model",
-            provider_snapshot="openai-compatible",
-        )
-
-    monkeypatch.setattr(orchestrator, "call_llm", fake_call_llm)
-    harness = HarnessOrchestrator(HarnessRunContext(project_path=project_path, run_id="run-1"))
-    harness._extract_observations(profile, metadata, "chapter-001", chapter_path)
-    harness._review_chapter(profile, metadata, "chapter-001", chapter_path)
-    harness._verify_chapter(profile, metadata, "chapter-001", chapter_path)
-    harness._write_final_chapter(metadata, "chapter-001", chapter_path)
-    harness._generate_candidate_state_patch(profile, metadata, "chapter-001", chapter_path)
-
-    assert set(captured_requests) == {
-        "extract_candidate_observations",
-        "semantic_review",
-        "verify_chapter",
-        "generate_candidate_state_patch",
-    }
-    assert all(request.stream is True for request in captured_requests.values())
-    assert all(request.request_options == {} for request in captured_requests.values())
-
-
-def test_orchestrator_rejects_unparseable_verifier_output(tmp_path, monkeypatch) -> None:
-    project_path = _make_project(tmp_path, setup_approved=True)
-    metadata = ProjectMetadata(
-        title="Novel",
-        active_arc_id="arc-001",
-        active_chapter_id="chapter-001",
-    )
-    write_json(project_path / "project.json", metadata.model_dump(mode="json"))
-    (project_path / "arcs" / "arc-001").mkdir(parents=True)
-    (project_path / "arcs" / "arc-001" / "plan.md").write_text("# Arc 1\n", encoding="utf-8")
-    chapter_path = project_path / "chapters" / "chapter-001"
-    chapter_path.mkdir(parents=True)
-    write_json(chapter_path / "context_snapshot.json", {"schema_version": 1})
-    write_json(chapter_path / "observations.json", {"schema_version": 1, "status": "candidate"})
-    (chapter_path / "goal.md").write_text("Keep the mentor alive.", encoding="utf-8")
-    (chapter_path / "draft.md").write_text("The mentor survives.", encoding="utf-8")
-    (chapter_path / "review.md").write_text("The draft appears coherent.", encoding="utf-8")
-    profile = LlmProfile(
-        id="main",
-        name="Main",
-        protocol="openai-compatible",
-        base_url="https://api.example.com/v1",
-        api_key=SecretStr("secret"),
-        model="story-model",
-    )
-    monkeypatch.setattr(orchestrator, "get_active_profile", lambda: profile)
-    monkeypatch.setattr(
-        orchestrator,
-        "call_llm",
-        lambda _profile, _request: ChatResult(
-            content="Looks fine, commit it.",
-            model_snapshot="story-model",
-            provider_snapshot="openai-compatible",
-        ),
-    )
-
-    harness = HarnessOrchestrator(HarnessRunContext(project_path=project_path, run_id="run-1"))
-    harness.advance_to_next_checkpoint()
-    harness.advance_to_next_checkpoint()
-
-    verification = read_json(chapter_path / "verification.json")
-    metadata_payload = read_json(project_path / "project.json")
-    events = read_events(project_path)
-
-    assert verification["commit_allowed"] is False
-    assert verification["routing_decision"] == "rewrite"
-    assert "could not be parsed as JSON" in verification["reasons"][0]
-    assert not (chapter_path / "final.md").exists()
-    assert metadata_payload["run_status"] == "waiting_for_user"
-    assert events[-1].kind == "routing_decision"
-    assert events[-1].routing_decision == "rewrite"
+    assert events[-1].kind == "agent_semantic_revision_exhausted"
+    assert events[-1].routing_decision == "pause"
+    assert read_json(project_path / "project.json")["run_status"] == "waiting_for_user"
 
 
 def test_orchestrator_advances_chapter_to_committed_state_patch(
@@ -1065,7 +1609,7 @@ def test_orchestrator_advances_chapter_to_committed_state_patch(
     monkeypatch.setattr(orchestrator, "call_llm", fake_call_llm)
 
     harness = HarnessOrchestrator(HarnessRunContext(project_path=project_path, run_id="run-1"))
-    for _ in range(9):
+    for _ in range(4):
         harness.advance_to_next_checkpoint()
 
     chapter_path = project_path / "chapters" / "chapter-001"
@@ -1084,25 +1628,20 @@ def test_orchestrator_advances_chapter_to_committed_state_patch(
     assert characters["version"] == 2
     assert characters["items"]["protagonist"]["belief"] == "trusts companions"
     assert events[-1].kind == "state_patch_committed"
-    llm_artifact_actions = {
-        "generate_chapter_goal",
-        "draft_chapter",
-        "extract_candidate_observations",
-        "semantic_review",
-        "verify_chapter",
-        "generate_candidate_state_patch",
-    }
-    llm_artifact_events = [
+    assert (chapter_path / "evaluation.json").exists()
+    agent_events = [
         event
         for event in events
-        if event.atomic_action in llm_artifact_actions and event.artifact_path is not None
+        if event.atomic_action == "run_chapter_agent" and event.payload.get("profile_id")
     ]
-    assert {event.atomic_action for event in llm_artifact_events} == llm_artifact_actions
-    for event in llm_artifact_events:
+    assert agent_events
+    for event in agent_events:
         _assert_sanitized_llm_payload(event)
 
 
-def test_orchestrator_rejects_unparseable_state_patch_output(tmp_path, monkeypatch) -> None:
+def test_orchestrator_rejects_legacy_partial_chapter_without_agent_patch(
+    tmp_path, monkeypatch
+) -> None:
     project_path = _make_project(tmp_path, setup_approved=True)
     metadata = ProjectMetadata(
         title="Novel",
@@ -1156,21 +1695,166 @@ def test_orchestrator_rejects_unparseable_state_patch_output(tmp_path, monkeypat
         HarnessRunContext(project_path=project_path, run_id="run-1")
     ).advance_to_next_checkpoint()
 
-    rejection = read_json(chapter_path / "state_patch_rejection.json")
     metadata_payload = read_json(project_path / "project.json")
     events = read_events(project_path)
 
-    assert rejection["schema"] == "failed"
-    assert "could not be parsed as JSON" in rejection["reasons"][0]
     assert not (chapter_path / "candidate_state_patch.json").exists()
     assert not (chapter_path / "committed_state_patch.json").exists()
-    assert metadata_payload["run_status"] == "waiting_for_user"
-    assert events[-1].kind == "state_patch_rejected"
-    assert events[-1].atomic_action == "generate_candidate_state_patch"
-    _assert_sanitized_llm_payload(events[-1])
-    assert events[-1].payload["reasons"] == [
-        "State patch generator output could not be parsed as JSON."
-    ]
+    assert metadata_payload["run_status"] == "failed"
+    assert events[-1].kind == "run_failed"
+    assert not (chapter_path / "state_patch_rejection.json").exists()
+
+
+def test_full_auto_repairs_rejected_patch_quotes_without_changing_operations(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_path = _make_project(tmp_path, setup_approved=True)
+    metadata = ProjectMetadata(
+        title="Novel",
+        operation_mode="full_auto",
+        active_arc_id="arc-001",
+        active_chapter_id="chapter-001",
+        run_status="running",
+    )
+    write_json(project_path / "project.json", metadata.model_dump(mode="json"))
+    chapter_path = project_path / "chapters" / "chapter-001"
+    chapter_path.mkdir(parents=True)
+    (chapter_path / "context_snapshot.json").write_text("{}\n", encoding="utf-8")
+    (chapter_path / "draft.md").write_text(
+        "The protagonist trusts companions after the trial.\n",
+        encoding="utf-8",
+    )
+    (chapter_path / "final.md").write_text(
+        "The protagonist trusts companions after the trial.\n",
+        encoding="utf-8",
+    )
+    write_json(
+        chapter_path / "observations.json",
+        {
+            "schema_version": 1,
+            "status": "candidate",
+            "based_on": "chapters/chapter-001/draft.md",
+        },
+    )
+    write_json(
+        chapter_path / "verification.json",
+        {
+            "schema_version": 1,
+            "chapter_id": "chapter-001",
+            "goal_satisfied": True,
+            "commit_allowed": True,
+            "routing_decision": "commit",
+            "signals": [],
+            "reasons": [],
+        },
+    )
+    patch = CandidateStatePatch.model_validate(
+        {
+            "based_on": {
+                "chapter_final": "chapters/chapter-001/final.md",
+                "observations": "chapters/chapter-001/observations.json",
+            },
+            "operations": [
+                {
+                    "op": "upsert",
+                    "target_file": "canon/characters.json",
+                    "target_id": "protagonist",
+                    "expected_version": 1,
+                    "value": {"belief": "trusts companions"},
+                    "evidence": [
+                        {
+                            "file": "chapters/chapter-001/final.md",
+                            "quote": "paraphrased trust",
+                        }
+                    ],
+                    "rationale": "The chapter changes the protagonist's belief.",
+                }
+            ],
+        }
+    )
+    write_json(
+        chapter_path / "candidate_state_patch.json",
+        patch.model_dump(mode="json"),
+    )
+    for name in ["characters", "relationships", "world_facts", "foreshadowing"]:
+        write_json(
+            project_path / "canon" / f"{name}.json",
+            {"schema_version": 1, "version": 1, "items": {}},
+        )
+    profile = LlmProfile(
+        id="main",
+        name="Main",
+        protocol="openai-compatible",
+        base_url="https://api.example.com/v1",
+        api_key=SecretStr("secret"),
+        model="story-model",
+    )
+    monkeypatch.setattr(orchestrator, "get_active_profile", lambda: profile)
+
+    def fake_repair(*_args, **_kwargs) -> ChapterPatchEvidenceRepairResult:
+        repaired = patch.model_copy(
+            update={
+                "operations": [
+                    patch.operations[0].model_copy(
+                        update={
+                            "evidence": [
+                                patch.operations[0].evidence[0].model_copy(
+                                    update={"quote": "trusts companions"}
+                                )
+                            ]
+                        }
+                    )
+                ]
+            }
+        )
+        identity = AgentIdentity(
+            project_id=metadata.project_id,
+            role="chapter",
+            scope_id="chapter-001",
+        )
+        return ChapterPatchEvidenceRepairResult(
+            patch=repaired,
+            run_result=AgentRunResult(
+                outcome="candidate",
+                identity=identity,
+                candidate_run_id="patch-repair-run",
+                activation_id="patch-repair-activation",
+                turns_used=1,
+            ),
+            candidate_artifact_path=(
+                "chapters/chapter-001/agent/a/patch-repair/c/"
+                "state-patch-evidence-repair.json"
+            ),
+        )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "run_chapter_patch_evidence_repair_agent",
+        fake_repair,
+    )
+    harness = HarnessOrchestrator(
+        HarnessRunContext(project_path=project_path, run_id="run-1")
+    )
+
+    harness.advance_to_next_checkpoint()
+    assert read_events(project_path)[-1].routing_decision == "repair_current_candidate"
+    assert read_json(project_path / "project.json")["run_status"] == "running"
+
+    harness.advance_to_next_checkpoint()
+    repaired_patch = read_json(chapter_path / "candidate_state_patch.json")
+    assert repaired_patch["operations"][0]["value"] == {
+        "belief": "trusts companions"
+    }
+    assert repaired_patch["operations"][0]["evidence"][0]["quote"] == (
+        "trusts companions"
+    )
+
+    harness.advance_to_next_checkpoint()
+    assert (chapter_path / "committed_state_patch.json").exists()
+    assert read_json(project_path / "canon" / "characters.json")["items"] == {
+        "protagonist": {"belief": "trusts companions"}
+    }
 
 
 def test_orchestrator_marks_chapter_complete_and_starts_next_chapter(

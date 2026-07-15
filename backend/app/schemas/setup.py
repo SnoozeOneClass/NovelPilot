@@ -153,6 +153,24 @@ class SetupStateDocument(BaseModel):
     last_model_snapshot: str | None = None
 
 
+def missing_confirmed_decisions(
+    confirmed_decisions: list[str],
+    *,
+    constraints: BookDirectionConstraints,
+    coverage: list[ConfirmedDecisionCoverage],
+) -> list[str]:
+    covered = {
+        item.decision
+        for item in coverage
+        if item.candidate_evidence.strip()
+    }
+    return [
+        decision
+        for decision in confirmed_decisions
+        if decision not in constraints.confirmed or decision not in covered
+    ]
+
+
 class SetupTurnRequest(BaseModel):
     message: str = Field(min_length=1)
 

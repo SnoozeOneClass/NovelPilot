@@ -4,7 +4,16 @@ import pytest
 from pydantic import SecretStr
 
 from app.llm import anthropic_compatible, openai_compatible
-from app.llm.gateway import ChatMessage, ChatRequest, call_llm
+from app.llm.gateway import (
+    ChatMessage,
+    ChatRequest,
+    ResponseSchema,
+    ToolCall,
+    ToolChoice,
+    ToolDefinition,
+    ToolResult,
+    call_llm,
+)
 from app.llm.anthropic_compatible import stream_anthropic_compatible
 from app.llm.openai_compatible import call_openai_compatible, stream_openai_compatible
 from app.schemas.profiles import LlmProfile, LlmProtocol
@@ -50,6 +59,7 @@ def test_openai_compatible_adapter_merges_arbitrary_request_options(monkeypatch)
             request_options={
                 "temperature": 0.6,
                 "response_format": {"type": "json_object"},
+                "tools": [{"type": "function", "function": {"name": "unsafe"}}],
             },
         ),
     )
@@ -64,7 +74,8 @@ def test_openai_compatible_adapter_merges_arbitrary_request_options(monkeypatch)
     assert payload["stream"] is False
     assert payload["temperature"] == 0.6
     assert payload["max_completion_tokens"] == 1200
-    assert payload["response_format"] == {"type": "json_object"}
+    assert "response_format" not in payload
+    assert "tools" not in payload
     assert payload["provider_extension"] == {"mode": "novel"}
     assert "max_tokens" not in payload
 
@@ -218,7 +229,7 @@ def test_anthropic_compatible_streams_text_deltas(monkeypatch) -> None:
 
     assert [chunk.text_delta for chunk in chunks if chunk.text_delta] == ["hel", "lo"]
     assert chunks[-1].event_type == "message_stop"
-    assert chunks[-1].usage == {"output_tokens": 3}
+    assert chunks[-1].usage == {"input_tokens": 2, "output_tokens": 3}
     payload = captured["payload"]
     assert isinstance(payload, dict)
     assert payload["max_tokens"] == 24000
@@ -320,6 +331,291 @@ def test_provider_http_calls_do_not_set_an_application_timeout(monkeypatch) -> N
     assert all("timeout" not in kwargs for _args, kwargs in calls)
 
 
+def test_openai_compatible_maps_tools_results_and_non_stream_call(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    profile = _profile(protocol="openai-compatible", base_url="https://api.example.com/v1")
+    prior_call = ToolCall(
+        id="call-prior",
+        name="lookup_context",
+        arguments={"pack": "book"},
+        raw_arguments='{"pack":"book"}',
+    )
+
+    def fake_post_json(_url, _api_key, payload):
+        captured["payload"] = payload
+        return {
+            "model": "story-model",
+            "choices": [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call-next",
+                                "type": "function",
+                                "function": {
+                                    "name": "submit_candidate",
+                                    "arguments": '{"revision":2}',
+                                },
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(openai_compatible, "_post_json", fake_post_json)
+    result = call_llm(
+        profile,
+        ChatRequest(
+            profile_id="main",
+            stream=False,
+            messages=[
+                ChatMessage(role="user", content="Continue."),
+                ChatMessage(role="assistant", tool_calls=[prior_call]),
+                ChatMessage(
+                    role="tool",
+                    tool_results=[
+                        ToolResult(
+                            tool_call_id="call-prior",
+                            name="lookup_context",
+                            content={"status": "ok"},
+                        )
+                    ],
+                ),
+            ],
+            tools=[_tool("lookup_context"), _tool("submit_candidate")],
+            tool_choice=ToolChoice(mode="required"),
+        ),
+    )
+
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert payload["tool_choice"] == "required"
+    assert [item["function"]["name"] for item in payload["tools"]] == [
+        "lookup_context",
+        "submit_candidate",
+    ]
+    assert payload["messages"][1]["tool_calls"][0]["id"] == "call-prior"
+    assert payload["messages"][2] == {
+        "role": "tool",
+        "tool_call_id": "call-prior",
+        "content": '{"status": "ok"}',
+    }
+    assert result.finish_reason == "tool_call"
+    assert result.tool_calls[0].arguments == {"revision": 2}
+
+
+def test_openai_compatible_streams_fragmented_tool_arguments(monkeypatch) -> None:
+    profile = _profile(protocol="openai-compatible", base_url="https://api.example.com/v1")
+    deltas: list[str] = []
+
+    monkeypatch.setattr(
+        openai_compatible,
+        "_stream_json_events",
+        lambda *_args: iter(
+            [
+                {
+                    "model": "story-model",
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call-1",
+                                        "function": {
+                                            "name": "submit_candidate",
+                                            "arguments": '{"revision":',
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    ],
+                },
+                {
+                    "model": "story-model",
+                    "choices": [
+                        {
+                            "finish_reason": "tool_calls",
+                            "delta": {
+                                "tool_calls": [
+                                    {"index": 0, "function": {"arguments": "2}"}}
+                                ]
+                            },
+                        }
+                    ],
+                },
+            ]
+        ),
+    )
+
+    result = call_llm(
+        profile,
+        ChatRequest(
+            profile_id="main",
+            messages=[ChatMessage(role="user", content="Submit.")],
+            tools=[_tool("submit_candidate")],
+            metadata={
+                "on_tool_event": lambda chunk: deltas.append(chunk.arguments_delta)
+                if chunk.arguments_delta
+                else None
+            },
+        ),
+    )
+
+    assert deltas == ['{"revision":', "2}"]
+    assert result.finish_reason == "tool_call"
+    assert result.tool_calls[0].arguments == {"revision": 2}
+
+
+def test_anthropic_compatible_maps_tools_results_and_streamed_call(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    profile = _profile(protocol="anthropic-compatible", base_url="https://api.example.com")
+    prior_call = ToolCall(
+        id="toolu-prior",
+        name="lookup_context",
+        arguments={"pack": "arc"},
+        raw_arguments='{"pack":"arc"}',
+    )
+
+    def fake_stream_json_events(_url, _api_key, payload):
+        captured["payload"] = payload
+        return iter(
+            [
+                {
+                    "type": "message_start",
+                    "message": {"model": "story-model", "usage": {"input_tokens": 4}},
+                },
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": "toolu-next",
+                        "name": "submit_candidate",
+                        "input": {},
+                    },
+                },
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": '{"revision":2}'},
+                },
+                {"type": "content_block_stop", "index": 0},
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "tool_use"},
+                    "usage": {"output_tokens": 3},
+                },
+            ]
+        )
+
+    monkeypatch.setattr(anthropic_compatible, "_stream_json_events", fake_stream_json_events)
+    result = call_llm(
+        profile,
+        ChatRequest(
+            profile_id="main",
+            messages=[
+                ChatMessage(role="assistant", tool_calls=[prior_call]),
+                ChatMessage(
+                    role="tool",
+                    tool_results=[
+                        ToolResult(
+                            tool_call_id="toolu-prior",
+                            name="lookup_context",
+                            content={"status": "ok"},
+                        )
+                    ],
+                ),
+            ],
+            tools=[_tool("lookup_context"), _tool("submit_candidate")],
+            tool_choice=ToolChoice(mode="named", name="submit_candidate"),
+        ),
+    )
+
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert payload["tool_choice"] == {"type": "tool", "name": "submit_candidate"}
+    assert payload["messages"][0]["content"][0]["type"] == "tool_use"
+    assert payload["messages"][1]["content"][0] == {
+        "type": "tool_result",
+        "tool_use_id": "toolu-prior",
+        "content": '{"status": "ok"}',
+        "is_error": False,
+    }
+    assert result.finish_reason == "tool_call"
+    assert result.tool_calls[0].arguments == {"revision": 2}
+    assert result.usage == {"input_tokens": 4, "output_tokens": 3}
+
+
+def test_structured_output_maps_natively_for_both_protocols(monkeypatch) -> None:
+    schema = ResponseSchema(
+        name="evaluation_result",
+        description="One strict evaluation.",
+        json_schema={
+            "type": "object",
+            "properties": {"outcome": {"type": "string"}},
+            "required": ["outcome"],
+            "additionalProperties": False,
+        },
+    )
+    captured: dict[str, object] = {}
+
+    def fake_openai(_url, _api_key, payload):
+        captured["openai"] = payload
+        return {"choices": [{"message": {"content": '{"outcome":"pass"}'}}]}
+
+    def fake_anthropic(_url, _api_key, payload):
+        captured["anthropic"] = payload
+        return {"content": [{"type": "text", "text": '{"outcome":"pass"}'}]}
+
+    monkeypatch.setattr(openai_compatible, "_post_json", fake_openai)
+    monkeypatch.setattr(anthropic_compatible, "_post_json", fake_anthropic)
+    request = ChatRequest(
+        profile_id="main",
+        stream=False,
+        messages=[ChatMessage(role="user", content="Evaluate.")],
+        response_schema=schema,
+    )
+
+    openai_result = call_llm(
+        _profile(protocol="openai-compatible", base_url="https://api.example.com/v1"),
+        request,
+    )
+    anthropic_result = call_llm(
+        _profile(protocol="anthropic-compatible", base_url="https://api.example.com"),
+        request,
+    )
+
+    openai_payload = captured["openai"]
+    anthropic_payload = captured["anthropic"]
+    assert isinstance(openai_payload, dict)
+    assert isinstance(anthropic_payload, dict)
+    assert openai_payload["response_format"]["type"] == "json_schema"
+    assert openai_payload["response_format"]["json_schema"]["strict"] is True
+    assert anthropic_payload["output_config"] == {
+        "format": {"type": "json_schema", "schema": schema.json_schema}
+    }
+    assert openai_result.structured_output == {"outcome": "pass"}
+    assert anthropic_result.structured_output == {"outcome": "pass"}
+
+
+def test_chat_request_rejects_tools_with_structured_output() -> None:
+    with pytest.raises(ValueError, match="cannot share one request"):
+        ChatRequest(
+            profile_id="main",
+            messages=[ChatMessage(role="user", content="Invalid.")],
+            tools=[_tool("submit_candidate")],
+            response_schema=ResponseSchema(
+                name="result",
+                json_schema={"type": "object"},
+            ),
+        )
+
+
 def _profile(*, protocol: LlmProtocol, base_url: str) -> LlmProfile:
     return LlmProfile(
         id="main",
@@ -328,4 +624,16 @@ def _profile(*, protocol: LlmProtocol, base_url: str) -> LlmProfile:
         base_url=base_url,
         api_key=SecretStr("secret"),
         model="story-model",
+    )
+
+
+def _tool(name: str) -> ToolDefinition:
+    return ToolDefinition(
+        name=name,
+        description=f"Run {name}.",
+        input_schema={
+            "type": "object",
+            "properties": {"revision": {"type": "integer"}},
+            "additionalProperties": False,
+        },
     )

@@ -18,7 +18,7 @@ import {
   formatLoopLayer,
   formatRoutingDecision
 } from "../../types/display";
-import type { ArtifactSummary, HarnessEvent, ProjectCompletionAudit, ProjectReadiness } from "../../types/domain";
+import { harnessEventEvidencePaths, type ArtifactSummary, type HarnessEvent, type ProjectCompletionAudit, type ProjectReadiness } from "../../types/domain";
 import { LiteraryReviewPanel } from "../workspace/LiteraryReviewPanel";
 import { eventMatches, formatClock, parseJsonRecord } from "../workspace/workspace-utils";
 import styles from "./EvidenceCenter.module.css";
@@ -105,6 +105,7 @@ export function EvidenceCenter({ events, summaries, artifactPaths, selectedArtif
   const visibleRawRows = rawRows.length ? rawRows : Array.from({ length: Math.min(events.length, 20) }, (_, index) => ({ index, start: index * 62, size: 62 }));
 
   const selectedEvent = statusEvents.find((event) => event.event_id === selectedEventId) ?? filteredEvents.at(-1) ?? null;
+  const selectedEventEvidencePaths = selectedEvent ? harnessEventEvidencePaths(selectedEvent) : [];
   const selectedSummary = summaries.find((summary) => summary.path === selectedArtifactPath) ?? null;
   const selectedEventArtifact = selectedEvent?.artifact_path === activeArtifact?.path ? activeArtifact : null;
   const contextSnapshot = selectedEventArtifact?.path.endsWith("context_snapshot.json") ? parseJsonRecord(selectedEventArtifact.content) : null;
@@ -112,7 +113,8 @@ export function EvidenceCenter({ events, summaries, artifactPaths, selectedArtif
   function selectEvent(event: HarnessEvent) {
     setSelectedEventId(event.event_id);
     setEventInspectorOpen(true);
-    if (event.artifact_path) onSelectArtifact(event.artifact_path);
+    const primaryEvidence = harnessEventEvidencePaths(event)[0];
+    if (primaryEvidence) onSelectArtifact(primaryEvidence);
   }
 
   function selectArtifact(path: string) {
@@ -166,6 +168,17 @@ export function EvidenceCenter({ events, summaries, artifactPaths, selectedArtif
                     <div><dt>路由决策</dt><dd>{formatRoutingDecision(selectedEvent.routing_decision)}</dd></div>
                     <div><dt>关联产物</dt><dd>{selectedEvent.artifact_path ?? "-"}</dd></div>
                   </dl>
+                  {selectedEventEvidencePaths.length > 0 && (
+                    <section className={styles.evidenceLinks} aria-label="Agent 证据文件">
+                      <h3>Agent 证据文件</h3>
+                      {selectedEventEvidencePaths.map((path) => (
+                        <button key={path} onClick={() => selectArtifact(path)}>
+                          <FileText size={13} />
+                          <span>{path}</span>
+                        </button>
+                      ))}
+                    </section>
+                  )}
                   {contextSnapshot && <section className={styles.snapshot}><h3>上下文装配快照</h3><p>来源：{Array.isArray(contextSnapshot.sources) ? contextSnapshot.sources.length : 0} 项</p><p>排除：{Array.isArray(contextSnapshot.excluded) ? contextSnapshot.excluded.length : 0} 项</p><small>{typeof contextSnapshot.assembly_rationale === "string" ? contextSnapshot.assembly_rationale : ""}</small></section>}
                   {JSON.stringify(selectedEvent.payload) !== "{}" && <details><summary>查看事件 Payload</summary><pre>{JSON.stringify(selectedEvent.payload, null, 2)}</pre></details>}
                 </>

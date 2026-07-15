@@ -172,7 +172,7 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
         id="operation_modes",
         requirement=(
             "Users can safely change a novel's operation mode without racing active runs or "
-            "bypassing pending story-arc review gates."
+            "bypassing pending story-arc review gates or Book revision approval gates."
         ),
         probes=(
             EvidenceProbe(
@@ -203,7 +203,20 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
             ),
             EvidenceProbe(
                 "backend/app/harness/orchestrator.py",
-                ("_current_arc_requires_human_review", 'human_review == "awaiting_review"'),
+                (
+                    "_current_arc_requires_human_review",
+                    'human_review == "awaiting_review"',
+                    "book_revision_approval_required",
+                    "including in full-auto mode",
+                ),
+            ),
+            EvidenceProbe(
+                "backend/app/storage/book_revisions.py",
+                ("awaiting_approval", "expected_base_book_version"),
+            ),
+            EvidenceProbe(
+                "backend/tests/test_book_revisions.py",
+                ("test_full_auto_book_revision_stays_candidate_until_explicit_approval",),
             ),
             EvidenceProbe(
                 "frontend/src/features/settings/SettingsView.tsx",
@@ -245,7 +258,14 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
         probes=(
             EvidenceProbe("backend/app/storage/patches.py", ("validate_candidate_state_patch", "commit_candidate_state_patch")),
             EvidenceProbe("backend/tests/test_patches.py", ("test_patch", "evidence")),
-            EvidenceProbe("backend/app/harness/orchestrator.py", ("generate_candidate_state_patch", "commit_state_patch")),
+            EvidenceProbe(
+                "backend/app/harness/agents/domain_tools.py",
+                ("submit_chapter_candidate", "SubmitChapterCandidateInput"),
+            ),
+            EvidenceProbe(
+                "backend/app/harness/orchestrator.py",
+                ("candidate_state_patch.json", "commit_state_patch"),
+            ),
         ),
     ),
     AcceptanceCriterion(

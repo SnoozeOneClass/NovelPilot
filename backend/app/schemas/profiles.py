@@ -1,9 +1,24 @@
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, HttpUrl, SecretStr
 
 
 LlmProtocol = Literal["openai-compatible", "anthropic-compatible"]
+
+
+class LlmCapabilityCheck(BaseModel):
+    ok: bool
+    message: str = Field(min_length=1, max_length=1_000)
+
+
+class LlmCapabilitySnapshot(BaseModel):
+    schema_version: int = 1
+    checked_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    profile_fingerprint: str = Field(min_length=64, max_length=64)
+    tool_calling: LlmCapabilityCheck
+    structured_output: LlmCapabilityCheck
+    ready_for_harness: bool
 
 
 class LlmProfile(BaseModel):
@@ -15,6 +30,7 @@ class LlmProfile(BaseModel):
     model: str = Field(min_length=1)
     request_options: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
+    capability_test: LlmCapabilitySnapshot | None = None
 
 
 class LlmProfilePublic(BaseModel):
@@ -26,6 +42,7 @@ class LlmProfilePublic(BaseModel):
     request_options: dict[str, Any] = Field(default_factory=dict)
     enabled: bool
     has_api_key: bool
+    capability_test: LlmCapabilitySnapshot | None = None
 
 
 class LlmProfilesDocument(BaseModel):
@@ -46,6 +63,7 @@ class LlmProfileTestResult(BaseModel):
     model_snapshot: str
     provider_snapshot: str
     message: str
+    capability_test: LlmCapabilitySnapshot
 
 
 class LlmProfileUpsert(BaseModel):
@@ -69,4 +87,5 @@ def to_public_profile(profile: LlmProfile) -> LlmProfilePublic:
         request_options=profile.request_options,
         enabled=profile.enabled,
         has_api_key=bool(profile.api_key.get_secret_value()),
+        capability_test=profile.capability_test,
     )

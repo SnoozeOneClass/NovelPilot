@@ -19,6 +19,10 @@
 .nameLine { display: flex; align-items: center; gap: 6px; }
 .nameLine strong { overflow: hidden; color: var(--np-text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .activeBadge { display: inline-flex; align-items: center; gap: 3px; border-radius: 999px; padding: 2px 5px; background: var(--np-success-soft); color: var(--np-success); font-size: 8px; white-space: nowrap; }
+.capabilityBadge { width: fit-content; border-radius: 999px; padding: 2px 6px; font-size: 8px; line-height: 1.3; }
+.capabilityReady { background: var(--np-success-soft); color: var(--np-success); }
+.capabilityFailed { background: var(--np-danger-soft); color: var(--np-danger); }
+.capabilityUnknown { background: var(--np-warning-soft); color: var(--np-warning); }
 .catalog article p, .catalog article small { margin: 0; overflow: hidden; color: var(--np-text-muted); text-overflow: ellipsis; white-space: nowrap; }
 .catalog article p { font-size: 9px; }
 .catalog article small { font: 8px var(--np-font-mono); }

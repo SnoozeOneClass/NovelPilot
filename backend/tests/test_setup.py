@@ -7,10 +7,13 @@ from fastapi import HTTPException
 from pydantic import SecretStr, ValidationError
 
 from app.api import setup as setup_api
+from app.harness.agents.domain_tools import BookDiscussionUpdateInput
+from app.harness.agents.loop_runners import apply_book_direction_prechecks
+from app.harness.agents.models import EvaluationRecord, EvaluationResult
 from app.harness.loops import book as book_loop
 from app.harness.loops.book import BookDirectionSynthesis, BookDiscussionTurnResult
 from app.harness.run_control import begin_active_runner, end_active_runner
-from app.llm.gateway import ChatChunk, ChatResult
+from app.llm.gateway import ChatChunk
 from app.schemas.profiles import LlmProfile, LlmProfilesDocument
 from app.schemas.projects import ProjectMetadata
 from app.schemas.setup import (
@@ -186,82 +189,39 @@ def test_review_context_records_versioned_sources_hashes_and_total_budget() -> N
     assert snapshot["budget"]["total_character_count"] > len(state.direction_draft)
 
 
-def test_book_discussion_parses_one_question_and_answer_options(
-    monkeypatch,
-) -> None:
-    profile = _profile()
-    captured = {}
-
-    def fake_call(_profile: LlmProfile, request):
-        captured["request"] = request
-        return ChatResult(
-            content=json.dumps(
+def test_book_discussion_tool_accepts_one_question_and_answer_options() -> None:
+    result = BookDiscussionUpdateInput.model_validate(
+        {
+            "expected_revision": 0,
+            "reply": "The emotional cost is now clear.",
+            "direction_draft": _long_direction(),
+            "discussion_summary": "A fair mystery with a costly hopeful ending.",
+            "confirmed_decisions": ["Fair clues", "Costly hopeful ending"],
+            "superseded_decisions": [],
+            "unresolved_questions": ["The final relationship outcome"],
+            "assumptions": ["The city remains politically stable"],
+            "contradictions": [],
+            "question": "Which relationship must carry the emotional cost?",
+            "suggestions": [
                 {
-                    "reply": "The emotional cost is now clear, so the next decision should identify its focus.",
-                    "direction_draft": _long_direction(),
-                    "discussion_summary": "A fair mystery with a costly hopeful ending.",
-                    "confirmed_decisions": ["Fair clues", "Costly hopeful ending"],
-                    "superseded_decisions": [],
-                    "unresolved_questions": ["The final relationship outcome"],
-                    "assumptions": ["The city remains politically stable"],
-                    "contradictions": [],
-                    "question": "Which relationship must carry the emotional cost?",
-                    "suggestions": [
-                        {
-                            "label": "Leave it open",
-                            "message": "Keep that relationship open.",
-                            "rationale": "Preserves ambiguity but delays emotional closure.",
-                            "recommended": False,
-                        },
-                        {
-                            "label": "Reconcile",
-                            "message": "Let them reconcile at a cost.",
-                            "rationale": "Supports the hopeful ending while preserving a price.",
-                            "recommended": True,
-                        },
-                        {
-                            "label": "Separate",
-                            "message": "They should separate permanently.",
-                            "rationale": "Creates the sharpest cost but weakens the hopeful note.",
-                            "recommended": False,
-                        },
-                    ],
-                    "ready_status": "continue",
-                    "readiness_reason": "The final relationship outcome remains open.",
+                    "id": "leave-open",
+                    "label": "Leave it open",
+                    "message": "Keep that relationship open.",
                 },
-                ensure_ascii=False,
-            ),
-            model_snapshot="story-model",
-            provider_snapshot="openai-compatible",
-            usage={"total_tokens": 123},
-        )
-
-    monkeypatch.setattr(book_loop, "call_llm", fake_call)
-    state = SetupStateDocument()
-    assembly = book_loop.assemble_discussion_context(state, "I want a costly hopeful ending.")
-
-    result = book_loop.continue_book_discussion(
-        profile,
-        state,
-        "I want a costly hopeful ending.",
-        assembly,
+                {
+                    "id": "reconcile",
+                    "label": "Reconcile",
+                    "message": "Let them reconcile at a cost.",
+                    "recommended": True,
+                },
+            ],
+            "readiness": {"status": "continue", "reason": "One decision remains."},
+        }
     )
 
-    assert result.direction_draft == _long_direction()
-    assert result.readiness.status == "continue"
     assert result.question == "Which relationship must carry the emotional cost?"
-    assert len(result.suggestions) == 3
-    assert result.suggestions[0].id == "turn-0001-suggestion-1"
-    assert result.suggestions[0].rationale.startswith("Preserves ambiguity")
+    assert len(result.suggestions) == 2
     assert result.suggestions[1].recommended is True
-    assert captured["request"].metadata["atomic_action"] == "continue_book_discussion"
-    assert captured["request"].stream is True
-    assert captured["request"].request_options == {}
-    system_prompt = captured["request"].messages[0].content
-    assert "决定“下一步问什么”是全书 Loop 的职责" in system_prompt
-    assert "人物身份、人数范围、角色关系" in system_prompt
-    assert "suggestions 是同一个问题的答案" in system_prompt
-    assert "每轮必须恰好有一项 recommended 为 true" in system_prompt
 
 
 def test_setup_suggestion_keeps_legacy_payloads_readable() -> None:
@@ -273,264 +233,139 @@ def test_setup_suggestion_keeps_legacy_payloads_readable() -> None:
     assert suggestion.recommended is False
 
 
-def test_book_discussion_rejects_invalid_model_state(monkeypatch) -> None:
-    monkeypatch.setattr(
-        book_loop,
-        "call_llm",
-        lambda _profile, _request: ChatResult(
-            content=json.dumps(
-                {
-                    "reply": "Looks complete.",
-                    "direction_draft": _long_direction(),
-                    "discussion_summary": "Summary.",
-                    "confirmed_decisions": [],
-                    "superseded_decisions": [],
-                    "unresolved_questions": [],
-                    "assumptions": [],
-                    "contradictions": [],
-                    "question": None,
-                    "suggestions": [],
-                    "ready_status": "approved",
-                    "readiness_reason": "The model tried to approve it.",
-                }
-            ),
-            model_snapshot="story-model",
-            provider_snapshot="openai-compatible",
-        ),
-    )
-    state = SetupStateDocument()
-    assembly = book_loop.assemble_discussion_context(state, "Continue.")
-
-    with pytest.raises(ValueError, match="invalid ready_status"):
-        book_loop.continue_book_discussion(_profile(), state, "Continue.", assembly)
-
-
-@pytest.mark.parametrize(
-    ("overrides", "error"),
-    [
-        (
-            {"question": "Which cost matters? Which relationship bears it?"},
-            "exactly one question",
-        ),
-        (
+def test_book_discussion_tool_rejects_model_attempt_to_approve() -> None:
+    with pytest.raises(ValidationError):
+        BookDiscussionUpdateInput.model_validate(
             {
-                "suggestions": [
-                    {"label": "Personal", "message": "Make the cost personal."}
-                ]
-            },
-            "2 to 3 answer options",
-        ),
-        (
-            {
-                "suggestions": [
-                    {
-                        "label": "Personal",
-                        "message": "Make the cost personal.",
-                        "rationale": " ",
-                        "recommended": True,
-                    },
-                    {
-                        "label": "Public",
-                        "message": "Make the cost public.",
-                        "rationale": "Expands the consequence beyond the protagonist.",
-                        "recommended": False,
-                    },
-                ]
-            },
-            "suggestion.rationale",
-        ),
-        (
-            {
-                "suggestions": [
-                    {
-                        "label": "Personal",
-                        "message": "Make the cost personal.",
-                        "rationale": "Keeps the consequence intimate.",
-                        "recommended": False,
-                    },
-                    {
-                        "label": "Public",
-                        "message": "Make the cost public.",
-                        "rationale": "Expands the consequence beyond the protagonist.",
-                        "recommended": False,
-                    },
-                ]
-            },
-            "recommend exactly one",
-        ),
-        (
-            {
-                "suggestions": [
-                    {
-                        "label": "Personal",
-                        "message": "Make the cost personal.",
-                        "rationale": "Keeps the consequence intimate.",
-                        "recommended": True,
-                    },
-                    {
-                        "label": "Public",
-                        "message": "Make the cost public.",
-                        "rationale": "Expands the consequence beyond the protagonist.",
-                        "recommended": True,
-                    },
-                ]
-            },
-            "recommend exactly one",
-        ),
-        (
-            {
-                "suggestions": [
-                    {
-                        "label": "Personal",
-                        "message": "Make the cost personal.",
-                        "rationale": "Keeps the consequence intimate.",
-                        "recommended": "yes",
-                    },
-                    {
-                        "label": "Public",
-                        "message": "Make the cost public.",
-                        "rationale": "Expands the consequence beyond the protagonist.",
-                        "recommended": False,
-                    },
-                ]
-            },
-            "must be a boolean",
-        ),
-        (
-            {"ready_status": "ready", "question": "Continue anyway?", "suggestions": []},
-            "must not contain a question",
-        ),
-        (
-            {"question": "Which issue should we discuss first?"},
-            "must choose the next concrete decision",
-        ),
-    ],
-)
-def test_book_discussion_rejects_non_plan_question_shapes(
-    overrides: dict[str, object],
-    error: str,
-) -> None:
-    payload: dict[str, object] = {
-        "reply": "The latest answer establishes the central cost.",
-        "direction_draft": _long_direction(),
-        "discussion_summary": "A fair mystery with a costly hopeful ending.",
-        "confirmed_decisions": ["Fair clues"],
-        "superseded_decisions": [],
-        "unresolved_questions": ["The final relationship outcome"],
-        "assumptions": [],
-        "contradictions": [],
-        "question": "Which relationship must carry the emotional cost?",
-        "suggestions": [
-            {
-                "label": "Mentor",
-                "message": "Let the mentor relationship bear it.",
-                "rationale": "Ties the cost to guidance and betrayal.",
-                "recommended": True,
-            },
-            {
-                "label": "Sibling",
-                "message": "Let the sibling relationship bear it.",
-                "rationale": "Makes the cost more intimate and familial.",
-                "recommended": False,
-            },
-        ],
-        "ready_status": "continue",
-        "readiness_reason": "One high-impact decision remains.",
-    }
-    payload.update(overrides)
-
-    with pytest.raises(ValueError, match=error):
-        book_loop._discussion_result_from_payload(
-            payload,
-            ChatResult(
-                content="{}",
-                model_snapshot="story-model",
-                provider_snapshot="openai-compatible",
-            ),
-            1,
-            "Continue.",
+                "expected_revision": 0,
+                "reply": "Looks complete.",
+                "direction_draft": _long_direction(),
+                "discussion_summary": "Summary.",
+                "confirmed_decisions": [],
+                "superseded_decisions": [],
+                "unresolved_questions": [],
+                "assumptions": [],
+                "contradictions": [],
+                "question": None,
+                "suggestions": [],
+                "readiness": {"status": "approved", "reason": "Tried to approve."},
+            }
         )
 
 
-def test_book_discussion_redacts_provider_secrets_from_model_content(monkeypatch) -> None:
-    profile = _profile(api_key="secret-key", base_url="https://api.example.com/v1")
-    monkeypatch.setattr(
-        book_loop,
-        "call_llm",
-        lambda _profile, _request: ChatResult(
-            content=json.dumps(
-                {
-                    "reply": "provider echoed secret-key",
-                    "direction_draft": _long_direction() + " https://api.example.com/v1",
-                    "discussion_summary": "Safe summary.",
-                    "confirmed_decisions": [],
-                    "superseded_decisions": [],
-                    "unresolved_questions": [],
-                    "assumptions": [],
-                    "contradictions": [],
-                    "question": "Which consequence matters most?",
-                    "suggestions": [
-                        {
-                            "label": "Personal",
-                            "message": "Make the consequence personal.",
-                            "rationale": "Keeps the emotional focus intimate.",
-                            "recommended": True,
-                        },
-                        {
-                            "label": "Public",
-                            "message": "Make the consequence public.",
-                            "rationale": "Broadens the stakes to the entire city.",
-                            "recommended": False,
-                        },
-                    ],
-                    "ready_status": "continue",
-                    "readiness_reason": "Continue.",
-                }
-            ),
-            model_snapshot="story-model",
-            provider_snapshot="openai-compatible",
-        ),
-    )
-    state = SetupStateDocument()
-    assembly = book_loop.assemble_discussion_context(state, "Continue.")
-
-    result = book_loop.continue_book_discussion(profile, state, "Continue.", assembly)
-    rendered = json.dumps(result.__dict__, ensure_ascii=False, default=str)
-
-    assert "secret-key" not in rendered
-    assert "https://api.example.com/v1" not in rendered
-    assert "[redacted]" in rendered
-
-
-def test_review_blocks_candidate_without_confirmed_decision_coverage(monkeypatch) -> None:
+def test_review_blocks_candidate_without_confirmed_decision_coverage() -> None:
     state = SetupStateDocument(
         direction_draft=_long_direction(),
         confirmed_decisions=["Clues must remain fair"],
     )
     synthesis = replace(_synthesis(), confirmed_decision_coverage=[])
-    monkeypatch.setattr(
-        book_loop,
-        "call_llm",
-        lambda _profile, _request: ChatResult(
-            content=json.dumps(
-                {
-                    "summary": "The candidate is long enough.",
-                    "issues": [],
-                    "signals": [],
-                }
-            ),
-            model_snapshot="review-model",
-            provider_snapshot="openai-compatible",
+    evaluation = EvaluationRecord(
+        candidate_artifact_id="book/candidate.json",
+        candidate_revision=1,
+        evaluator_profile_id="main",
+        evaluator_model_snapshot="review-model",
+        evaluator_provider_snapshot="openai-compatible",
+        rubric_version="book-direction-v1",
+        result=EvaluationResult(
+            schema_version=1,
+            outcome="pass",
+            contract_satisfied=True,
+            summary="The candidate is otherwise valid.",
+            issues=[],
+            signals=[],
+            repair_brief=None,
+            upstream_blocker=None,
         ),
     )
 
-    review, _, _ = book_loop.review_book_direction(_profile(), state, synthesis)
+    reviewed = apply_book_direction_prechecks(state, synthesis, evaluation)
 
-    assert review.status == "blocked"
+    assert reviewed.result.outcome == "local_repair"
     assert any(
-        issue.kind == "confirmed_decision_coverage_missing"
-        for issue in review.issues
+        issue.category == "confirmed_decision_coverage"
+        for issue in reviewed.result.issues
     )
+
+
+def test_review_blocks_coverage_that_is_not_preserved_by_candidate() -> None:
+    state = SetupStateDocument(
+        direction_draft=_long_direction(),
+        confirmed_decisions=["Clues must remain fair"],
+    )
+    synthesis = replace(
+        _synthesis(),
+        constraints=_synthesis().constraints.model_copy(update={"confirmed": []}),
+        confirmed_decision_coverage=[
+            ConfirmedDecisionCoverage(
+                decision="Clues must remain fair",
+                candidate_evidence="text that is absent from the candidate",
+            )
+        ],
+    )
+    evaluation = EvaluationRecord(
+        candidate_artifact_id="book/candidate.json",
+        candidate_revision=1,
+        evaluator_profile_id="main",
+        evaluator_model_snapshot="review-model",
+        evaluator_provider_snapshot="openai-compatible",
+        rubric_version="book-direction-v1",
+        result=EvaluationResult(
+            schema_version=1,
+            outcome="pass",
+            contract_satisfied=True,
+            summary="Passed by semantic review.",
+            issues=[],
+            signals=[],
+            repair_brief=None,
+            upstream_blocker=None,
+        ),
+    )
+
+    reviewed = apply_book_direction_prechecks(state, synthesis, evaluation)
+
+    assert reviewed.result.outcome == "local_repair"
+    assert reviewed.result.contract_satisfied is False
+
+
+def test_review_accepts_non_verbatim_evidence_for_preserved_decision() -> None:
+    state = SetupStateDocument(
+        direction_draft=_long_direction(),
+        confirmed_decisions=["Clues must remain fair"],
+    )
+    synthesis = replace(
+        _synthesis(),
+        confirmed_decision_coverage=[
+            ConfirmedDecisionCoverage(
+                decision="Clues must remain fair",
+                candidate_evidence=(
+                    "The fair-clue section explains the visible clue contract."
+                ),
+            )
+        ],
+    )
+    evaluation = EvaluationRecord(
+        candidate_artifact_id="book/candidate.json",
+        candidate_revision=1,
+        evaluator_profile_id="main",
+        evaluator_model_snapshot="review-model",
+        evaluator_provider_snapshot="openai-compatible",
+        rubric_version="book-direction-v1",
+        result=EvaluationResult(
+            schema_version=1,
+            outcome="pass",
+            contract_satisfied=True,
+            summary="Passed by semantic review.",
+            issues=[],
+            signals=[],
+            repair_brief=None,
+            upstream_blocker=None,
+        ),
+    )
+
+    reviewed = apply_book_direction_prechecks(state, synthesis, evaluation)
+
+    assert reviewed.result.outcome == "pass"
+    assert reviewed.result.contract_satisfied is True
 
 
 def test_record_discussion_turn_persists_trace_without_committing_book_direction(
@@ -1070,7 +905,7 @@ def test_setup_api_failure_is_fail_closed_and_redacts_provider_secrets(
     monkeypatch.setattr(setup_api, "get_active_project_path", lambda: project_path)
     monkeypatch.setattr(setup_api, "get_active_profile", lambda: profile)
 
-    def fail_discussion(*_args):
+    def fail_discussion(*_args, **_kwargs):
         raise RuntimeError("provider echoed secret-key at https://api.example.com/v1")
 
     monkeypatch.setattr(setup_api, "continue_book_discussion", fail_discussion)
@@ -1090,6 +925,97 @@ def test_setup_api_failure_is_fail_closed_and_redacts_provider_secrets(
     assert "[redacted]" in rendered
 
 
+def test_setup_agent_event_callback_persists_safe_agent_evidence(
+    tmp_path: Path,
+) -> None:
+    project_path = _make_project(tmp_path)
+    metadata = ProjectMetadata.model_validate(read_json(project_path / "project.json"))
+    callback = setup_api._setup_agent_event_callback(
+        project_path,
+        metadata,
+        action="continue_book_discussion",
+    )
+
+    callback(
+        {
+            "kind": "agent_activation_completed",
+            "activation_id": "activation-1",
+            "candidate_run_id": "run-1",
+            "outcome": "candidate",
+            "evidence_paths": [
+                "book/candidates/direction-1.json",
+                "book/agent/a/activation-1/telemetry.json",
+            ],
+            "raw_arguments": {"api_key": "secret"},
+        }
+    )
+
+    event = read_events(project_path)[-1]
+    assert event.kind == "agent_activation_completed"
+    assert event.artifact_path == "book/agent/a/activation-1/telemetry.json"
+    assert event.payload["evidence_paths"] == [
+        "book/candidates/direction-1.json",
+        "book/agent/a/activation-1/telemetry.json",
+    ]
+    assert "raw_arguments" not in event.payload
+    assert "secret" not in str(event.payload)
+
+
+def test_setup_stream_progress_counts_tool_argument_deltas(tmp_path: Path) -> None:
+    project_path = _make_project(tmp_path)
+    metadata = ProjectMetadata.model_validate(read_json(project_path / "project.json"))
+    callback = setup_api._setup_stream_callback(
+        project_path,
+        metadata,
+        action="synthesize_book_direction",
+    )
+
+    callback(
+        ChatChunk(
+            event_type="tool_argument_delta",
+            arguments_delta='{"direction_markdown":"开始',
+            provider_snapshot="openai-compatible",
+        )
+    )
+
+    event = read_events(project_path)[-1]
+    assert event.kind == "llm_stream_progress"
+    assert event.payload["received_characters"] == len(
+        '{"direction_markdown":"开始'
+    )
+    assert "direction_markdown" not in str(event.payload)
+
+
+def test_setup_stream_progress_coalesces_small_provider_fragments(tmp_path: Path) -> None:
+    project_path = _make_project(tmp_path)
+    metadata = ProjectMetadata.model_validate(read_json(project_path / "project.json"))
+    callback = setup_api._setup_stream_callback(
+        project_path,
+        metadata,
+        action="synthesize_book_direction",
+    )
+
+    for _ in range(100):
+        callback(
+            ChatChunk(
+                event_type="tool_argument_delta",
+                arguments_delta="x",
+                provider_snapshot="openai-compatible",
+            )
+        )
+    callback(
+        ChatChunk(
+            event_type="tool_call_stop",
+            provider_snapshot="openai-compatible",
+        )
+    )
+
+    progress_events = [
+        event for event in read_events(project_path) if event.kind == "llm_stream_progress"
+    ]
+    assert [event.payload["received_characters"] for event in progress_events] == [1, 100]
+
+
 def test_setup_api_review_failure_preserves_attempt_and_never_unlocks_approval(
     tmp_path: Path,
     monkeypatch,
@@ -1099,7 +1025,7 @@ def test_setup_api_review_failure_preserves_attempt_and_never_unlocks_approval(
     monkeypatch.setattr(setup_api, "get_active_project_path", lambda: project_path)
     monkeypatch.setattr(setup_api, "get_active_profile", lambda: profile)
 
-    def fail_synthesis(*_args):
+    def fail_synthesis(*_args, **_kwargs):
         raise RuntimeError("provider echoed secret-key at https://api.example.com/v1")
 
     monkeypatch.setattr(setup_api, "synthesize_book_direction", fail_synthesis)
@@ -1126,7 +1052,11 @@ def test_setup_api_review_failure_preserves_attempt_and_never_unlocks_approval(
     assert "secret-key" not in failed_rendered
     assert "https://api.example.com/v1" not in failed_rendered
 
-    monkeypatch.setattr(setup_api, "synthesize_book_direction", lambda *_args: _synthesis())
+    monkeypatch.setattr(
+        setup_api,
+        "synthesize_book_direction",
+        lambda *_args, **_kwargs: _synthesis(),
+    )
     monkeypatch.setattr(
         setup_api,
         "review_book_direction",
@@ -1152,7 +1082,14 @@ def test_setup_api_runs_discussion_review_and_explicit_approval(
     monkeypatch.setattr(setup_api, "get_active_project_path", lambda: project_path)
     monkeypatch.setattr(setup_api, "get_active_profile", lambda: profile)
 
-    def fake_discussion(_profile, _state, _message, _assembly, on_text_delta):
+    def fake_discussion(
+        _profile,
+        _state,
+        _message,
+        _assembly,
+        on_text_delta,
+        **_kwargs,
+    ):
         on_text_delta(
             ChatChunk(
                 text_delta='{"reply":',
@@ -1172,7 +1109,11 @@ def test_setup_api_runs_discussion_review_and_explicit_approval(
         "continue_book_discussion",
         fake_discussion,
     )
-    monkeypatch.setattr(setup_api, "synthesize_book_direction", lambda *_args: _synthesis())
+    monkeypatch.setattr(
+        setup_api,
+        "synthesize_book_direction",
+        lambda *_args, **_kwargs: _synthesis(),
+    )
     monkeypatch.setattr(
         setup_api,
         "review_book_direction",
@@ -1208,7 +1149,7 @@ def test_setup_api_runs_discussion_review_and_explicit_approval(
     progress_events = [
         event for event in read_events(project_path) if event.kind == "llm_stream_progress"
     ]
-    assert [event.payload["received_characters"] for event in progress_events] == [9, 10]
+    assert [event.payload["received_characters"] for event in progress_events] == [9]
     assert all("text_delta" not in event.payload for event in progress_events)
 
     with pytest.raises(HTTPException) as duplicate_approval:
@@ -1273,7 +1214,7 @@ def test_setup_api_queues_events_when_durable_append_temporarily_fails(
     monkeypatch.setattr(
         setup_api,
         "continue_book_discussion",
-        lambda *_args: _turn_result(),
+        lambda *_args, **_kwargs: _turn_result(),
     )
     monkeypatch.setattr(
         setup_api,
@@ -1307,7 +1248,14 @@ def test_setup_api_redacts_secrets_from_user_discussion_before_storage(
     monkeypatch.setattr(setup_api, "get_active_project_path", lambda: project_path)
     monkeypatch.setattr(setup_api, "get_active_profile", lambda: profile)
 
-    def fake_discussion(_profile, _state, message, _assembly, _on_text_delta):
+    def fake_discussion(
+        _profile,
+        _state,
+        message,
+        _assembly,
+        _on_text_delta,
+        **_kwargs,
+    ):
         captured_messages.append(message)
         return _turn_result()
 

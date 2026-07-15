@@ -14,6 +14,7 @@ export const workspaceQueryKeys = {
   project: (projectId: string) => ["workspace", projectId] as const,
   activeProject: (projectId: string) => ["workspace", projectId, "active-project"] as const,
   setup: (projectId: string) => ["workspace", projectId, "setup"] as const,
+  bookRevision: (projectId: string) => ["workspace", projectId, "book-revision"] as const,
   readiness: (projectId: string) => ["workspace", projectId, "readiness"] as const,
   arc: (projectId: string) => ["workspace", projectId, "arc"] as const,
   experimentFixture: (projectId: string) => ["workspace", projectId, "experiment-fixture"] as const,
@@ -29,6 +30,10 @@ export const workspaceQueryKeys = {
 export function useWorkspaceQueries(projectId: string) {
   const activeProject = useQuery({ queryKey: workspaceQueryKeys.activeProject(projectId), queryFn: api.activeProject });
   const setup = useQuery({ queryKey: workspaceQueryKeys.setup(projectId), queryFn: api.setupState });
+  const bookRevision = useQuery({
+    queryKey: workspaceQueryKeys.bookRevision(projectId),
+    queryFn: api.pendingBookRevision
+  });
   const readiness = useQuery({ queryKey: workspaceQueryKeys.readiness(projectId), queryFn: api.readiness });
   const currentArc = useQuery({ queryKey: workspaceQueryKeys.arc(projectId), queryFn: api.currentArc });
   const experimentFixture = useQuery({
@@ -55,12 +60,13 @@ export function useWorkspaceQueries(projectId: string) {
   const canonContents = Object.fromEntries(
     (Object.keys(canonFiles) as CanonKind[]).map((kind, index) => [kind, canonQueries[index]?.data ?? emptyCanonContents[kind]])
   ) as Record<CanonKind, string>;
-  const error = [activeProject, setup, readiness, currentArc, experimentFixture, profiles, artifactPaths, artifactSummaries, completionAudit]
+  const error = [activeProject, setup, bookRevision, readiness, currentArc, experimentFixture, profiles, artifactPaths, artifactSummaries, completionAudit]
     .find((query) => query.error)?.error ?? null;
 
   return {
     activeProject,
     setup,
+    bookRevision,
     readiness,
     currentArc,
     experimentFixture,

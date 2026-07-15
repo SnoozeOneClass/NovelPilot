@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import (
     arcs,
     artifacts,
+    book_revisions,
     completion,
     experiments,
     exports,
@@ -34,6 +35,11 @@ def create_app() -> FastAPI:
     app.include_router(projects.router, prefix="/api/projects", tags=["projects"])
     app.include_router(profiles.router, prefix="/api/profiles", tags=["profiles"])
     app.include_router(setup.router, prefix="/api/setup", tags=["setup"])
+    app.include_router(
+        book_revisions.router,
+        prefix="/api/book-revisions",
+        tags=["book-revisions"],
+    )
     app.include_router(arcs.router, prefix="/api/arcs", tags=["arcs"])
     app.include_router(runs.router, prefix="/api/runs", tags=["runs"])
     app.include_router(feedback.router, prefix="/api/feedback", tags=["feedback"])
