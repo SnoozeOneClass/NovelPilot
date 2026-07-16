@@ -166,7 +166,7 @@
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: var(--np-topbar-height) auto minmax(0, 1fr) auto;
+  grid-template-rows: var(--np-topbar-height) auto minmax(0, 1fr);
 }
 
 .topbar {
@@ -252,6 +252,7 @@
 }
 
 .content {
+  grid-row: 3;
   min-width: 0;
   min-height: 0;
   overflow: auto;
@@ -307,7 +308,7 @@
 
   .workspace {
     grid-row: 1;
-    grid-template-rows: 52px auto minmax(0, 1fr) auto;
+    grid-template-rows: 52px auto minmax(0, 1fr);
   }
 
   .topbar {
