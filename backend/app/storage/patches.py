@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -9,8 +10,9 @@ from app.schemas.patches import (
     PatchValidationResult,
 )
 from app.schemas.state import VersionedState
-from app.storage.json_files import read_json, write_json
+from app.storage.json_files import read_json
 from app.storage.text_files import read_text_file
+from app.storage.transactions import commit_file_transaction
 
 
 ALLOWED_CANON_TARGETS = {
@@ -66,17 +68,34 @@ def commit_candidate_state_patch(
         state = states[target_file]
         _apply_operation(state, operation)
 
-    for target_file, state in states.items():
-        state.version += 1
-        write_json(project_path / target_file, state.model_dump(mode="json"))
-
     committed = CommittedStatePatch(
         committed_at=datetime.now(UTC).isoformat(),
         operations=patch.operations,
         validation=validation,
     )
-    write_json(committed_patch_path, committed.model_dump(mode="json", by_alias=True))
+    files: dict[str, str | bytes] = {}
+    for target_file, state in states.items():
+        state.version += 1
+        files[target_file] = _json_document(state.model_dump(mode="json"))
+    try:
+        committed_relative = committed_patch_path.resolve().relative_to(
+            project_path.resolve()
+        )
+    except ValueError as exc:
+        raise ValueError("Committed state patch path escapes the project.") from exc
+    files[committed_relative.as_posix()] = _json_document(
+        committed.model_dump(mode="json", by_alias=True)
+    )
+    commit_file_transaction(
+        project_path,
+        kind=f"state-patch-{committed_relative.parent.name}",
+        files=files,
+    )
     return committed
+
+
+def _json_document(payload: object) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
 
 def _validate_schema_boundaries(patch: CandidateStatePatch) -> list[str]:

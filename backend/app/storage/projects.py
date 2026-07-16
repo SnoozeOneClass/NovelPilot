@@ -37,7 +37,7 @@ INITIAL_CANON_FILES = {
     "canon/world_facts.json": {"schema_version": 1, "version": 1, "items": {}},
     "canon/foreshadowing.json": {"schema_version": 1, "version": 1, "items": {}},
 }
-RUN_LOCK_STATUSES = {"running", "pause_requested"}
+RUN_LOCK_STATUSES = {"running", "pause_requested", "waiting_for_provider"}
 
 
 class ActiveProjectBusyError(RuntimeError):

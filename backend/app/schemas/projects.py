@@ -14,6 +14,7 @@ RunStatus = Literal[
     "pause_requested",
     "paused",
     "waiting_for_user",
+    "waiting_for_provider",
     "failed",
 ]
 

@@ -25,6 +25,7 @@ const runStatusLabels: Record<string, string> = {
   pause_requested: "等待安全暂停",
   paused: "已暂停",
   waiting_for_user: "等待用户",
+  waiting_for_provider: "等待模型服务恢复",
   failed: "失败"
 };
 
@@ -245,6 +246,7 @@ const runNextActionLabels: Record<RunNextAction["id"], string> = {
   configure_llm_profile: "配置 LLM",
   repair_project_state: "修复项目状态",
   wait_for_safe_checkpoint: "等待安全检查点",
+  wait_for_provider_retry: "等待模型服务自动重试",
   recover_stale_run: "恢复卡住的运行",
   inspect_failure: "检查失败原因",
   retry_provider_connection: "重新连接并继续",

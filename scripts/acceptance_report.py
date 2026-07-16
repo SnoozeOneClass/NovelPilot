@@ -305,12 +305,13 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
     ),
     AcceptanceCriterion(
         id="run_control_sse",
-        requirement="Harness has one explicit start, guarded automatic continuation, abnormal recovery, and replayable streaming updates.",
+        requirement="Harness has one explicit start, backend-owned durable continuation, abnormal recovery, and replayable streaming updates.",
         probes=(
             EvidenceProbe("backend/app/api/runs.py", ("start_run", "pause_run", "resume_run", "stream_events")),
             EvidenceProbe("backend/tests/test_runs.py", ("_events_after_last_event_id", "concurrent")),
-            EvidenceProbe("frontend/src/features/workspace/Workspace.tsx", ("useHarnessEvents", "useCreationRunController", "resumeRun")),
-            EvidenceProbe("frontend/src/features/creation/useCreationRunController.ts", ("can_auto_continue", "requires_user", "hasStarted")),
+            EvidenceProbe("backend/app/harness/run_host.py", ("class RunHost", "route_run", "begin_harness_checkpoint")),
+            EvidenceProbe("backend/app/harness/flow_router.py", ("RunFacts", "def route_run")),
+            EvidenceProbe("frontend/src/features/workspace/Workspace.tsx", ("useHarnessEvents", "startRun", "waiting_for_provider")),
             EvidenceProbe("frontend/src/app/harness-events.ts", ("EventSource", "chapter_draft_delta")),
         ),
     ),

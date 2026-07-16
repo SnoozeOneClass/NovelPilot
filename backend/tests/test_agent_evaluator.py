@@ -244,6 +244,41 @@ def test_evaluator_retries_a_transient_provider_failure_before_validation() -> N
     assert retries == [(1, 2)]
 
 
+def test_evaluation_fingerprint_binds_candidate_input_and_profile() -> None:
+    def passing_call(_profile, _request):
+        return ChatResult(
+            content="{}",
+            structured_output={
+                "schema_version": 1,
+                "outcome": "pass",
+                "contract_satisfied": True,
+                "summary": "The candidate passes.",
+                "issues": [],
+                "signals": [],
+                "repair_brief": None,
+                "upstream_blocker": None,
+            },
+            model_snapshot="judge-model",
+            provider_snapshot="openai-compatible",
+        )
+
+    first = evaluate_candidate(_profile(), _input(), evaluator_call=passing_call)
+    second = evaluate_candidate(
+        _profile(),
+        _input().model_copy(update={"candidate_revision": 2}),
+        evaluator_call=passing_call,
+    )
+    third = evaluate_candidate(
+        _profile().model_copy(update={"model": "judge-model-v2"}),
+        _input(),
+        evaluator_call=passing_call,
+    )
+
+    assert first.input_fingerprint
+    assert first.input_fingerprint != second.input_fingerprint
+    assert first.input_fingerprint != third.input_fingerprint
+
+
 def _profile() -> LlmProfile:
     return LlmProfile(
         id="judge",

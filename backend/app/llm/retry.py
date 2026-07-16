@@ -11,6 +11,15 @@ TransportRetryCallback = Callable[[int, int, Exception], None]
 SleepCall = Callable[[float], None]
 
 _HTTP_STATUS_PATTERN = re.compile(r"provider returned\s+(\d{3})", re.IGNORECASE)
+_NON_RETRYABLE_AUTH_TEXT = (
+    "auth_unavailable",
+    "no auth available",
+    "invalid api key",
+    "invalid_api_key",
+    "authentication failed",
+    "unauthorized",
+    "forbidden",
+)
 _RETRYABLE_TEXT = (
     "provider request failed",
     "temporary provider failure",
@@ -77,9 +86,11 @@ def is_retryable_provider_error(error: BaseException) -> bool:
 
 
 def is_retryable_provider_error_message(message: str) -> bool:
+    lowered = message.casefold()
+    if any(marker in lowered for marker in _NON_RETRYABLE_AUTH_TEXT):
+        return False
     match = _HTTP_STATUS_PATTERN.search(message)
     if match is not None:
         status = int(match.group(1))
         return status in {408, 409, 425, 429} or 500 <= status <= 599
-    lowered = message.casefold()
     return any(marker in lowered for marker in _RETRYABLE_TEXT)

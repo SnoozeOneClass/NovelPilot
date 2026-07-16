@@ -1,5 +1,6 @@
 import json
 from collections.abc import Callable
+from hashlib import sha256
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -22,6 +23,7 @@ from app.llm.redaction import redact_profile_secrets
 from app.llm.retry import TransportRetryCallback, call_llm_with_transport_retries
 from app.schemas.profiles import LlmProfile
 from app.storage.json_files import read_json
+from app.storage.profiles import profile_fingerprint
 from app.storage.transactions import commit_file_transaction
 
 
@@ -95,6 +97,8 @@ def evaluate_candidate(
     if evaluation is None or result is None:
         raise EvaluationValidationError("Evaluator did not produce a validated result.")
     return EvaluationRecord(
+        candidate_run_id=evaluation_input.candidate_run_id,
+        input_fingerprint=evaluation_input_fingerprint(profile, evaluation_input),
         candidate_artifact_id=evaluation_input.candidate_artifact_id,
         candidate_revision=evaluation_input.candidate_revision,
         evaluator_profile_id=profile.id,
@@ -103,6 +107,23 @@ def evaluate_candidate(
         rubric_version=evaluation_input.rubric_version,
         result=evaluation,
     )
+
+
+def evaluation_input_fingerprint(
+    profile: LlmProfile,
+    evaluation_input: EvaluationInput,
+) -> str:
+    """Identify the complete, immutable input evaluated by one model profile."""
+    canonical = json.dumps(
+        {
+            "evaluation_input": evaluation_input.model_dump(mode="json"),
+            "evaluator_profile_fingerprint": profile_fingerprint(profile),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _validated_evaluation(
@@ -192,14 +213,35 @@ def persist_evaluation_views(
     commit_file_transaction(
         project_path,
         kind="agent-evaluation",
-        files={
-            evaluation_path: _json_document(record.model_dump(mode="json")),
-            review_path: render_review_markdown(record),
-            verification_path: _json_document(
-                verification_payload or render_verification(record)
-            ),
-        },
+        files=evaluation_view_files(
+            record,
+            evaluation_path=evaluation_path,
+            review_path=review_path,
+            verification_path=verification_path,
+            verification_payload=verification_payload,
+        ),
     )
+
+
+def evaluation_view_files(
+    record: EvaluationRecord,
+    *,
+    evaluation_path: str,
+    review_path: str,
+    verification_path: str,
+    verification_payload: dict[str, object] | None = None,
+) -> dict[str, str | bytes]:
+    """Render evaluation projections for inclusion in a larger transaction."""
+    paths = [evaluation_path, review_path, verification_path]
+    for value in paths:
+        ensure_relative_artifact_path(value)
+    return {
+        evaluation_path: _json_document(record.model_dump(mode="json")),
+        review_path: render_review_markdown(record),
+        verification_path: _json_document(
+            verification_payload or render_verification(record)
+        ),
+    }
 
 
 def render_review_markdown(record: EvaluationRecord) -> str:

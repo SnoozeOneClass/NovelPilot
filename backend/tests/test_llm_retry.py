@@ -68,6 +68,33 @@ def test_transport_retry_does_not_retry_non_transient_provider_rejection() -> No
     assert attempts == 1
 
 
+def test_transport_retry_does_not_mask_auth_failure_behind_http_503() -> None:
+    attempts = 0
+
+    def fake_call(_profile: LlmProfile, _request: ChatRequest) -> ChatResult:
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError(
+            'OpenAI-compatible provider returned 503: '
+            '{"error":{"message":"auth_unavailable: no auth available"}}'
+        )
+
+    try:
+        call_llm_with_transport_retries(
+            _profile(),
+            _request(),
+            retry_limit=3,
+            llm_call=fake_call,
+            sleep_call=lambda _delay: None,
+        )
+    except RuntimeError as exc:
+        assert "auth_unavailable" in str(exc)
+    else:
+        raise AssertionError("An authentication failure entered transport retries.")
+
+    assert attempts == 1
+
+
 def test_transport_budget_is_fresh_for_each_independent_request() -> None:
     attempts_by_request = {"first": 0, "second": 0}
 

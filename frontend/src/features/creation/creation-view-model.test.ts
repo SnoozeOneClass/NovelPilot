@@ -130,4 +130,28 @@ describe("deriveCreationViewModel", () => {
       expect(model.primaryAction).toBe("retry_failed_run");
     }
   );
+
+  it("shows provider waiting as backend-owned progress without a manual action", () => {
+    const model = deriveCreationViewModel({
+      project: {
+        ...project,
+        metadata: {
+          ...project.metadata,
+          run_status: "waiting_for_provider",
+          active_chapter_id: "chapter-002"
+        }
+      },
+      readiness: readiness("wait_for_provider_retry", {
+        evidence: ["next_wake_at:2026-07-16T12:00:10Z"]
+      }),
+      currentArc: null,
+      bookRevision: null,
+      events: []
+    });
+
+    expect(model.stage).toBe("waiting_provider");
+    expect(model.primaryAction).toBeNull();
+    expect(model.isRunning).toBe(true);
+    expect(model.description).toContain("2026-07-16T12:00:10Z");
+  });
 });

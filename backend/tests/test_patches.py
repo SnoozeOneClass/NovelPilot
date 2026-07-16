@@ -2,6 +2,7 @@ import pytest
 
 from app.schemas.patches import CandidateStatePatch
 from app.storage import patches as patch_storage
+from app.storage import transactions
 from app.storage.json_files import read_json, write_json
 from app.storage.patches import (
     PatchValidationError,
@@ -82,6 +83,46 @@ def test_noop_patch_commit_writes_committed_patch_without_mutating_canon(tmp_pat
     assert committed_payload["operations"] == []
     assert state["version"] == 1
     assert state["items"] == {}
+
+
+def test_patch_commit_rolls_back_canon_when_multifile_promotion_is_interrupted(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    project_path = _make_project(tmp_path)
+    committed_path = (
+        project_path / "chapters" / "chapter-001" / "committed_state_patch.json"
+    )
+    original_promote = transactions._promote_staged_file
+    promotions = 0
+
+    def fail_second_promotion(staged, target, transaction_id):
+        nonlocal promotions
+        promotions += 1
+        if promotions == 2:
+            raise OSError("injected promotion interruption")
+        return original_promote(staged, target, transaction_id)
+
+    monkeypatch.setattr(
+        transactions,
+        "_promote_staged_file",
+        fail_second_promotion,
+    )
+
+    with pytest.raises(OSError, match="injected promotion interruption"):
+        commit_candidate_state_patch(
+            project_path,
+            _candidate_patch(),
+            committed_path,
+        )
+
+    assert read_json(project_path / "canon" / "characters.json") == {
+        "schema_version": 1,
+        "version": 1,
+        "items": {},
+    }
+    assert not committed_path.exists()
+    assert not (project_path / "book" / ".transactions").exists()
 
 
 def test_patch_validation_rejects_disallowed_target(tmp_path) -> None:

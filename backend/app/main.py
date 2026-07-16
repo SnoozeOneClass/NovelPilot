@@ -1,3 +1,6 @@
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -16,14 +19,25 @@ from app.api import (
     setup,
 )
 from app.core.config import ensure_runtime_dirs
+from app.harness.run_host import get_run_host
 from app.storage.projects import recover_all_project_transactions
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    host = get_run_host()
+    host.start()
+    try:
+        yield
+    finally:
+        host.stop()
 
 
 def create_app() -> FastAPI:
     ensure_runtime_dirs()
     recover_all_project_transactions()
 
-    app = FastAPI(title="Novelpilot", version="0.1.0")
+    app = FastAPI(title="Novelpilot", version="0.1.0", lifespan=_lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],

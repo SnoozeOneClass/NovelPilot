@@ -43,6 +43,9 @@ function feedbackText(event: HarnessEvent): string | null {
 function failureSummary(event: HarnessEvent): string {
   const category = event.payload.category;
   const message = event.message;
+  if (category === "provider_auth" || category === "unsupported_capability") {
+    return "当前模型配置或接口能力不可用。请先在设置中修正模型配置，再重试同一个检查点；已有候选和正式正文不会丢失。";
+  }
   const providerFailure = category === "transport_provider"
     || /provider (?:request failed|returned \d{3}|authentication is unavailable)/i.test(message)
     || /\b(?:SSL|TLS|EOF|timeout|timed out|auth_unavailable)\b/i.test(message);

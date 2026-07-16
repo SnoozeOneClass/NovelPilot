@@ -1,23 +1,30 @@
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from collections.abc import Callable
 from typing import Any, Literal
 from uuid import uuid4
 
 from app.core.paths import resolve_artifact_path
-from app.harness.agents.evaluator import persist_evaluation_views
+from app.harness.agents.evaluator import evaluation_view_files
 from app.harness.agents.events import project_agent_event
 from app.harness.agents.loop_runners import (
     AgentControlCheckpoint,
+    recover_completed_chapter_agent,
+    recover_completed_story_arc_agent,
     run_book_revision_agent,
     run_chapter_agent,
     run_chapter_patch_evidence_repair_agent,
     run_story_arc_agent,
 )
 from app.harness.agents.models import AgentIdentity, EvaluationRecord
-from app.harness.agents.persistence import read_agent_state, save_agent_state
+from app.harness.agents.persistence import (
+    activation_relative,
+    read_agent_state,
+    save_agent_state,
+)
 from app.harness.agents.policy import ResolvedAgentPolicy, resolve_agent_policy
 from app.harness.agents.public_stream import ChapterDraftStreamProjector
 from app.harness.stream_progress import StreamProgressAccumulator
@@ -44,6 +51,11 @@ from app.storage.projects import read_project_metadata, write_project_metadata
 from app.storage.setup import read_setup_state
 from app.storage.text_files import read_text_file, write_text_file
 from app.storage.transactions import commit_file_transaction
+from app.storage.run_state import (
+    action_key_for_project,
+    schedule_provider_wait,
+    set_run_intent,
+)
 
 CANON_CONTEXT_FILES = (
     "canon/characters.json",
@@ -124,6 +136,9 @@ class HarnessOrchestrator:
 
         metadata.active_profile_id = profile.id
         try:
+            if self._process_pending_cross_loop_route(metadata):
+                return
+
             if self._process_approved_book_revision(metadata, profile):
                 return
 
@@ -131,15 +146,54 @@ class HarnessOrchestrator:
                 return
 
             if metadata.active_arc_id is None:
+                metadata.active_arc_id = _next_arc_id(self.context.project_path)
+                write_project_metadata(self.context.project_path, metadata)
+
+            active_arc_path = (
+                self.context.project_path / "arcs" / metadata.active_arc_id
+            )
+            if not (active_arc_path / "plan.md").exists() and not (
+                active_arc_path / "state.json"
+            ).exists():
                 self._plan_initial_story_arc(metadata)
                 return
 
             self._advance_chapter_loop(metadata)
         except Exception as exc:
-            metadata.run_status = "failed"
-            write_project_metadata(self.context.project_path, metadata)
             safe_error = redact_profile_secrets(str(exc), profile)
             provider_failure = is_retryable_provider_error(exc)
+            if provider_failure:
+                action_key = action_key_for_project(self.context.project_path)
+                wait = schedule_provider_wait(
+                    self.context.project_path,
+                    action_key=action_key,
+                    message=safe_error,
+                )
+                metadata.run_status = "waiting_for_provider"
+                write_project_metadata(self.context.project_path, metadata)
+                self._emit(
+                    metadata,
+                    kind="run_waiting_for_provider",
+                    loop_layer="system",
+                    atomic_action=action_key,
+                    status="requested",
+                    routing_decision="retry_automatically",
+                    message=(
+                        "Model provider connection was interrupted. NovelPilot preserved "
+                        "the current candidate and will retry automatically."
+                    ),
+                    payload={
+                        "category": "transport_provider",
+                        "code": "provider_retry_scheduled",
+                        "attempt": wait.attempt,
+                        "next_wake_at": wait.next_wake_at.isoformat(),
+                    },
+                )
+                return
+            metadata.run_status = "failed"
+            write_project_metadata(self.context.project_path, metadata)
+            set_run_intent(self.context.project_path, desired_state="stopped")
+            failure_category, failure_code = _non_retryable_failure_kind(safe_error)
             self._emit(
                 metadata,
                 kind="run_failed",
@@ -149,14 +203,8 @@ class HarnessOrchestrator:
                 routing_decision="pause",
                 message=f"Harness run failed: {safe_error}",
                 payload={
-                    "category": (
-                        "transport_provider" if provider_failure else "harness_failure"
-                    ),
-                    "code": (
-                        "provider_retry_exhausted"
-                        if provider_failure
-                        else "run_failed"
-                    ),
+                    "category": failure_category,
+                    "code": failure_code,
                 },
             )
 
@@ -242,7 +290,9 @@ class HarnessOrchestrator:
         if profile is None:
             raise ValueError("Missing active profile.")
 
-        arc_id = _next_arc_id(self.context.project_path)
+        arc_id = metadata.active_arc_id or _next_arc_id(self.context.project_path)
+        metadata.active_arc_id = arc_id
+        write_project_metadata(self.context.project_path, metadata)
         arc_path = self.context.project_path / "arcs" / arc_id
         arc_path.mkdir(parents=True, exist_ok=True)
 
@@ -289,23 +339,37 @@ class HarnessOrchestrator:
             "plan_current_arc",
         )
         try:
-            agent_result = run_story_arc_agent(
+            agent_result = recover_completed_story_arc_agent(
                 self.context.project_path,
                 metadata,
                 policy,
                 arc_id=arc_id,
                 intent="create",
                 expected_revision=0,
-                instruction=prompt,
-                candidate_run_id=self._story_arc_resume_candidate_run_id(arc_path),
                 on_event=self._agent_event_callback(
                     metadata,
                     "story_arc",
                     "plan_current_arc",
                 ),
-                on_text_delta=stream_callback,
-                on_tool_event=stream_callback,
             )
+            if agent_result is None:
+                agent_result = run_story_arc_agent(
+                    self.context.project_path,
+                    metadata,
+                    policy,
+                    arc_id=arc_id,
+                    intent="create",
+                    expected_revision=0,
+                    instruction=prompt,
+                    candidate_run_id=self._story_arc_resume_candidate_run_id(arc_path),
+                    on_event=self._agent_event_callback(
+                        metadata,
+                        "story_arc",
+                        "plan_current_arc",
+                    ),
+                    on_text_delta=stream_callback,
+                    on_tool_event=stream_callback,
+                )
         except AgentControlCheckpoint as checkpoint:
             self._handle_agent_control_checkpoint(
                 metadata,
@@ -345,19 +409,13 @@ class HarnessOrchestrator:
             usage=agent_result.run_result.usage,
         )
         review_root = Path("arcs") / arc_id / "reviews" / "review-0001"
-        persist_evaluation_views(
-            self.context.project_path,
+        evaluation_files = evaluation_view_files(
             agent_result.evaluation,
             evaluation_path=(review_root / "evaluation.json").as_posix(),
             review_path=(review_root / "review.md").as_posix(),
             verification_path=(review_root / "verification.json").as_posix(),
         )
-
-        plan_path = arc_path / "plan.md"
-        write_text_file(plan_path, proposal.plan_markdown.strip() + "\n")
-        write_json(
-            arc_path / "state.json",
-            {
+        arc_state = {
                 "schema_version": 1,
                 "version": 1,
                 "arc_id": arc_id,
@@ -376,6 +434,16 @@ class HarnessOrchestrator:
                 "target_chapter_count": proposal.target_chapter_count,
                 "completed_chapter_ids": [],
                 "completed_at": None,
+            }
+        commit_file_transaction(
+            self.context.project_path,
+            kind=f"story-arc-candidate-{arc_id}-0001",
+            files={
+                f"arcs/{arc_id}/plan.md": proposal.plan_markdown.strip() + "\n",
+                f"arcs/{arc_id}/state.json": (
+                    json.dumps(arc_state, ensure_ascii=False, indent=2) + "\n"
+                ),
+                **evaluation_files,
             },
         )
         (arc_path / "book-upstream-resume.json").unlink(missing_ok=True)
@@ -643,23 +711,37 @@ class HarnessOrchestrator:
             "revise_current_arc_plan",
         )
         try:
-            agent_result = run_story_arc_agent(
+            agent_result = recover_completed_story_arc_agent(
                 self.context.project_path,
                 metadata,
                 policy,
                 arc_id=arc_id,
                 intent="revise",
                 expected_revision=expected_revision,
-                instruction=prompt,
-                candidate_run_id=self._story_arc_resume_candidate_run_id(arc_path),
                 on_event=self._agent_event_callback(
                     metadata,
                     "story_arc",
                     "revise_current_arc_plan",
                 ),
-                on_text_delta=stream_callback,
-                on_tool_event=stream_callback,
             )
+            if agent_result is None:
+                agent_result = run_story_arc_agent(
+                    self.context.project_path,
+                    metadata,
+                    policy,
+                    arc_id=arc_id,
+                    intent="revise",
+                    expected_revision=expected_revision,
+                    instruction=prompt,
+                    candidate_run_id=self._story_arc_resume_candidate_run_id(arc_path),
+                    on_event=self._agent_event_callback(
+                        metadata,
+                        "story_arc",
+                        "revise_current_arc_plan",
+                    ),
+                    on_text_delta=stream_callback,
+                    on_tool_event=stream_callback,
+                )
         except AgentControlCheckpoint as checkpoint:
             self._handle_agent_control_checkpoint(
                 metadata,
@@ -704,17 +786,14 @@ class HarnessOrchestrator:
             / "reviews"
             / f"review-{expected_revision + 1:04d}"
         )
-        persist_evaluation_views(
-            self.context.project_path,
+        evaluation_files = evaluation_view_files(
             agent_result.evaluation,
             evaluation_path=(review_root / "evaluation.json").as_posix(),
             review_path=(review_root / "review.md").as_posix(),
             verification_path=(review_root / "verification.json").as_posix(),
         )
         revised_plan = proposal.plan_markdown.strip() + "\n"
-        write_text_file(plan_path, revised_plan)
-        write_text_file(
-            arc_path / "revision.md",
+        revision_document = (
             "\n\n".join(
                 [
                     "# Arc Revision",
@@ -723,12 +802,24 @@ class HarnessOrchestrator:
                     f"## Revised Plan\n{proposal.plan_markdown.strip()}",
                 ]
             )
-            + "\n",
+            + "\n"
         )
-        self._update_arc_revision_state(
+        arc_state = self._arc_revision_state_payload(
             metadata,
             result,
             target_chapter_count=proposal.target_chapter_count,
+        )
+        commit_file_transaction(
+            self.context.project_path,
+            kind=f"story-arc-revision-{arc_id}-{expected_revision + 1:04d}",
+            files={
+                f"arcs/{arc_id}/plan.md": revised_plan,
+                f"arcs/{arc_id}/revision.md": revision_document,
+                f"arcs/{arc_id}/state.json": (
+                    json.dumps(arc_state, ensure_ascii=False, indent=2) + "\n"
+                ),
+                **evaluation_files,
+            },
         )
         (arc_path / "book-upstream-resume.json").unlink(missing_ok=True)
         self._finish_feedback_artifact_step(
@@ -1036,15 +1127,15 @@ class HarnessOrchestrator:
             return ""
         return "\n".join(["User checkpoint feedback to apply after the last atomic action:", *lines])
 
-    def _update_arc_revision_state(
+    def _arc_revision_state_payload(
         self,
         metadata: ProjectMetadata,
         result: ChatResult,
         *,
         target_chapter_count: int,
-    ) -> None:
+    ) -> dict[str, object]:
         if metadata.active_arc_id is None:
-            return
+            raise ValueError("Cannot revise an absent Story Arc.")
         state_path = self.context.project_path / "arcs" / metadata.active_arc_id / "state.json"
         payload = read_json(state_path, default={})
         state = payload if isinstance(payload, dict) else {}
@@ -1070,7 +1161,7 @@ class HarnessOrchestrator:
         else:
             state["human_review"] = "not_required"
             state["approved_at"] = None
-        write_json(state_path, state)
+        return state
 
     def _run_chapter_agent(
         self,
@@ -1140,19 +1231,38 @@ class HarnessOrchestrator:
             and isinstance(resume_payload.get("candidate_run_id"), str)
             else None
         )
+        if resume_candidate_run_id is None:
+            prior_state = read_agent_state(
+                self.context.project_path,
+                AgentIdentity(
+                    project_id=metadata.project_id,
+                    role="chapter",
+                    scope_id=chapter_id,
+                ),
+            )
+            if prior_state.lifecycle == "failed":
+                resume_candidate_run_id = prior_state.candidate_run_id
         try:
-            agent_result = run_chapter_agent(
+            agent_result = recover_completed_chapter_agent(
                 self.context.project_path,
                 metadata,
                 policy,
                 chapter_id=chapter_id,
-                expected_revision=0,
-                instruction=instruction,
-                candidate_run_id=resume_candidate_run_id,
                 on_event=on_agent_event,
-                on_text_delta=stream_callback,
-                on_tool_event=on_tool_event,
             )
+            if agent_result is None:
+                agent_result = run_chapter_agent(
+                    self.context.project_path,
+                    metadata,
+                    policy,
+                    chapter_id=chapter_id,
+                    expected_revision=0,
+                    instruction=instruction,
+                    candidate_run_id=resume_candidate_run_id,
+                    on_event=on_agent_event,
+                    on_text_delta=stream_callback,
+                    on_tool_event=on_tool_event,
+                )
         except AgentControlCheckpoint as checkpoint:
             public_stream.discard_open("chapter_agent_control_checkpoint")
             self._handle_agent_control_checkpoint(
@@ -1198,49 +1308,106 @@ class HarnessOrchestrator:
                 "operations": operations,
             }
         )
+        candidate_run_id = agent_result.run_result.candidate_run_id
+        if (
+            agent_result.evaluation.candidate_run_id is not None
+            and agent_result.evaluation.candidate_run_id != candidate_run_id
+        ):
+            raise ValueError(
+                "Chapter candidate and evaluation belong to different candidate runs."
+            )
+        agent_state = read_agent_state(
+            self.context.project_path,
+            AgentIdentity(
+                project_id=metadata.project_id,
+                role="chapter",
+                scope_id=chapter_id,
+            ),
+        )
+        semantic_revisions = (
+            agent_state.budgets.used_semantic_revisions
+            if agent_state.candidate_run_id == candidate_run_id
+            and agent_state.budgets is not None
+            else 0
+        )
+        chain_revision = semantic_revisions + 1
+        run_segment = _candidate_run_segment(candidate_run_id)
+        revision_root = (
+            f"chapters/{chapter_id}/runs/{run_segment}/r/{chain_revision:04d}"
+        )
+        revision_evaluation_path = f"{revision_root}/evaluation.json"
+        revision_review_path = f"{revision_root}/review.md"
+        revision_verification_path = f"{revision_root}/verification.json"
         candidate_document = {
             "schema_version": 1,
             "chapter_id": chapter_id,
+            "candidate_run_id": candidate_run_id,
+            "activation_id": agent_result.run_result.activation_id,
+            "chain_revision": chain_revision,
             "source_candidate_root": agent_result.candidate_root,
             "candidate_revision": agent_result.submission.candidate_revision,
             "plan_revision": agent_result.submission.plan_revision,
             "draft_revision": agent_result.submission.draft_revision,
             "evaluation_id": agent_result.evaluation.evaluation_id,
+            "evaluation_input_fingerprint": agent_result.evaluation.input_fingerprint,
+            "revision_artifacts": {
+                "candidate": f"{revision_root}/candidate.json",
+                "evaluation": revision_evaluation_path,
+                "review": revision_review_path,
+                "verification": revision_verification_path,
+            },
             "promotable": agent_result.verification.commit_allowed,
+        }
+        plan_document = plan.rstrip() + "\n"
+        draft_document = draft.rstrip() + "\n"
+        observations_document = json.dumps(
+            observations.model_dump(mode="json"),
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n"
+        patch_document = json.dumps(
+            patch.model_dump(mode="json"),
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n"
+        candidate_json = json.dumps(
+            candidate_document,
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n"
+        verification_payload = agent_result.verification.model_dump(mode="json")
+        evaluation_files = {
+            **evaluation_view_files(
+                agent_result.evaluation,
+                evaluation_path=revision_evaluation_path,
+                review_path=revision_review_path,
+                verification_path=revision_verification_path,
+                verification_payload=verification_payload,
+            ),
+            **evaluation_view_files(
+                agent_result.evaluation,
+                evaluation_path=f"chapters/{chapter_id}/evaluation.json",
+                review_path=f"chapters/{chapter_id}/review.md",
+                verification_path=f"chapters/{chapter_id}/verification.json",
+                verification_payload=verification_payload,
+            ),
         }
         commit_file_transaction(
             self.context.project_path,
             kind=f"chapter-agent-candidate-{chapter_id}",
             files={
-                f"chapters/{chapter_id}/goal.md": plan.rstrip() + "\n",
-                draft_path: draft.rstrip() + "\n",
-                observations_path: json.dumps(
-                    observations.model_dump(mode="json"),
-                    ensure_ascii=False,
-                    indent=2,
-                )
-                + "\n",
-                f"chapters/{chapter_id}/candidate_state_patch.json": json.dumps(
-                    patch.model_dump(mode="json"),
-                    ensure_ascii=False,
-                    indent=2,
-                )
-                + "\n",
-                f"chapters/{chapter_id}/agent_candidate.json": json.dumps(
-                    candidate_document,
-                    ensure_ascii=False,
-                    indent=2,
-                )
-                + "\n",
+                f"chapters/{chapter_id}/goal.md": plan_document,
+                draft_path: draft_document,
+                observations_path: observations_document,
+                f"chapters/{chapter_id}/candidate_state_patch.json": patch_document,
+                f"chapters/{chapter_id}/agent_candidate.json": candidate_json,
+                f"{revision_root}/goal.md": plan_document,
+                f"{revision_root}/draft.md": draft_document,
+                f"{revision_root}/observations.json": observations_document,
+                f"{revision_root}/candidate_state_patch.json": patch_document,
+                f"{revision_root}/candidate.json": candidate_json,
+                **evaluation_files,
             },
-        )
-        persist_evaluation_views(
-            self.context.project_path,
-            agent_result.evaluation,
-            evaluation_path=f"chapters/{chapter_id}/evaluation.json",
-            review_path=f"chapters/{chapter_id}/review.md",
-            verification_path=f"chapters/{chapter_id}/verification.json",
-            verification_payload=agent_result.verification.model_dump(mode="json"),
         )
         self._finish_artifact_step(
             metadata,
@@ -1378,9 +1545,11 @@ class HarnessOrchestrator:
         outcome = checkpoint.run_result.outcome
         blocker_kind = payload.get("kind")
         if outcome == "waiting_user":
-            kind = "agent_waiting_for_user"
-            routing_decision = "pause"
-            message = "Loop Agent requested one explicit user decision."
+            kind = "agent_decision_checkpoint_rejected"
+            routing_decision = "stop"
+            message = (
+                "This autonomous Loop cannot open an extra user-decision checkpoint."
+            )
         elif blocker_kind == "cross_loop":
             kind = "cross_loop_proposal_recorded"
             target_owner = payload.get("target_owner")
@@ -1415,8 +1584,9 @@ class HarnessOrchestrator:
             source_artifact=checkpoint.artifact_path,
         ):
             return
-        metadata.run_status = "waiting_for_user"
+        metadata.run_status = "failed"
         write_project_metadata(self.context.project_path, metadata)
+        set_run_intent(self.context.project_path, desired_state="stopped")
 
     def _handle_evaluation_control(
         self,
@@ -1444,9 +1614,22 @@ class HarnessOrchestrator:
                 "Evaluator cross-Loop proposal recorded; only the Harness may route it."
             )
         elif result.outcome == "needs_user":
-            kind = "agent_waiting_for_user"
-            routing_decision = "pause"
-            message = "Evaluator requires an explicit user decision."
+            if loop_layer == "chapter":
+                kind = "agent_semantic_revision_exhausted"
+                routing_decision = "retry_candidate"
+                message = (
+                    "Chapter evaluation could not resolve the candidate automatically; "
+                    "the user may start a fresh bounded revision without answering a "
+                    "creative question."
+                )
+            else:
+                kind = "agent_semantic_revision_exhausted"
+                routing_decision = "retry_candidate"
+                message = (
+                    "Evaluation could not resolve the candidate automatically; a user "
+                    "may start a fresh bounded candidate revision without answering an "
+                    "extra creative question."
+                )
         else:
             kind = "agent_semantic_revision_exhausted"
             routing_decision = "pause"
@@ -1491,7 +1674,11 @@ class HarnessOrchestrator:
             )
         ):
             return True
-        metadata.run_status = "waiting_for_user"
+        if loop_layer == "chapter":
+            metadata.run_status = "waiting_for_user"
+        else:
+            metadata.run_status = "failed"
+            set_run_intent(self.context.project_path, desired_state="stopped")
         write_project_metadata(self.context.project_path, metadata)
         return True
 
@@ -1614,6 +1801,7 @@ class HarnessOrchestrator:
         action: str,
         proposal: dict[str, object],
         source_artifact: str,
+        route_id: str | None = None,
     ) -> bool:
         """Validate and execute a Harness-owned upper route.
 
@@ -1629,6 +1817,7 @@ class HarnessOrchestrator:
                 action=action,
                 proposal=proposal,
                 source_artifact=source_artifact,
+                route_id=route_id,
             )
 
         rejection = self._story_arc_route_rejection(metadata, loop_layer, proposal)
@@ -1661,7 +1850,21 @@ class HarnessOrchestrator:
             )
             return False
 
-        route_id = f"route-{uuid4().hex}"
+        route_id = route_id or f"route-{uuid4().hex}"
+        write_json(
+            self.context.project_path
+            / "book"
+            / "harness"
+            / "pending-cross-loop-route.json",
+            {
+                "schema_version": 1,
+                "route_id": route_id,
+                "loop_layer": loop_layer,
+                "action": action,
+                "proposal": proposal,
+                "source_artifact": source_artifact,
+            },
+        )
         self._emit(
             metadata,
             kind="cross_loop_route_accepted",
@@ -1726,6 +1929,12 @@ class HarnessOrchestrator:
             revised_arc_path=revised_path,
             proposal=proposal,
         )
+        (
+            self.context.project_path
+            / "book"
+            / "harness"
+            / "pending-cross-loop-route.json"
+        ).unlink(missing_ok=True)
         self._emit(
             metadata,
             kind="cross_loop_route_completed",
@@ -1755,6 +1964,7 @@ class HarnessOrchestrator:
         action: str,
         proposal: dict[str, object],
         source_artifact: str,
+        route_id: str | None = None,
     ) -> bool:
         rejection = self._book_route_rejection(metadata, loop_layer, proposal)
         if rejection is not None:
@@ -1793,7 +2003,21 @@ class HarnessOrchestrator:
         assert isinstance(book_state, dict)
         base_book_version = int(book_state["version"])
         target_direction_version = int(book_state.get("book_direction_version", 1)) + 1
-        route_id = f"route-{uuid4().hex}"
+        route_id = route_id or f"route-{uuid4().hex}"
+        write_json(
+            self.context.project_path
+            / "book"
+            / "harness"
+            / "pending-cross-loop-route.json",
+            {
+                "schema_version": 1,
+                "route_id": route_id,
+                "loop_layer": loop_layer,
+                "action": action,
+                "proposal": proposal,
+                "source_artifact": source_artifact,
+            },
+        )
         self._emit(
             metadata,
             kind="cross_loop_route_accepted",
@@ -1861,6 +2085,10 @@ class HarnessOrchestrator:
                 policy,
                 target_direction_version=target_direction_version,
                 revision_request=revision_request,
+                candidate_run_id=self._book_revision_resume_candidate_run_id(
+                    metadata,
+                    target_direction_version,
+                ),
                 on_event=self._agent_event_callback(
                     metadata,
                     "book",
@@ -1909,6 +2137,12 @@ class HarnessOrchestrator:
             review=review,
             profile_id=policy.profile.id,
         )
+        (
+            self.context.project_path
+            / "book"
+            / "harness"
+            / "pending-cross-loop-route.json"
+        ).unlink(missing_ok=True)
         if source_loop == "story_arc" and revision.source_candidate_run_id is not None:
             scope_id = self._story_arc_scope_id(metadata, source_artifact)
             if scope_id is not None:
@@ -1948,6 +2182,194 @@ class HarnessOrchestrator:
                     revision.verification_path,
                     f"book/revisions/{revision.revision_id}/state.json",
                 ],
+            },
+        )
+        return True
+
+    def _process_pending_cross_loop_route(
+        self,
+        metadata: ProjectMetadata,
+    ) -> bool:
+        path = (
+            self.context.project_path
+            / "book"
+            / "harness"
+            / "pending-cross-loop-route.json"
+        )
+        payload = read_json(path, default=None)
+        if payload is None:
+            return False
+        if not isinstance(payload, dict):
+            raise ValueError("Pending cross-Loop route is not a valid document.")
+        loop_layer = payload.get("loop_layer")
+        action = payload.get("action")
+        proposal = payload.get("proposal")
+        source_artifact = payload.get("source_artifact")
+        route_id = payload.get("route_id")
+        if (
+            loop_layer not in {"story_arc", "chapter"}
+            or not isinstance(action, str)
+            or not isinstance(proposal, dict)
+            or not isinstance(source_artifact, str)
+            or not isinstance(route_id, str)
+        ):
+            raise ValueError("Pending cross-Loop route is incomplete.")
+        target_owner = proposal.get("target_owner", proposal.get("owner"))
+        if target_owner == "book":
+            saved_revision = book_revision_storage.read_pending_book_revision(
+                self.context.project_path
+            )
+            if saved_revision is not None and saved_revision.route_id == route_id:
+                path.unlink(missing_ok=True)
+                metadata.run_status = "waiting_for_user"
+                write_project_metadata(self.context.project_path, metadata)
+                self._emit(
+                    metadata,
+                    kind="cross_loop_route_recovered",
+                    loop_layer="book",
+                    atomic_action="revise_book_direction",
+                    status="completed",
+                    artifact_path=saved_revision.candidate.direction_path,
+                    routing_decision="await_user_approval",
+                    message=(
+                        "Recovered the already-saved Book revision route without "
+                        "rerunning either Agent."
+                    ),
+                    payload={
+                        "route_id": route_id,
+                        "revision_id": saved_revision.revision_id,
+                    },
+                )
+                return True
+            routed = self._route_book_revision_proposal(
+                metadata,
+                loop_layer=loop_layer,
+                action=action,
+                proposal=proposal,
+                source_artifact=source_artifact,
+                route_id=route_id,
+            )
+        else:
+            if self._recover_completed_story_arc_route(
+                metadata,
+                path=path,
+                route_id=route_id,
+                proposal=proposal,
+                source_artifact=source_artifact,
+            ):
+                return True
+            routed = self._route_cross_loop_proposal(
+                metadata,
+                loop_layer=loop_layer,
+                action=action,
+                proposal=proposal,
+                source_artifact=source_artifact,
+                route_id=route_id,
+            )
+        if not routed:
+            archive_path = (
+                self.context.project_path
+                / "book"
+                / "harness"
+                / "cross-loop-routes"
+                / f"{route_id}-rejected.json"
+            )
+            write_json(
+                archive_path,
+                {
+                    **payload,
+                    "status": "rejected_on_replay",
+                    "archived_at": datetime.now(UTC).isoformat(),
+                },
+            )
+            path.unlink(missing_ok=True)
+            metadata.run_status = "failed"
+            write_project_metadata(self.context.project_path, metadata)
+            set_run_intent(self.context.project_path, desired_state="stopped")
+        return True
+
+    def _recover_completed_story_arc_route(
+        self,
+        metadata: ProjectMetadata,
+        *,
+        path: Path,
+        route_id: str,
+        proposal: dict[str, object],
+        source_artifact: str,
+    ) -> bool:
+        chapter_id = metadata.active_chapter_id
+        arc_id = metadata.active_arc_id
+        if chapter_id is None or arc_id is None:
+            return False
+        route_relative = (
+            Path("chapters")
+            / chapter_id
+            / "upstream-routes"
+            / f"{route_id}.json"
+        )
+        route_path = self.context.project_path / route_relative
+        invalidated: list[str]
+        if route_path.is_file():
+            route_payload = read_json(route_path, default={})
+            raw_invalidated = (
+                route_payload.get("invalidated_paths", [])
+                if isinstance(route_payload, dict)
+                else []
+            )
+            invalidated = [
+                item for item in raw_invalidated if isinstance(item, str)
+            ]
+        else:
+            contract_revision = proposal.get("contract_revision")
+            state_payload = read_json(
+                self.context.project_path / "arcs" / arc_id / "state.json",
+                default={},
+            )
+            current_revision = (
+                state_payload.get("version")
+                if isinstance(state_payload, dict)
+                else None
+            )
+            revision_text = _read_text(
+                self.context.project_path / "arcs" / arc_id / "revision.md"
+            )
+            if (
+                not isinstance(contract_revision, int)
+                or current_revision != contract_revision + 1
+                or route_id not in revision_text
+            ):
+                return False
+            route_relative_value, invalidated = (
+                self._invalidate_uncommitted_chapter_after_arc_revision(
+                    metadata,
+                    route_id=route_id,
+                    source_artifact=source_artifact,
+                    revised_arc_path=f"arcs/{arc_id}/plan.md",
+                    proposal=proposal,
+                )
+            )
+            route_relative = Path(route_relative_value)
+
+        path.unlink(missing_ok=True)
+        self._emit(
+            metadata,
+            kind="cross_loop_route_recovered",
+            loop_layer="story_arc",
+            atomic_action="revise_current_arc_plan",
+            status="completed",
+            artifact_path=route_relative.as_posix(),
+            routing_decision=(
+                "pause_for_arc_review"
+                if metadata.operation_mode == "participatory"
+                else "retry_chapter"
+            ),
+            message=(
+                "Recovered the completed Story Arc route and finished only its "
+                "uncommitted Chapter cleanup."
+            ),
+            payload={
+                "route_id": route_id,
+                "invalidated_paths": invalidated,
             },
         )
         return True
@@ -2000,13 +2422,48 @@ class HarnessOrchestrator:
             return parts[1]
         return None
 
-    @staticmethod
-    def _story_arc_resume_candidate_run_id(arc_path: Path) -> str | None:
+    def _story_arc_resume_candidate_run_id(self, arc_path: Path) -> str | None:
         payload = read_json(arc_path / "book-upstream-resume.json", default={})
-        if not isinstance(payload, dict):
+        if isinstance(payload, dict):
+            candidate_run_id = payload.get("candidate_run_id")
+            if isinstance(candidate_run_id, str):
+                return candidate_run_id
+        metadata = read_project_metadata(self.context.project_path)
+        state = read_agent_state(
+            self.context.project_path,
+            AgentIdentity(
+                project_id=metadata.project_id,
+                role="story_arc",
+                scope_id=arc_path.name,
+            ),
+        )
+        return state.candidate_run_id if state.lifecycle == "failed" else None
+
+    def _book_revision_resume_candidate_run_id(
+        self,
+        metadata: ProjectMetadata,
+        target_direction_version: int,
+    ) -> str | None:
+        identity = AgentIdentity(project_id=metadata.project_id, role="book")
+        state = read_agent_state(self.context.project_path, identity)
+        if state.candidate_run_id is None:
             return None
-        candidate_run_id = payload.get("candidate_run_id")
-        return candidate_run_id if isinstance(candidate_run_id, str) else None
+        if state.lifecycle == "failed":
+            return state.candidate_run_id
+        if state.lifecycle != "completed" or state.activation_id is None:
+            return None
+        candidate_path = (
+            activation_relative(identity, state.activation_id)
+            / "c"
+            / "book-direction.json"
+        )
+        payload = read_json(self.context.project_path / candidate_path, default={})
+        if (
+            isinstance(payload, dict)
+            and payload.get("candidate_revision") == target_direction_version
+        ):
+            return state.candidate_run_id
+        return None
 
     def _book_route_rejection(
         self,
@@ -2749,6 +3206,10 @@ def _chapter_number(chapter_id: str) -> int | None:
         return None
 
 
+def _candidate_run_segment(candidate_run_id: str) -> str:
+    return sha256(candidate_run_id.encode("utf-8")).hexdigest()[:12]
+
+
 def _next_chapter_id(project_path: Path) -> str:
     chapters_path = project_path / "chapters"
     chapters_path.mkdir(parents=True, exist_ok=True)
@@ -2840,3 +3301,25 @@ def _loop_layer_for_feedback_route(routing_decision: str) -> LoopLayer:
     if routing_decision == "revise_current_arc_plan":
         return "story_arc"
     return "book"
+
+
+def _non_retryable_failure_kind(message: str) -> tuple[str, str]:
+    lowered = message.casefold()
+    if any(
+        marker in lowered
+        for marker in (
+            "auth_unavailable",
+            "no auth available",
+            "invalid api key",
+            "invalid_api_key",
+            "unauthorized",
+            "forbidden",
+        )
+    ):
+        return "provider_auth", "provider_auth_configuration_required"
+    if any(
+        marker in lowered
+        for marker in ("unsupported", "does not support", "capability")
+    ):
+        return "unsupported_capability", "provider_capability_required"
+    return "harness_failure", "run_failed"

@@ -14,7 +14,7 @@ from app.harness.agents.domain_tools import (
     SubmitChapterCandidateInput,
     build_default_tool_registry,
 )
-from app.harness.agents.evaluator import evaluate_candidate
+from app.harness.agents.evaluator import evaluate_candidate, evaluation_input_fingerprint
 from app.harness.agents.models import (
     AgentIdentity,
     AgentRunResult,
@@ -23,9 +23,14 @@ from app.harness.agents.models import (
     EvaluationIssue,
     EvaluationRecord,
     EvaluationResult,
+    ToolExecutionResult,
 )
 from app.harness.agents.policy import ResolvedAgentPolicy
-from app.harness.agents.persistence import write_activation_document
+from app.harness.agents.persistence import (
+    activation_relative,
+    read_agent_state,
+    write_activation_document,
+)
 from app.harness.agents.runtime import AgentActivation, AgentRuntime
 from app.harness.loops.book import (
     BookDirectionSynthesis,
@@ -237,20 +242,68 @@ def run_book_revision_agent(
     *,
     target_direction_version: int,
     revision_request: dict[str, object],
+    candidate_run_id: str | None = None,
     on_event: AgentEventCallback | None = None,
     on_text_delta: Callable[[ChatChunk], None] | None = None,
     on_tool_event: Callable[[ChatChunk], None] | None = None,
     runtime: AgentRuntime | None = None,
 ) -> tuple[BookDirectionSynthesis, EvaluationRecord, BookDirectionReview]:
+    resolved_candidate_run_id = candidate_run_id or (
+        f"book-revision-{target_direction_version}-{uuid4().hex[:8]}"
+    )
+    identity = AgentIdentity(project_id=metadata.project_id, role="book")
+    agent_state = read_agent_state(project_path, identity)
+    if (
+        agent_state.lifecycle == "completed"
+        and agent_state.candidate_run_id == resolved_candidate_run_id
+        and agent_state.activation_id is not None
+    ):
+        candidate_path = (
+            activation_relative(identity, agent_state.activation_id)
+            / "c"
+            / "book-direction.json"
+        ).as_posix()
+        if (project_path / candidate_path).is_file():
+            recovered = AgentRunResult(
+                outcome="candidate",
+                identity=identity,
+                candidate_run_id=resolved_candidate_run_id,
+                activation_id=agent_state.activation_id,
+                turns_used=(
+                    agent_state.budgets.used_turns
+                    if agent_state.budgets is not None
+                    else 0
+                ),
+                terminal_result=ToolExecutionResult(
+                    status="ok",
+                    tool_name="submit_book_direction_candidate",
+                    tool_call_id=f"recovered:{agent_state.activation_id}",
+                    content={"recovered": True},
+                    message="Recovered the durable Book revision candidate.",
+                    checkpoint_id=agent_state.last_checkpoint_id,
+                    terminal=True,
+                    artifact_paths=[candidate_path],
+                    replayed=True,
+                ),
+                model_snapshot=policy.profile.model,
+                provider_snapshot=policy.profile.protocol,
+            )
+            return _book_direction_attempt(
+                project_path,
+                state,
+                policy,
+                identity,
+                target_direction_version,
+                recovered,
+                on_event,
+            )
     return _run_book_direction_candidate_agent(
         project_path,
         metadata,
         state,
         policy,
         candidate_revision=target_direction_version,
-        candidate_run_id=(
-            f"book-revision-{target_direction_version}-{uuid4().hex[:8]}"
-        ),
+        candidate_run_id=resolved_candidate_run_id,
         system_prompt=_book_revision_agent_prompt(
             state_revision=state.revision,
             candidate_revision=target_direction_version,
@@ -409,16 +462,48 @@ def _book_direction_attempt(
         provider_snapshot=result.provider_snapshot or policy.profile.protocol,
         usage=result.usage,
     )
-    evaluation, review = evaluate_book_direction_candidate(
+    candidate_path = _terminal_artifact(result)
+    evaluation_input = _book_direction_evaluation_input(
         state,
         synthesis,
-        policy,
-        identity=identity,
-        candidate_path=_terminal_artifact(result),
+        candidate_path=candidate_path,
         candidate_revision=candidate_revision,
-        on_event=on_event,
+        identity=identity,
+        candidate_run_id=result.candidate_run_id,
     )
-    evaluation_path = _persist_activation_evaluation(project_path, result, evaluation)
+    evaluation_relative = (
+        activation_relative(identity, result.activation_id) / "evaluation.json"
+    ).as_posix()
+    expected_fingerprint = evaluation_input_fingerprint(
+        policy.evaluator_profile,
+        evaluation_input,
+    )
+    existing_payload = read_json(project_path / evaluation_relative, default=None)
+    evaluation: EvaluationRecord | None = None
+    if existing_payload is not None:
+        existing = EvaluationRecord.model_validate(existing_payload)
+        if (
+            existing.candidate_run_id == result.candidate_run_id
+            and existing.candidate_artifact_id == candidate_path
+            and existing.candidate_revision == candidate_revision
+            and existing.input_fingerprint == expected_fingerprint
+        ):
+            evaluation = existing
+    if evaluation is None:
+        evaluation, review = evaluate_book_direction_candidate(
+            state,
+            synthesis,
+            policy,
+            identity=identity,
+            candidate_path=candidate_path,
+            candidate_revision=candidate_revision,
+            candidate_run_id=result.candidate_run_id,
+            on_event=on_event,
+        )
+        evaluation_path = _persist_activation_evaluation(project_path, result, evaluation)
+    else:
+        review = _book_review_from_evaluation(evaluation)
+        evaluation_path = evaluation_relative
     _emit_evaluation_completed(on_event, evaluation, evaluation_path)
     return synthesis, evaluation, review
 
@@ -431,6 +516,7 @@ def evaluate_book_direction_candidate(
     identity: AgentIdentity,
     candidate_path: str,
     candidate_revision: int,
+    candidate_run_id: str | None = None,
     on_event: AgentEventCallback | None = None,
 ) -> tuple[EvaluationRecord, BookDirectionReview]:
     _require_policy_capabilities(policy)
@@ -440,6 +526,7 @@ def evaluate_book_direction_candidate(
         candidate_path=candidate_path,
         candidate_revision=candidate_revision,
         identity=identity,
+        candidate_run_id=candidate_run_id,
     )
     evaluation = _run_evaluator(
         policy.evaluator_profile,
@@ -547,6 +634,72 @@ def run_story_arc_agent(
     return attempt
 
 
+def recover_completed_story_arc_agent(
+    project_path: Path,
+    metadata: ProjectMetadata,
+    policy: ResolvedAgentPolicy,
+    *,
+    arc_id: str,
+    intent: str,
+    expected_revision: int,
+    on_event: AgentEventCallback | None = None,
+) -> StoryArcAgentResult | None:
+    identity = AgentIdentity(
+        project_id=metadata.project_id,
+        role="story_arc",
+        scope_id=arc_id,
+    )
+    state = read_agent_state(project_path, identity)
+    if (
+        state.lifecycle != "completed"
+        or state.candidate_run_id is None
+        or state.activation_id is None
+    ):
+        return None
+    candidate_path = (
+        activation_relative(identity, state.activation_id) / "c" / "story-arc.json"
+    ).as_posix()
+    if not (project_path / candidate_path).is_file():
+        return None
+    candidate_payload = read_json(project_path / candidate_path, default={})
+    if (
+        not isinstance(candidate_payload, dict)
+        or candidate_payload.get("intent") != intent
+        or candidate_payload.get("expected_revision") != expected_revision
+    ):
+        return None
+    result = AgentRunResult(
+        outcome="candidate",
+        identity=identity,
+        candidate_run_id=state.candidate_run_id,
+        activation_id=state.activation_id,
+        turns_used=state.budgets.used_turns if state.budgets is not None else 0,
+        terminal_result=ToolExecutionResult(
+            status="ok",
+            tool_name="submit_story_arc_candidate",
+            tool_call_id=f"recovered:{state.activation_id}",
+            content={"recovered": True},
+            message="Recovered the durable Story Arc candidate.",
+            checkpoint_id=state.last_checkpoint_id,
+            terminal=True,
+            artifact_paths=[candidate_path],
+            replayed=True,
+        ),
+        model_snapshot=policy.profile.model,
+        provider_snapshot=policy.profile.protocol,
+    )
+    return _story_arc_attempt(
+        project_path,
+        policy,
+        identity,
+        arc_id,
+        intent,
+        expected_revision,
+        result,
+        on_event,
+    )
+
+
 def _story_arc_attempt(
     project_path: Path,
     policy: ResolvedAgentPolicy,
@@ -567,26 +720,52 @@ def _story_arc_attempt(
             f"Story Arc candidate intent {candidate.intent!r} does not match {intent!r}."
         )
     candidate_path = _terminal_artifact(result)
-    evaluation = _run_evaluator(
-        policy.evaluator_profile,
-        EvaluationInput(
-            identity=identity,
-            checkpoint="story_arc_candidate",
-            candidate_artifact_id=candidate_path,
-            candidate_revision=expected_revision + 1,
-            candidate_content=json.dumps(candidate.model_dump(mode="json"), ensure_ascii=False),
-            evidence=_story_arc_evidence(project_path, arc_id),
-            deterministic_prechecks={
-                "target_chapter_count": candidate.target_chapter_count,
-                "has_plan": bool(candidate.plan_markdown.strip()),
-                "ownership_matches": candidate.arc_id == arc_id,
-            },
-            rubric_version="story-arc-v1",
+    evaluation_input = EvaluationInput(
+        identity=identity,
+        candidate_run_id=result.candidate_run_id,
+        checkpoint="story_arc_candidate",
+        candidate_artifact_id=candidate_path,
+        candidate_revision=expected_revision + 1,
+        candidate_content=json.dumps(
+            candidate.model_dump(mode="json"),
+            ensure_ascii=False,
         ),
-        on_event,
-        transport_retry_limit=policy.transport_retry_limit,
+        evidence=_story_arc_evidence(project_path, arc_id),
+        deterministic_prechecks={
+            "target_chapter_count": candidate.target_chapter_count,
+            "has_plan": bool(candidate.plan_markdown.strip()),
+            "ownership_matches": candidate.arc_id == arc_id,
+        },
+        rubric_version="story-arc-v1",
     )
-    evaluation_path = _persist_activation_evaluation(project_path, result, evaluation)
+    evaluation_relative = (
+        activation_relative(identity, result.activation_id) / "evaluation.json"
+    ).as_posix()
+    expected_fingerprint = evaluation_input_fingerprint(
+        policy.evaluator_profile,
+        evaluation_input,
+    )
+    existing_payload = read_json(project_path / evaluation_relative, default=None)
+    evaluation: EvaluationRecord | None = None
+    if existing_payload is not None:
+        existing = EvaluationRecord.model_validate(existing_payload)
+        if (
+            existing.candidate_run_id == result.candidate_run_id
+            and existing.candidate_artifact_id == candidate_path
+            and existing.candidate_revision == expected_revision + 1
+            and existing.input_fingerprint == expected_fingerprint
+        ):
+            evaluation = existing
+    if evaluation is None:
+        evaluation = _run_evaluator(
+            policy.evaluator_profile,
+            evaluation_input,
+            on_event,
+            transport_retry_limit=policy.transport_retry_limit,
+        )
+        evaluation_path = _persist_activation_evaluation(project_path, result, evaluation)
+    else:
+        evaluation_path = evaluation_relative
     _emit_evaluation_completed(on_event, evaluation, evaluation_path)
     return StoryArcAgentResult(
         proposal=StoryArcPlanProposal(
@@ -695,6 +874,63 @@ def run_chapter_agent(
     return attempt
 
 
+def recover_completed_chapter_agent(
+    project_path: Path,
+    metadata: ProjectMetadata,
+    policy: ResolvedAgentPolicy,
+    *,
+    chapter_id: str,
+    on_event: AgentEventCallback | None = None,
+) -> ChapterAgentResult | None:
+    """Resume projection/evaluation without asking the Chapter Agent to write again."""
+    identity = AgentIdentity(
+        project_id=metadata.project_id,
+        role="chapter",
+        scope_id=chapter_id,
+    )
+    state = read_agent_state(project_path, identity)
+    if (
+        state.lifecycle != "completed"
+        or state.candidate_run_id is None
+        or state.activation_id is None
+    ):
+        return None
+    manifest_path = (
+        activation_relative(identity, state.activation_id) / "c" / "manifest.json"
+    ).as_posix()
+    if not (project_path / manifest_path).is_file():
+        return None
+    result = AgentRunResult(
+        outcome="candidate",
+        identity=identity,
+        candidate_run_id=state.candidate_run_id,
+        activation_id=state.activation_id,
+        turns_used=state.budgets.used_turns if state.budgets is not None else 0,
+        terminal_result=ToolExecutionResult(
+            status="ok",
+            tool_name="submit_chapter_candidate",
+            tool_call_id=f"recovered:{state.activation_id}",
+            content={"recovered": True},
+            message="Recovered the durable Chapter Agent candidate.",
+            checkpoint_id=state.last_checkpoint_id,
+            terminal=True,
+            artifact_paths=[manifest_path],
+            replayed=True,
+        ),
+        model_snapshot=policy.profile.model,
+        provider_snapshot=policy.profile.protocol,
+    )
+    return _chapter_attempt(
+        project_path,
+        metadata,
+        policy,
+        identity,
+        chapter_id,
+        result,
+        on_event,
+    )
+
+
 def run_chapter_patch_evidence_repair_agent(
     project_path: Path,
     metadata: ProjectMetadata,
@@ -783,35 +1019,58 @@ def _chapter_attempt(
     root = Path(manifest_path).parent
     plan = _read_candidate_text(project_path, root / "plan.md")
     draft = _read_candidate_text(project_path, root / "draft.md")
-    evaluation = _run_evaluator(
-        policy.evaluator_profile,
-        EvaluationInput(
-            identity=identity,
-            checkpoint="chapter_candidate",
-            candidate_artifact_id=manifest_path,
-            candidate_revision=submission.candidate_revision,
-            candidate_content=json.dumps(
-                {
-                    "plan": plan,
-                    "draft": draft,
-                    "observations": submission.observations.model_dump(mode="json"),
-                    "state_patch": submission.state_patch.model_dump(mode="json"),
-                },
-                ensure_ascii=False,
-            )[:500_000],
-            evidence=_chapter_evidence(project_path, metadata),
-            deterministic_prechecks={
-                "plan_revision": submission.plan_revision,
-                "draft_revision": submission.draft_revision,
-                "draft_characters": len(draft),
-                "has_observation_source": bool(submission.observations.based_on),
+    evaluation_input = EvaluationInput(
+        identity=identity,
+        candidate_run_id=result.candidate_run_id,
+        checkpoint="chapter_candidate",
+        candidate_artifact_id=manifest_path,
+        candidate_revision=submission.candidate_revision,
+        candidate_content=json.dumps(
+            {
+                "plan": plan,
+                "draft": draft,
+                "observations": submission.observations.model_dump(mode="json"),
+                "state_patch": submission.state_patch.model_dump(mode="json"),
             },
-            rubric_version="chapter-candidate-v1",
-        ),
-        on_event,
-        transport_retry_limit=policy.transport_retry_limit,
+            ensure_ascii=False,
+        )[:500_000],
+        evidence=_chapter_evidence(project_path, metadata),
+        deterministic_prechecks={
+            "plan_revision": submission.plan_revision,
+            "draft_revision": submission.draft_revision,
+            "draft_characters": len(draft),
+            "has_observation_source": bool(submission.observations.based_on),
+        },
+        rubric_version="chapter-candidate-v1",
     )
-    evaluation_path = _persist_activation_evaluation(project_path, result, evaluation)
+    evaluation_relative = (
+        activation_relative(identity, result.activation_id) / "evaluation.json"
+    ).as_posix()
+    expected_fingerprint = evaluation_input_fingerprint(
+        policy.evaluator_profile,
+        evaluation_input,
+    )
+    existing_payload = read_json(project_path / evaluation_relative, default=None)
+    evaluation: EvaluationRecord | None = None
+    if existing_payload is not None:
+        existing = EvaluationRecord.model_validate(existing_payload)
+        if (
+            existing.candidate_run_id == result.candidate_run_id
+            and existing.candidate_artifact_id == manifest_path
+            and existing.candidate_revision == submission.candidate_revision
+            and existing.input_fingerprint == expected_fingerprint
+        ):
+            evaluation = existing
+    if evaluation is None:
+        evaluation = _run_evaluator(
+            policy.evaluator_profile,
+            evaluation_input,
+            on_event,
+            transport_retry_limit=policy.transport_retry_limit,
+        )
+        evaluation_path = _persist_activation_evaluation(project_path, result, evaluation)
+    else:
+        evaluation_path = evaluation_relative
     _emit_evaluation_completed(on_event, evaluation, evaluation_path)
     return ChapterAgentResult(
         submission=submission,
@@ -1083,6 +1342,7 @@ def _book_direction_evaluation_input(
     candidate_path: str,
     candidate_revision: int,
     identity: AgentIdentity,
+    candidate_run_id: str | None = None,
 ) -> EvaluationInput:
     evidence = [
         EvaluationEvidence(
@@ -1104,6 +1364,7 @@ def _book_direction_evaluation_input(
     ]
     return EvaluationInput(
         identity=identity,
+        candidate_run_id=candidate_run_id,
         checkpoint="book_direction_candidate",
         candidate_artifact_id=candidate_path,
         candidate_revision=candidate_revision,

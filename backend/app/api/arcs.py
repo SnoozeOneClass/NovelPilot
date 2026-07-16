@@ -8,6 +8,7 @@ from app.schemas.arcs import (
     CurrentArcState,
 )
 from app.schemas.events import HarnessEvent
+from app.harness.run_host import continue_after_user_gate
 from app.storage import arcs as arc_storage
 from app.storage.events import append_event
 from app.storage.projects import get_active_project_path, read_project_metadata
@@ -62,4 +63,5 @@ def approve_current_arc(
             },
         ),
     )
+    continue_after_user_gate(project_path)
     return CurrentArcApprovalResponse(arc=arc, run_status=metadata.run_status)

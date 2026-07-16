@@ -5,7 +5,7 @@ from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from app.harness.agents.evaluator import persist_evaluation_views
+from app.harness.agents.evaluator import evaluation_view_files
 from app.harness.agents.models import EvaluationRecord
 from app.harness.loops.book import BookDirectionSynthesis
 from app.schemas.book_revisions import (
@@ -137,8 +137,7 @@ def save_book_revision_candidate(
             review_path=review_path.as_posix(),
             verification_path=verification_path.as_posix(),
         )
-        persist_evaluation_views(
-            project_path,
+        evaluation_files = evaluation_view_files(
             evaluation,
             evaluation_path=evaluation_path.as_posix(),
             review_path=review_path.as_posix(),
@@ -174,6 +173,7 @@ def save_book_revision_candidate(
                 ),
                 rolling_plan_path.as_posix(): synthesis.rolling_plan_markdown.rstrip()
                 + "\n",
+                **evaluation_files,
                 state_path.as_posix(): state_document,
                 _latest_relative(): state_document,
             },

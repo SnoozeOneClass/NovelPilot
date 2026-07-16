@@ -33,7 +33,9 @@ export function SettingsView({ project, onProjectChanged, onProfilesChanged }: S
   const [savingMode, setSavingMode] = useState(false);
   const [notice, setNotice] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const { preference, resolvedTheme, setPreference } = useTheme();
-  const modeLocked = project.metadata.run_status === "running" || project.metadata.run_status === "pause_requested";
+  const modeLocked = project.metadata.run_status === "running"
+    || project.metadata.run_status === "pause_requested"
+    || project.metadata.run_status === "waiting_for_provider";
 
   async function changeMode(mode: OperationMode) {
     if (mode === project.metadata.operation_mode || savingMode || modeLocked) return;

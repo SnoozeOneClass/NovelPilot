@@ -9,6 +9,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
 from app.harness.orchestrator import HarnessOrchestrator, HarnessRunContext
+from app.harness.run_host import continue_after_user_gate, get_run_host
+from app.harness.agents.models import AgentIdentity, AgentState
+from app.harness.agents.persistence import save_agent_state
 from app.harness.run_control import (
     active_project_transition_lock,
     begin_active_runner,
@@ -16,6 +19,7 @@ from app.harness.run_control import (
     has_active_runner,
 )
 from app.schemas.events import HarnessEvent
+from app.schemas.projects import ProjectMetadata
 from app.schemas.runs import RunAdvanceRequest
 from app.storage.json_files import write_json
 from app.storage.events import append_event, read_events
@@ -27,6 +31,7 @@ from app.storage.projects import (
 )
 from app.storage.readiness import build_project_readiness
 from app.storage.retries import retry_scope_for_chapter
+from app.storage.run_state import set_run_intent
 
 router = APIRouter()
 
@@ -64,6 +69,7 @@ def start_run(run_request: RunAdvanceRequest | None = None) -> dict[str, str]:
     advance_request = run_request or RunAdvanceRequest()
     project_path = _begin_active_runner_or_409()
     run_id = str(uuid4())
+    released_runner = False
     try:
         metadata = read_project_metadata(project_path)
         _ensure_run_can_start(metadata.run_status)
@@ -86,9 +92,28 @@ def start_run(run_request: RunAdvanceRequest | None = None) -> dict[str, str]:
                 message="Harness run started.",
             ),
         )
-        _advance_run_until_stop(project_path, run_id, advance_request)
+        host = get_run_host()
+        if host.started and not advance_request.stop_after_chapter:
+            set_run_intent(
+                project_path,
+                desired_state="running",
+                run_id=run_id,
+                clear_provider_wait=True,
+            )
+            end_active_runner(project_path)
+            released_runner = True
+            host.wake(project_path)
+        else:
+            set_run_intent(
+                project_path,
+                desired_state="stopped",
+                run_id=run_id,
+                clear_provider_wait=True,
+            )
+            _advance_run_until_stop(project_path, run_id, advance_request)
     finally:
-        end_active_runner(project_path)
+        if not released_runner:
+            end_active_runner(project_path)
 
     metadata = read_project_metadata(project_path)
     return {"run_id": run_id, "status": metadata.run_status}
@@ -98,6 +123,23 @@ def start_run(run_request: RunAdvanceRequest | None = None) -> dict[str, str]:
 def pause_run() -> dict[str, str]:
     project_path = _active_project_or_404()
     metadata = read_project_metadata(project_path)
+    if metadata.run_status == "waiting_for_provider":
+        set_run_intent(project_path, desired_state="stopped")
+        metadata.run_status = "paused"
+        write_project_metadata(project_path, metadata)
+        append_event(
+            project_path,
+            HarnessEvent(
+                project_id=metadata.project_id,
+                kind="run_paused",
+                loop_layer="system",
+                atomic_action="pause_run",
+                status="completed",
+                routing_decision="pause",
+                message="Provider retry wait was paused by the user.",
+            ),
+        )
+        return {"status": metadata.run_status}
     if metadata.run_status != "running":
         append_event(
             project_path,
@@ -116,6 +158,7 @@ def pause_run() -> dict[str, str]:
         )
         return {"status": metadata.run_status}
 
+    set_run_intent(project_path, desired_state="stopped")
     metadata.run_status = "pause_requested"
     write_project_metadata(project_path, metadata)
     append_event(
@@ -136,6 +179,7 @@ def resume_run(run_request: RunAdvanceRequest | None = None) -> dict[str, str]:
     advance_request = run_request or RunAdvanceRequest()
     project_path = _begin_active_runner_or_409()
     run_id = str(uuid4())
+    released_runner = False
     try:
         metadata = read_project_metadata(project_path)
         _ensure_run_can_start(metadata.run_status)
@@ -143,6 +187,7 @@ def resume_run(run_request: RunAdvanceRequest | None = None) -> dict[str, str]:
         with project_metadata_lock(project_path):
             metadata = read_project_metadata(project_path)
             _ensure_run_can_start(metadata.run_status)
+            _prepare_manual_agent_retry(project_path, metadata)
             metadata.run_status = "running"
             write_project_metadata(project_path, metadata)
         append_event(
@@ -156,9 +201,28 @@ def resume_run(run_request: RunAdvanceRequest | None = None) -> dict[str, str]:
                 message="Harness run resumed from committed state.",
             ),
         )
-        _advance_run_until_stop(project_path, run_id, advance_request)
+        host = get_run_host()
+        if host.started and not advance_request.stop_after_chapter:
+            set_run_intent(
+                project_path,
+                desired_state="running",
+                run_id=run_id,
+                clear_provider_wait=True,
+            )
+            end_active_runner(project_path)
+            released_runner = True
+            host.wake(project_path)
+        else:
+            set_run_intent(
+                project_path,
+                desired_state="stopped",
+                run_id=run_id,
+                clear_provider_wait=True,
+            )
+            _advance_run_until_stop(project_path, run_id, advance_request)
     finally:
-        end_active_runner(project_path)
+        if not released_runner:
+            end_active_runner(project_path)
     metadata = read_project_metadata(project_path)
     return {"status": metadata.run_status}
 
@@ -223,9 +287,11 @@ def recover_stale_run() -> dict[str, str]:
 def retry_current_chapter() -> dict[str, str]:
     project_path = _begin_active_runner_or_409()
     try:
-        return _retry_current_chapter(project_path)
+        result = _retry_current_chapter(project_path)
     finally:
         end_active_runner(project_path)
+    continue_after_user_gate(project_path)
+    return result
 
 
 def _retry_current_chapter(project_path: Path) -> dict[str, str]:
@@ -248,6 +314,18 @@ def _retry_current_chapter(project_path: Path) -> dict[str, str]:
         attempt_path = _next_attempt_path(chapter_path)
         attempt_path.mkdir(parents=True, exist_ok=False)
         archived = _archive_retry_artifacts(chapter_path, attempt_path, artifact_names)
+        if retry_scope == "chapter_candidate":
+            save_agent_state(
+                project_path,
+                AgentState(
+                    identity=AgentIdentity(
+                        project_id=metadata.project_id,
+                        role="chapter",
+                        scope_id=chapter_id,
+                    ),
+                    summary="Previous candidate was explicitly abandoned for a fresh retry.",
+                ),
+            )
         manifest_path = attempt_path / "retry_manifest.json"
         manifest_relative = manifest_path.relative_to(project_path).as_posix()
         write_json(
@@ -297,7 +375,13 @@ def _advance_run_until_stop(
         metadata = read_project_metadata(project_path)
         events = read_events(project_path)
         last_event = events[-1] if events else None
-        if metadata.run_status in {"waiting_for_user", "failed", "pause_requested", "paused"}:
+        if metadata.run_status in {
+            "waiting_for_user",
+            "waiting_for_provider",
+            "failed",
+            "pause_requested",
+            "paused",
+        }:
             break
         if (
             last_event
@@ -316,6 +400,44 @@ def _advance_run_until_stop(
             write_project_metadata(project_path, metadata)
     else:
         _emit_step_budget_reached(project_path, run_id, advance_request.max_steps)
+
+
+def _prepare_manual_agent_retry(
+    project_path: Path,
+    metadata: ProjectMetadata,
+) -> None:
+    if metadata.run_status != "failed":
+        return
+    events = read_events(project_path)
+    event = events[-1] if events else None
+    if event is None or event.kind not in {
+        "agent_semantic_revision_exhausted",
+        "agent_decision_checkpoint_rejected",
+    }:
+        return
+    if event.loop_layer == "book":
+        identity = AgentIdentity(project_id=metadata.project_id, role="book")
+    elif event.loop_layer == "story_arc" and metadata.active_arc_id is not None:
+        identity = AgentIdentity(
+            project_id=metadata.project_id,
+            role="story_arc",
+            scope_id=metadata.active_arc_id,
+        )
+    elif event.loop_layer == "chapter" and metadata.active_chapter_id is not None:
+        identity = AgentIdentity(
+            project_id=metadata.project_id,
+            role="chapter",
+            scope_id=metadata.active_chapter_id,
+        )
+    else:
+        return
+    save_agent_state(
+        project_path,
+        AgentState(
+            identity=identity,
+            summary="User started a fresh bounded candidate revision after exhaustion.",
+        ),
+    )
 
 
 def _emit_step_budget_reached(project_path: Path, run_id: str, max_steps: int) -> None:
@@ -340,7 +462,7 @@ def _emit_step_budget_reached(project_path: Path, run_id: str, max_steps: int) -
 
 
 def _ensure_run_can_start(run_status: str) -> None:
-    if run_status in {"running", "pause_requested"}:
+    if run_status in {"running", "pause_requested", "waiting_for_provider"}:
         raise HTTPException(status_code=400, detail="A harness run is already in progress.")
 
 

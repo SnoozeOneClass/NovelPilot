@@ -21,6 +21,7 @@ from app.storage.book_revisions import (
     save_book_revision_candidate,
 )
 from app.storage.json_files import read_json, write_json
+from app.storage.events import read_events
 from app.storage.readiness import build_project_readiness
 
 
@@ -143,6 +144,53 @@ def test_book_revision_approval_rejects_stale_book_contract_without_overwrite(
         encoding="utf-8"
     ) == "# Original direction\n"
     assert read_pending_book_revision(project_path) is not None
+
+
+def test_pending_route_reuses_already_saved_book_revision_after_restart(
+    tmp_path: Path,
+) -> None:
+    project_path = _approved_project(tmp_path, operation_mode="full_auto")
+    pending = save_book_revision_candidate(
+        project_path,
+        route_id="route-restart1",
+        base_book_version=4,
+        source_loop="chapter",
+        source_artifact="chapters/chapter-003/agent-candidate.json",
+        source_candidate_run_id="chapter-run-1",
+        summary="A future Book revision is required.",
+        contract_field="ending.reveal",
+        committed_evidence_locator="book/direction.md",
+        impossibility_reason="The approved reveal conflicts with committed evidence.",
+        synthesis=_synthesis(),
+        evaluation=_passing_evaluation(),
+        review=_passing_review(),
+        profile_id="profile-1",
+    )
+    pending_route_path = (
+        project_path / "book" / "harness" / "pending-cross-loop-route.json"
+    )
+    write_json(
+        pending_route_path,
+        {
+            "schema_version": 1,
+            "route_id": pending.route_id,
+            "loop_layer": "chapter",
+            "action": "run_chapter_agent",
+            "proposal": {"target_owner": "book"},
+            "source_artifact": pending.source_artifact,
+        },
+    )
+    metadata = ProjectMetadata.model_validate(read_json(project_path / "project.json"))
+
+    handled = HarnessOrchestrator(
+        HarnessRunContext(project_path=project_path, run_id="run-restart")
+    )._process_pending_cross_loop_route(metadata)
+
+    assert handled is True
+    assert not pending_route_path.exists()
+    assert read_pending_book_revision(project_path) == pending
+    assert read_json(project_path / "project.json")["run_status"] == "waiting_for_user"
+    assert read_events(project_path)[-1].kind == "cross_loop_route_recovered"
 
 
 def _approved_project(tmp_path: Path, *, operation_mode: str) -> Path:

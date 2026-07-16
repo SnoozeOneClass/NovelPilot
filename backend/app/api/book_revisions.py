@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.schemas.book_revisions import BookRevisionApprovalRequest, BookRevisionState
 from app.schemas.events import HarnessEvent
+from app.harness.run_host import continue_after_user_gate
 from app.storage import book_revisions as book_revision_storage
 from app.storage.events import append_event
 from app.storage.projects import get_active_project_path, read_project_metadata
@@ -61,6 +62,7 @@ def approve_book_revision(
             },
         ),
     )
+    continue_after_user_gate(project_path)
     return state
 
 

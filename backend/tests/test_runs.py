@@ -6,13 +6,14 @@ from fastapi import HTTPException
 
 from app.api import runs as runs_api
 from app.api.runs import _build_run_archive, _events_after_last_event_id, _format_sse_event
-from app.harness.run_control import begin_active_runner, end_active_runner
+from app.harness.run_control import begin_active_runner, end_active_runner, has_active_runner
 from app.schemas.events import HarnessEvent
 from app.schemas.projects import ProjectMetadata
 from app.schemas.runs import RunAdvanceRequest
 from app.storage import profiles as profile_storage
 from app.storage.events import append_event, read_events
 from app.storage.json_files import read_json, write_json
+from app.storage.run_state import read_run_control_state
 
 
 def _event(event_id: str) -> HarnessEvent:
@@ -180,6 +181,40 @@ def test_start_run_rejects_non_idle_status_without_history(tmp_path, monkeypatch
     assert exc.value.detail == "Harness run has already started; use resume."
     assert stored["run_status"] == "paused"
     assert events == []
+
+
+def test_start_run_hands_continuation_to_backend_host(tmp_path, monkeypatch) -> None:
+    project_path = tmp_path / "novel"
+    project_path.mkdir()
+    write_json(
+        project_path / "project.json",
+        ProjectMetadata(title="Novel", run_status="idle").model_dump(mode="json"),
+    )
+    (project_path / "events.jsonl").write_text("", encoding="utf-8")
+    wakes = []
+
+    class FakeHost:
+        started = True
+
+        def wake(self, path) -> None:
+            wakes.append(path)
+
+    monkeypatch.setattr(runs_api, "get_active_project_path", lambda: project_path)
+    monkeypatch.setattr(runs_api, "_ensure_project_is_ready_to_run", lambda _path: None)
+    monkeypatch.setattr(runs_api, "get_run_host", lambda: FakeHost())
+    monkeypatch.setattr(
+        runs_api,
+        "_advance_run_until_stop",
+        lambda *_args, **_kwargs: pytest.fail("Browser request drove the run inline."),
+    )
+
+    result = runs_api.start_run()
+
+    assert result["status"] == "running"
+    assert wakes == [project_path]
+    state = read_run_control_state(project_path)
+    assert state.desired_state == "running"
+    assert state.run_id == result["run_id"]
 
 
 def test_pause_run_requests_pause_only_when_running(tmp_path, monkeypatch) -> None:
@@ -470,6 +505,12 @@ def test_retry_current_chapter_archives_failed_verification_artifacts(
         },
     )
     monkeypatch.setattr(runs_api, "get_active_project_path", lambda: project_path)
+    woke_after_release: list[bool] = []
+    monkeypatch.setattr(
+        runs_api,
+        "continue_after_user_gate",
+        lambda path: woke_after_release.append(not has_active_runner(path)) or True,
+    )
 
     result = runs_api.retry_current_chapter()
 
@@ -489,6 +530,7 @@ def test_retry_current_chapter_archives_failed_verification_artifacts(
     ]
     assert events[-1].kind == "chapter_retry_prepared"
     assert events[-1].routing_decision == "retry"
+    assert woke_after_release == [True]
 
 
 def test_retry_current_chapter_archives_rejected_state_patch(

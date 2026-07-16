@@ -238,6 +238,7 @@ class EvaluationInput(BaseModel):
 
     schema_version: int = 1
     identity: AgentIdentity
+    candidate_run_id: str | None = Field(default=None, min_length=1, max_length=200)
     checkpoint: str = Field(min_length=1, max_length=200)
     candidate_artifact_id: str = Field(min_length=1, max_length=1_000)
     candidate_revision: int = Field(ge=1)
@@ -254,6 +255,8 @@ class EvaluationRecord(BaseModel):
 
     schema_version: int = 1
     evaluation_id: str = Field(default_factory=lambda: str(uuid4()))
+    candidate_run_id: str | None = Field(default=None, min_length=1, max_length=200)
+    input_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
     candidate_artifact_id: str
     candidate_revision: int = Field(ge=1)
     evaluator_profile_id: str

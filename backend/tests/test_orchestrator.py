@@ -485,6 +485,71 @@ def test_cross_loop_route_never_invalidates_committed_chapter_work(tmp_path: Pat
     assert (chapter_path / "final.md").read_text(encoding="utf-8") == "Committed prose\n"
 
 
+def test_pending_story_arc_route_finishes_cleanup_without_rerunning_agent(
+    tmp_path: Path,
+) -> None:
+    project_path = tmp_path / "project"
+    chapter_path = project_path / "chapters" / "chapter-001"
+    arc_path = project_path / "arcs" / "arc-001"
+    chapter_path.mkdir(parents=True)
+    arc_path.mkdir(parents=True)
+    route_id = "route-restart-story"
+    metadata = ProjectMetadata(
+        project_id="project-1",
+        title="Novel",
+        active_arc_id="arc-001",
+        active_chapter_id="chapter-001",
+        run_status="running",
+    )
+    write_json(project_path / "project.json", metadata.model_dump(mode="json"))
+    write_json(
+        arc_path / "state.json",
+        {"schema_version": 1, "version": 3, "arc_id": "arc-001"},
+    )
+    (arc_path / "plan.md").write_text("# Revised Arc\n", encoding="utf-8")
+    (arc_path / "revision.md").write_text(
+        f"# Arc Revision\n\n{route_id}\n",
+        encoding="utf-8",
+    )
+    for name in ["context_snapshot.json", "draft.md", "evaluation.json"]:
+        (chapter_path / name).write_text("candidate\n", encoding="utf-8")
+    pending_path = (
+        project_path / "book" / "harness" / "pending-cross-loop-route.json"
+    )
+    write_json(
+        pending_path,
+        {
+            "schema_version": 1,
+            "route_id": route_id,
+            "loop_layer": "chapter",
+            "action": "run_chapter_agent",
+            "source_artifact": "chapters/chapter-001/agent_candidate.json",
+            "proposal": {
+                "target_owner": "story_arc",
+                "candidate_run_id": "chapter-run-1",
+                "contract_revision": 2,
+                "contract_field": "ending_instruction",
+                "committed_evidence_locator": "arcs/arc-001/plan.md",
+                "impossibility_reason": "Committed evidence requires a revised ending.",
+            },
+        },
+    )
+
+    handled = HarnessOrchestrator(
+        HarnessRunContext(project_path=project_path, run_id="run-restart")
+    )._process_pending_cross_loop_route(metadata)
+
+    assert handled is True
+    assert not pending_path.exists()
+    assert not (chapter_path / "context_snapshot.json").exists()
+    assert not (chapter_path / "draft.md").exists()
+    route_record = read_json(
+        chapter_path / "upstream-routes" / f"{route_id}.json"
+    )
+    assert route_record["committed_artifacts_touched"] is False
+    assert read_events(project_path)[-1].kind == "cross_loop_route_recovered"
+
+
 def test_full_auto_book_route_waits_for_explicit_user_approval(
     tmp_path: Path,
     monkeypatch,

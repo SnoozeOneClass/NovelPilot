@@ -13,6 +13,7 @@ from app.storage.json_files import read_json
 from app.storage.profiles import list_public_profiles
 from app.storage.projects import read_project_metadata
 from app.storage.retries import retry_scope_for_chapter
+from app.storage.run_state import read_run_control_state
 from app.storage.setup import read_setup_state
 
 APPROVED_BOOK_ARTIFACTS = [
@@ -164,7 +165,7 @@ def _book_revision_gate(project_path: Path) -> ReadinessGate:
 
 
 def _run_control_gate(run_status: str) -> ReadinessGate:
-    if run_status in {"running", "pause_requested"}:
+    if run_status in {"running", "pause_requested", "waiting_for_provider"}:
         return ReadinessGate(
             id="run_control",
             status="pending",
@@ -207,6 +208,26 @@ def _next_action(
     gate_by_id = {gate.id: gate for gate in gates}
     run_control_gate = gate_by_id["run_control"]
     if run_control_gate.status != "passed":
+        if metadata.run_status == "waiting_for_provider":
+            state = read_run_control_state(project_path)
+            wait = state.provider_wait
+            return RunNextAction(
+                id="wait_for_provider_retry",
+                requires_user=False,
+                message=(
+                    "The model provider is temporarily unavailable; the backend will "
+                    "retry this action automatically."
+                ),
+                evidence=(
+                    [
+                        f"attempt:{wait.attempt}",
+                        f"next_wake_at:{wait.next_wake_at.isoformat()}",
+                        f"action_key:{wait.action_key}",
+                    ]
+                    if wait is not None
+                    else ["provider_wait_state_pending"]
+                ),
+            )
         if active_runner is False and metadata.run_status in {"running", "pause_requested"}:
             return RunNextAction(
                 id="recover_stale_run",
@@ -448,6 +469,18 @@ def _failed_run_next_action(events: list[HarnessEvent]) -> RunNextAction:
                 "The provider connection failed after bounded transport retries. "
                 "Reconnect and retry from committed state; prior candidate and "
                 "failure evidence remain available."
+            ),
+            evidence=evidence,
+        )
+
+    if category in {"provider_auth", "profile_configuration"}:
+        return RunNextAction(
+            id="retry_failed_run",
+            command="POST /api/runs/resume",
+            requires_user=True,
+            message=(
+                "Correct the model profile or provider capability, then retry the same "
+                "durable checkpoint. Existing candidates and committed prose are preserved."
             ),
             evidence=evidence,
         )

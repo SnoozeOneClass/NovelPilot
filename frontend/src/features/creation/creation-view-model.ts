@@ -15,6 +15,7 @@ export type CreationStage =
   | "evaluating_chapter"
   | "repairing_chapter"
   | "continuing"
+  | "waiting_provider"
   | "chapter_recovery"
   | "failed"
   | "completed";
@@ -103,6 +104,23 @@ export function deriveCreationViewModel({
       description: "正文和候选证据已保留。你可以继续一次有界自动修订，或先查看详细证据。",
       primaryAction: "retry_chapter",
       isRunning,
+      hasStarted: started
+    };
+  }
+  if (
+    metadata.run_status === "waiting_for_provider"
+    || nextAction?.id === "wait_for_provider_retry"
+  ) {
+    const nextWake = nextAction?.evidence.find((item) => item.startsWith("next_wake_at:"));
+    return {
+      stage: "waiting_provider",
+      eyebrow: "模型服务暂时不可用",
+      title: "已保留现场，后台会自动重试",
+      description: nextWake
+        ? `当前候选和检查点均已保存；${nextWake.replace("next_wake_at:", "预计重试：")}`
+        : "当前候选和检查点均已保存；模型服务恢复后会自动继续。",
+      primaryAction: null,
+      isRunning: true,
       hasStarted: started
     };
   }

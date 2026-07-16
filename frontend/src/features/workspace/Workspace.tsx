@@ -8,7 +8,6 @@ import type { TaskDomain } from "../../app/types";
 import { useWorkspaceQueries, workspaceQueryKeys } from "../../app/workspace-queries";
 import type { LlmProfilesDocument, ProjectSummary } from "../../types/domain";
 import { CreationView } from "../creation/CreationView";
-import { useCreationRunController } from "../creation/useCreationRunController";
 import { EvidenceCenter } from "../evidence/EvidenceCenter";
 import { ExperimentLab } from "../experiments/ExperimentLab";
 import { SettingsView } from "../settings/SettingsView";
@@ -69,7 +68,9 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
   });
   const activeArtifact = activeArtifactQuery.data ?? null;
   const runStatus = metadata.run_status;
-  const runInFlight = runStatus === "running" || runStatus === "pause_requested";
+  const runInFlight = runStatus === "running"
+    || runStatus === "pause_requested"
+    || runStatus === "waiting_for_provider";
   const canRecover = readiness?.next_action.id === "recover_stale_run";
   const commandBusy = pendingCommands.size > 0;
   const currentProfile = profiles?.profiles.find((profile) => profile.id === profiles.active_profile_id) ?? null;
@@ -81,18 +82,6 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
         ((summary.kind === "verification" && summary.status === "failed") || summary.kind === "state_patch_rejection")
     );
   }, [artifactSummaries, metadata.active_chapter_id]);
-  const hasStarted = useMemo(
-    () => events.some((event) => event.kind === "run_started" || event.kind === "run_resumed"),
-    [events]
-  );
-  useCreationRunController({
-    hasStarted,
-    readiness,
-    busy: commandBusy,
-    continuationKey: `${metadata.updated_at}:${events.at(-1)?.event_id ?? "none"}`,
-    onResume: resumeRun
-  });
-
   useEffect(() => {
     try { window.sessionStorage.setItem(`novelpilot.location.${projectId}`, location); } catch { /* no-op */ }
   }, [location, projectId]);

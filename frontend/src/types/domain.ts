@@ -5,6 +5,7 @@ export type RunStatus =
   | "pause_requested"
   | "paused"
   | "waiting_for_user"
+  | "waiting_for_provider"
   | "failed";
 
 export type LlmProtocol = "openai-compatible" | "anthropic-compatible";
@@ -470,6 +471,7 @@ export type RunNextActionId =
   | "configure_llm_profile"
   | "repair_project_state"
   | "wait_for_safe_checkpoint"
+  | "wait_for_provider_retry"
   | "recover_stale_run"
   | "inspect_failure"
   | "retry_provider_connection"
