@@ -85,7 +85,7 @@ output/project-<项目 ID>/exports/manuscript.md
 
 ## 制作消融实验母本
 
-“实验室”是常驻的独立入口，不是正常三层 Loop 的必经阶段。用于生成建议测试故事的 Prompt 与冻结步骤见 [消融实验母本故事 Prompt](benchmark-story-prompt.md)。
+“实验室”是常驻的独立入口，不是正常三层 Loop 的必经阶段。用于生成建议测试故事的 Prompt 与冻结步骤见 [消融实验母本故事 Prompt 1](benchmark-story-prompt.md)。
 
 母本冻结要求源项目处在一个干净的跨故事弧检查点：至少一个先前故事弧已经完成，当前故事弧计划已经批准，但当前故事弧尚未开始写章，且没有 Harness 动作正在运行。条件不足时，实验室会保留入口并列出具体原因。
 
