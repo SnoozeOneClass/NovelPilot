@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from app.llm.retry import is_retryable_provider_error_message
 from app.schemas.completion import GateStatus
 from app.schemas.events import HarnessEvent
 from app.schemas.projects import ProjectMetadata
@@ -425,6 +426,10 @@ def _failed_run_next_action(events: list[HarnessEvent]) -> RunNextAction:
     )
     if category is None and run_failure is not None:
         category = run_failure.payload.get("category")
+        if category is None and is_retryable_provider_error_message(
+            run_failure.message
+        ):
+            category = "transport_provider"
     evidence = list(
         dict.fromkeys(
             [

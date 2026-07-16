@@ -278,7 +278,7 @@ def test_readiness_recommends_explicit_retry_for_generic_failed_runs(
             kind="run_failed",
             atomic_action="advance_to_next_checkpoint",
             status="failed",
-            message="Harness run failed: provider timeout.",
+            message="Harness run failed: checkpoint execution could not continue.",
         ),
     )
 
@@ -290,18 +290,45 @@ def test_readiness_recommends_explicit_retry_for_generic_failed_runs(
     assert readiness.next_action.evidence == [
         "run_failed",
         "advance_to_next_checkpoint",
-        "Harness run failed: provider timeout.",
+        "Harness run failed: checkpoint execution could not continue.",
     ]
 
 
 @pytest.mark.parametrize(
-    "failure_kind",
-    ["agent_activation_failed", "agent_evaluation_failed"],
+    ("failure_kind", "failure_payload", "run_failure_message"),
+    [
+        (
+            "agent_activation_failed",
+            {
+                "category": "transport_provider",
+                "code": "provider_retry_exhausted",
+            },
+            "Harness run failed: provider unavailable.",
+        ),
+        (
+            "agent_evaluation_failed",
+            {
+                "category": "transport_provider",
+                "code": "provider_retry_exhausted",
+            },
+            "Harness run failed: provider unavailable.",
+        ),
+        (
+            "agent_evaluation_failed",
+            {},
+            (
+                "Harness run failed: OpenAI-compatible provider request failed: "
+                "<urlopen error [SSL: UNEXPECTED_EOF_WHILE_READING]>"
+            ),
+        ),
+    ],
 )
 def test_readiness_recommends_reconnect_for_provider_failure(
     tmp_path: Path,
     monkeypatch,
     failure_kind: str,
+    failure_payload: dict[str, str],
+    run_failure_message: str,
 ) -> None:
     _isolate_runtime_paths(tmp_path, monkeypatch)
     project = project_storage.create_project(
@@ -324,10 +351,7 @@ def test_readiness_recommends_reconnect_for_provider_failure(
             status="failed",
             artifact_path="chapters/chapter-001/agent/a/failed/failure.json",
             message="Bounded Loop Agent activation failed closed.",
-            payload={
-                "category": "transport_provider",
-                "code": "provider_retry_exhausted",
-            },
+            payload=failure_payload,
         ),
     )
     append_event(
@@ -338,7 +362,7 @@ def test_readiness_recommends_reconnect_for_provider_failure(
             kind="run_failed",
             atomic_action="advance_to_next_checkpoint",
             status="failed",
-            message="Harness run failed: provider unavailable.",
+            message=run_failure_message,
         ),
     )
 
