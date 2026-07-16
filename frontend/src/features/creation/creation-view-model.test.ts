@@ -112,4 +112,22 @@ describe("deriveCreationViewModel", () => {
     expect(model.stage).toBe("chapter_recovery");
     expect(model.primaryAction).toBe("retry_chapter");
   });
+
+  it.each(["retry_provider_connection", "retry_failed_run"] as const)(
+    "keeps %s as an explicit failed-step recovery",
+    (nextActionId) => {
+      const model = deriveCreationViewModel({
+        project: {
+          ...project,
+          metadata: { ...project.metadata, run_status: "failed", active_chapter_id: "chapter-001" }
+        },
+        readiness: readiness(nextActionId, { requires_user: true }),
+        currentArc: null,
+        bookRevision: null,
+        events: []
+      });
+      expect(model.stage).toBe("failed");
+      expect(model.primaryAction).toBe("retry_failed_run");
+    }
+  );
 });

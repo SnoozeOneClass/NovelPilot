@@ -81,6 +81,7 @@
 .failureNotice { margin: 24px 0; padding: 16px 0; border-block: 1px solid color-mix(in srgb, var(--np-danger) 35%, var(--np-line)); }
 .failureNotice strong { color: var(--np-danger); font-size: 14px; }
 .failureNotice p { margin: 6px 0 8px; color: var(--np-text-secondary); font-size: 13px; line-height: 1.6; }
+.failureActions { display: flex; align-items: center; gap: 8px; }
 
 .liveDocument { margin: 30px 0 20px; padding: 0; }
 .liveDocument > header { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 12px 0; border-bottom: 1px solid var(--np-line); }

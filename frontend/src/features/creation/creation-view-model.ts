@@ -24,6 +24,7 @@ export type CreationPrimaryAction =
   | "approve_story_arc"
   | "approve_book_revision"
   | "retry_chapter"
+  | "retry_failed_run"
   | "recover_stale"
   | null;
 
@@ -101,6 +102,20 @@ export function deriveCreationViewModel({
       title: "当前章节需要继续自动修订",
       description: "正文和候选证据已保留。你可以继续一次有界自动修订，或先查看详细证据。",
       primaryAction: "retry_chapter",
+      isRunning,
+      hasStarted: started
+    };
+  }
+  if (nextAction?.id === "retry_provider_connection" || nextAction?.id === "retry_failed_run") {
+    const providerFailure = nextAction.id === "retry_provider_connection";
+    return {
+      stage: "failed",
+      eyebrow: providerFailure ? "模型连接已中断" : "创作步骤未能继续",
+      title: "Harness 已保留现场",
+      description: providerFailure
+        ? "旧候选与失败证据均已保留；模型恢复后可从已提交状态重新执行失败步骤。"
+        : "当前失败可以从已提交状态开启一次新的有界尝试；旧现场仍保留，不会覆盖已提交正文。",
+      primaryAction: "retry_failed_run",
       isRunning,
       hasStarted: started
     };

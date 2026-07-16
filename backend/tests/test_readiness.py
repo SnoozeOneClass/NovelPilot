@@ -257,7 +257,7 @@ def test_readiness_recommends_retry_for_rejected_state_patch(
     assert readiness.next_action.evidence[0] == "state_patch"
 
 
-def test_readiness_recommends_failure_inspection_for_failed_runs(
+def test_readiness_recommends_explicit_retry_for_generic_failed_runs(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -284,13 +284,185 @@ def test_readiness_recommends_failure_inspection_for_failed_runs(
 
     readiness = readiness_api.get_readiness()
 
-    assert readiness.next_action.id == "inspect_failure"
+    assert readiness.next_action.id == "retry_failed_run"
+    assert readiness.next_action.command == "POST /api/runs/resume"
     assert readiness.next_action.requires_user is True
     assert readiness.next_action.evidence == [
         "run_failed",
         "advance_to_next_checkpoint",
         "Harness run failed: provider timeout.",
     ]
+
+
+@pytest.mark.parametrize(
+    "failure_kind",
+    ["agent_activation_failed", "agent_evaluation_failed"],
+)
+def test_readiness_recommends_reconnect_for_provider_failure(
+    tmp_path: Path,
+    monkeypatch,
+    failure_kind: str,
+) -> None:
+    _isolate_runtime_paths(tmp_path, monkeypatch)
+    project = project_storage.create_project(
+        CreateProjectRequest(operation_mode="full_auto")
+    )
+    project_path = Path(project.path)
+    _approve_setup(project_path)
+    _create_profile()
+    metadata = project_storage.read_project_metadata(project_path)
+    metadata.run_status = "failed"
+    project_storage.write_project_metadata(project_path, metadata)
+    append_event(
+        project_path,
+        HarnessEvent(
+            project_id=metadata.project_id,
+            run_id="run-1",
+            kind=failure_kind,
+            loop_layer="chapter",
+            atomic_action="run_chapter_agent",
+            status="failed",
+            artifact_path="chapters/chapter-001/agent/a/failed/failure.json",
+            message="Bounded Loop Agent activation failed closed.",
+            payload={
+                "category": "transport_provider",
+                "code": "provider_retry_exhausted",
+            },
+        ),
+    )
+    append_event(
+        project_path,
+        HarnessEvent(
+            project_id=metadata.project_id,
+            run_id="run-1",
+            kind="run_failed",
+            atomic_action="advance_to_next_checkpoint",
+            status="failed",
+            message="Harness run failed: provider unavailable.",
+        ),
+    )
+
+    readiness = readiness_api.get_readiness()
+
+    assert readiness.next_action.id == "retry_provider_connection"
+    assert readiness.next_action.command == "POST /api/runs/resume"
+    assert readiness.next_action.requires_user is True
+    assert readiness.next_action.can_auto_continue is False
+    assert "chapters/chapter-001/agent/a/failed/failure.json" in readiness.next_action.evidence
+
+
+@pytest.mark.parametrize(
+    ("category", "code"),
+    [
+        ("malformed_model_output", "tool_schema_repair_exhausted"),
+        ("local_semantic", "semantic_revision_exhausted"),
+    ],
+)
+def test_readiness_recommends_new_bounded_retry_for_retryable_agent_failure(
+    tmp_path: Path,
+    monkeypatch,
+    category: str,
+    code: str,
+) -> None:
+    _isolate_runtime_paths(tmp_path, monkeypatch)
+    project = project_storage.create_project(
+        CreateProjectRequest(operation_mode="full_auto")
+    )
+    project_path = Path(project.path)
+    _approve_setup(project_path)
+    _create_profile()
+    metadata = project_storage.read_project_metadata(project_path)
+    metadata.run_status = "failed"
+    project_storage.write_project_metadata(project_path, metadata)
+    append_event(
+        project_path,
+        HarnessEvent(
+            project_id=metadata.project_id,
+            run_id="run-retryable",
+            kind="agent_activation_failed",
+            loop_layer="chapter",
+            atomic_action="run_chapter_agent",
+            status="failed",
+            message="The bounded automatic repair budget was exhausted.",
+            payload={"category": category, "code": code},
+        ),
+    )
+    append_event(
+        project_path,
+        HarnessEvent(
+            project_id=metadata.project_id,
+            run_id="run-retryable",
+            kind="run_failed",
+            atomic_action="advance_to_next_checkpoint",
+            status="failed",
+            message="Harness run failed after bounded repair.",
+        ),
+    )
+
+    readiness = readiness_api.get_readiness()
+
+    assert readiness.next_action.id == "retry_failed_run"
+    assert readiness.next_action.command == "POST /api/runs/resume"
+    assert readiness.next_action.requires_user is True
+
+
+@pytest.mark.parametrize(
+    ("category", "code"),
+    [
+        ("unsupported_capability", "tool_calling_unavailable"),
+        ("harness_conflict", "stale_candidate_revision"),
+        ("cross_loop_semantic", "unsupported_owner_route"),
+        ("needs_user", "explicit_decision_required"),
+        ("exhausted", "agent_turn_limit_exhausted"),
+        ("cancelled", "activation_cancelled"),
+    ],
+)
+def test_readiness_keeps_non_retryable_failure_inspection_only(
+    tmp_path: Path,
+    monkeypatch,
+    category: str,
+    code: str,
+) -> None:
+    _isolate_runtime_paths(tmp_path, monkeypatch)
+    project = project_storage.create_project(
+        CreateProjectRequest(operation_mode="full_auto")
+    )
+    project_path = Path(project.path)
+    _approve_setup(project_path)
+    _create_profile()
+    metadata = project_storage.read_project_metadata(project_path)
+    metadata.run_status = "failed"
+    project_storage.write_project_metadata(project_path, metadata)
+    append_event(
+        project_path,
+        HarnessEvent(
+            project_id=metadata.project_id,
+            run_id="run-2",
+            kind="agent_activation_failed",
+            loop_layer="chapter",
+            atomic_action="run_chapter_agent",
+            status="failed",
+            message="Non-retryable Agent failure preserved for inspection.",
+            payload={"category": category, "code": code},
+        ),
+    )
+    append_event(
+        project_path,
+        HarnessEvent(
+            project_id=metadata.project_id,
+            run_id="run-2",
+            kind="run_failed",
+            atomic_action="advance_to_next_checkpoint",
+            status="failed",
+            message="Harness run failed: stale candidate revision.",
+        ),
+    )
+
+    readiness = readiness_api.get_readiness()
+
+    assert readiness.next_action.id == "inspect_failure"
+    assert readiness.next_action.command is None
+    assert readiness.next_action.requires_user is True
 
 
 def test_readiness_recommends_recovering_stale_run_lock(

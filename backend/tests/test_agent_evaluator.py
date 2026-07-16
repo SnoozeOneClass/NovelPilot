@@ -203,6 +203,47 @@ def test_evaluator_rejects_text_json_when_native_structured_output_is_missing() 
         raise AssertionError("Evaluator accepted prompt-parsed JSON fallback output.")
 
 
+def test_evaluator_retries_a_transient_provider_failure_before_validation() -> None:
+    calls = 0
+    retries: list[tuple[int, int]] = []
+
+    def fake_call(_profile, _request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError(
+                "OpenAI-compatible provider request failed: "
+                "[SSL: UNEXPECTED_EOF_WHILE_READING]"
+            )
+        return ChatResult(
+            content="{}",
+            structured_output={
+                "schema_version": 1,
+                "outcome": "pass",
+                "contract_satisfied": True,
+                "summary": "The candidate passes.",
+                "issues": [],
+                "signals": [],
+                "repair_brief": None,
+                "upstream_blocker": None,
+            },
+            model_snapshot="judge-model",
+            provider_snapshot="openai-compatible",
+        )
+
+    record = evaluate_candidate(
+        _profile(),
+        _input(),
+        evaluator_call=fake_call,
+        transport_retry_limit=2,
+        on_transport_retry=lambda retry, limit, _exc: retries.append((retry, limit)),
+    )
+
+    assert record.result.outcome == "pass"
+    assert calls == 2
+    assert retries == [(1, 2)]
+
+
 def _profile() -> LlmProfile:
     return LlmProfile(
         id="judge",

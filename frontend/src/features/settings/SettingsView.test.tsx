@@ -95,8 +95,8 @@ describe("SettingsView", () => {
 
     await user.click(screen.getByRole("button", { name: /LLM Profile/ }));
     await user.selectOptions(await screen.findByLabelText("全书 Loop 模型"), "main");
-    await user.clear(screen.getByLabelText("语义自动修订"));
-    await user.type(screen.getByLabelText("语义自动修订"), "3");
+    await user.clear(screen.getByLabelText("语义单候选修订"));
+    await user.type(screen.getByLabelText("语义单候选修订"), "3");
     await user.click(screen.getByRole("button", { name: "保存 Agent 配置" }));
 
     await waitFor(() => expect(updatePolicy).toHaveBeenCalledWith(expect.objectContaining({

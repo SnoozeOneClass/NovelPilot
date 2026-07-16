@@ -118,12 +118,12 @@ export function AgentPolicyPanel({
       </div>
 
       <div className={styles.budgetGrid}>
-        <NumberField label="全书最大回合" value={policy.book_max_turns} min={1} max={200} disabled={saving || locked} onChange={(value) => updateNumber("book_max_turns", value, 1, 200)} />
-        <NumberField label="故事弧最大回合" value={policy.story_arc_max_turns} min={1} max={200} disabled={saving || locked} onChange={(value) => updateNumber("story_arc_max_turns", value, 1, 200)} />
-        <NumberField label="章节最大回合" value={policy.chapter_max_turns} min={1} max={200} disabled={saving || locked} onChange={(value) => updateNumber("chapter_max_turns", value, 1, 200)} />
-        <NumberField label="Tool 格式修正" value={policy.tool_schema_repair_limit} min={0} max={20} disabled={saving || locked} onChange={(value) => updateNumber("tool_schema_repair_limit", value, 0, 20)} />
-        <NumberField label="语义自动修订" value={policy.semantic_revision_limit} min={0} max={20} disabled={saving || locked} onChange={(value) => updateNumber("semantic_revision_limit", value, 0, 20)} />
-        <NumberField label="Provider 重试" value={policy.transport_retry_limit} min={0} max={20} disabled={saving || locked} onChange={(value) => updateNumber("transport_retry_limit", value, 0, 20)} />
+        <NumberField label="全书单次激活回合" value={policy.book_max_turns} min={1} max={200} disabled={saving || locked} onChange={(value) => updateNumber("book_max_turns", value, 1, 200)} />
+        <NumberField label="故事弧单次激活回合" value={policy.story_arc_max_turns} min={1} max={200} disabled={saving || locked} onChange={(value) => updateNumber("story_arc_max_turns", value, 1, 200)} />
+        <NumberField label="章节单次激活回合" value={policy.chapter_max_turns} min={1} max={200} disabled={saving || locked} onChange={(value) => updateNumber("chapter_max_turns", value, 1, 200)} />
+        <NumberField label="Tool 单次动作修正" value={policy.tool_schema_repair_limit} min={0} max={20} disabled={saving || locked} onChange={(value) => updateNumber("tool_schema_repair_limit", value, 0, 20)} />
+        <NumberField label="语义单候选修订" value={policy.semantic_revision_limit} min={0} max={20} disabled={saving || locked} onChange={(value) => updateNumber("semantic_revision_limit", value, 0, 20)} />
+        <NumberField label="Provider 单次请求重试" value={policy.transport_retry_limit} min={0} max={20} disabled={saving || locked} onChange={(value) => updateNumber("transport_retry_limit", value, 0, 20)} />
       </div>
       <footer>
         <button type="button" disabled={saving || locked} onClick={() => void save()}>

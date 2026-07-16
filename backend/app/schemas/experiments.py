@@ -3,7 +3,11 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.schemas.projects import AgentPolicy
+from app.schemas.projects import (
+    RETRY_BUDGET_SCOPE_VERSION,
+    AgentPolicy,
+    RetryBudgetScopeVersion,
+)
 
 
 class _StrictExperimentModel(BaseModel):
@@ -125,7 +129,8 @@ class ExperimentSchemaSnapshot(_StrictExperimentModel):
     tool_registry: dict[str, int]
     context_policy_version: Literal["context-policy-v1"] = "context-policy-v1"
     evaluation_schema_version: Literal["evaluation-v1"] = "evaluation-v1"
-    telemetry_schema_version: Literal[1] = 1
+    telemetry_schema_version: Literal[2] = 2
+    retry_budget_scope_version: RetryBudgetScopeVersion = RETRY_BUDGET_SCOPE_VERSION
 
 
 class ExperimentRunConfiguration(_StrictExperimentModel):

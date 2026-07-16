@@ -30,7 +30,7 @@ def test_user_decision_tool_is_not_exposed_to_downstream_agents() -> None:
     assert "request_user_decision" not in loop_runners.CHAPTER_AGENT_TOOLS
 
 
-def test_story_arc_agent_repairs_local_semantic_failure_with_frozen_budget(
+def test_story_arc_agent_repairs_local_semantic_failure_with_candidate_budget(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -66,7 +66,7 @@ def test_story_arc_agent_repairs_local_semantic_failure_with_frozen_budget(
     evaluation_count = 0
     events: list[dict[str, object]] = []
 
-    def fake_evaluate(_profile, evaluation_input: EvaluationInput):
+    def fake_evaluate(_profile, evaluation_input: EvaluationInput, **_kwargs):
         nonlocal evaluation_count
         evaluation_count += 1
         passed = evaluation_count == 2
@@ -115,7 +115,7 @@ def test_story_arc_agent_repairs_local_semantic_failure_with_frozen_budget(
         AgentIdentity(project_id="project-1", role="story_arc", scope_id="arc-001"),
     )
     assert state.budgets is not None
-    assert state.budgets.used_turns == 2
+    assert state.budgets.used_turns == 1
     assert state.budgets.used_semantic_revisions == 1
     activation_roots = sorted((tmp_path / "arcs" / "arc-001" / "agent" / "a").iterdir())
     assert len(activation_roots) == 2
@@ -226,7 +226,7 @@ def test_book_evaluator_needs_user_becomes_one_standard_discussion_question(
         ]
     )
 
-    def fake_evaluate(_profile, evaluation_input: EvaluationInput):
+    def fake_evaluate(_profile, evaluation_input: EvaluationInput, **_kwargs):
         return EvaluationRecord(
             candidate_artifact_id=evaluation_input.candidate_artifact_id,
             candidate_revision=evaluation_input.candidate_revision,

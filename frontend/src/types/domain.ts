@@ -472,6 +472,8 @@ export type RunNextActionId =
   | "wait_for_safe_checkpoint"
   | "recover_stale_run"
   | "inspect_failure"
+  | "retry_provider_connection"
+  | "retry_failed_run"
   | "retry_current_chapter"
   | "approve_story_arc"
   | "start_run"

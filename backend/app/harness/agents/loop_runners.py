@@ -33,6 +33,8 @@ from app.harness.loops.book import (
     DiscussionContextAssembly,
 )
 from app.llm.gateway import ChatChunk, ChatMessage
+from app.llm.redaction import redact_profile_secrets
+from app.llm.retry import is_retryable_provider_error
 from app.schemas.patches import CandidateStatePatch
 from app.schemas.projects import ProjectMetadata
 from app.schemas.profiles import LlmProfile
@@ -443,6 +445,7 @@ def evaluate_book_direction_candidate(
         policy.evaluator_profile,
         evaluation_input,
         on_event,
+        transport_retry_limit=policy.transport_retry_limit,
     )
     evaluation = apply_book_direction_prechecks(state, synthesis, evaluation)
     return evaluation, _book_review_from_evaluation(evaluation)
@@ -581,6 +584,7 @@ def _story_arc_attempt(
             rubric_version="story-arc-v1",
         ),
         on_event,
+        transport_retry_limit=policy.transport_retry_limit,
     )
     evaluation_path = _persist_activation_evaluation(project_path, result, evaluation)
     _emit_evaluation_completed(on_event, evaluation, evaluation_path)
@@ -805,6 +809,7 @@ def _chapter_attempt(
             rubric_version="chapter-candidate-v1",
         ),
         on_event,
+        transport_retry_limit=policy.transport_retry_limit,
     )
     evaluation_path = _persist_activation_evaluation(project_path, result, evaluation)
     _emit_evaluation_completed(on_event, evaluation, evaluation_path)
@@ -906,6 +911,8 @@ def _run_evaluator(
     profile: LlmProfile,
     evaluation_input: EvaluationInput,
     on_event: AgentEventCallback | None,
+    *,
+    transport_retry_limit: int,
 ) -> EvaluationRecord:
     if on_event is not None:
         on_event(
@@ -915,15 +922,43 @@ def _run_evaluator(
                 "phase": evaluation_input.checkpoint,
             }
         )
+    def on_transport_retry(retry: int, limit: int, exc: Exception) -> None:
+        if on_event is None:
+            return
+        on_event(
+            {
+                "kind": "agent_transport_retry",
+                "candidate_artifact_id": evaluation_input.candidate_artifact_id,
+                "phase": evaluation_input.checkpoint,
+                "retry": retry,
+                "limit": limit,
+                "message": redact_profile_secrets(str(exc), profile),
+            }
+        )
+
     try:
-        return evaluate_candidate(profile, evaluation_input)
-    except Exception:
+        return evaluate_candidate(
+            profile,
+            evaluation_input,
+            transport_retry_limit=transport_retry_limit,
+            on_transport_retry=on_transport_retry,
+        )
+    except Exception as exc:
         if on_event is not None:
+            provider_failure = is_retryable_provider_error(exc)
             on_event(
                 {
                     "kind": "agent_evaluation_failed",
                     "candidate_artifact_id": evaluation_input.candidate_artifact_id,
                     "phase": evaluation_input.checkpoint,
+                    "category": (
+                        "transport_provider" if provider_failure else "local_semantic"
+                    ),
+                    "code": (
+                        "provider_retry_exhausted"
+                        if provider_failure
+                        else "evaluation_failed"
+                    ),
                 }
             )
         raise

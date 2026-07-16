@@ -57,6 +57,15 @@ function harnessEvent(eventId: string, kind: string, payload: Record<string, unk
   };
 }
 
+function failedEvent(eventId: string, overrides: Partial<HarnessEvent> = {}): HarnessEvent {
+  return {
+    ...harnessEvent(eventId, "agent_tool_result", {}),
+    status: "failed",
+    message: "Agent Tool call was rejected by Harness validation.",
+    ...overrides
+  };
+}
+
 function renderCreation(overrides: Partial<React.ComponentProps<typeof CreationView>> = {}) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const props: React.ComponentProps<typeof CreationView> = {
@@ -75,6 +84,7 @@ function renderCreation(overrides: Partial<React.ComponentProps<typeof CreationV
     onStart: vi.fn().mockResolvedValue(undefined),
     onApproveArc: vi.fn().mockResolvedValue(true),
     onApproveBookRevision: vi.fn().mockResolvedValue(undefined),
+    onRetryFailedRun: vi.fn().mockResolvedValue(undefined),
     onRetryChapter: vi.fn().mockResolvedValue(undefined),
     onRecoverStale: vi.fn().mockResolvedValue(undefined),
     onSelectArtifact: vi.fn(),
@@ -92,6 +102,87 @@ describe("CreationView", () => {
     expect(onStart).toHaveBeenCalledOnce();
     expect(screen.queryByRole("button", { name: /暂停|恢复|继续/ })).not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "创作反馈" })).toBeInTheDocument();
+  });
+
+  it("does not present a recovered pre-run Book failure as the current blocker", () => {
+    renderCreation({
+      events: [
+        failedEvent("event-26", { run_id: null, loop_layer: "book", atomic_action: "continue_book_discussion" }),
+        {
+          ...harnessEvent("event-40", "agent_tool_result", {}),
+          run_id: null,
+          loop_layer: "book",
+          atomic_action: "continue_book_discussion",
+          status: "completed"
+        },
+        {
+          ...harnessEvent("event-41", "user_feedback", { feedback: "后续保持公平推理。" }),
+          run_id: null,
+          loop_layer: "book",
+          status: "completed"
+        }
+      ]
+    });
+
+    expect(screen.getByRole("button", { name: "开始创作" })).toBeInTheDocument();
+    expect(screen.queryByText("当前步骤未能继续")).not.toBeInTheDocument();
+    expect(screen.queryByText("Agent Tool call was rejected by Harness validation.")).not.toBeInTheDocument();
+    expect(screen.getByText("后续保持公平推理。")).toBeInTheDocument();
+  });
+
+  it("shows the latest failure and explicitly retries the current failed step", async () => {
+    const user = userEvent.setup();
+    const onRetryFailedRun = vi.fn().mockResolvedValue(undefined);
+    renderCreation({
+      project: { ...project, metadata: { ...project.metadata, run_status: "failed" } },
+      readiness: readiness("retry_failed_run"),
+      events: [
+        harnessEvent("event-100", "run_started", {}),
+        failedEvent("event-101")
+      ],
+      onRetryFailedRun
+    });
+
+    expect(screen.getByText("当前步骤未能继续")).toBeInTheDocument();
+    expect(screen.getByText("Agent Tool call was rejected by Harness validation.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "重试当前步骤" }));
+    expect(onRetryFailedRun).toHaveBeenCalledOnce();
+  });
+
+  it("labels a provider failure as reconnecting without submitting feedback", async () => {
+    const user = userEvent.setup();
+    const onRetryFailedRun = vi.fn().mockResolvedValue(undefined);
+    const onSendFeedback = vi.fn().mockResolvedValue(true);
+    renderCreation({
+      project: { ...project, metadata: { ...project.metadata, run_status: "failed" } },
+      readiness: readiness("retry_provider_connection"),
+      events: [
+        harnessEvent("event-110", "run_started", {}),
+        failedEvent("event-111", { message: "Provider authentication is unavailable." })
+      ],
+      onRetryFailedRun,
+      onSendFeedback
+    });
+
+    expect(screen.getByText(/模型服务连接意外中断/)).toBeInTheDocument();
+    expect(screen.queryByText("Provider authentication is unavailable.")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "重新连接并继续" }));
+    expect(onRetryFailedRun).toHaveBeenCalledOnce();
+    expect(onSendFeedback).not.toHaveBeenCalled();
+  });
+
+  it("keeps the current run failure visible during chapter recovery", () => {
+    renderCreation({
+      readiness: readiness("retry_current_chapter"),
+      events: [
+        harnessEvent("event-200", "run_started", {}),
+        failedEvent("event-201", { message: "Chapter evaluation exhausted its repair limit." })
+      ]
+    });
+
+    expect(screen.getByText("当前步骤未能继续")).toBeInTheDocument();
+    expect(screen.getByText("Chapter evaluation exhausted its repair limit.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "继续自动修订" })).toBeInTheDocument();
   });
 
   it("renders actual streamed prose as a read-only document", () => {

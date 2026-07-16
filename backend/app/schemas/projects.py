@@ -6,6 +6,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 OperationMode = Literal["full_auto", "participatory"]
+RetryBudgetScopeVersion = Literal["action-local-v1"]
+RETRY_BUDGET_SCOPE_VERSION: RetryBudgetScopeVersion = "action-local-v1"
 RunStatus = Literal[
     "idle",
     "running",

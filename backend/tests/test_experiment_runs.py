@@ -90,6 +90,8 @@ def test_run_configuration_freezes_each_loop_agent_and_evaluator_binding(
     assert configuration.agent_policy.semantic_revision_limit == 3
     assert configuration.schemas.context_policy_version == "context-policy-v1"
     assert configuration.schemas.evaluation_schema_version == "evaluation-v1"
+    assert configuration.schemas.telemetry_schema_version == 2
+    assert configuration.schemas.retry_budget_scope_version == "action-local-v1"
     assert configuration.schemas.tool_registry
     assert [arm.strategy.mode for arm in configuration.arms] == [
         "none",

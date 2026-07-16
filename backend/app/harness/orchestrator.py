@@ -24,6 +24,7 @@ from app.harness.stream_progress import StreamProgressAccumulator
 from app.llm.gateway import ChatChunk, ChatMessage, ChatRequest, ChatResult, call_llm
 from app.llm.profiles import get_active_profile
 from app.llm.redaction import redact_profile_secrets
+from app.llm.retry import call_llm_with_transport_retries, is_retryable_provider_error
 from app.schemas.artifacts import (
     ChapterVerification,
     ContextExclusion,
@@ -138,6 +139,7 @@ class HarnessOrchestrator:
             metadata.run_status = "failed"
             write_project_metadata(self.context.project_path, metadata)
             safe_error = redact_profile_secrets(str(exc), profile)
+            provider_failure = is_retryable_provider_error(exc)
             self._emit(
                 metadata,
                 kind="run_failed",
@@ -146,6 +148,16 @@ class HarnessOrchestrator:
                 status="failed",
                 routing_decision="pause",
                 message=f"Harness run failed: {safe_error}",
+                payload={
+                    "category": (
+                        "transport_provider" if provider_failure else "harness_failure"
+                    ),
+                    "code": (
+                        "provider_retry_exhausted"
+                        if provider_failure
+                        else "run_failed"
+                    ),
+                },
             )
 
     def _advance_chapter_loop(self, metadata: ProjectMetadata) -> None:
@@ -2469,7 +2481,23 @@ class HarnessOrchestrator:
             emitted_delta = True
             self._emit_model_output_delta(metadata, loop_layer, action, chunk.text_delta)
 
-        result = call_llm(
+        def on_transport_retry(retry: int, limit: int, exc: Exception) -> None:
+            self._emit(
+                metadata,
+                kind="llm_transport_retry",
+                loop_layer=loop_layer,
+                atomic_action=action,
+                status="requested",
+                routing_decision="retry_provider_call",
+                message="Provider call scheduled an automatic transport retry.",
+                payload={
+                    "retry": retry,
+                    "limit": limit,
+                    "error": redact_profile_secrets(str(exc), profile),
+                },
+            )
+
+        result = call_llm_with_transport_retries(
             profile,
             ChatRequest(
                 profile_id=profile.id,
@@ -2484,6 +2512,9 @@ class HarnessOrchestrator:
                     "on_text_delta": on_text_delta,
                 },
             ),
+            retry_limit=metadata.agent_policy.transport_retry_limit,
+            llm_call=call_llm,
+            on_retry=on_transport_retry,
         )
         if not emitted_delta:
             self._emit_model_output(metadata, loop_layer, action, result.content)

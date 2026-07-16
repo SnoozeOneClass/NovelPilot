@@ -19,6 +19,7 @@ from app.llm.gateway import (
     strict_model_json_schema,
 )
 from app.llm.redaction import redact_profile_secrets
+from app.llm.retry import TransportRetryCallback, call_llm_with_transport_retries
 from app.schemas.profiles import LlmProfile
 from app.storage.json_files import read_json
 from app.storage.transactions import commit_file_transaction
@@ -37,6 +38,8 @@ def evaluate_candidate(
     *,
     evaluator_call: EvaluatorCall | None = None,
     max_validation_repairs: int = 2,
+    transport_retry_limit: int = 3,
+    on_transport_retry: TransportRetryCallback | None = None,
 ) -> EvaluationRecord:
     if max_validation_repairs < 0:
         raise ValueError("Evaluator validation repair limit must not be negative.")
@@ -59,14 +62,18 @@ def evaluate_candidate(
     evaluation: EvaluationResult | None = None
     result: ChatResult | None = None
     for attempt in range(max_validation_repairs + 1):
-        result = call(
+        request = ChatRequest(
+            profile_id=profile.id,
+            stream=False,
+            messages=messages,
+            response_schema=response_schema,
+        )
+        result = call_llm_with_transport_retries(
             profile,
-            ChatRequest(
-                profile_id=profile.id,
-                stream=False,
-                messages=messages,
-                response_schema=response_schema,
-            ),
+            request,
+            retry_limit=transport_retry_limit,
+            llm_call=call,
+            on_retry=on_transport_retry,
         )
         try:
             evaluation = _validated_evaluation(profile, evaluation_input, result)

@@ -245,6 +245,7 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
         onStart={startRun}
         onApproveArc={approveArc}
         onApproveBookRevision={approveBookRevision}
+        onRetryFailedRun={resumeRun}
         onRetryChapter={retryCurrentChapter}
         onRecoverStale={recoverStaleRun}
         onSelectArtifact={openArtifact}

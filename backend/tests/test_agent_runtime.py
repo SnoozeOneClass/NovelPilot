@@ -79,7 +79,7 @@ def test_agent_runtime_repairs_invalid_tool_call_and_stops_on_checkpoint(tmp_pat
     state = read_agent_state(tmp_path, AgentIdentity(project_id="project-1", role="book"))
     assert state.lifecycle == "completed"
     assert state.budgets is not None
-    assert state.budgets.used_tool_schema_repairs == 1
+    assert state.budgets.used_tool_schema_repairs == 0
     assert result.usage == {
         "input_tokens": 220,
         "output_tokens": 30,
@@ -95,6 +95,8 @@ def test_agent_runtime_repairs_invalid_tool_call_and_stops_on_checkpoint(tmp_pat
     assert telemetry["tool_errors"] == 1
     assert telemetry["validation_failures"] == 1
     assert telemetry["activation_turns"] == 2
+    assert telemetry["activation_tool_schema_repairs"] == 1
+    assert telemetry["retry_budget_scope_version"] == "action-local-v1"
     assert telemetry["usage"] == result.usage
 
 
@@ -350,6 +352,213 @@ def test_transport_retry_does_not_consume_an_agent_turn(tmp_path) -> None:
     assert state.budgets.used_transport_retries == 1
 
 
+def test_new_activation_resets_local_usage_and_preserves_semantic_chain(
+    tmp_path: Path,
+) -> None:
+    activation = _activation(tmp_path)
+    save_agent_state(
+        tmp_path,
+        AgentState(
+            identity=activation.identity,
+            lifecycle="idle",
+            candidate_run_id=activation.candidate_run_id,
+            budgets=AgentBudgets(
+                max_turns=4,
+                used_turns=4,
+                tool_schema_repair_limit=2,
+                used_tool_schema_repairs=2,
+                semantic_revision_limit=2,
+                used_semantic_revisions=1,
+                transport_retry_limit=2,
+                used_transport_retries=2,
+            ),
+        ),
+    )
+    responses = iter(
+        [
+            _tool_response(
+                ToolCall(
+                    id="fresh-invalid",
+                    name="submit_candidate",
+                    arguments={},
+                    raw_arguments="{}",
+                )
+            ),
+            _tool_response(
+                ToolCall(
+                    id="fresh-valid",
+                    name="submit_candidate",
+                    arguments={"revision": 1},
+                    raw_arguments='{"revision":1}',
+                )
+            ),
+        ]
+    )
+
+    result = AgentRuntime(
+        _registry_with_inspector(),
+        chat_call=lambda _profile, _request: next(responses),
+    ).run(activation)
+
+    assert result.outcome == "candidate"
+    assert result.turns_used == 2
+    state = read_agent_state(tmp_path, activation.identity)
+    assert state.budgets is not None
+    assert state.budgets.used_turns == 2
+    assert state.budgets.used_tool_schema_repairs == 0
+    assert state.budgets.used_transport_retries == 0
+    assert state.budgets.used_semantic_revisions == 1
+
+
+def test_tool_repair_limit_is_independent_after_successful_tool_action(
+    tmp_path: Path,
+) -> None:
+    responses = iter(
+        [
+            _tool_response(
+                ToolCall(
+                    id="first-invalid",
+                    name="submit_candidate",
+                    arguments={},
+                    raw_arguments="{}",
+                )
+            ),
+            _tool_response(
+                ToolCall(
+                    id="inspect-ok",
+                    name="inspect_context",
+                    arguments={"revision": 1},
+                    raw_arguments='{"revision":1}',
+                )
+            ),
+            _tool_response(
+                ToolCall(
+                    id="second-invalid",
+                    name="submit_candidate",
+                    arguments={},
+                    raw_arguments="{}",
+                )
+            ),
+            _tool_response(
+                ToolCall(
+                    id="second-valid",
+                    name="submit_candidate",
+                    arguments={"revision": 1},
+                    raw_arguments='{"revision":1}',
+                )
+            ),
+        ]
+    )
+    activation = _activation(tmp_path)
+    activation = replace(
+        activation,
+        allowed_tools=("inspect_context", "submit_candidate"),
+        policy=activation.policy.model_copy(
+            update={"max_turns": 6, "tool_schema_repair_limit": 1}
+        ),
+    )
+
+    result = AgentRuntime(
+        _registry_with_inspector(),
+        chat_call=lambda _profile, _request: next(responses),
+    ).run(activation)
+
+    assert result.outcome == "candidate"
+    telemetry_path = next(
+        (tmp_path / "book" / "agent" / "a").glob("*/telemetry.json")
+    )
+    telemetry = read_json(telemetry_path)
+    assert telemetry["activation_tool_schema_repairs"] == 2
+
+
+def test_tool_repair_limit_still_bounds_one_continuous_failed_action(
+    tmp_path: Path,
+) -> None:
+    def invalid_response(call_id: str) -> ChatResult:
+        return _tool_response(
+            ToolCall(
+                id=call_id,
+                name="submit_candidate",
+                arguments={},
+                raw_arguments="{}",
+            )
+        )
+
+    responses = iter(
+        [invalid_response("invalid-1"), invalid_response("invalid-2")]
+    )
+    activation = _activation(tmp_path)
+    activation = replace(
+        activation,
+        policy=activation.policy.model_copy(
+            update={"tool_schema_repair_limit": 1}
+        ),
+    )
+
+    result = AgentRuntime(
+        _registry_with_inspector(),
+        chat_call=lambda _profile, _request: next(responses),
+    ).run(activation)
+
+    assert result.outcome == "failed"
+    assert result.failure is not None
+    assert result.failure.code == "tool_schema_repair_exhausted"
+    assert result.failure.consumed_budgets["tool_schema_repairs"] == 1
+    assert result.failure.remaining_budgets["tool_schema_repairs"] == 0
+
+
+def test_provider_retry_limit_is_independent_for_each_llm_request(
+    tmp_path: Path,
+) -> None:
+    attempts = 0
+
+    def fake_call(_profile, _request):
+        nonlocal attempts
+        attempts += 1
+        if attempts in {1, 3}:
+            raise RuntimeError("temporary provider failure")
+        if attempts == 2:
+            return _tool_response(
+                ToolCall(
+                    id="inspect-after-retry",
+                    name="inspect_context",
+                    arguments={"revision": 1},
+                    raw_arguments='{"revision":1}',
+                )
+            )
+        return _tool_response(
+            ToolCall(
+                id="submit-after-second-retry",
+                name="submit_candidate",
+                arguments={"revision": 1},
+                raw_arguments='{"revision":1}',
+            )
+        )
+
+    activation = _activation(tmp_path)
+    activation = replace(
+        activation,
+        allowed_tools=("inspect_context", "submit_candidate"),
+        policy=activation.policy.model_copy(
+            update={"transport_retry_limit": 1}
+        ),
+    )
+
+    result = AgentRuntime(
+        _registry_with_inspector(),
+        chat_call=fake_call,
+    ).run(activation)
+
+    assert attempts == 4
+    assert result.outcome == "candidate"
+    assert result.turns_used == 2
+    telemetry_path = next(
+        (tmp_path / "book" / "agent" / "a").glob("*/telemetry.json")
+    )
+    telemetry = read_json(telemetry_path)
+    assert telemetry["activation_transport_retries"] == 2
+
+
 def test_registry_enforces_role_allowlist() -> None:
     registry = ToolRegistry()
     registry.register(_terminal_spec())
@@ -432,6 +641,26 @@ def _terminal_spec() -> ToolSpec:
         read_only=False,
         terminal=True,
     )
+
+
+def _registry_with_inspector() -> ToolRegistry:
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec(
+            name="inspect_context",
+            version=1,
+            description="Inspect context before another candidate submission.",
+            input_model=RevisionInput,
+            allowed_roles=frozenset({"book"}),
+            handler=lambda _context, arguments: ToolExecutionPlan(
+                content={"revision": arguments.revision}
+            ),
+            read_only=True,
+            terminal=False,
+        )
+    )
+    registry.register(_terminal_spec())
+    return registry
 
 
 def _activation(project_path: Path) -> AgentActivation:

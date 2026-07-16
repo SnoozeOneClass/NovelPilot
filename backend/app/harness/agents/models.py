@@ -4,6 +4,11 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.schemas.projects import (
+    RETRY_BUDGET_SCOPE_VERSION,
+    RetryBudgetScopeVersion,
+)
+
 
 AgentRole = Literal["book", "story_arc", "chapter"]
 AgentLifecycle = Literal[
@@ -51,6 +56,7 @@ class AgentIdentity(BaseModel):
 class AgentBudgets(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    budget_scope_version: RetryBudgetScopeVersion = RETRY_BUDGET_SCOPE_VERSION
     max_turns: int = Field(ge=1, le=200)
     used_turns: int = Field(default=0, ge=0)
     tool_schema_repair_limit: int = Field(default=2, ge=0, le=20)

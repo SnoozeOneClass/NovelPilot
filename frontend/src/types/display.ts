@@ -247,6 +247,8 @@ const runNextActionLabels: Record<RunNextAction["id"], string> = {
   wait_for_safe_checkpoint: "等待安全检查点",
   recover_stale_run: "恢复卡住的运行",
   inspect_failure: "检查失败原因",
+  retry_provider_connection: "重新连接并继续",
+  retry_failed_run: "重试当前步骤",
   retry_current_chapter: "重试当前章节",
   approve_story_arc: "批准当前故事弧",
   start_run: "启动 harness",

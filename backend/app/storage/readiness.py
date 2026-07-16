@@ -347,13 +347,7 @@ def _next_action(
 
     if metadata.run_status == "failed":
         events = read_events(project_path)
-        last_event = events[-1] if events else None
-        return RunNextAction(
-            id="inspect_failure",
-            requires_user=True,
-            message="Inspect the latest harness failure before resuming.",
-            evidence=_event_evidence(last_event),
-        )
+        return _failed_run_next_action(events)
 
     retry_action = _retry_next_action(project_path, metadata)
     if retry_action is not None:
@@ -408,6 +402,74 @@ def _retry_next_action(project_path: Path, metadata: ProjectMetadata) -> RunNext
         requires_user=True,
         message=f"Prepare a retry for the current chapter {metadata.active_chapter_id}.",
         evidence=[retry_scope, *artifact_names],
+    )
+
+
+def _failed_run_next_action(events: list[HarnessEvent]) -> RunNextAction:
+    run_failure = next(
+        (event for event in reversed(events) if event.kind == "run_failed"),
+        events[-1] if events else None,
+    )
+    run_id = run_failure.run_id if run_failure is not None else None
+    agent_failure = next(
+        (
+            event
+            for event in reversed(events)
+            if event.kind in {"agent_activation_failed", "agent_evaluation_failed"}
+            and (run_id is None or event.run_id == run_id)
+        ),
+        None,
+    )
+    category = (
+        agent_failure.payload.get("category") if agent_failure is not None else None
+    )
+    if category is None and run_failure is not None:
+        category = run_failure.payload.get("category")
+    evidence = list(
+        dict.fromkeys(
+            [
+                *_event_evidence(agent_failure),
+                *_event_evidence(run_failure),
+            ]
+        )
+    )
+
+    if category == "transport_provider":
+        return RunNextAction(
+            id="retry_provider_connection",
+            command="POST /api/runs/resume",
+            requires_user=True,
+            message=(
+                "The provider connection failed after bounded transport retries. "
+                "Reconnect and retry from committed state; prior candidate and "
+                "failure evidence remain available."
+            ),
+            evidence=evidence,
+        )
+
+    if agent_failure is not None and category not in {
+        "malformed_model_output",
+        "local_semantic",
+    }:
+        return RunNextAction(
+            id="inspect_failure",
+            requires_user=True,
+            message=(
+                "This failure requires evidence inspection or a new bounded candidate "
+                "revision; repeating the same step cannot make progress."
+            ),
+            evidence=evidence,
+        )
+
+    return RunNextAction(
+        id="retry_failed_run",
+        command="POST /api/runs/resume",
+        requires_user=True,
+        message=(
+            "Retry the failed Harness step from committed state while preserving "
+            "the prior failure evidence."
+        ),
+        evidence=evidence,
     )
 
 

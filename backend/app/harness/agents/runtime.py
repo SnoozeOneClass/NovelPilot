@@ -33,7 +33,9 @@ from app.llm.gateway import (
     call_llm,
 )
 from app.llm.redaction import redact_profile_secrets
+from app.llm.retry import call_llm_with_transport_retries, is_retryable_provider_error
 from app.schemas.experiments import ExperimentHookStrategy
+from app.schemas.projects import RETRY_BUDGET_SCOPE_VERSION
 
 
 AgentEventCallback = Callable[[dict[str, Any]], None]
@@ -62,13 +64,12 @@ class AgentActivation:
 class _ActivationTelemetry:
     started_at: datetime
     started_monotonic: float
-    starting_turns: int
-    starting_schema_repairs: int
-    starting_transport_retries: int
     llm_calls: int = 0
     tool_calls: int = 0
     tool_errors: int = 0
     validation_failures: int = 0
+    tool_schema_repairs: int = 0
+    transport_retries: int = 0
     context_characters: int = 0
     usage: dict[str, Any] = field(default_factory=dict)
     model_snapshot: str | None = None
@@ -107,12 +108,11 @@ class AgentRuntime:
         state.phase = activation.phase
         state.expected_revision = activation.expected_revision
         budgets = _required_budgets(state)
+        _reset_activation_usage(budgets)
+        schema_repair_attempts: dict[str, int] = {}
         telemetry = _ActivationTelemetry(
             started_at=datetime.now(UTC),
             started_monotonic=perf_counter(),
-            starting_turns=budgets.used_turns,
-            starting_schema_repairs=budgets.used_tool_schema_repairs,
-            starting_transport_retries=budgets.used_transport_retries,
         )
         save_agent_state(activation.project_path, state)
         self._write_request_snapshot(activation, activation_id, state, specs)
@@ -136,6 +136,7 @@ class AgentRuntime:
                 activation_id,
                 state,
                 messages,
+                telemetry,
             )
             if isinstance(result, FailureEnvelope):
                 return self._fail(
@@ -171,6 +172,9 @@ class AgentRuntime:
                     activation,
                     activation_id,
                     state,
+                    schema_repair_attempts,
+                    telemetry,
+                    action_key="assistant:terminal_tool_required",
                     code="terminal_tool_required",
                     message=(
                         "A Tool Agent turn must call an exposed Tool; assistant text alone "
@@ -251,6 +255,12 @@ class AgentRuntime:
                         activation,
                         activation_id,
                         state,
+                        schema_repair_attempts,
+                        telemetry,
+                        action_key=(
+                            f"{call.name}:"
+                            f"{tool_result.error_code or 'invalid_tool_call'}"
+                        ),
                         code=tool_result.error_code or "invalid_tool_call",
                         message=tool_result.message or "Tool call requires correction.",
                     )
@@ -263,6 +273,10 @@ class AgentRuntime:
                             telemetry=telemetry,
                         )
                     continue
+
+                schema_repair_attempts.clear()
+                budgets.used_tool_schema_repairs = 0
+                save_agent_state(activation.project_path, state)
 
                 if tool_result.terminal:
                     if (
@@ -334,7 +348,7 @@ class AgentRuntime:
             state,
             category="exhausted",
             code="agent_turn_limit_exhausted",
-            message="Agent reached its cumulative turn limit without a terminal checkpoint.",
+            message="Agent reached its activation turn limit without a terminal checkpoint.",
             recoverable=False,
         )
         return self._fail(
@@ -352,7 +366,7 @@ class AgentRuntime:
         evaluation_id: str,
         candidate_artifact_id: str,
     ) -> bool:
-        """Consume one frozen semantic-revision slot before another activation.
+        """Consume one candidate-local semantic-revision slot before another activation.
 
         Evaluators can propose a local repair, but only the Harness-owned runtime may
         spend the revision budget and reactivate the same logical Agent. Returning
@@ -373,7 +387,7 @@ class AgentRuntime:
                 category="local_semantic",
                 code="semantic_revision_exhausted",
                 message=(
-                    "Candidate still requires local semantic repair after the frozen "
+                    "Candidate still requires local semantic repair after its "
                     "automatic revision budget was exhausted."
                 ),
                 recoverable=False,
@@ -394,6 +408,7 @@ class AgentRuntime:
             "semantic-repair.json",
             {
                 "schema_version": 1,
+                "retry_budget_scope_version": RETRY_BUDGET_SCOPE_VERSION,
                 "evaluation_id": evaluation_id,
                 "candidate_artifact_id": candidate_artifact_id,
                 "revision": budgets.used_semantic_revisions,
@@ -436,68 +451,90 @@ class AgentRuntime:
         activation_id: str,
         state: AgentState,
         messages: list[ChatMessage],
+        telemetry: _ActivationTelemetry,
     ) -> ChatResult | FailureEnvelope:
         budgets = _required_budgets(state)
-        while True:
-            try:
-                return self._chat_call(
-                    activation.policy.profile,
-                    ChatRequest(
-                        profile_id=activation.policy.profile.id,
-                        messages=messages,
-                        stream=True,
-                        tools=self._registry.definitions(
-                            role=activation.identity.role,
-                            phase=activation.phase,
-                            names=activation.allowed_tools,
-                        ),
-                        tool_choice=ToolChoice(mode="required"),
-                        metadata={
-                            **(
-                                {"on_text_delta": activation.on_text_delta}
-                                if activation.on_text_delta is not None
-                                else {}
-                            ),
-                            **(
-                                {"on_tool_event": activation.on_tool_event}
-                                if activation.on_tool_event is not None
-                                else {}
-                            ),
-                        },
-                    ),
-                )
-            except (RuntimeError, ValueError) as exc:
-                message = redact_profile_secrets(str(exc), activation.policy.profile)
-                if budgets.used_transport_retries >= budgets.transport_retry_limit:
-                    return self._failure(
-                        activation,
-                        activation_id,
-                        state,
-                        category="transport_provider",
-                        code="provider_retry_exhausted",
-                        message=message,
-                        recoverable=False,
-                        allowed_actions=["retry_candidate_run", "change_profile"],
-                    )
-                budgets.used_transport_retries += 1
-                save_agent_state(activation.project_path, state)
-                self._emit(
-                    activation,
-                    {
-                        "kind": "agent_transport_retry",
-                        "activation_id": activation_id,
-                        "retry": budgets.used_transport_retries,
-                        "limit": budgets.transport_retry_limit,
-                        "message": message,
-                    },
-                )
+        if budgets.used_transport_retries:
+            budgets.used_transport_retries = 0
+            save_agent_state(activation.project_path, state)
+
+        request = ChatRequest(
+            profile_id=activation.policy.profile.id,
+            messages=messages,
+            stream=True,
+            tools=self._registry.definitions(
+                role=activation.identity.role,
+                phase=activation.phase,
+                names=activation.allowed_tools,
+            ),
+            tool_choice=ToolChoice(mode="required"),
+            metadata={
+                **(
+                    {"on_text_delta": activation.on_text_delta}
+                    if activation.on_text_delta is not None
+                    else {}
+                ),
+                **(
+                    {"on_tool_event": activation.on_tool_event}
+                    if activation.on_tool_event is not None
+                    else {}
+                ),
+            },
+        )
+
+        def on_retry(retry: int, limit: int, exc: Exception) -> None:
+            message = redact_profile_secrets(str(exc), activation.policy.profile)
+            budgets.used_transport_retries = retry
+            telemetry.transport_retries += 1
+            save_agent_state(activation.project_path, state)
+            self._emit(
+                activation,
+                {
+                    "kind": "agent_transport_retry",
+                    "activation_id": activation_id,
+                    "retry": retry,
+                    "limit": limit,
+                    "message": message,
+                },
+            )
+
+        try:
+            return call_llm_with_transport_retries(
+                activation.policy.profile,
+                request,
+                retry_limit=budgets.transport_retry_limit,
+                llm_call=self._chat_call,
+                on_retry=on_retry,
+            )
+        except Exception as exc:
+            message = redact_profile_secrets(str(exc), activation.policy.profile)
+            provider_failure = is_retryable_provider_error(exc)
+            return self._failure(
+                activation,
+                activation_id,
+                state,
+                category=(
+                    "transport_provider" if provider_failure else "malformed_model_output"
+                ),
+                code=(
+                    "provider_retry_exhausted"
+                    if provider_failure
+                    else "provider_response_invalid"
+                ),
+                message=message,
+                recoverable=False,
+                allowed_actions=["retry_candidate_run", "change_profile"],
+            )
 
     def _consume_schema_repair(
         self,
         activation: AgentActivation,
         activation_id: str,
         state: AgentState,
+        attempts_by_action: dict[str, int],
+        telemetry: _ActivationTelemetry,
         *,
+        action_key: str,
         code: str,
         message: str,
     ) -> ChatMessage | FailureEnvelope:
@@ -505,6 +542,9 @@ class AgentRuntime:
             activation,
             activation_id,
             state,
+            attempts_by_action,
+            telemetry,
+            action_key=action_key,
             code=code,
             message=message,
         )
@@ -523,12 +563,17 @@ class AgentRuntime:
         activation: AgentActivation,
         activation_id: str,
         state: AgentState,
+        attempts_by_action: dict[str, int],
+        telemetry: _ActivationTelemetry,
         *,
+        action_key: str,
         code: str,
         message: str,
     ) -> FailureEnvelope | None:
         budgets = _required_budgets(state)
-        if budgets.used_tool_schema_repairs >= budgets.tool_schema_repair_limit:
+        used = attempts_by_action.get(action_key, 0)
+        budgets.used_tool_schema_repairs = used
+        if used >= budgets.tool_schema_repair_limit:
             return self._failure(
                 activation,
                 activation_id,
@@ -539,7 +584,10 @@ class AgentRuntime:
                 recoverable=False,
                 evidence=[code],
             )
-        budgets.used_tool_schema_repairs += 1
+        used += 1
+        attempts_by_action[action_key] = used
+        budgets.used_tool_schema_repairs = used
+        telemetry.tool_schema_repairs += 1
         save_agent_state(activation.project_path, state)
         return None
 
@@ -556,7 +604,8 @@ class AgentRuntime:
             activation_id,
             "request.json",
             {
-                "schema_version": 1,
+                "schema_version": 2,
+                "retry_budget_scope_version": RETRY_BUDGET_SCOPE_VERSION,
                 "identity": activation.identity.model_dump(mode="json"),
                 "candidate_run_id": activation.candidate_run_id,
                 "activation_id": activation_id,
@@ -749,7 +798,8 @@ class AgentRuntime:
             activation_id,
             "telemetry.json",
             {
-                "schema_version": 1,
+                "schema_version": 2,
+                "retry_budget_scope_version": RETRY_BUDGET_SCOPE_VERSION,
                 "candidate_run_id": activation.candidate_run_id,
                 "activation_id": activation_id,
                 "role": activation.identity.role,
@@ -766,15 +816,9 @@ class AgentRuntime:
                 "tool_errors": telemetry.tool_errors,
                 "validation_failures": telemetry.validation_failures,
                 "context_characters": telemetry.context_characters,
-                "activation_turns": budgets.used_turns - telemetry.starting_turns,
-                "activation_tool_schema_repairs": (
-                    budgets.used_tool_schema_repairs
-                    - telemetry.starting_schema_repairs
-                ),
-                "activation_transport_retries": (
-                    budgets.used_transport_retries
-                    - telemetry.starting_transport_retries
-                ),
+                "activation_turns": budgets.used_turns,
+                "activation_tool_schema_repairs": telemetry.tool_schema_repairs,
+                "activation_transport_retries": telemetry.transport_retries,
                 "candidate_budgets": budgets.model_dump(mode="json"),
                 "usage": telemetry.usage,
                 "model_snapshot": telemetry.model_snapshot,
@@ -791,8 +835,15 @@ class AgentRuntime:
 
 def _required_budgets(state: AgentState) -> AgentBudgets:
     if state.budgets is None:
-        raise ValueError("Agent state is missing its frozen budgets.")
+        raise ValueError("Agent state is missing its retry policy and local usage.")
     return state.budgets
+
+
+def _reset_activation_usage(budgets: AgentBudgets) -> None:
+    """Reset action-local usage while preserving the candidate semantic chain."""
+    budgets.used_turns = 0
+    budgets.used_tool_schema_repairs = 0
+    budgets.used_transport_retries = 0
 
 
 def _tool_result_content(result: ToolExecutionResult) -> dict[str, Any]:

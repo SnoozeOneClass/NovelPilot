@@ -10,7 +10,7 @@ import { CreationStageHeader } from "./CreationStageHeader";
 import { LiveChapterDocument } from "./LiveChapterDocument";
 import { StoryArcReviewTask } from "./StoryArcReviewTask";
 import { latestChapterDraft, reduceChapterDraftStreams } from "./chapter-draft-stream";
-import { deriveCreationViewModel } from "./creation-view-model";
+import { deriveCreationViewModel, type CreationViewModel } from "./creation-view-model";
 import styles from "./CreationView.module.css";
 
 interface CreationViewProps {
@@ -29,6 +29,7 @@ interface CreationViewProps {
   onStart: () => Promise<void>;
   onApproveArc: (targetChapterCount: number) => Promise<boolean>;
   onApproveBookRevision: () => Promise<void>;
+  onRetryFailedRun: () => Promise<void>;
   onRetryChapter: () => Promise<void>;
   onRecoverStale: () => Promise<void>;
   onSelectArtifact: (path: string) => void;
@@ -37,6 +38,40 @@ interface CreationViewProps {
 function feedbackText(event: HarnessEvent): string | null {
   const value = event.payload.feedback;
   return typeof value === "string" && value.trim() ? value : null;
+}
+
+function failureSummary(event: HarnessEvent): string {
+  const category = event.payload.category;
+  const message = event.message;
+  const providerFailure = category === "transport_provider"
+    || /provider (?:request failed|returned \d{3}|authentication is unavailable)/i.test(message)
+    || /\b(?:SSL|TLS|EOF|timeout|timed out|auth_unavailable)\b/i.test(message);
+  if (providerFailure) {
+    return "模型服务连接意外中断。候选内容和创作现场已保留，可以在服务恢复后重新连接并继续。原始网络错误可在“查看详细证据”中查看。";
+  }
+  return message;
+}
+
+function latestActionableFailure(events: HarnessEvent[], model: CreationViewModel): HarnessEvent | null {
+  const needsFailureAction = model.stage === "chapter_recovery"
+    || model.stage === "failed" && model.primaryAction !== "recover_stale";
+  if (!needsFailureAction) return null;
+
+  let currentRunId: string | null = null;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if ((event.kind === "run_started" || event.kind === "run_resumed") && event.run_id) {
+      currentRunId = event.run_id;
+      break;
+    }
+  }
+  if (!currentRunId) return null;
+
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.status === "failed" && event.run_id === currentRunId) return event;
+  }
+  return null;
 }
 
 function scrollToBottom(element: HTMLDivElement | null, behavior: ScrollBehavior = "smooth") {
@@ -48,7 +83,7 @@ function scrollToBottom(element: HTMLDivElement | null, behavior: ScrollBehavior
   }
 }
 
-export function CreationView({ project, events, currentArc, summaries, readiness, bookRevision, busy, feedback, sendingFeedback, onFeedbackChange, onSendFeedback, onRequestArcRevision, onStart, onApproveArc, onApproveBookRevision, onRetryChapter, onRecoverStale, onSelectArtifact }: CreationViewProps) {
+export function CreationView({ project, events, currentArc, summaries, readiness, bookRevision, busy, feedback, sendingFeedback, onFeedbackChange, onSendFeedback, onRequestArcRevision, onStart, onApproveArc, onApproveBookRevision, onRetryFailedRun, onRetryChapter, onRecoverStale, onSelectArtifact }: CreationViewProps) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [following, setFollowing] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -74,7 +109,8 @@ export function CreationView({ project, events, currentArc, summaries, readiness
     ? "committed" as const
     : latestDraft?.status ?? (fallbackSummary ? "candidate" as const : "streaming" as const);
   const completedChapterIds = useMemo(() => [...new Set(summaries.map((summary) => summary.path.match(/^chapters\/([^/]+)\/final\.md$/)?.[1]).filter((value): value is string => Boolean(value)))], [summaries]);
-  const authorEvents = events.filter((event) => ["user_feedback", "feedback_processed"].includes(event.kind) || event.status === "failed").slice(-20);
+  const actionableFailure = latestActionableFailure(events, model);
+  const authorEvents = events.filter((event) => ["user_feedback", "feedback_processed"].includes(event.kind) || event.event_id === actionableFailure?.event_id).slice(-20);
 
   useEffect(() => {
     if (!following) return;
@@ -113,7 +149,7 @@ export function CreationView({ project, events, currentArc, summaries, readiness
             const text = feedbackText(event);
             if (event.kind === "user_feedback" && text) return <article className={styles.message} data-role="user" key={event.event_id}><span>你</span><p>{text}</p></article>;
             if (event.kind === "feedback_processed" && text) return <article className={styles.message} data-role="agent" key={event.event_id}><span>NovelPilot</span><p>已接收并路由这条反馈：{text}</p></article>;
-            if (event.status === "failed") return <article className={styles.failureNotice} key={event.event_id}><strong>当前步骤未能继续</strong><p>{event.message}</p><Button variant="ghost" size="sm" onClick={() => setDetailsOpen(true)}>查看详细证据</Button></article>;
+            if (event.status === "failed") return <article className={styles.failureNotice} key={event.event_id}><strong>当前步骤未能继续</strong><p>{failureSummary(event)}</p><div className={styles.failureActions}><Button variant="ghost" size="sm" onClick={() => setDetailsOpen(true)}>查看详细证据</Button>{model.primaryAction === "retry_failed_run" && <Button variant="primary" size="sm" disabled={busy} onClick={() => void onRetryFailedRun()}><RotateCw size={15} />{busy ? "正在重试……" : readiness?.next_action.id === "retry_provider_connection" ? "重新连接并继续" : "重试当前步骤"}</Button>}</div></article>;
             return null;
           })}
 
