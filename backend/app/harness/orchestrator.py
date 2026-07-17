@@ -2846,6 +2846,20 @@ class HarnessOrchestrator:
             "chapter",
             "repair_state_patch_evidence",
         )
+        prior_state = read_agent_state(
+            self.context.project_path,
+            AgentIdentity(
+                project_id=metadata.project_id,
+                role="chapter",
+                scope_id=chapter_id,
+            ),
+        )
+        resume_candidate_run_id = (
+            prior_state.candidate_run_id
+            if prior_state.lifecycle == "failed"
+            and prior_state.phase == "state_patch_repair"
+            else None
+        )
         try:
             repair = run_chapter_patch_evidence_repair_agent(
                 self.context.project_path,
@@ -2854,6 +2868,7 @@ class HarnessOrchestrator:
                 chapter_id=chapter_id,
                 expected_revision=attempts,
                 instruction=instruction,
+                candidate_run_id=resume_candidate_run_id,
                 on_event=self._agent_event_callback(
                     metadata,
                     "chapter",

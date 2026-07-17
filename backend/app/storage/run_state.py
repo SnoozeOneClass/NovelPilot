@@ -4,11 +4,13 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 from typing import Literal
+from uuid import uuid4
 
 from app.schemas.runs import (
     HarnessCheckpoint,
     ProviderWaitState,
     RunControlState,
+    RunDispatchState,
 )
 from app.storage.events import read_events
 from app.storage.file_lock import exclusive_file_lock
@@ -19,6 +21,7 @@ from app.storage.projects import read_project_metadata
 RUN_STATE_RELATIVE = Path("book") / "harness" / "run-state.json"
 CHECKPOINT_ROOT = Path("book") / "harness" / "checkpoints"
 RUN_STATE_LOCK_RELATIVE = Path("book") / "harness" / ".state.lock"
+RUN_DISPATCH_STALE_AFTER_SECONDS = 30
 
 
 def read_run_control_state(project_path: Path) -> RunControlState:
@@ -65,8 +68,98 @@ def set_run_intent(
             state.run_id = run_id
         if clear_provider_wait:
             state.provider_wait = None
+        if desired_state == "stopped":
+            state.dispatch = None
         _write_run_control_state_unlocked(project_path, state)
         return state
+
+
+def accept_run_dispatch(
+    project_path: Path,
+    *,
+    run_id: str,
+    action_key: str,
+    dispatch_id: str | None = None,
+    now: datetime | None = None,
+) -> RunDispatchState:
+    """Persist Host ownership intent before an API acknowledges start/resume."""
+    accepted_at = now or datetime.now(UTC)
+    dispatch = RunDispatchState(
+        dispatch_id=dispatch_id or str(uuid4()),
+        run_id=run_id,
+        action_key=action_key,
+        status="accepted",
+        accepted_at=accepted_at,
+    )
+    with exclusive_file_lock(project_path / RUN_STATE_LOCK_RELATIVE):
+        state = _read_run_control_state_unlocked(project_path)
+        state.schema_version = max(state.schema_version, 2)
+        state.desired_state = "running"
+        state.run_id = run_id
+        state.provider_wait = None
+        state.dispatch = dispatch
+        _write_run_control_state_unlocked(project_path, state)
+    return dispatch
+
+
+def claim_run_dispatch(
+    project_path: Path,
+    *,
+    run_id: str,
+    action_key: str,
+    now: datetime | None = None,
+) -> tuple[RunDispatchState | None, bool]:
+    """Mark the accepted command as claimed by RunHost under its runner lease."""
+    claimed_at = now or datetime.now(UTC)
+    with exclusive_file_lock(project_path / RUN_STATE_LOCK_RELATIVE):
+        state = _read_run_control_state_unlocked(project_path)
+        if state.desired_state != "running" or state.run_id not in {None, run_id}:
+            return state.dispatch, False
+        if state.run_id is None:
+            state.run_id = run_id
+        previous = state.dispatch
+        if (
+            previous is not None
+            and previous.run_id == run_id
+            and previous.status == "claimed"
+            and previous.action_key == action_key
+        ):
+            return previous, False
+        dispatch = RunDispatchState(
+            dispatch_id=(
+                previous.dispatch_id
+                if previous is not None and previous.run_id == run_id
+                else str(uuid4())
+            ),
+            run_id=run_id,
+            action_key=action_key,
+            status="claimed",
+            accepted_at=(
+                previous.accepted_at
+                if previous is not None and previous.run_id == run_id
+                else claimed_at
+            ),
+            claimed_at=claimed_at,
+        )
+        state.schema_version = max(state.schema_version, 2)
+        state.dispatch = dispatch
+        _write_run_control_state_unlocked(project_path, state)
+        return dispatch, True
+
+
+def run_dispatch_is_pending(
+    state: RunControlState,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    dispatch = state.dispatch
+    if dispatch is None or dispatch.status != "accepted":
+        return False
+    accepted_at = dispatch.accepted_at
+    if accepted_at.tzinfo is None:
+        accepted_at = accepted_at.replace(tzinfo=UTC)
+    age = ((now or datetime.now(UTC)) - accepted_at).total_seconds()
+    return age < RUN_DISPATCH_STALE_AFTER_SECONDS
 
 
 def clear_provider_wait(

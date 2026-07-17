@@ -83,7 +83,7 @@ describe("deriveCreationViewModel", () => {
     expect(model.primaryAction).toBe("approve_story_arc");
   });
 
-  it("does not expose resume as a normal primary action", () => {
+  it("does not pretend an idle resume hint is active generation", () => {
     const model = deriveCreationViewModel({
       project: {
         ...project,
@@ -94,8 +94,48 @@ describe("deriveCreationViewModel", () => {
       bookRevision: null,
       events: []
     });
-    expect(model.stage).toBe("continuing");
+    expect(model.stage).toBe("completed");
     expect(model.primaryAction).toBeNull();
+    expect(model.isRunning).toBe(false);
+  });
+
+  it("renders paused state with one explicit resume action", () => {
+    const model = deriveCreationViewModel({
+      project: {
+        ...project,
+        metadata: { ...project.metadata, run_status: "paused", active_chapter_id: "chapter-001" }
+      },
+      readiness: readiness("resume_run", {
+        requires_user: true,
+        can_auto_continue: false,
+        message: "The harness is paused and no generation is active."
+      }),
+      currentArc: null,
+      bookRevision: null,
+      events: [
+        {
+          seq: 1,
+          event_id: "event-1",
+          timestamp: "2026-07-17T00:00:00Z",
+          project_id: "project-1",
+          run_id: "run-1",
+          kind: "run_started",
+          loop_layer: "system",
+          atomic_action: null,
+          status: "started",
+          artifact_path: null,
+          routing_decision: null,
+          message: "Run started.",
+          payload: {}
+        }
+      ]
+    });
+
+    expect(model.stage).toBe("paused");
+    expect(model.primaryAction).toBe("resume");
+    expect(model.isRunning).toBe(false);
+    expect(model.title).toBe("当前没有正在进行的生成");
+    expect(model.description).not.toContain("不需要手动点击继续");
   });
 
   it("keeps exhausted chapter repair as an explicit recovery task", () => {

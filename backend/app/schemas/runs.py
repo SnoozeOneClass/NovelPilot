@@ -3,6 +3,11 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.projects import RunStatus
+
+
+RunDispatchStatus = Literal["accepted", "claimed", "completed_inline"]
+
 
 class RunAdvanceRequest(BaseModel):
     stop_after_chapter: bool = False
@@ -19,14 +24,45 @@ class ProviderWaitState(BaseModel):
     next_wake_at: datetime
 
 
+class RunDispatchState(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dispatch_id: str = Field(min_length=1, max_length=200)
+    run_id: str = Field(min_length=1, max_length=200)
+    action_key: str = Field(min_length=1, max_length=500)
+    status: Literal["accepted", "claimed"] = "accepted"
+    accepted_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    claimed_at: datetime | None = None
+
+
+class RunCommandResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str = Field(min_length=1, max_length=200)
+    status: RunStatus
+    dispatch_status: RunDispatchStatus
+    action_key: str | None = Field(default=None, max_length=500)
+    dispatch_id: str | None = Field(default=None, max_length=200)
+
+
+class StaleRunRecoveryResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: RunStatus
+    previous_status: RunStatus
+    desired_state: Literal["stopped"] = "stopped"
+    next_action: Literal["resume_run", "none"] = "resume_run"
+
+
 class RunControlState(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = 1
+    schema_version: int = 2
     desired_state: Literal["stopped", "running"] = "stopped"
     run_id: str | None = None
     checkpoint_sequence: int = Field(default=0, ge=0)
     provider_wait: ProviderWaitState | None = None
+    dispatch: RunDispatchState | None = None
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 

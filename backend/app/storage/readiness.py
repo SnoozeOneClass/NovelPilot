@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from app.llm.retry import is_retryable_provider_error_message
 from app.schemas.completion import GateStatus
@@ -13,7 +14,7 @@ from app.storage.json_files import read_json
 from app.storage.profiles import list_public_profiles
 from app.storage.projects import read_project_metadata
 from app.storage.retries import retry_scope_for_chapter
-from app.storage.run_state import read_run_control_state
+from app.storage.run_state import read_run_control_state, run_dispatch_is_pending
 from app.storage.setup import read_setup_state
 
 APPROVED_BOOK_ARTIFACTS = [
@@ -24,6 +25,40 @@ APPROVED_BOOK_ARTIFACTS = [
     "book/outline.md",
     "book/state.json",
 ]
+
+NormalizedFailureCategory = Literal[
+    "transport_provider",
+    "provider_auth",
+    "profile_configuration",
+    "unsupported_capability",
+    "malformed_model_output",
+    "harness_conflict",
+    "local_semantic",
+    "cross_loop_semantic",
+    "needs_user",
+    "exhausted",
+    "cancelled",
+    "harness_failure",
+]
+FailureRecoveryAction = Literal[
+    "retry_provider_connection",
+    "retry_failed_run",
+    "inspect_failure",
+]
+FAILURE_ACTION_BY_CATEGORY: dict[str, FailureRecoveryAction] = {
+    "transport_provider": "retry_provider_connection",
+    "provider_auth": "retry_failed_run",
+    "profile_configuration": "retry_failed_run",
+    "unsupported_capability": "inspect_failure",
+    "malformed_model_output": "retry_failed_run",
+    "harness_conflict": "inspect_failure",
+    "local_semantic": "retry_failed_run",
+    "cross_loop_semantic": "inspect_failure",
+    "needs_user": "inspect_failure",
+    "exhausted": "inspect_failure",
+    "cancelled": "inspect_failure",
+    "harness_failure": "inspect_failure",
+}
 
 
 def build_project_readiness(
@@ -229,6 +264,26 @@ def _next_action(
                 ),
             )
         if active_runner is False and metadata.run_status in {"running", "pause_requested"}:
+            state = read_run_control_state(project_path)
+            if run_dispatch_is_pending(state):
+                dispatch = state.dispatch
+                return RunNextAction(
+                    id="wait_for_safe_checkpoint",
+                    requires_user=False,
+                    message=(
+                        "RunHost has durably accepted this command and is waiting to "
+                        "claim the next Harness action."
+                    ),
+                    evidence=(
+                        [
+                            "dispatch:accepted",
+                            f"dispatch_id:{dispatch.dispatch_id}",
+                            f"action_key:{dispatch.action_key}",
+                        ]
+                        if dispatch is not None
+                        else ["dispatch:accepted"]
+                    ),
+                )
             return RunNextAction(
                 id="recover_stale_run",
                 command="POST /api/runs/recover-stale",
@@ -375,11 +430,39 @@ def _next_action(
     if retry_action is not None:
         return retry_action
 
+    if (
+        active_runner is True
+        and metadata.active_arc_id is not None
+        and arc_storage.read_current_arc_state(project_path) is None
+    ):
+        return RunNextAction(
+            id="wait_for_safe_checkpoint",
+            requires_user=False,
+            message=(
+                "RunHost is still preparing the active Story Arc candidate; wait for "
+                "its plan and review state to commit together."
+            ),
+            evidence=[metadata.active_arc_id, "arc_state_pending"],
+        )
+
     arc_action = _story_arc_review_next_action(project_path, metadata)
     if arc_action is not None:
         return arc_action
 
-    if metadata.run_status in {"paused", "waiting_for_user"}:
+    if metadata.run_status == "paused":
+        return RunNextAction(
+            id="resume_run",
+            command="POST /api/runs/resume",
+            requires_user=True,
+            can_auto_continue=False,
+            message=(
+                "The harness is paused and no generation is active. Resume explicitly "
+                "from the latest coherent checkpoint."
+            ),
+            evidence=[metadata.run_status, "desired_state:stopped"],
+        )
+
+    if metadata.run_status == "waiting_for_user":
         return RunNextAction(
             id="resume_run",
             command="POST /api/runs/resume",
@@ -460,7 +543,15 @@ def _failed_run_next_action(events: list[HarnessEvent]) -> RunNextAction:
         )
     )
 
-    if category == "transport_provider":
+    recovery_action = (
+        FAILURE_ACTION_BY_CATEGORY.get(category)
+        if isinstance(category, str)
+        else None
+    )
+    if recovery_action is None and isinstance(category, str):
+        recovery_action = "inspect_failure"
+
+    if recovery_action == "retry_provider_connection":
         return RunNextAction(
             id="retry_provider_connection",
             command="POST /api/runs/resume",
@@ -473,7 +564,10 @@ def _failed_run_next_action(events: list[HarnessEvent]) -> RunNextAction:
             evidence=evidence,
         )
 
-    if category in {"provider_auth", "profile_configuration"}:
+    if recovery_action == "retry_failed_run" and category in {
+        "provider_auth",
+        "profile_configuration",
+    }:
         return RunNextAction(
             id="retry_failed_run",
             command="POST /api/runs/resume",
@@ -485,10 +579,7 @@ def _failed_run_next_action(events: list[HarnessEvent]) -> RunNextAction:
             evidence=evidence,
         )
 
-    if agent_failure is not None and category not in {
-        "malformed_model_output",
-        "local_semantic",
-    }:
+    if recovery_action == "inspect_failure":
         return RunNextAction(
             id="inspect_failure",
             requires_user=True,
@@ -520,9 +611,7 @@ def _story_arc_review_next_action(
 
     arc = arc_storage.read_current_arc_state(project_path)
     if arc is None:
-        if metadata.operation_mode != "participatory":
-            return None
-        evidence = [metadata.active_arc_id, "missing_arc_state"]
+        return None
     elif arc.human_review == "approved":
         return None
     elif (

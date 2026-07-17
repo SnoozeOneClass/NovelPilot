@@ -18,6 +18,7 @@ import type {
   ProjectCompletionAudit,
   ProjectReadiness,
   ProjectSummary,
+  RunCommandResponse,
   SetupStateDocument,
   StaleRunRecoveryResponse
 } from "../types/domain";
@@ -191,9 +192,9 @@ export const api = {
     request<ExperimentFixtureCreateResponse>("/api/experiments/fixtures", {
       method: "POST"
     }),
-  startRun: () => request<{ run_id: string; status: string }>("/api/runs/start", { method: "POST" }),
+  startRun: () => request<RunCommandResponse>("/api/runs/start", { method: "POST" }),
   pauseRun: () => request<{ status: string }>("/api/runs/pause", { method: "POST" }),
-  resumeRun: () => request<{ status: string }>("/api/runs/resume", { method: "POST" }),
+  resumeRun: () => request<RunCommandResponse>("/api/runs/resume", { method: "POST" }),
   recoverStaleRun: () =>
     request<StaleRunRecoveryResponse>("/api/runs/recover-stale", { method: "POST" }),
   retryCurrentChapter: () =>

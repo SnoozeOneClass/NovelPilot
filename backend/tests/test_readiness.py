@@ -4,10 +4,14 @@ import pytest
 from fastapi import HTTPException
 
 from app.api import readiness as readiness_api
+from app.api import runs as runs_api
 from app.core import config as core_config
 from app.core import paths as core_paths
 from app.harness.loops.book import BookDirectionSynthesis
-from app.harness.run_control import begin_active_runner, end_active_runner
+from app.harness import run_host
+from app.harness.run_control import begin_active_runner, end_active_runner, has_active_runner
+from app.harness.agents.models import AgentBudgets, AgentIdentity, AgentState
+from app.harness.agents.persistence import save_agent_state
 from app.schemas.events import HarnessEvent
 from app.schemas.profiles import LlmProfileUpsert
 from app.schemas.projects import CreateProjectRequest
@@ -23,8 +27,21 @@ from app.schemas.setup import (
 from app.storage import profiles as profile_storage
 from app.storage import projects as project_storage
 from app.storage import setup as setup_storage
-from app.storage.events import append_event
+from app.storage.events import append_event, read_events
 from app.storage.json_files import write_json
+from app.storage.projects import read_project_metadata, write_project_metadata
+from app.storage.readiness import build_project_readiness
+from app.storage.run_state import (
+    accept_run_dispatch,
+    begin_harness_checkpoint,
+    read_run_control_state,
+    set_run_intent,
+)
+from backend.tests.helpers.harness_invariants import (
+    assert_committed_state_unchanged,
+    assert_control_plane_state,
+    capture_harness_invariants,
+)
 
 
 def test_readiness_requires_active_project(tmp_path: Path, monkeypatch) -> None:
@@ -219,6 +236,43 @@ def test_readiness_recommends_arc_approval_in_participatory_mode(
 
     assert after_mode_change.next_action.id == "approve_story_arc"
     assert after_mode_change.next_action.requires_user is True
+
+
+def test_readiness_never_projects_arc_approval_before_arc_state_commits(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _isolate_runtime_paths(tmp_path, monkeypatch)
+    project = project_storage.create_project(
+        CreateProjectRequest(operation_mode="participatory")
+    )
+    project_path = Path(project.path)
+    _approve_setup(project_path)
+    _create_profile()
+    metadata = project_storage.read_project_metadata(project_path)
+    metadata.active_arc_id = "arc-002"
+    metadata.run_status = "idle"
+    project_storage.write_project_metadata(project_path, metadata)
+    append_event(
+        project_path,
+        HarnessEvent(
+            project_id=metadata.project_id,
+            run_id="run-1",
+            kind="run_started",
+            loop_layer="system",
+            status="started",
+            message="Harness run started.",
+        ),
+    )
+
+    while_active = build_project_readiness(project_path, active_runner=True)
+    after_interruption = build_project_readiness(project_path, active_runner=False)
+
+    assert while_active.next_action.id == "wait_for_safe_checkpoint"
+    assert while_active.next_action.requires_user is False
+    assert while_active.next_action.evidence == ["arc-002", "arc_state_pending"]
+    assert after_interruption.next_action.id == "resume_run"
+    assert after_interruption.next_action.id != "approve_story_arc"
 
 
 def test_readiness_recommends_retry_for_rejected_state_patch(
@@ -516,6 +570,60 @@ def test_readiness_recommends_recovering_stale_run_lock(
     assert readiness.next_action.evidence == ["running", "no_active_runner"]
 
 
+def test_readiness_waits_for_fresh_host_dispatch_instead_of_recovering_it(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _isolate_runtime_paths(tmp_path, monkeypatch)
+    project = project_storage.create_project(
+        CreateProjectRequest(operation_mode="full_auto")
+    )
+    project_path = Path(project.path)
+    _approve_setup(project_path)
+    _create_profile()
+    metadata = project_storage.read_project_metadata(project_path)
+    metadata.run_status = "running"
+    project_storage.write_project_metadata(project_path, metadata)
+    dispatch = accept_run_dispatch(
+        project_path,
+        run_id="run-1",
+        action_key="book:bootstrap",
+    )
+
+    readiness = readiness_api.get_readiness()
+
+    assert readiness.next_action.id == "wait_for_safe_checkpoint"
+    assert readiness.next_action.requires_user is False
+    assert readiness.next_action.evidence == [
+        "dispatch:accepted",
+        f"dispatch_id:{dispatch.dispatch_id}",
+        "action_key:book:bootstrap",
+    ]
+
+
+def test_readiness_requires_explicit_resume_for_paused_run(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _isolate_runtime_paths(tmp_path, monkeypatch)
+    project = project_storage.create_project(
+        CreateProjectRequest(operation_mode="full_auto")
+    )
+    project_path = Path(project.path)
+    _approve_setup(project_path)
+    _create_profile()
+    metadata = project_storage.read_project_metadata(project_path)
+    metadata.run_status = "paused"
+    project_storage.write_project_metadata(project_path, metadata)
+
+    readiness = readiness_api.get_readiness()
+
+    assert readiness.next_action.id == "resume_run"
+    assert readiness.next_action.requires_user is True
+    assert readiness.next_action.can_auto_continue is False
+    assert readiness.next_action.evidence == ["paused", "desired_state:stopped"]
+
+
 def test_readiness_waits_when_runner_is_active(
     tmp_path: Path,
     monkeypatch,
@@ -538,6 +646,226 @@ def test_readiness_waits_when_runner_is_active(
         end_active_runner(project_path)
 
     assert readiness.next_action.id == "wait_for_safe_checkpoint"
+
+
+def test_phase16_resume_claim_stale_cleanup_and_second_resume_converge(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _isolate_runtime_paths(tmp_path, monkeypatch)
+    project = project_storage.create_project(
+        CreateProjectRequest(operation_mode="full_auto")
+    )
+    project_path = Path(project.path)
+    _approve_setup(project_path)
+    _create_profile()
+    metadata = project_storage.read_project_metadata(project_path)
+    metadata.run_status = "failed"
+    metadata.active_chapter_id = "chapter-013"
+    project_storage.write_project_metadata(project_path, metadata)
+    candidate_root = project_path / "chapters" / "chapter-013" / "agent" / "a" / "failed" / "c"
+    candidate_root.mkdir(parents=True)
+    (candidate_root / "draft.md").write_text("The preserved Chapter 13 draft.\n", encoding="utf-8")
+    identity = AgentIdentity(
+        project_id=metadata.project_id,
+        role="chapter",
+        scope_id="chapter-013",
+    )
+    save_agent_state(
+        project_path,
+        AgentState(
+            identity=identity,
+            lifecycle="failed",
+            candidate_run_id="chapter-013-chain",
+            activation_id="failed",
+            phase="chapter",
+            budgets=AgentBudgets(
+                max_turns=30,
+                tool_schema_repair_limit=2,
+                used_tool_schema_repairs=2,
+            ),
+        ),
+    )
+    for index in range(3):
+        append_event(
+            project_path,
+            HarnessEvent(
+                project_id=metadata.project_id,
+                run_id="run-failed",
+                kind="agent_tool_result",
+                loop_layer="chapter",
+                atomic_action="run_chapter_agent",
+                status="failed",
+                message="Agent Tool call was rejected by Harness validation.",
+                payload={
+                    "error_code": "candidate_patch_evidence_not_verbatim",
+                    "repair_index": index + 1,
+                },
+            ),
+        )
+    append_event(
+        project_path,
+        HarnessEvent(
+            project_id=metadata.project_id,
+            run_id="run-failed",
+            kind="agent_activation_failed",
+            loop_layer="chapter",
+            atomic_action="run_chapter_agent",
+            status="failed",
+            artifact_path="chapters/chapter-013/agent/a/failed/failure.json",
+            message="Bounded Loop Agent activation failed closed.",
+            payload={
+                "category": "malformed_model_output",
+                "code": "tool_schema_repair_exhausted",
+                "cause_code": "candidate_patch_evidence_not_verbatim",
+                "recoverable": True,
+                "allowed_actions": ["retry_failed_run"],
+            },
+        ),
+    )
+    append_event(
+        project_path,
+        HarnessEvent(
+            project_id=metadata.project_id,
+            run_id="run-failed",
+            kind="run_failed",
+            loop_layer="system",
+            status="failed",
+            message="Harness stopped after bounded Chapter evidence correction.",
+        ),
+    )
+
+    wakes: list[Path] = []
+
+    class QueuedHost:
+        started = True
+
+        def wake(self, path: Path) -> None:
+            wakes.append(path)
+
+    monkeypatch.setattr(runs_api, "get_active_project_path", lambda: project_path)
+    monkeypatch.setattr(runs_api, "get_run_host", lambda: QueuedHost())
+    baseline = capture_harness_invariants(project_path)
+
+    first_resume = runs_api.resume_run()
+
+    assert first_resume["dispatch_status"] == "accepted"
+    accepted_snapshot = capture_harness_invariants(project_path)
+    assert_control_plane_state(
+        accepted_snapshot,
+        project_status="running",
+        desired_state="running",
+        dispatch_status="accepted",
+        readiness_action="wait_for_safe_checkpoint",
+    )
+    assert accepted_snapshot.creation_stage == "writing_chapter"
+    assert accepted_snapshot.creation_primary_action is None
+    assert accepted_snapshot.creation_is_running is True
+    assert accepted_snapshot.action_local_budget_scope == "action-local-v1"
+    assert accepted_snapshot.action_local_budget_usage == (
+        ("used_turns", 0),
+        ("used_tool_schema_repairs", 2),
+        ("used_transport_retries", 0),
+    )
+    assert_committed_state_unchanged(baseline, accepted_snapshot)
+    assert has_active_runner(project_path) is False
+
+    class SimulatedHostExit(BaseException):
+        pass
+
+    def checkpoint_then_exit(*_args, **_kwargs):
+        raise SimulatedHostExit
+
+    monkeypatch.setattr(run_host, "begin_harness_checkpoint", checkpoint_then_exit)
+    with pytest.raises(SimulatedHostExit):
+        run_host.RunHost()._drive(project_path)
+
+    claimed_state = read_run_control_state(project_path)
+    assert claimed_state.dispatch is not None
+    assert claimed_state.dispatch.status == "claimed"
+    assert has_active_runner(project_path) is False
+    claimed_snapshot = capture_harness_invariants(project_path)
+    assert_control_plane_state(
+        claimed_snapshot,
+        project_status="running",
+        desired_state="running",
+        dispatch_status="claimed",
+        readiness_action="recover_stale_run",
+    )
+    assert claimed_snapshot.creation_stage == "failed"
+    assert claimed_snapshot.creation_primary_action == "recover_stale"
+    assert_committed_state_unchanged(baseline, claimed_snapshot)
+
+    recovered = runs_api.recover_stale_run()
+
+    assert recovered["status"] == "paused"
+    assert recovered["desired_state"] == "stopped"
+    recovered_state = read_run_control_state(project_path)
+    assert recovered_state.desired_state == "stopped"
+    assert recovered_state.dispatch is None
+    paused_readiness = readiness_api.get_readiness()
+    assert paused_readiness.next_action.id == "resume_run"
+    assert paused_readiness.next_action.requires_user is True
+    assert paused_readiness.next_action.can_auto_continue is False
+    paused_snapshot = capture_harness_invariants(project_path)
+    assert_control_plane_state(
+        paused_snapshot,
+        project_status="paused",
+        desired_state="stopped",
+        dispatch_status=None,
+        readiness_action="resume_run",
+    )
+    assert paused_snapshot.creation_stage == "paused"
+    assert paused_snapshot.creation_primary_action == "resume"
+    assert paused_snapshot.creation_is_running is False
+    assert_committed_state_unchanged(baseline, paused_snapshot)
+    assert (candidate_root / "draft.md").read_text(encoding="utf-8") == (
+        "The preserved Chapter 13 draft.\n"
+    )
+
+    monkeypatch.setattr(run_host, "begin_harness_checkpoint", begin_harness_checkpoint)
+    second_resume = runs_api.resume_run()
+    assert second_resume["dispatch_status"] == "accepted"
+
+    class SuccessfulOrchestrator:
+        def __init__(self, context) -> None:
+            self.context = context
+
+        def advance_to_next_checkpoint(self) -> None:
+            current = read_project_metadata(self.context.project_path)
+            current.run_status = "idle"
+            write_project_metadata(self.context.project_path, current)
+            set_run_intent(self.context.project_path, desired_state="stopped")
+            append_event(
+                self.context.project_path,
+                HarnessEvent(
+                    project_id=current.project_id,
+                    run_id=self.context.run_id,
+                    kind="chapter_retry_continued",
+                    loop_layer="chapter",
+                    atomic_action="run_chapter_agent",
+                    status="completed",
+                    message="The preserved Chapter candidate made durable progress.",
+                ),
+            )
+
+    monkeypatch.setattr(run_host, "HarnessOrchestrator", SuccessfulOrchestrator)
+
+    assert run_host.RunHost()._drive(project_path) is None
+    assert read_project_metadata(project_path).run_status == "idle"
+    final_state = read_run_control_state(project_path)
+    assert final_state.desired_state == "stopped"
+    assert final_state.dispatch is None
+    completed_snapshot = capture_harness_invariants(project_path)
+    assert_committed_state_unchanged(baseline, completed_snapshot)
+    assert completed_snapshot.candidate_run_id == baseline.candidate_run_id
+    assert completed_snapshot.human_gate_count == baseline.human_gate_count
+    kinds = [event.kind for event in read_events(project_path)]
+    assert kinds.count("run_dispatch_accepted") == 2
+    assert kinds.count("run_dispatch_claimed") == 2
+    assert kinds.count("run_recovered") == 1
+    assert kinds[-1] == "chapter_retry_continued"
+    assert wakes == [project_path, project_path]
 
 
 def test_readiness_fails_when_approved_setup_artifact_is_missing(

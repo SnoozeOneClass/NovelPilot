@@ -17,6 +17,7 @@ export type CreationStage =
   | "continuing"
   | "waiting_provider"
   | "chapter_recovery"
+  | "paused"
   | "failed"
   | "completed";
 
@@ -26,6 +27,7 @@ export type CreationPrimaryAction =
   | "approve_book_revision"
   | "retry_chapter"
   | "retry_failed_run"
+  | "resume"
   | "recover_stale"
   | null;
 
@@ -149,6 +151,17 @@ export function deriveCreationViewModel({
       hasStarted: started
     };
   }
+  if (metadata.run_status === "paused" && nextAction?.id === "resume_run") {
+    return {
+      stage: "paused",
+      eyebrow: "连续创作已暂停",
+      title: "当前没有正在进行的生成",
+      description: nextAction.message || "从最近一个一致检查点恢复后，后台才会继续创作。",
+      primaryAction: "resume",
+      isRunning: false,
+      hasStarted: started
+    };
+  }
   if (metadata.run_status === "failed" || nextAction?.id === "inspect_failure") {
     return {
       stage: "failed",
@@ -176,7 +189,7 @@ export function deriveCreationViewModel({
       hasStarted: started
     };
   }
-  if (isRunning || nextAction?.id === "resume_run" && nextAction.can_auto_continue) {
+  if (isRunning) {
     return {
       stage: "continuing",
       eyebrow: "连续创作",

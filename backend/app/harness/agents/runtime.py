@@ -17,6 +17,7 @@ from app.harness.agents.models import (
 )
 from app.harness.agents.persistence import (
     append_activation_log,
+    clone_activation_candidate_workspace,
     read_agent_state,
     save_agent_state,
     write_activation_document,
@@ -102,7 +103,24 @@ class AgentRuntime:
             names=activation.allowed_tools,
         )
         state = self._prepare_state(activation)
+        prior_failed_activation_id = (
+            state.activation_id
+            if activation.identity.role == "chapter"
+            and state.lifecycle == "failed"
+            and state.candidate_run_id == activation.candidate_run_id
+            else None
+        )
         activation_id = uuid4().hex[:12]
+        restored_candidate_paths = (
+            clone_activation_candidate_workspace(
+                activation.project_path,
+                activation.identity,
+                source_activation_id=prior_failed_activation_id,
+                target_activation_id=activation_id,
+            )
+            if prior_failed_activation_id is not None
+            else []
+        )
         state.activation_id = activation_id
         state.lifecycle = "running"
         state.phase = activation.phase
@@ -130,6 +148,19 @@ class AgentRuntime:
 
         messages = [ChatMessage(role="system", content=activation.system_prompt)]
         messages.extend(message.model_copy(deep=True) for message in activation.messages)
+        if restored_candidate_paths:
+            messages.append(
+                ChatMessage(
+                    role="user",
+                    content=(
+                        "Harness restored the uncommitted Chapter candidate workspace "
+                        "from the prior failed activation for this candidate run. Reuse "
+                        "the preserved plan and draft where valid, and correct the prior "
+                        "validation failure through the exposed Tools. This workspace is "
+                        "candidate evidence, not committed prose."
+                    ),
+                )
+            )
         while budgets.used_turns < budgets.max_turns:
             result = self._call_with_transport_retries(
                 activation,
@@ -263,6 +294,8 @@ class AgentRuntime:
                         ),
                         code=tool_result.error_code or "invalid_tool_call",
                         message=tool_result.message or "Tool call requires correction.",
+                        evidence=tool_result.artifact_paths,
+                        allowed_actions=tool_result.allowed_actions,
                     )
                     if correction_failure is not None:
                         return self._fail(
@@ -569,6 +602,8 @@ class AgentRuntime:
         action_key: str,
         code: str,
         message: str,
+        evidence: list[str] | None = None,
+        allowed_actions: list[str] | None = None,
     ) -> FailureEnvelope | None:
         budgets = _required_budgets(state)
         used = attempts_by_action.get(action_key, 0)
@@ -580,9 +615,13 @@ class AgentRuntime:
                 state,
                 category="malformed_model_output",
                 code="tool_schema_repair_exhausted",
+                cause_code=code,
                 message=message,
-                recoverable=False,
-                evidence=[code],
+                recoverable=True,
+                evidence=list(dict.fromkeys([code, *(evidence or [])])),
+                allowed_actions=list(
+                    dict.fromkeys([*(allowed_actions or []), "retry_failed_run"])
+                ),
             )
         used += 1
         attempts_by_action[action_key] = used
@@ -682,6 +721,7 @@ class AgentRuntime:
         *,
         category: FailureCategory,
         code: str,
+        cause_code: str | None = None,
         message: str,
         recoverable: bool,
         evidence: list[str] | None = None,
@@ -691,6 +731,7 @@ class AgentRuntime:
         return FailureEnvelope(
             category=category,
             code=code,
+            cause_code=cause_code,
             scope=activation.identity.role,
             recoverable=recoverable,
             responsible_component=(
@@ -763,6 +804,9 @@ class AgentRuntime:
                 "failure_id": failure.failure_id,
                 "category": failure.category,
                 "code": failure.code,
+                "cause_code": failure.cause_code,
+                "recoverable": failure.recoverable,
+                "allowed_actions": failure.allowed_actions,
                 "message": failure.message,
                 "evidence_paths": evidence_paths,
             },

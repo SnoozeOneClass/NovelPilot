@@ -84,6 +84,7 @@ function renderCreation(overrides: Partial<React.ComponentProps<typeof CreationV
     onStart: vi.fn().mockResolvedValue(undefined),
     onApproveArc: vi.fn().mockResolvedValue(true),
     onApproveBookRevision: vi.fn().mockResolvedValue(undefined),
+    onResume: vi.fn().mockResolvedValue(undefined),
     onRetryFailedRun: vi.fn().mockResolvedValue(undefined),
     onRetryChapter: vi.fn().mockResolvedValue(undefined),
     onRecoverStale: vi.fn().mockResolvedValue(undefined),
@@ -183,6 +184,33 @@ describe("CreationView", () => {
     expect(screen.getByText("当前步骤未能继续")).toBeInTheDocument();
     expect(screen.getByText("Chapter evaluation exhausted its repair limit.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "继续自动修订" })).toBeInTheDocument();
+  });
+
+  it("shows paused as inactive and resumes only after the explicit click", async () => {
+    const user = userEvent.setup();
+    const onResume = vi.fn().mockResolvedValue(undefined);
+    const pausedReadiness = readiness("resume_run");
+    pausedReadiness.next_action.requires_user = true;
+    pausedReadiness.next_action.can_auto_continue = false;
+    pausedReadiness.next_action.message = "The harness is paused and no generation is active.";
+    renderCreation({
+      project: {
+        ...project,
+        metadata: {
+          ...project.metadata,
+          run_status: "paused",
+          active_chapter_id: "chapter-001"
+        }
+      },
+      readiness: pausedReadiness,
+      events: [harnessEvent("event-300", "run_started", {})],
+      onResume
+    });
+
+    expect(screen.getByText("当前没有正在进行的生成")).toBeInTheDocument();
+    expect(screen.queryByText("正在进入下一个内部阶段")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "恢复连续创作" }));
+    expect(onResume).toHaveBeenCalledOnce();
   });
 
   it("renders actual streamed prose as a read-only document", () => {

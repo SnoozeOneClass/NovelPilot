@@ -6,13 +6,25 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from app.storage.file_lock import exclusive_file_lock
 from app.storage.json_files import read_json, write_json
 
 
 TRANSACTION_ROOT = Path("book") / ".transactions"
+TRANSACTION_LOCK_RELATIVE = Path("book") / ".transactions.lock"
 
 
 def commit_file_transaction(
+    project_path: Path,
+    *,
+    kind: str,
+    files: dict[str, str | bytes],
+) -> None:
+    with exclusive_file_lock(project_path / TRANSACTION_LOCK_RELATIVE):
+        _commit_file_transaction_unlocked(project_path, kind=kind, files=files)
+
+
+def _commit_file_transaction_unlocked(
     project_path: Path,
     *,
     kind: str,
@@ -83,6 +95,11 @@ def commit_file_transaction(
 
 
 def recover_file_transactions(project_path: Path) -> None:
+    with exclusive_file_lock(project_path / TRANSACTION_LOCK_RELATIVE):
+        _recover_file_transactions_unlocked(project_path)
+
+
+def _recover_file_transactions_unlocked(project_path: Path) -> None:
     root = project_path / TRANSACTION_ROOT
     if not root.exists():
         return

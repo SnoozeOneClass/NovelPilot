@@ -723,6 +723,7 @@ def _submit_chapter_candidate(
             ),
             recoverable=True,
             content={"rejected_evidence": rejected_evidence},
+            artifact_paths=[plan_path.as_posix(), draft_path.as_posix()],
             allowed_actions=[
                 "inspect_chapter_consistency",
                 "retry:submit_chapter_candidate",
@@ -886,6 +887,11 @@ def _submit_chapter_patch_evidence_repair(
             "Evidence repair must cover exactly the rejected operation indexes.",
             recoverable=True,
             content={"required_operation_indexes": sorted(rejected_indexes)},
+            artifact_paths=[
+                final_relative,
+                patch_path.relative_to(context.project_path).as_posix(),
+                rejection_path.relative_to(context.project_path).as_posix(),
+            ],
             allowed_actions=["retry:submit_chapter_patch_evidence_repair"],
         )
     if any(index >= len(patch.operations) for index in provided_indexes):
@@ -894,6 +900,11 @@ def _submit_chapter_patch_evidence_repair(
             "Evidence repair references an operation that does not exist.",
             recoverable=True,
             content={"operation_count": len(patch.operations)},
+            artifact_paths=[
+                final_relative,
+                patch_path.relative_to(context.project_path).as_posix(),
+                rejection_path.relative_to(context.project_path).as_posix(),
+            ],
             allowed_actions=["retry:submit_chapter_patch_evidence_repair"],
         )
     final_text = _read_required_text(
@@ -912,6 +923,11 @@ def _submit_chapter_patch_evidence_repair(
             "Every repaired evidence quote must be an exact substring of final.md.",
             recoverable=True,
             content={"invalid_quotes": invalid_quotes},
+            artifact_paths=[
+                final_relative,
+                patch_path.relative_to(context.project_path).as_posix(),
+                rejection_path.relative_to(context.project_path).as_posix(),
+            ],
             allowed_actions=["retry:submit_chapter_patch_evidence_repair"],
         )
     repairs = {item.operation_index: item for item in request.repairs}

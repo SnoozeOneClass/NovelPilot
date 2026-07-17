@@ -309,9 +309,21 @@ export interface ChapterRetryResponse {
   artifact_path: string;
 }
 
+export type RunDispatchStatus = "accepted" | "claimed" | "completed_inline";
+
+export interface RunCommandResponse {
+  run_id: string;
+  status: RunStatus;
+  dispatch_status: RunDispatchStatus;
+  action_key: string | null;
+  dispatch_id: string | null;
+}
+
 export interface StaleRunRecoveryResponse {
   status: RunStatus;
   previous_status: RunStatus;
+  desired_state: "stopped";
+  next_action: "resume_run" | "none";
 }
 
 export interface HarnessEvent {

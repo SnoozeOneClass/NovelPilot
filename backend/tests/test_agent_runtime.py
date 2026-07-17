@@ -5,12 +5,13 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from app.harness.agents.domain_tools import build_default_tool_registry
 from app.harness.agents.models import AgentBudgets, AgentIdentity, AgentState
-from app.harness.agents.persistence import json_document, read_agent_state
+from app.harness.agents.persistence import activation_relative, json_document, read_agent_state
 from app.harness.agents.persistence import save_agent_state
 from app.harness.agents.policy import ResolvedAgentPolicy
 from app.harness.agents.registry import (
     ToolExecutionContext,
     ToolExecutionPlan,
+    ToolHandlerError,
     ToolRegistry,
     ToolSpec,
 )
@@ -30,6 +31,12 @@ class TextInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: str
+
+
+class RetryCandidateInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    accept: bool = False
 
 
 def test_agent_runtime_repairs_invalid_tool_call_and_stops_on_checkpoint(tmp_path) -> None:
@@ -503,8 +510,171 @@ def test_tool_repair_limit_still_bounds_one_continuous_failed_action(
     assert result.outcome == "failed"
     assert result.failure is not None
     assert result.failure.code == "tool_schema_repair_exhausted"
+    assert result.failure.cause_code == "invalid_tool_arguments"
+    assert result.failure.recoverable is True
+    assert result.failure.allowed_actions == [
+        "retry:submit_candidate",
+        "retry_failed_run",
+    ]
     assert result.failure.consumed_budgets["tool_schema_repairs"] == 1
     assert result.failure.remaining_budgets["tool_schema_repairs"] == 0
+
+
+def test_chapter_retry_preserves_candidate_workspace_and_original_failure(
+    tmp_path: Path,
+) -> None:
+    registry = ToolRegistry()
+
+    def seed_candidate(context, _arguments):
+        draft_path = activation_relative(context.identity, context.activation_id) / "c" / "draft.md"
+        return ToolExecutionPlan(
+            content={"summary": "Draft preserved."},
+            files={draft_path.as_posix(): "The bell rang once.\n"},
+            artifact_paths=[draft_path.as_posix()],
+            allowed_actions=["submit_candidate"],
+        )
+
+    def submit_candidate(context, arguments):
+        assert isinstance(arguments, RetryCandidateInput)
+        draft_path = activation_relative(context.identity, context.activation_id) / "c" / "draft.md"
+        if not arguments.accept:
+            raise ToolHandlerError(
+                "candidate_patch_evidence_not_verbatim",
+                "State-patch evidence is not verbatim.",
+                recoverable=True,
+                artifact_paths=[draft_path.as_posix()],
+                allowed_actions=["retry:submit_candidate"],
+            )
+        assert (context.project_path / draft_path).read_text(encoding="utf-8") == (
+            "The bell rang once.\n"
+        )
+        return ToolExecutionPlan(
+            content={"summary": "Candidate accepted."},
+            checkpoint_id="chapter:chapter-001:1",
+            artifact_paths=[draft_path.as_posix()],
+        )
+
+    registry.register(
+        ToolSpec(
+            name="seed_candidate",
+            version=1,
+            description="Seed a Chapter candidate.",
+            input_model=RetryCandidateInput,
+            allowed_roles=frozenset({"chapter"}),
+            allowed_phases=frozenset({"chapter"}),
+            handler=seed_candidate,
+            read_only=False,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="submit_candidate",
+            version=1,
+            description="Submit a Chapter candidate.",
+            input_model=RetryCandidateInput,
+            allowed_roles=frozenset({"chapter"}),
+            allowed_phases=frozenset({"chapter"}),
+            handler=submit_candidate,
+            read_only=False,
+            terminal=True,
+        )
+    )
+    base = _activation(tmp_path)
+    activation = replace(
+        base,
+        identity=AgentIdentity(
+            project_id="project-1",
+            role="chapter",
+            scope_id="chapter-001",
+        ),
+        candidate_run_id="chapter-chain-1",
+        phase="chapter",
+        allowed_tools=("seed_candidate", "submit_candidate"),
+        policy=base.policy.model_copy(
+            update={
+                "role": "chapter",
+                "max_turns": 7,
+                "tool_schema_repair_limit": 2,
+            }
+        ),
+    )
+    first_responses = iter(
+        [
+            _tool_response(
+                ToolCall(
+                    id="seed",
+                    name="seed_candidate",
+                    arguments={"accept": False},
+                    raw_arguments='{"accept":false}',
+                )
+            ),
+            _tool_response(
+                ToolCall(
+                    id="reject-1",
+                    name="submit_candidate",
+                    arguments={"accept": False},
+                    raw_arguments='{"accept":false}',
+                )
+            ),
+            _tool_response(
+                ToolCall(
+                    id="reject-2",
+                    name="submit_candidate",
+                    arguments={"accept": False},
+                    raw_arguments='{"accept":false}',
+                )
+            ),
+            _tool_response(
+                ToolCall(
+                    id="reject-3",
+                    name="submit_candidate",
+                    arguments={"accept": False},
+                    raw_arguments='{"accept":false}',
+                )
+            ),
+        ]
+    )
+
+    failed = AgentRuntime(
+        registry,
+        chat_call=lambda _profile, _request: next(first_responses),
+    ).run(activation)
+
+    assert failed.outcome == "failed"
+    assert failed.failure is not None
+    assert failed.failure.cause_code == "candidate_patch_evidence_not_verbatim"
+    assert failed.failure.recoverable is True
+    assert failed.failure.allowed_actions == [
+        "retry:submit_candidate",
+        "retry_failed_run",
+    ]
+    assert any(path.endswith("/c/draft.md") for path in failed.failure.evidence)
+
+    completed = AgentRuntime(
+        registry,
+        chat_call=lambda _profile, _request: _tool_response(
+            ToolCall(
+                id="accept-after-retry",
+                name="submit_candidate",
+                arguments={"accept": True},
+                raw_arguments='{"accept":true}',
+            )
+        ),
+    ).run(activation)
+
+    assert completed.outcome == "candidate"
+    assert completed.candidate_run_id == failed.candidate_run_id
+    assert completed.activation_id != failed.activation_id
+    restored_draft = (
+        tmp_path
+        / activation_relative(activation.identity, completed.activation_id)
+        / "c"
+        / "draft.md"
+    )
+    assert restored_draft.read_text(encoding="utf-8") == "The bell rang once.\n"
+    state = read_agent_state(tmp_path, activation.identity)
+    assert state.budgets is not None
+    assert state.budgets.used_tool_schema_repairs == 0
 
 
 def test_provider_retry_limit_is_independent_for_each_llm_request(

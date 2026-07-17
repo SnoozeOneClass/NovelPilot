@@ -16,6 +16,7 @@
     "profile:upsert": "scripts\\python.cmd scripts/configure_llm_profile.py",
     "profile:test": "scripts\\python.cmd scripts/test_llm_profile.py",
     "smoke:live": "scripts\\python.cmd scripts/live_provider_smoke.py",
+    "acceptance:live-project": "scripts\\python.cmd scripts/live_project_acceptance.py",
     "audit:secrets": "scripts\\python.cmd scripts/audit_output_secrets.py",
     "review:literary": "scripts\\python.cmd scripts/record_literary_review.py",
     "audit:completion": "scripts\\python.cmd scripts/completion_audit.py",

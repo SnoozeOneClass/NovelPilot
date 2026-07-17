@@ -239,6 +239,7 @@ def record_agent_user_decision(
                 label=str(item.get("label", "")).strip(),
                 message=str(item.get("message", "")).strip(),
                 rationale=str(item.get("rationale", "")).strip(),
+                recommended=item.get("recommended") is True,
             )
             for index, item in enumerate(raw_suggestions)
             if isinstance(item, dict)

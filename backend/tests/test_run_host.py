@@ -9,11 +9,17 @@ from app.storage.events import append_event, read_events
 from app.storage.json_files import read_json, write_json
 from app.storage.projects import read_project_metadata, write_project_metadata
 from app.storage.run_state import (
+    accept_run_dispatch,
+    action_key_for_project,
     checkpoint_candidate_identity,
     read_run_control_state,
     schedule_provider_wait,
     set_run_intent,
     write_run_control_state,
+)
+from backend.tests.helpers.harness_invariants import (
+    assert_committed_state_unchanged,
+    capture_harness_invariants,
 )
 
 
@@ -150,7 +156,57 @@ def test_run_host_drives_until_a_real_user_gate(tmp_path, monkeypatch) -> None:
         project_path / "book" / "harness" / "checkpoints" / "00000001.json"
     )
     assert checkpoint["status"] == "waiting"
-    assert checkpoint["event_sequence_after"] == 1
+    assert checkpoint["event_sequence_after"] == 2
+
+
+def test_run_host_claims_durable_dispatch_before_advancing(
+    tmp_path, monkeypatch
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    metadata = ProjectMetadata(title="Novel", run_status="running")
+    write_json(project_path / "project.json", metadata.model_dump(mode="json"))
+    (project_path / "events.jsonl").write_text("", encoding="utf-8")
+    action_key = action_key_for_project(project_path)
+    accepted = accept_run_dispatch(
+        project_path,
+        run_id="run-1",
+        action_key=action_key,
+    )
+
+    class StopOrchestrator:
+        def __init__(self, context) -> None:
+            self.context = context
+
+        def advance_to_next_checkpoint(self) -> None:
+            set_run_intent(self.context.project_path, desired_state="stopped")
+            current = read_project_metadata(self.context.project_path)
+            current.run_status = "idle"
+            write_project_metadata(self.context.project_path, current)
+            append_event(
+                self.context.project_path,
+                HarnessEvent(
+                    project_id=current.project_id,
+                    run_id=self.context.run_id,
+                    kind="artifact_written",
+                    loop_layer="book",
+                    atomic_action="book:bootstrap",
+                    status="completed",
+                    message="Bootstrap complete.",
+                ),
+            )
+
+    monkeypatch.setattr(run_host, "HarnessOrchestrator", StopOrchestrator)
+
+    assert run_host.RunHost()._drive(project_path) is None
+
+    events = read_events(project_path)
+    claimed = next(event for event in events if event.kind == "run_dispatch_claimed")
+    assert claimed.payload == {
+        "dispatch_id": accepted.dispatch_id,
+        "dispatch_status": "claimed",
+        "action_key": action_key,
+    }
 
 
 def test_run_host_reconciles_durable_running_intent_after_restart(
@@ -412,6 +468,10 @@ def test_mocked_multi_chapter_run_survives_provider_waits_and_restart(
     )
     (project_path / "events.jsonl").write_text("", encoding="utf-8")
     set_run_intent(project_path, desired_state="running", run_id="run-1")
+    baseline = capture_harness_invariants(
+        project_path,
+        include_readiness=False,
+    )
     calls = 0
     wait_attempts: list[int] = []
 
@@ -498,6 +558,12 @@ def test_mocked_multi_chapter_run_survives_provider_waits_and_restart(
     assert wait_attempts == [1, 1]
     assert read_run_control_state(project_path).desired_state == "stopped"
     assert read_project_metadata(project_path).active_chapter_id == "chapter-002"
+    completed = capture_harness_invariants(
+        project_path,
+        include_readiness=False,
+    )
+    assert_committed_state_unchanged(baseline, completed)
+    assert completed.human_gate_count == baseline.human_gate_count
     kinds = [event.kind for event in read_events(project_path)]
     assert kinds.count("run_waiting_for_provider") == 2
     assert "chapter_patch_evidence_repair_completed" in kinds

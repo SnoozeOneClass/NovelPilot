@@ -8,6 +8,9 @@ def test_agent_event_projection_exposes_safe_evidence_without_raw_arguments() ->
             "activation_id": "activation-1",
             "candidate_run_id": "run-1",
             "code": "tool_schema_repair_exhausted",
+            "cause_code": "candidate_patch_evidence_not_verbatim",
+            "recoverable": True,
+            "allowed_actions": ["retry_failed_run"],
             "message": "private provider response",
             "raw_arguments": {"api_key": "secret"},
             "evidence_paths": [
@@ -21,6 +24,9 @@ def test_agent_event_projection_exposes_safe_evidence_without_raw_arguments() ->
     assert projected.status == "failed"
     assert projected.artifact_path == "book/agent/a/activation-1/failure.json"
     assert projected.routing_decision == "tool_schema_repair_exhausted"
+    assert projected.payload["cause_code"] == "candidate_patch_evidence_not_verbatim"
+    assert projected.payload["recoverable"] is True
+    assert projected.payload["allowed_actions"] == ["retry_failed_run"]
     assert projected.payload["evidence_paths"] == [
         "book/agent/a/activation-1/failure.json",
         "book/agent/a/activation-1/telemetry.json",

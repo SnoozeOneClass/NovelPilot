@@ -56,12 +56,14 @@ class ToolHandlerError(RuntimeError):
         *,
         recoverable: bool,
         content: dict[str, Any] | None = None,
+        artifact_paths: list[str] | None = None,
         allowed_actions: list[str] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.recoverable = recoverable
         self.content = content or {}
+        self.artifact_paths = artifact_paths or []
         self.allowed_actions = allowed_actions or []
 
 
@@ -269,6 +271,7 @@ class ToolRegistry:
                     message=str(exc),
                     recoverable=exc.recoverable,
                     content=exc.content,
+                    artifact_paths=exc.artifact_paths,
                     allowed_actions=exc.allowed_actions,
                 ),
                 ToolExecutionPlan(content={}),
@@ -342,6 +345,7 @@ def _error_result(
     message: str,
     recoverable: bool,
     content: dict[str, Any] | None = None,
+    artifact_paths: list[str] | None = None,
     allowed_actions: list[str] | None = None,
 ) -> ToolExecutionResult:
     return ToolExecutionResult(
@@ -352,5 +356,6 @@ def _error_result(
         recoverable=recoverable,
         error_code=code,
         message=message,
+        artifact_paths=artifact_paths or [],
         allowed_actions=allowed_actions or [],
     )

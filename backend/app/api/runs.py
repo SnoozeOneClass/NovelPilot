@@ -20,7 +20,13 @@ from app.harness.run_control import (
 )
 from app.schemas.events import HarnessEvent
 from app.schemas.projects import ProjectMetadata
-from app.schemas.runs import RunAdvanceRequest
+from app.schemas.runs import (
+    RunAdvanceRequest,
+    RunCommandResult,
+    RunDispatchState,
+    RunDispatchStatus,
+    StaleRunRecoveryResult,
+)
 from app.storage.json_files import write_json
 from app.storage.events import append_event, read_events
 from app.storage.projects import (
@@ -31,7 +37,13 @@ from app.storage.projects import (
 )
 from app.storage.readiness import build_project_readiness
 from app.storage.retries import retry_scope_for_chapter
-from app.storage.run_state import set_run_intent
+from app.storage.run_state import (
+    accept_run_dispatch,
+    action_key_for_project,
+    read_run_control_state,
+    run_dispatch_is_pending,
+    set_run_intent,
+)
 
 router = APIRouter()
 
@@ -64,12 +76,40 @@ def _build_run_archive(project_path: Path) -> bytes:
     return buffer.getvalue()
 
 
-@router.post("/start")
-def start_run(run_request: RunAdvanceRequest | None = None) -> dict[str, str]:
+def _append_dispatch_accepted_event(
+    project_path: Path,
+    metadata: ProjectMetadata,
+    dispatch: RunDispatchState,
+) -> None:
+    append_event(
+        project_path,
+        HarnessEvent(
+            project_id=metadata.project_id,
+            run_id=dispatch.run_id,
+            kind="run_dispatch_accepted",
+            loop_layer="system",
+            atomic_action=dispatch.action_key,
+            status="started",
+            routing_decision="advance",
+            message="RunHost durably accepted the run command for dispatch.",
+            payload={
+                "dispatch_id": dispatch.dispatch_id,
+                "dispatch_status": dispatch.status,
+                "action_key": dispatch.action_key,
+            },
+        ),
+    )
+
+
+@router.post("/start", response_model=RunCommandResult)
+def start_run(run_request: RunAdvanceRequest | None = None) -> dict[str, object]:
     advance_request = run_request or RunAdvanceRequest()
     project_path = _begin_active_runner_or_409()
     run_id = str(uuid4())
     released_runner = False
+    dispatch_status: RunDispatchStatus = "completed_inline"
+    action_key: str | None = None
+    dispatch_id: str | None = None
     try:
         metadata = read_project_metadata(project_path)
         _ensure_run_can_start(metadata.run_status)
@@ -94,12 +134,15 @@ def start_run(run_request: RunAdvanceRequest | None = None) -> dict[str, str]:
         )
         host = get_run_host()
         if host.started and not advance_request.stop_after_chapter:
-            set_run_intent(
+            action_key = action_key_for_project(project_path)
+            dispatch = accept_run_dispatch(
                 project_path,
-                desired_state="running",
                 run_id=run_id,
-                clear_provider_wait=True,
+                action_key=action_key,
             )
+            dispatch_status = dispatch.status
+            dispatch_id = dispatch.dispatch_id
+            _append_dispatch_accepted_event(project_path, metadata, dispatch)
             end_active_runner(project_path)
             released_runner = True
             host.wake(project_path)
@@ -116,7 +159,13 @@ def start_run(run_request: RunAdvanceRequest | None = None) -> dict[str, str]:
             end_active_runner(project_path)
 
     metadata = read_project_metadata(project_path)
-    return {"run_id": run_id, "status": metadata.run_status}
+    return RunCommandResult(
+        run_id=run_id,
+        status=metadata.run_status,
+        dispatch_status=dispatch_status,
+        action_key=action_key,
+        dispatch_id=dispatch_id,
+    ).model_dump(mode="json")
 
 
 @router.post("/pause")
@@ -174,12 +223,15 @@ def pause_run() -> dict[str, str]:
     return {"status": metadata.run_status}
 
 
-@router.post("/resume")
-def resume_run(run_request: RunAdvanceRequest | None = None) -> dict[str, str]:
+@router.post("/resume", response_model=RunCommandResult)
+def resume_run(run_request: RunAdvanceRequest | None = None) -> dict[str, object]:
     advance_request = run_request or RunAdvanceRequest()
     project_path = _begin_active_runner_or_409()
     run_id = str(uuid4())
     released_runner = False
+    dispatch_status: RunDispatchStatus = "completed_inline"
+    action_key: str | None = None
+    dispatch_id: str | None = None
     try:
         metadata = read_project_metadata(project_path)
         _ensure_run_can_start(metadata.run_status)
@@ -203,12 +255,15 @@ def resume_run(run_request: RunAdvanceRequest | None = None) -> dict[str, str]:
         )
         host = get_run_host()
         if host.started and not advance_request.stop_after_chapter:
-            set_run_intent(
+            action_key = action_key_for_project(project_path)
+            dispatch = accept_run_dispatch(
                 project_path,
-                desired_state="running",
                 run_id=run_id,
-                clear_provider_wait=True,
+                action_key=action_key,
             )
+            dispatch_status = dispatch.status
+            dispatch_id = dispatch.dispatch_id
+            _append_dispatch_accepted_event(project_path, metadata, dispatch)
             end_active_runner(project_path)
             released_runner = True
             host.wake(project_path)
@@ -224,11 +279,17 @@ def resume_run(run_request: RunAdvanceRequest | None = None) -> dict[str, str]:
         if not released_runner:
             end_active_runner(project_path)
     metadata = read_project_metadata(project_path)
-    return {"status": metadata.run_status}
+    return RunCommandResult(
+        run_id=run_id,
+        status=metadata.run_status,
+        dispatch_status=dispatch_status,
+        action_key=action_key,
+        dispatch_id=dispatch_id,
+    ).model_dump(mode="json")
 
 
-@router.post("/recover-stale")
-def recover_stale_run() -> dict[str, str]:
+@router.post("/recover-stale", response_model=StaleRunRecoveryResult)
+def recover_stale_run() -> dict[str, object]:
     project_path = _begin_active_runner_or_409(
         detail=(
             "A harness runner is still active; request pause and wait for a safe checkpoint."
@@ -251,12 +312,28 @@ def recover_stale_run() -> dict[str, str]:
                         payload={"run_status": metadata.run_status},
                     ),
                 )
-                return {
-                    "status": metadata.run_status,
-                    "previous_status": metadata.run_status,
-                }
+                return StaleRunRecoveryResult(
+                    status=metadata.run_status,
+                    previous_status=metadata.run_status,
+                    next_action="none",
+                ).model_dump(mode="json")
+
+            state = read_run_control_state(project_path)
+            if run_dispatch_is_pending(state):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "RunHost has durably accepted this run command and has not "
+                        "exceeded the claim deadline; stale cleanup is not allowed."
+                    ),
+                )
 
             previous_status = metadata.run_status
+            set_run_intent(
+                project_path,
+                desired_state="stopped",
+                clear_provider_wait=True,
+            )
             metadata.run_status = "paused"
             write_project_metadata(project_path, metadata)
             append_event(
@@ -275,10 +352,15 @@ def recover_stale_run() -> dict[str, str]:
                     payload={
                         "previous_status": previous_status,
                         "run_status": metadata.run_status,
+                        "desired_state": "stopped",
+                        "next_action": "resume_run",
                     },
                 ),
             )
-            return {"status": metadata.run_status, "previous_status": previous_status}
+            return StaleRunRecoveryResult(
+                status=metadata.run_status,
+                previous_status=previous_status,
+            ).model_dump(mode="json")
     finally:
         end_active_runner(project_path)
 

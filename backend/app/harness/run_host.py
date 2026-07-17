@@ -15,6 +15,7 @@ from app.storage.run_state import (
     action_key_for_project,
     begin_harness_checkpoint,
     checkpoint_candidate_identity,
+    claim_run_dispatch,
     clear_provider_wait,
     finish_harness_checkpoint,
     read_run_control_state,
@@ -138,11 +139,35 @@ class RunHost:
                 if decision in {"wait_user", "stop", "fail"}:
                     return None
 
+                run_id = state.run_id or f"recovered-{metadata.project_id}"
+                action_key = action_key_for_project(project_path)
+                dispatch, newly_claimed = claim_run_dispatch(
+                    project_path,
+                    run_id=run_id,
+                    action_key=action_key,
+                )
+                if newly_claimed and dispatch is not None:
+                    append_event(
+                        project_path,
+                        HarnessEvent(
+                            project_id=metadata.project_id,
+                            run_id=run_id,
+                            kind="run_dispatch_claimed",
+                            loop_layer="system",
+                            atomic_action=action_key,
+                            status="started",
+                            routing_decision="advance",
+                            message="RunHost claimed the accepted run action.",
+                            payload={
+                                "dispatch_id": dispatch.dispatch_id,
+                                "dispatch_status": dispatch.status,
+                                "action_key": dispatch.action_key,
+                            },
+                        ),
+                    )
                 metadata.run_status = "running"
                 write_project_metadata(project_path, metadata)
 
-                run_id = state.run_id or f"recovered-{metadata.project_id}"
-                action_key = action_key_for_project(project_path)
                 checkpoint, checkpoint_path = begin_harness_checkpoint(
                     project_path,
                     run_id=run_id,

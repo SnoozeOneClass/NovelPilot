@@ -762,6 +762,7 @@ def test_agent_review_question_reopens_standard_discussion_without_fake_user_tur
                     "label": "师徒关系",
                     "message": "让师徒关系承担不可逆的决裂代价。",
                     "rationale": "与主角的信任成长直接相连。",
+                    "recommended": True,
                 },
                 {
                     "label": "手足关系",
@@ -779,6 +780,7 @@ def test_agent_review_question_reopens_standard_discussion_without_fake_user_tur
     assert updated.candidate is None
     assert updated.question == "结局必须由哪段关系承担不可逆的代价？"
     assert len(updated.suggestions) == 2
+    assert [item.recommended for item in updated.suggestions] == [True, False]
     assert updated.selected_title == "Harbor of Trust"
     assert "正式书名：《Harbor of Trust》" in updated.confirmed_decisions
     assert len(updated.messages) == previous_message_count + 1

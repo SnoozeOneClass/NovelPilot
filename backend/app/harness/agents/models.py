@@ -115,6 +115,7 @@ class FailureEnvelope(BaseModel):
     failure_id: str = Field(default_factory=lambda: str(uuid4()))
     category: FailureCategory
     code: str = Field(min_length=1, max_length=128)
+    cause_code: str | None = Field(default=None, min_length=1, max_length=128)
     scope: FailureScope
     recoverable: bool
     responsible_component: str = Field(min_length=1, max_length=200)

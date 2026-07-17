@@ -368,8 +368,9 @@ def prepare_setup_review() -> SetupStateDocument:
                         "label": item.title,
                         "message": f"采用《{item.title}》作为正式书名。",
                         "rationale": item.rationale,
+                        "recommended": index == 0,
                     }
-                    for item in synthesis.recommended_titles[:3]
+                    for index, item in enumerate(synthesis.recommended_titles[:3])
                 ],
             }
             try:

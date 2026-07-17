@@ -29,6 +29,7 @@ interface CreationViewProps {
   onStart: () => Promise<void>;
   onApproveArc: (targetChapterCount: number) => Promise<boolean>;
   onApproveBookRevision: () => Promise<void>;
+  onResume: () => Promise<void>;
   onRetryFailedRun: () => Promise<void>;
   onRetryChapter: () => Promise<void>;
   onRecoverStale: () => Promise<void>;
@@ -86,7 +87,7 @@ function scrollToBottom(element: HTMLDivElement | null, behavior: ScrollBehavior
   }
 }
 
-export function CreationView({ project, events, currentArc, summaries, readiness, bookRevision, busy, feedback, sendingFeedback, onFeedbackChange, onSendFeedback, onRequestArcRevision, onStart, onApproveArc, onApproveBookRevision, onRetryFailedRun, onRetryChapter, onRecoverStale, onSelectArtifact }: CreationViewProps) {
+export function CreationView({ project, events, currentArc, summaries, readiness, bookRevision, busy, feedback, sendingFeedback, onFeedbackChange, onSendFeedback, onRequestArcRevision, onStart, onApproveArc, onApproveBookRevision, onResume, onRetryFailedRun, onRetryChapter, onRecoverStale, onSelectArtifact }: CreationViewProps) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [following, setFollowing] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -161,6 +162,7 @@ export function CreationView({ project, events, currentArc, summaries, readiness
           {completedChapterIds.filter((chapterId) => chapterId !== activeChapterId).map((chapterId) => <button type="button" className={styles.completedChapter} key={chapterId} onClick={() => onSelectArtifact(`chapters/${chapterId}/final.md`)}><span><BookOpen size={15} /></span><div><strong>{chapterId}</strong><small>正文已提交，点击只读查看</small></div></button>)}
 
           {model.stage === "chapter_recovery" && <section className={styles.recoveryTask}><h2>正文已保留，继续自动修订证据</h2><p>不会要求你编辑补丁或重写章节；Harness 会继续有限次语义修订。</p><div><Button variant="ghost" onClick={() => setDetailsOpen(true)}>查看失败详情</Button><Button variant="primary" disabled={busy} onClick={() => void onRetryChapter()}><RotateCw size={16} />继续自动修订</Button></div></section>}
+          {model.primaryAction === "resume" && <section className={styles.recoveryTask}><h2>连续创作当前已暂停</h2><p>现在没有模型生成或后台创作任务。恢复后将从最近的一致检查点继续。</p><Button variant="primary" disabled={busy} onClick={() => void onResume()}><Play size={16} />{busy ? "正在恢复……" : "恢复连续创作"}</Button></section>}
           {model.primaryAction === "recover_stale" && <section className={styles.recoveryTask}><h2>异常运行恢复</h2><p>只有确认后台请求已经结束时才执行恢复。</p><Button variant="primary" disabled={busy} onClick={() => void onRecoverStale()}>恢复异常状态</Button></section>}
         </div>
       </div>

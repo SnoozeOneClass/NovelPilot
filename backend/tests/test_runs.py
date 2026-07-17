@@ -13,7 +13,7 @@ from app.schemas.runs import RunAdvanceRequest
 from app.storage import profiles as profile_storage
 from app.storage.events import append_event, read_events
 from app.storage.json_files import read_json, write_json
-from app.storage.run_state import read_run_control_state
+from app.storage.run_state import accept_run_dispatch, read_run_control_state
 
 
 def _event(event_id: str) -> HarnessEvent:
@@ -211,10 +211,65 @@ def test_start_run_hands_continuation_to_backend_host(tmp_path, monkeypatch) -> 
     result = runs_api.start_run()
 
     assert result["status"] == "running"
+    assert result["dispatch_status"] == "accepted"
+    assert result["action_key"] is not None
+    assert result["dispatch_id"] is not None
     assert wakes == [project_path]
     state = read_run_control_state(project_path)
     assert state.desired_state == "running"
     assert state.run_id == result["run_id"]
+    assert state.dispatch is not None
+    assert state.dispatch.status == "accepted"
+    assert state.dispatch.dispatch_id == result["dispatch_id"]
+    assert state.dispatch.action_key == result["action_key"]
+    assert [event.kind for event in read_events(project_path)] == [
+        "run_started",
+        "run_dispatch_accepted",
+    ]
+
+
+def test_resume_run_hands_continuation_to_backend_host(tmp_path, monkeypatch) -> None:
+    project_path = tmp_path / "novel"
+    project_path.mkdir()
+    write_json(
+        project_path / "project.json",
+        ProjectMetadata(title="Novel", run_status="paused").model_dump(mode="json"),
+    )
+    (project_path / "events.jsonl").write_text("", encoding="utf-8")
+    wakes = []
+
+    class FakeHost:
+        started = True
+
+        def wake(self, path) -> None:
+            wakes.append(path)
+
+    monkeypatch.setattr(runs_api, "get_active_project_path", lambda: project_path)
+    monkeypatch.setattr(runs_api, "_ensure_project_is_ready_to_run", lambda _path: None)
+    monkeypatch.setattr(runs_api, "get_run_host", lambda: FakeHost())
+    monkeypatch.setattr(
+        runs_api,
+        "_advance_run_until_stop",
+        lambda *_args, **_kwargs: pytest.fail("Browser request drove the run inline."),
+    )
+
+    result = runs_api.resume_run()
+
+    assert result["status"] == "running"
+    assert result["dispatch_status"] == "accepted"
+    assert result["action_key"] is not None
+    assert result["dispatch_id"] is not None
+    assert wakes == [project_path]
+    state = read_run_control_state(project_path)
+    assert state.desired_state == "running"
+    assert state.run_id == result["run_id"]
+    assert state.dispatch is not None
+    assert state.dispatch.status == "accepted"
+    assert state.dispatch.dispatch_id == result["dispatch_id"]
+    assert [event.kind for event in read_events(project_path)] == [
+        "run_resumed",
+        "run_dispatch_accepted",
+    ]
 
 
 def test_pause_run_requests_pause_only_when_running(tmp_path, monkeypatch) -> None:
@@ -275,12 +330,78 @@ def test_recover_stale_run_pauses_abandoned_run_lock(
     metadata = read_json(project_path / "project.json")
     events = read_events(project_path)
 
-    assert result == {"status": "paused", "previous_status": run_status}
+    assert result == {
+        "status": "paused",
+        "previous_status": run_status,
+        "desired_state": "stopped",
+        "next_action": "resume_run",
+    }
     assert metadata["run_status"] == "paused"
+    state = read_run_control_state(project_path)
+    assert state.desired_state == "stopped"
+    assert state.dispatch is None
     assert events[-1].kind == "run_recovered"
     assert events[-1].atomic_action == "recover_stale_run"
     assert events[-1].routing_decision == "pause"
-    assert events[-1].payload == {"previous_status": run_status, "run_status": "paused"}
+    assert events[-1].payload == {
+        "previous_status": run_status,
+        "run_status": "paused",
+        "desired_state": "stopped",
+        "next_action": "resume_run",
+    }
+
+
+def test_recover_stale_run_rejects_fresh_host_dispatch(tmp_path, monkeypatch) -> None:
+    project_path = tmp_path / "novel"
+    project_path.mkdir()
+    write_json(
+        project_path / "project.json",
+        ProjectMetadata(title="Novel", run_status="running").model_dump(mode="json"),
+    )
+    dispatch = accept_run_dispatch(
+        project_path,
+        run_id="run-1",
+        action_key="book:bootstrap",
+    )
+    monkeypatch.setattr(runs_api, "get_active_project_path", lambda: project_path)
+
+    with pytest.raises(HTTPException) as exc:
+        runs_api.recover_stale_run()
+
+    assert exc.value.status_code == 400
+    assert "durably accepted" in str(exc.value.detail)
+    assert read_json(project_path / "project.json")["run_status"] == "running"
+    state = read_run_control_state(project_path)
+    assert state.desired_state == "running"
+    assert state.dispatch is not None
+    assert state.dispatch.dispatch_id == dispatch.dispatch_id
+
+
+def test_recover_stale_run_cleanup_is_idempotent(tmp_path, monkeypatch) -> None:
+    project_path = tmp_path / "novel"
+    project_path.mkdir()
+    write_json(
+        project_path / "project.json",
+        ProjectMetadata(title="Novel", run_status="running").model_dump(mode="json"),
+    )
+    monkeypatch.setattr(runs_api, "get_active_project_path", lambda: project_path)
+
+    first = runs_api.recover_stale_run()
+    second = runs_api.recover_stale_run()
+
+    state = read_run_control_state(project_path)
+    events = read_events(project_path)
+    assert first["next_action"] == "resume_run"
+    assert second == {
+        "status": "paused",
+        "previous_status": "paused",
+        "desired_state": "stopped",
+        "next_action": "none",
+    }
+    assert state.desired_state == "stopped"
+    assert state.dispatch is None
+    assert [event.kind for event in events].count("run_recovered") == 1
+    assert events[-1].kind == "run_recovery_ignored"
 
 
 def test_recover_stale_run_rejects_active_runner(tmp_path, monkeypatch) -> None:
@@ -319,7 +440,12 @@ def test_recover_stale_run_ignores_non_locked_project(tmp_path, monkeypatch) -> 
     metadata = read_json(project_path / "project.json")
     events = read_events(project_path)
 
-    assert result == {"status": "idle", "previous_status": "idle"}
+    assert result == {
+        "status": "idle",
+        "previous_status": "idle",
+        "desired_state": "stopped",
+        "next_action": "none",
+    }
     assert metadata["run_status"] == "idle"
     assert events[-1].kind == "run_recovery_ignored"
     assert events[-1].payload == {"run_status": "idle"}

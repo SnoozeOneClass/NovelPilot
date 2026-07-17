@@ -939,6 +939,7 @@ def run_chapter_patch_evidence_repair_agent(
     chapter_id: str,
     expected_revision: int,
     instruction: str,
+    candidate_run_id: str | None = None,
     on_event: AgentEventCallback | None = None,
     on_text_delta: Callable[[ChatChunk], None] | None = None,
     on_tool_event: Callable[[ChatChunk], None] | None = None,
@@ -955,9 +956,8 @@ def run_chapter_patch_evidence_repair_agent(
         AgentActivation(
             project_path=project_path,
             identity=identity,
-            candidate_run_id=(
-                f"chapter-patch-{chapter_id}-{expected_revision + 1}-{uuid4().hex[:8]}"
-            ),
+            candidate_run_id=candidate_run_id
+            or f"chapter-patch-{chapter_id}-{expected_revision + 1}-{uuid4().hex[:8]}",
             phase="state_patch_repair",
             expected_revision=expected_revision,
             allowed_tools=(

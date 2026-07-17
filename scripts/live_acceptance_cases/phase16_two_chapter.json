@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "case_id": "phase16-two-chapter-normal-flow-v1",
+  "prompt_path": "scripts/live_acceptance_cases/phase16_two_chapter_prompt.md",
+  "prompt_sha256": "87611f930314d9db7f9000630cfd5e39d0f13abb9711eb1480c5cbe90476f722",
+  "actor_policy_version": "recommended-only-v1",
+  "operation_mode": "participatory",
+  "first_arc": {
+    "expected_target_chapter_count": 2,
+    "approval_policy": "exact_model_recommendation"
+  },
+  "cross_chapter_obligations": [
+    {
+      "id": "named-entity-lin-che",
+      "chapter_1": "Establish protagonist 林澈 by name.",
+      "chapter_2": "Preserve 林澈 as the same protagonist."
+    },
+    {
+      "id": "timeline-2317",
+      "chapter_1": "Establish the explicit timeline fact 23:17.",
+      "chapter_2": "Use or explain the established 23:17 fact without contradiction."
+    },
+    {
+      "id": "physical-evidence-0417",
+      "chapter_1": "Establish a brass tide token numbered 0417.",
+      "chapter_2": "Preserve and advance the same token as physical evidence."
+    },
+    {
+      "id": "delivery-obligation",
+      "chapter_1": "林澈 promises to give the token to archivist 许青 for verification.",
+      "chapter_2": "Discharge the promise or record an explicit consequence."
+    },
+    {
+      "id": "conditional-alliance",
+      "chapter_1": "林澈 and 许青 begin in mutual distrust.",
+      "chapter_2": "Advance the relationship to conditional cooperation without erasing its cost."
+    }
+  ],
+  "terminal_checkpoint": {
+    "completed_chapter_ids": ["chapter-001", "chapter-002"],
+    "completed_arc_id": "arc-001",
+    "next_arc_id": "arc-002",
+    "next_action": "approve_story_arc"
+  },
+  "prohibited_driver_capabilities": [
+    "fault_injection",
+    "model_response_mutation",
+    "tool_result_mutation",
+    "evaluator_result_mutation",
+    "persistence_mutation",
+    "retry_budget_mutation",
+    "run_state_mutation"
+  ]
+}
