@@ -18,6 +18,7 @@ export type CreationStage =
   | "waiting_provider"
   | "chapter_recovery"
   | "paused"
+  | "benchmark_terminal"
   | "failed"
   | "completed";
 
@@ -29,6 +30,7 @@ export type CreationPrimaryAction =
   | "retry_failed_run"
   | "resume"
   | "recover_stale"
+  | "open_experiment_lab"
   | null;
 
 export interface CreationViewModel {
@@ -64,6 +66,28 @@ export function deriveCreationViewModel({
   const started = hasRunStarted(events);
   const nextAction = readiness?.next_action;
   const isRunning = metadata.run_status === "running" || metadata.run_status === "pause_requested";
+  const benchmarkTerminal = metadata.project_kind === "benchmark_mother" && (
+    metadata.benchmark_fixture?.status === "frozen"
+    || metadata.benchmark_fixture?.status === "freeze_failed"
+    || currentArc?.arc_id === "arc-002" && currentArc.human_review === "approved"
+    || nextAction?.id === "retry_experiment_fixture"
+    || nextAction?.id === "open_experiment_lab"
+  );
+
+  if (benchmarkTerminal) {
+    const frozen = metadata.benchmark_fixture?.status === "frozen";
+    return {
+      stage: "benchmark_terminal",
+      eyebrow: frozen ? "实验母本已冻结" : "母本冻结待处理",
+      title: frozen ? "源项目创作已经结束" : "第二故事弧已批准，生成保持停止",
+      description: frozen
+        ? "这个项目现在只保留母本来源证据。进入实验室查看固定检查点并开始后续实验。"
+        : "请进入实验室重试本地母本发布；不会再次调用模型或修改已批准内容。",
+      primaryAction: "open_experiment_lab",
+      isRunning: false,
+      hasStarted: started
+    };
+  }
 
   if (bookRevision) {
     return {

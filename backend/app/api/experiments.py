@@ -7,22 +7,18 @@ from app.harness.run_control import (
     begin_active_runner,
     end_active_runner,
 )
-from app.schemas.events import HarnessEvent
 from app.schemas.experiments import (
-    ExperimentFixtureCreateResponse,
+    ExperimentFixtureIssue,
     ExperimentFixtureStatus,
+    ExperimentFixtureTransition,
     ExperimentRunConfigurationRequest,
     ExperimentRunConfigurationResponse,
 )
-from app.storage.events import append_event
-from app.storage.experiment_fixtures import (
-    ExperimentFixtureIneligibleError,
-    create_fixture,
-    get_fixture_status,
-)
+from app.storage import benchmark_sources
+from app.storage.experiment_fixtures import get_fixture_status
 from app.storage.experiment_runs import create_run_configuration
 from app.storage.projects import get_active_project_path, read_project_metadata
-from app.storage.setup import enqueue_pending_setup_event
+from app.storage.run_state import set_run_intent
 
 
 router = APIRouter()
@@ -38,14 +34,44 @@ def _active_project_or_404() -> Path:
 @router.get("/fixtures/status", response_model=ExperimentFixtureStatus)
 def fixture_status() -> ExperimentFixtureStatus:
     project_path = _active_project_or_404()
+    metadata = read_project_metadata(project_path)
+    if metadata.project_kind != "benchmark_mother":
+        return ExperimentFixtureStatus(
+            project_kind="novel",
+            eligible=False,
+            issues=[
+                ExperimentFixtureIssue(
+                    code="not_benchmark_mother",
+                    message="当前项目不是在新建时声明的实验母本项目。",
+                )
+            ],
+        )
     try:
-        return get_fixture_status(project_path)
+        status = get_fixture_status(project_path)
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    lifecycle = status.lifecycle
+    if (
+        lifecycle is not None
+        and lifecycle.status == "frozen"
+        and status.existing_fixture is None
+    ):
+        return status.model_copy(
+            update={
+                "eligible": False,
+                "issues": [
+                    ExperimentFixtureIssue(
+                        code="frozen_fixture_missing",
+                        message="已登记的冻结母本缺失或完整性校验失败。",
+                    )
+                ],
+            }
+        )
+    return status
 
 
-@router.post("/fixtures", response_model=ExperimentFixtureCreateResponse)
-def freeze_fixture() -> ExperimentFixtureCreateResponse:
+@router.post("/fixtures", response_model=ExperimentFixtureTransition)
+def freeze_fixture() -> ExperimentFixtureTransition:
     with active_project_transition_lock():
         project_path = _active_project_or_404()
         if not begin_active_runner(project_path):
@@ -55,22 +81,28 @@ def freeze_fixture() -> ExperimentFixtureCreateResponse:
             )
 
     try:
-        try:
-            response = create_fixture(project_path, ignore_active_runner=True)
-        except ExperimentFixtureIneligibleError as exc:
+        metadata = read_project_metadata(project_path)
+        if metadata.project_kind != "benchmark_mother":
             raise HTTPException(
                 status_code=409,
-                detail={
-                    "message": "当前项目还没有到达可冻结的实验检查点。",
-                    "issues": [issue.model_dump(mode="json") for issue in exc.issues],
-                },
-            ) from exc
+                detail="普通小说项目不能转换为实验母本。",
+            )
+        lifecycle = metadata.benchmark_fixture
+        if lifecycle is not None and lifecycle.status == "frozen":
+            try:
+                return benchmark_sources.frozen_transition(project_path)
+            except benchmark_sources.BenchmarkCheckpointError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+        try:
+            benchmark_sources.validate_approved_arc2_checkpoint(project_path)
         except (FileNotFoundError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        if response.created:
-            _record_fixture_event(project_path, response)
-        return response
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        set_run_intent(
+            project_path,
+            desired_state="stopped",
+            clear_provider_wait=True,
+        )
+        return benchmark_sources.publish_approved_benchmark_fixture(project_path)
     finally:
         end_active_runner(project_path)
 
@@ -93,30 +125,3 @@ def create_experiment_run_configuration(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         end_active_runner(project_path)
-
-
-def _record_fixture_event(
-    project_path: Path,
-    response: ExperimentFixtureCreateResponse,
-) -> None:
-    metadata = read_project_metadata(project_path)
-    fixture = response.fixture
-    event = HarnessEvent(
-        project_id=metadata.project_id,
-        kind="benchmark_fixture_frozen",
-        loop_layer="system",
-        atomic_action="freeze_experiment_fixture",
-        status="completed",
-        routing_decision="fixture_ready",
-        message=f"Experiment fixture {fixture.fixture_id} frozen from committed state.",
-        payload={
-            "fixture_id": fixture.fixture_id,
-            "checkpoint_fingerprint": fixture.checkpoint.checkpoint_fingerprint,
-            "fixture_relative_path": fixture.relative_path,
-            "source_active_arc_id": fixture.checkpoint.active_arc_id,
-        },
-    )
-    try:
-        append_event(project_path, event)
-    except OSError:
-        enqueue_pending_setup_event(project_path, event)

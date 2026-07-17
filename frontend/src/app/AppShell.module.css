@@ -241,6 +241,13 @@
   font-size: 10px;
 }
 
+.statuses .motherStatus {
+  border-color: color-mix(in srgb, var(--np-accent) 48%, var(--np-line));
+  background: var(--np-accent-soft);
+  color: var(--np-accent);
+  font-weight: 700;
+}
+
 .statuses strong[data-status="running"] {
   border-color: var(--np-success);
   color: var(--np-success);

@@ -8,13 +8,14 @@ import type {
   CurrentArcApprovalResponse,
   CurrentArcState,
   DeleteProjectsResponse,
-  ExperimentFixtureCreateResponse,
   ExperimentFixtureStatus,
+  ExperimentFixtureTransition,
   ChapterRetryResponse,
   ArtifactSummary,
   AgentPolicy,
   BookRevisionState,
   OperationMode,
+  ProjectKind,
   ProjectCompletionAudit,
   ProjectReadiness,
   ProjectSummary,
@@ -110,11 +111,11 @@ async function request<T>(path: string, init?: RequestInit, timeoutMs?: number):
 export const api = {
   listProjects: () => request<ProjectSummary[]>("/api/projects", undefined, projectListTimeoutMs),
   activeProject: () => request<ProjectSummary | null>("/api/projects/active"),
-  createProject: (operation_mode: OperationMode) =>
+  createProject: (operation_mode: OperationMode, project_kind: ProjectKind = "novel") =>
     request<ProjectSummary>("/api/projects", {
       method: "POST",
       headers: jsonHeaders,
-      body: JSON.stringify({ operation_mode })
+      body: JSON.stringify({ operation_mode, project_kind })
     }),
   openProject: (name: string) =>
     request<ProjectSummary>("/api/projects/open", {
@@ -189,7 +190,7 @@ export const api = {
   experimentFixtureStatus: () =>
     request<ExperimentFixtureStatus>("/api/experiments/fixtures/status"),
   freezeExperimentFixture: () =>
-    request<ExperimentFixtureCreateResponse>("/api/experiments/fixtures", {
+    request<ExperimentFixtureTransition>("/api/experiments/fixtures", {
       method: "POST"
     }),
   startRun: () => request<RunCommandResponse>("/api/runs/start", { method: "POST" }),

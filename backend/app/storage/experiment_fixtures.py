@@ -68,16 +68,26 @@ def get_fixture_status(
     project_path: Path,
     *,
     ignore_active_runner: bool = False,
+    allow_pending_current_arc_review: bool = False,
 ) -> ExperimentFixtureStatus:
+    metadata = read_project_metadata(project_path)
     inspection = _inspect_source(
         project_path,
         ignore_active_runner=ignore_active_runner,
+        allow_pending_current_arc_review=allow_pending_current_arc_review,
     )
     if isinstance(inspection, list):
-        return ExperimentFixtureStatus(eligible=False, issues=inspection)
+        return ExperimentFixtureStatus(
+            project_kind=metadata.project_kind,
+            lifecycle=metadata.benchmark_fixture,
+            eligible=False,
+            issues=inspection,
+        )
 
     existing = _find_matching_fixture(inspection.checkpoint)
     return ExperimentFixtureStatus(
+        project_kind=metadata.project_kind,
+        lifecycle=metadata.benchmark_fixture,
         eligible=True,
         checkpoint=inspection.checkpoint,
         existing_fixture=existing,
@@ -92,6 +102,7 @@ def create_fixture(
     inspection = _inspect_source(
         project_path,
         ignore_active_runner=ignore_active_runner,
+        allow_pending_current_arc_review=False,
     )
     if isinstance(inspection, list):
         raise ExperimentFixtureIneligibleError(inspection)
@@ -188,6 +199,7 @@ def _inspect_source(
     project_path: Path,
     *,
     ignore_active_runner: bool,
+    allow_pending_current_arc_review: bool,
 ) -> _EligibleSource | list[ExperimentFixtureIssue]:
     issues: list[ExperimentFixtureIssue] = []
     metadata = read_project_metadata(project_path)
@@ -225,7 +237,10 @@ def _inspect_source(
         elif current_arc.arc_id != metadata.active_arc_id:
             _issue(issues, "current_arc_mismatch", "当前故事弧与项目元数据不一致。")
         else:
-            if current_arc.human_review != "approved":
+            if current_arc.human_review != "approved" and not (
+                allow_pending_current_arc_review
+                and current_arc.human_review == "awaiting_review"
+            ):
                 _issue(issues, "current_arc_not_approved", "请先明确批准当前故事弧计划。")
             if current_arc.completed_chapter_ids:
                 _issue(issues, "current_arc_started", "当前故事弧已经提交章节，冻结点已经过去。")
@@ -446,6 +461,8 @@ def _fixture_summary(
     manifest: ExperimentFixtureManifest,
 ) -> ExperimentFixtureSummary:
     return ExperimentFixtureSummary(
+        fixture_version=manifest.fixture_version,
+        integrity_verified=True,
         fixture_id=manifest.fixture_id,
         created_at=manifest.created_at,
         relative_path=fixture_path.relative_to(config.OUTPUT_DIR).as_posix(),

@@ -10,7 +10,7 @@ const project: ProjectSummary = {
   name: "project-1",
   title: "测试小说",
   path: "D:/output/project-1",
-  metadata: { schema_version: 1, project_id: "project-1", title: "测试小说", operation_mode: "participatory", active_profile_id: null, active_arc_id: null, active_chapter_id: null, run_status: "paused", created_at: "2026-07-13T00:00:00Z", updated_at: "2026-07-13T00:00:00Z" }
+  metadata: { schema_version: 1, project_id: "project-1", title: "测试小说", operation_mode: "participatory", project_kind: "novel", benchmark_fixture: null, active_profile_id: null, active_arc_id: null, active_chapter_id: null, run_status: "paused", created_at: "2026-07-13T00:00:00Z", updated_at: "2026-07-13T00:00:00Z" }
 };
 
 function renderSettings(value = project, onProjectChanged = vi.fn()) {
@@ -23,6 +23,58 @@ describe("SettingsView", () => {
     renderSettings({ ...project, metadata: { ...project.metadata, run_status: "running" } });
     expect(screen.getByRole("radio", { name: /全自动模式/ })).toBeDisabled();
     expect(screen.getByRole("radio", { name: /参与模式/ })).toBeDisabled();
+  });
+
+  it("permanently locks operation mode for a benchmark mother", () => {
+    renderSettings({
+      ...project,
+      metadata: {
+        ...project.metadata,
+        project_kind: "benchmark_mother",
+        benchmark_fixture: {
+          status: "preparing",
+          fixture_id: null,
+          checkpoint_fingerprint: null,
+          failure_code: null,
+          failure_message: null
+        },
+        run_status: "idle"
+      }
+    });
+
+    expect(screen.getByText(/永久使用参与模式/)).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /全自动模式/ })).toBeDisabled();
+    expect(screen.getByRole("radio", { name: /参与模式/ })).toBeDisabled();
+  });
+
+  it("keeps model configuration available before Arc-2 approval", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, "profiles").mockResolvedValue({
+      schema_version: 1,
+      active_profile_id: null,
+      profiles: []
+    });
+    renderSettings({
+      ...project,
+      metadata: {
+        ...project.metadata,
+        project_kind: "benchmark_mother",
+        benchmark_fixture: {
+          status: "preparing",
+          fixture_id: null,
+          checkpoint_fingerprint: null,
+          failure_code: null,
+          failure_message: null
+        },
+        active_arc_id: "arc-002",
+        run_status: "paused"
+      }
+    });
+
+    await user.click(screen.getByRole("button", { name: /LLM Profile/ }));
+
+    expect(await screen.findByRole("button", { name: /新建配置/ })).toBeEnabled();
+    expect(screen.queryByText(/模型与 Agent 配置保持只读/)).not.toBeInTheDocument();
   });
 
   it("updates a stopped project's operation mode through the existing API", async () => {

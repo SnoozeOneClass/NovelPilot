@@ -30,6 +30,8 @@ from app.schemas.runs import (
 from app.storage.json_files import write_json
 from app.storage.events import append_event, read_events
 from app.storage.projects import (
+    ProjectReadOnlyError,
+    ensure_creative_mutation_allowed,
     get_active_project_path,
     project_metadata_lock,
     read_project_metadata,
@@ -111,6 +113,7 @@ def start_run(run_request: RunAdvanceRequest | None = None) -> dict[str, object]
     action_key: str | None = None
     dispatch_id: str | None = None
     try:
+        _ensure_source_can_mutate(project_path)
         metadata = read_project_metadata(project_path)
         _ensure_run_can_start(metadata.run_status)
         _ensure_run_can_start_new(project_path, metadata.run_status)
@@ -171,6 +174,7 @@ def start_run(run_request: RunAdvanceRequest | None = None) -> dict[str, object]
 @router.post("/pause")
 def pause_run() -> dict[str, str]:
     project_path = _active_project_or_404()
+    _ensure_source_can_mutate(project_path)
     metadata = read_project_metadata(project_path)
     if metadata.run_status == "waiting_for_provider":
         set_run_intent(project_path, desired_state="stopped")
@@ -233,6 +237,7 @@ def resume_run(run_request: RunAdvanceRequest | None = None) -> dict[str, object
     action_key: str | None = None
     dispatch_id: str | None = None
     try:
+        _ensure_source_can_mutate(project_path)
         metadata = read_project_metadata(project_path)
         _ensure_run_can_start(metadata.run_status)
         _ensure_project_is_ready_to_run(project_path)
@@ -296,6 +301,7 @@ def recover_stale_run() -> dict[str, object]:
         )
     )
     try:
+        _ensure_source_can_mutate(project_path)
         with project_metadata_lock(project_path):
             metadata = read_project_metadata(project_path)
             if metadata.run_status not in {"running", "pause_requested"}:
@@ -369,6 +375,7 @@ def recover_stale_run() -> dict[str, object]:
 def retry_current_chapter() -> dict[str, str]:
     project_path = _begin_active_runner_or_409()
     try:
+        _ensure_source_can_mutate(project_path)
         result = _retry_current_chapter(project_path)
     finally:
         end_active_runner(project_path)
@@ -577,13 +584,23 @@ def _ensure_project_is_ready_to_run(project_path: Path) -> None:
         for gate in readiness.gates
         if gate.required and gate.status != "passed"
     ]
-    if not blocking_gates:
+    if readiness.can_start_run and not blocking_gates:
         return
 
     detail = "; ".join(
         f"{gate.id}={gate.status}: {gate.message}" for gate in blocking_gates
-    )
+    ) or readiness.next_action.message
     raise HTTPException(status_code=400, detail=f"Run is not ready: {detail}")
+
+
+def _ensure_source_can_mutate(project_path: Path) -> None:
+    try:
+        ensure_creative_mutation_allowed(project_path)
+    except ProjectReadOnlyError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="实验母本源项目已经停止创作，只能查看、删除或进入实验室。",
+        ) from exc
 
 
 def _next_attempt_path(chapter_path: Path) -> Path:

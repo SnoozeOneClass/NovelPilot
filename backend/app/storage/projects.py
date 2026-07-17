@@ -13,6 +13,7 @@ from app.schemas.events import HarnessEvent
 from app.schemas.projects import (
     ActiveProjectDocument,
     AgentPolicy,
+    BenchmarkFixtureLifecycle,
     CreateProjectRequest,
     DeletedProject,
     DeleteProjectsResponse,
@@ -52,6 +53,14 @@ class ProjectDeletionError(RuntimeError):
     pass
 
 
+class ProjectReadOnlyError(RuntimeError):
+    pass
+
+
+class BenchmarkProjectModeLockedError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class ProjectDeletionTarget:
     project_id: str
@@ -82,7 +91,10 @@ def project_metadata_lock(project_path: Path) -> AbstractContextManager[None]:
 def create_project(request: CreateProjectRequest) -> ProjectSummary:
     ensure_runtime_dirs()
     _ensure_active_project_can_change()
-    metadata = ProjectMetadata(operation_mode=request.operation_mode)
+    metadata = ProjectMetadata(
+        operation_mode=request.operation_mode,
+        project_kind=request.project_kind,
+    )
     project_path = resolve_project_path(f"project-{metadata.project_id}")
     if project_path.exists():
         raise FileExistsError(f"Project already exists: {project_path.name}")
@@ -157,6 +169,10 @@ def update_operation_mode(
                 )
             if metadata.operation_mode == operation_mode:
                 return summarize_project(project_path)
+            if metadata.project_kind == "benchmark_mother":
+                raise BenchmarkProjectModeLockedError(
+                    "实验母本项目永久使用参与模式，不能切换创作模式。"
+                )
 
             files: dict[str, str | bytes] = {}
             previous_mode = metadata.operation_mode
@@ -223,6 +239,7 @@ def update_agent_policy(project_path: Path, agent_policy: AgentPolicy) -> Projec
     with project_metadata_lock(project_path):
         recover_file_transactions(project_path)
         metadata = read_project_metadata(project_path)
+        _ensure_creative_mutation_allowed(project_path, metadata)
         if metadata.run_status in RUN_LOCK_STATUSES:
             raise ActiveProjectBusyError(
                 "Cannot change Agent policy while the harness run is in progress."
@@ -255,6 +272,59 @@ def update_agent_policy(project_path: Path, agent_policy: AgentPolicy) -> Projec
             },
         )
         return summarize_project(project_path)
+
+
+def benchmark_source_is_generation_terminal(
+    project_path: Path,
+    metadata: ProjectMetadata | None = None,
+) -> bool:
+    metadata = metadata or read_project_metadata(project_path)
+    if metadata.project_kind != "benchmark_mother":
+        return False
+    lifecycle = metadata.benchmark_fixture
+    if lifecycle is not None and lifecycle.status in {"freeze_failed", "frozen"}:
+        return True
+    if metadata.active_arc_id != "arc-002":
+        return False
+    state_path = project_path / "arcs" / "arc-002" / "state.json"
+    payload = read_json(state_path, default=None)
+    if not isinstance(payload, dict):
+        return False
+    try:
+        arc = CurrentArcState.model_validate(payload)
+    except ValueError:
+        return False
+    return arc.arc_id == "arc-002" and arc.human_review == "approved"
+
+
+def ensure_creative_mutation_allowed(project_path: Path) -> None:
+    metadata = read_project_metadata(project_path)
+    _ensure_creative_mutation_allowed(project_path, metadata)
+
+
+def update_benchmark_fixture_lifecycle(
+    project_path: Path,
+    lifecycle: BenchmarkFixtureLifecycle,
+) -> ProjectMetadata:
+    with project_metadata_lock(project_path):
+        metadata = read_project_metadata(project_path)
+        if metadata.project_kind != "benchmark_mother":
+            raise ValueError("The active project is not a benchmark mother source.")
+        metadata.benchmark_fixture = lifecycle
+        if lifecycle.status in {"freeze_failed", "frozen"}:
+            metadata.run_status = "paused"
+        write_project_metadata(project_path, metadata)
+        return metadata
+
+
+def _ensure_creative_mutation_allowed(
+    project_path: Path,
+    metadata: ProjectMetadata,
+) -> None:
+    if benchmark_source_is_generation_terminal(project_path, metadata):
+        raise ProjectReadOnlyError(
+            "实验母本源项目已经停止创作，只能查看、导出、删除或进入实验室。"
+        )
 
 
 def summarize_project(project_path: Path) -> ProjectSummary:

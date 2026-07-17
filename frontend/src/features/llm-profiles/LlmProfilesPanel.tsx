@@ -7,6 +7,7 @@ import styles from "./LlmProfilesPanel.module.css";
 
 interface LlmProfilesPanelProps {
   onProfilesChanged?: (profiles: LlmProfilesDocument) => void;
+  locked?: boolean;
 }
 
 const emptyForm: LlmProfileMutation = {
@@ -20,7 +21,7 @@ const emptyForm: LlmProfileMutation = {
   enabled: true
 };
 
-export function LlmProfilesPanel({ onProfilesChanged }: LlmProfilesPanelProps) {
+export function LlmProfilesPanel({ onProfilesChanged, locked = false }: LlmProfilesPanelProps) {
   const [profiles, setProfiles] = useState<LlmProfilesDocument | null>(null);
   const [form, setForm] = useState<LlmProfileMutation>(emptyForm);
   const [requestOptionsText, setRequestOptionsText] = useState("{}");
@@ -142,7 +143,7 @@ export function LlmProfilesPanel({ onProfilesChanged }: LlmProfilesPanelProps) {
           <h1>设置与模型</h1>
           <p>配置保存在本机全局文件中；小说项目只记录 profile_id 与模型快照。</p>
         </div>
-        <button className={styles.outlineButton} onClick={() => { setForm(emptyForm); setRequestOptionsText("{}"); setEditingExisting(false); }}>
+        <button disabled={locked} className={styles.outlineButton} onClick={() => { setForm(emptyForm); setRequestOptionsText("{}"); setEditingExisting(false); }}>
           <Plus size={16} /> 新建配置
         </button>
       </header>
@@ -168,9 +169,9 @@ export function LlmProfilesPanel({ onProfilesChanged }: LlmProfilesPanelProps) {
                     <small>{profile.base_url} · {profile.has_api_key ? "已保存密钥" : "未保存密钥"}</small>
                   </div>
                   <div className={styles.profileActions}>
-                    <button title="设为当前配置" disabled={saving || loading || testingProfileId !== null || active} onClick={() => void selectProfile(profile.id)}><Check size={16} /></button>
+                    <button title="设为当前配置" disabled={locked || saving || loading || testingProfileId !== null || active} onClick={() => void selectProfile(profile.id)}><Check size={16} /></button>
                     <button title="测试连接" disabled={saving || loading || testingProfileId !== null || !profile.has_api_key} onClick={() => void testProfile(profile.id)}><PlugZap size={16} /></button>
-                    <button title="编辑配置" disabled={saving || testingProfileId !== null} onClick={() => editProfile(profile)}><Pencil size={16} /></button>
+                    <button title="编辑配置" disabled={locked || saving || testingProfileId !== null} onClick={() => editProfile(profile)}><Pencil size={16} /></button>
                   </div>
                 </article>
               );
@@ -184,17 +185,17 @@ export function LlmProfilesPanel({ onProfilesChanged }: LlmProfilesPanelProps) {
             <div><h2>{editingExisting ? "编辑配置" : "新建配置"}</h2><p>兼容 OpenAI 与 Anthropic 协议的 Base URL。</p></div>
           </header>
           <div className={styles.formGrid}>
-            <label><span>Profile ID</span><input value={form.id} disabled={editingExisting} onChange={(event) => setForm({ ...form, id: event.target.value })} placeholder="main" /></label>
-            <label><span>显示名称</span><input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="主要写作模型" /></label>
-            <label><span>协议</span><select value={form.protocol} onChange={(event) => setForm({ ...form, protocol: event.target.value as LlmProfileMutation["protocol"] })}><option value="openai-compatible">OpenAI 兼容协议</option><option value="anthropic-compatible">Anthropic 兼容协议</option></select></label>
-            <label><span>模型名</span><input value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })} placeholder="gpt-4.1" /></label>
-            <label className={styles.wide}><span>Base URL</span><input value={form.base_url} onChange={(event) => setForm({ ...form, base_url: event.target.value })} placeholder="https://api.example.com/v1" /></label>
-            <label className={styles.wide}><span>API Key</span><input value={form.api_key ?? ""} onChange={(event) => setForm({ ...form, api_key: event.target.value })} placeholder={editingExisting ? "留空则保留原密钥" : "API Key"} type="password" /></label>
-            <label className={styles.wide}><span>额外请求参数（JSON）</span><textarea aria-label="额外请求参数（JSON）" value={requestOptionsText} onChange={(event) => setRequestOptionsText(event.target.value)} placeholder={'{"reasoning_effort":"high"}'} /><small>字段会合并到 Provider 请求体；model、messages/system 与 stream 由 NovelPilot 管理。Anthropic 如要求 max_tokens，请在这里显式填写。不要存放额外密钥。</small></label>
-            <label className={styles.enabled}><input checked={form.enabled} type="checkbox" onChange={(event) => setForm({ ...form, enabled: event.target.checked })} /><span>启用这个配置</span></label>
+            <label><span>Profile ID</span><input value={form.id} disabled={locked || editingExisting} onChange={(event) => setForm({ ...form, id: event.target.value })} placeholder="main" /></label>
+            <label><span>显示名称</span><input value={form.name} disabled={locked} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="主要写作模型" /></label>
+            <label><span>协议</span><select value={form.protocol} disabled={locked} onChange={(event) => setForm({ ...form, protocol: event.target.value as LlmProfileMutation["protocol"] })}><option value="openai-compatible">OpenAI 兼容协议</option><option value="anthropic-compatible">Anthropic 兼容协议</option></select></label>
+            <label><span>模型名</span><input value={form.model} disabled={locked} onChange={(event) => setForm({ ...form, model: event.target.value })} placeholder="gpt-4.1" /></label>
+            <label className={styles.wide}><span>Base URL</span><input value={form.base_url} disabled={locked} onChange={(event) => setForm({ ...form, base_url: event.target.value })} placeholder="https://api.example.com/v1" /></label>
+            <label className={styles.wide}><span>API Key</span><input value={form.api_key ?? ""} disabled={locked} onChange={(event) => setForm({ ...form, api_key: event.target.value })} placeholder={editingExisting ? "留空则保留原密钥" : "API Key"} type="password" /></label>
+            <label className={styles.wide}><span>额外请求参数（JSON）</span><textarea aria-label="额外请求参数（JSON）" value={requestOptionsText} disabled={locked} onChange={(event) => setRequestOptionsText(event.target.value)} placeholder={'{"reasoning_effort":"high"}'} /><small>字段会合并到 Provider 请求体；model、messages/system 与 stream 由 NovelPilot 管理。Anthropic 如要求 max_tokens，请在这里显式填写。不要存放额外密钥。</small></label>
+            <label className={styles.enabled}><input checked={form.enabled} disabled={locked} type="checkbox" onChange={(event) => setForm({ ...form, enabled: event.target.checked })} /><span>启用这个配置</span></label>
           </div>
           <footer>
-            <button className={styles.primaryButton} disabled={saving || loading || !form.id.trim() || !form.name.trim() || !form.model.trim()} onClick={() => void saveProfile()}>
+            <button className={styles.primaryButton} disabled={locked || saving || loading || !form.id.trim() || !form.name.trim() || !form.model.trim()} onClick={() => void saveProfile()}>
               <Save size={16} /> {saving ? "正在保存..." : "保存配置"}
             </button>
           </footer>

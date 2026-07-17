@@ -11,6 +11,7 @@ import styles from "./SettingsView.module.css";
 
 interface SettingsViewProps {
   project: ProjectSummary;
+  sourceReadOnly?: boolean;
   onProjectChanged: (project: ProjectSummary) => void;
   onProfilesChanged: (profiles: LlmProfilesDocument) => void;
 }
@@ -27,15 +28,21 @@ const themes: Array<{ id: ThemePreference; label: string; detail: string; icon: 
   { id: "dark", label: "暗色", detail: "适合长时间专注", icon: Moon }
 ];
 
-export function SettingsView({ project, onProjectChanged, onProfilesChanged }: SettingsViewProps) {
+export function SettingsView({ project, sourceReadOnly = false, onProjectChanged, onProfilesChanged }: SettingsViewProps) {
   const [section, setSection] = useState<SettingsSection>("project");
   const [profiles, setProfiles] = useState<LlmProfilesDocument | null>(null);
   const [savingMode, setSavingMode] = useState(false);
   const [notice, setNotice] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const { preference, resolvedTheme, setPreference } = useTheme();
-  const modeLocked = project.metadata.run_status === "running"
+  const motherModeLocked = project.metadata.project_kind === "benchmark_mother";
+  const terminalSourceReadOnly = sourceReadOnly || motherModeLocked && (
+    project.metadata.benchmark_fixture?.status === "frozen"
+    || project.metadata.benchmark_fixture?.status === "freeze_failed"
+  );
+  const runLocked = project.metadata.run_status === "running"
     || project.metadata.run_status === "pause_requested"
     || project.metadata.run_status === "waiting_for_provider";
+  const modeLocked = runLocked || motherModeLocked;
 
   async function changeMode(mode: OperationMode) {
     if (mode === project.metadata.operation_mode || savingMode || modeLocked) return;
@@ -70,7 +77,9 @@ export function SettingsView({ project, onProjectChanged, onProfilesChanged }: S
           <section className={styles.preferencePage}>
             <header><p>项目运行</p><h2>参与方式</h2><span>控制故事弧计划是否需要人工确认。随时反馈在两种模式下都可用。</span></header>
             {notice && <p className={notice.kind === "error" ? styles.error : styles.success}>{notice.text}</p>}
-            {modeLocked && <p className={styles.warning}>Harness 正在运行，模式将在当前动作结束并停止后才能修改。</p>}
+            {motherModeLocked
+              ? <p className={styles.warning}>实验母本项目永久使用参与模式，不能切换创作模式。</p>
+              : modeLocked && <p className={styles.warning}>Harness 正在运行，模式将在当前动作结束并停止后才能修改。</p>}
             <div className={styles.modeOptions} role="radiogroup" aria-label="项目运行模式">
               {([
                 { id: "full_auto" as const, title: "全自动模式", detail: "故事弧计划无需人工批准，Harness 在安全检查点自动继续。" },
@@ -86,7 +95,9 @@ export function SettingsView({ project, onProjectChanged, onProfilesChanged }: S
 
         {section === "models" && (
           <div className={styles.modelsPage}>
+            {terminalSourceReadOnly && <p className={styles.warning}>母本源项目已经停止创作，模型与 Agent 配置保持只读。</p>}
             <LlmProfilesPanel
+              locked={terminalSourceReadOnly}
               onProfilesChanged={(nextProfiles) => {
                 setProfiles(nextProfiles);
                 onProfilesChanged(nextProfiles);
@@ -95,7 +106,7 @@ export function SettingsView({ project, onProjectChanged, onProfilesChanged }: S
             <AgentPolicyPanel
               project={project}
               profiles={profiles}
-              locked={modeLocked}
+              locked={runLocked || terminalSourceReadOnly}
               onProjectChanged={onProjectChanged}
             />
           </div>

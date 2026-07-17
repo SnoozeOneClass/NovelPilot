@@ -6,7 +6,7 @@ import { AppShell } from "../../app/AppShell";
 import { useHarnessEvents } from "../../app/harness-events";
 import type { TaskDomain } from "../../app/types";
 import { useWorkspaceQueries, workspaceQueryKeys } from "../../app/workspace-queries";
-import type { LlmProfilesDocument, ProjectSummary } from "../../types/domain";
+import type { CurrentArcApprovalResponse, LlmProfilesDocument, ProjectSummary } from "../../types/domain";
 import { CreationView } from "../creation/CreationView";
 import { EvidenceCenter } from "../evidence/EvidenceCenter";
 import { ExperimentLab } from "../experiments/ExperimentLab";
@@ -125,8 +125,21 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
   async function resumeRun() { await runCommand("resume", async () => { await api.resumeRun(); }); }
 
   async function approveArc(targetChapterCount: number): Promise<boolean> {
-    const ok = await runCommand("approve", async () => { await api.approveCurrentArc(targetChapterCount); });
-    if (ok) setFeedbackNotice({ kind: "success", text: "当前故事弧已批准，正在自动进入章节创作。" });
+    const responses: CurrentArcApprovalResponse[] = [];
+    const ok = await runCommand("approve", async () => {
+      responses.push(await api.approveCurrentArc(targetChapterCount));
+    });
+    if (!ok) return false;
+    const response = responses[0];
+    if (response?.fixture_transition?.status === "frozen") {
+      setFeedbackNotice({ kind: "success", text: `实验母本已自动冻结：${response.fixture_transition.fixture?.fixture_id ?? "已就绪"}` });
+      setLocation("experiments");
+    } else if (response?.fixture_transition?.status === "freeze_failed") {
+      setFeedbackNotice({ kind: "error", text: response.fixture_transition.failure_message ?? "母本自动冻结未完成，请在实验室重试。" });
+      setLocation("experiments");
+    } else {
+      setFeedbackNotice({ kind: "success", text: "当前故事弧已批准，正在自动进入章节创作。" });
+    }
     return ok;
   }
 
@@ -150,11 +163,21 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
 
   async function freezeExperimentFixture(): Promise<boolean> {
     let fixtureId = "";
+    let failureMessage: string | null = null;
     const ok = await runCommand("freeze", async () => {
-      fixtureId = (await api.freezeExperimentFixture()).fixture.fixture_id;
+      const transition = await api.freezeExperimentFixture();
+      fixtureId = transition.fixture?.fixture_id ?? "";
+      failureMessage = transition.status === "freeze_failed"
+        ? transition.failure_message ?? "母本冻结重试未完成。"
+        : null;
     });
-    if (ok) setFeedbackNotice({ kind: "success", text: `实验母本已就绪：${fixtureId}` });
-    return ok;
+    if (!ok) return false;
+    if (failureMessage) {
+      setFeedbackNotice({ kind: "error", text: failureMessage });
+      return false;
+    }
+    setFeedbackNotice({ kind: "success", text: `实验母本已就绪：${fixtureId}` });
+    return true;
   }
 
   async function requestArcRevision(message: string): Promise<boolean> {
@@ -238,6 +261,7 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
         onRetryFailedRun={resumeRun}
         onRetryChapter={retryCurrentChapter}
         onRecoverStale={recoverStaleRun}
+        onOpenExperiments={() => setLocation("experiments")}
         onSelectArtifact={openArtifact}
       />
     );
@@ -291,17 +315,22 @@ export function Workspace({ project, onProjectClosed }: WorkspaceProps) {
         return (
           <ExperimentLab
             status={experimentFixture}
-            operationMode={metadata.operation_mode}
+            projectKind={metadata.project_kind}
+            lifecycle={metadata.benchmark_fixture}
             loading={queries.experimentFixture.isLoading}
             busy={pendingCommands.has("freeze")}
-            onFreeze={freezeExperimentFixture}
-            onOpenSettings={() => setLocation("settings")}
+            onRetry={freezeExperimentFixture}
           />
         );
       case "settings":
         return (
           <SettingsView
             project={projectState}
+            sourceReadOnly={metadata.project_kind === "benchmark_mother" && (
+              metadata.benchmark_fixture?.status === "frozen"
+              || metadata.benchmark_fixture?.status === "freeze_failed"
+              || currentArc?.arc_id === "arc-002" && currentArc.human_review === "approved"
+            )}
             onProjectChanged={(nextProject) => queryClient.setQueryData(workspaceQueryKeys.activeProject(projectId), nextProject)}
             onProfilesChanged={handleProfilesChanged}
           />

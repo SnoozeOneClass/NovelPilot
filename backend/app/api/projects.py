@@ -127,6 +127,8 @@ def update_operation_mode(request: UpdateOperationModeRequest) -> ProjectSummary
             )
         except project_storage.ActiveProjectBusyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except project_storage.BenchmarkProjectModeLockedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -158,6 +160,8 @@ def update_agent_policy(request: UpdateAgentPolicyRequest) -> ProjectSummary:
         try:
             return project_storage.update_agent_policy(project_path, request.agent_policy)
         except project_storage.ActiveProjectBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except project_storage.ProjectReadOnlyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
     finally:
         end_active_runner(project_path)

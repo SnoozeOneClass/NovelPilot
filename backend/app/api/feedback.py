@@ -2,7 +2,12 @@ from fastapi import APIRouter, HTTPException
 
 from app.schemas.events import HarnessEvent, UserFeedbackRequest
 from app.storage.events import append_event
-from app.storage.projects import get_active_project_path, read_project_metadata
+from app.storage.projects import (
+    ProjectReadOnlyError,
+    ensure_creative_mutation_allowed,
+    get_active_project_path,
+    read_project_metadata,
+)
 
 router = APIRouter()
 
@@ -12,6 +17,10 @@ def submit_feedback(request: UserFeedbackRequest) -> dict[str, bool]:
     project_path = get_active_project_path()
     if project_path is None:
         raise HTTPException(status_code=404, detail="No active project.")
+    try:
+        ensure_creative_mutation_allowed(project_path)
+    except ProjectReadOnlyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     metadata = read_project_metadata(project_path)
     append_event(
         project_path,

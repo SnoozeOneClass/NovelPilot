@@ -36,7 +36,12 @@ from app.schemas.setup import (
 from app.storage import setup as setup_storage
 from app.storage.events import append_event
 from app.storage.profiles import load_profiles
-from app.storage.projects import get_active_project_path, read_project_metadata
+from app.storage.projects import (
+    ProjectReadOnlyError,
+    ensure_creative_mutation_allowed,
+    get_active_project_path,
+    read_project_metadata,
+)
 
 router = APIRouter()
 _setup_lock = Lock()
@@ -56,6 +61,7 @@ def get_setup_state() -> SetupStateDocument:
 def continue_setup_discussion(request: SetupTurnRequest) -> SetupStateDocument:
     with _setup_lock:
         project_path = _active_project_path()
+        _ensure_setup_mutable(project_path)
         setup_storage.flush_pending_setup_events(project_path)
         metadata = read_project_metadata(project_path)
         state = setup_storage.read_setup_state(project_path)
@@ -204,6 +210,7 @@ def continue_setup_discussion(request: SetupTurnRequest) -> SetupStateDocument:
 def prepare_setup_review() -> SetupStateDocument:
     with _setup_lock:
         project_path = _active_project_path()
+        _ensure_setup_mutable(project_path)
         setup_storage.flush_pending_setup_events(project_path)
         metadata = read_project_metadata(project_path)
         state = setup_storage.read_setup_state(project_path)
@@ -496,6 +503,7 @@ def approve_setup(request: SetupApprovalRequest) -> SetupStateDocument:
         project_path: Path | None = None
         try:
             project_path = _begin_setup_approval_lease()
+            _ensure_setup_mutable(project_path)
             setup_storage.flush_pending_setup_events(project_path)
             metadata = read_project_metadata(project_path)
             try:
@@ -572,6 +580,13 @@ def _active_project_path() -> Path:
     if project_path is None:
         raise HTTPException(status_code=404, detail="No active project.")
     return project_path
+
+
+def _ensure_setup_mutable(project_path: Path) -> None:
+    try:
+        ensure_creative_mutation_allowed(project_path)
+    except ProjectReadOnlyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 def _begin_setup_approval_lease() -> Path:

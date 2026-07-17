@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { ArrowDown, BookOpen, Play, RotateCw, ShieldCheck } from "lucide-react";
+import { ArrowDown, BookOpen, FlaskConical, Play, RotateCw, ShieldCheck } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api/client";
 import { Button } from "../../components/ui/Button";
@@ -33,6 +33,7 @@ interface CreationViewProps {
   onRetryFailedRun: () => Promise<void>;
   onRetryChapter: () => Promise<void>;
   onRecoverStale: () => Promise<void>;
+  onOpenExperiments: () => void;
   onSelectArtifact: (path: string) => void;
 }
 
@@ -87,7 +88,7 @@ function scrollToBottom(element: HTMLDivElement | null, behavior: ScrollBehavior
   }
 }
 
-export function CreationView({ project, events, currentArc, summaries, readiness, bookRevision, busy, feedback, sendingFeedback, onFeedbackChange, onSendFeedback, onRequestArcRevision, onStart, onApproveArc, onApproveBookRevision, onResume, onRetryFailedRun, onRetryChapter, onRecoverStale, onSelectArtifact }: CreationViewProps) {
+export function CreationView({ project, events, currentArc, summaries, readiness, bookRevision, busy, feedback, sendingFeedback, onFeedbackChange, onSendFeedback, onRequestArcRevision, onStart, onApproveArc, onApproveBookRevision, onResume, onRetryFailedRun, onRetryChapter, onRecoverStale, onOpenExperiments, onSelectArtifact }: CreationViewProps) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [following, setFollowing] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -147,7 +148,9 @@ export function CreationView({ project, events, currentArc, summaries, readiness
 
           {bookRevision && <section className={styles.bookRevisionTask}><span>全书契约修订</span><h2>批准未来方向 v{bookRevision.base_book_version} → v{bookRevision.target_book_version}</h2><p>{bookRevision.summary}</p><dl><div><dt>冲突字段</dt><dd>{bookRevision.contract_field}</dd></div><div><dt>修订原因</dt><dd>{bookRevision.impossibility_reason}</dd></div></dl><div><Button variant="ghost" onClick={() => onSelectArtifact(bookRevision.candidate.direction_path)}>查看候选方向</Button><Button variant="primary" size="lg" disabled={busy} onClick={() => void onApproveBookRevision()}><ShieldCheck size={16} />批准并继续未来创作</Button></div></section>}
 
-          {model.stage === "story_arc_review" && currentArc && <StoryArcReviewTask arc={currentArc} plan={arcPlanQuery.data?.content ?? ""} loading={arcPlanQuery.isLoading} busy={busy} onApprove={onApproveArc} onOpenPlan={() => onSelectArtifact(currentArc.plan_path)} />}
+          {model.stage === "story_arc_review" && currentArc && <StoryArcReviewTask arc={currentArc} plan={arcPlanQuery.data?.content ?? ""} loading={arcPlanQuery.isLoading} busy={busy} freezesBenchmark={project.metadata.project_kind === "benchmark_mother" && currentArc.arc_id === "arc-002"} onApprove={onApproveArc} onOpenPlan={() => onSelectArtifact(currentArc.plan_path)} />}
+
+          {model.stage === "benchmark_terminal" && <section className={styles.recoveryTask}><h2>{model.title}</h2><p>{model.description}</p><Button variant="primary" onClick={onOpenExperiments}><FlaskConical size={16} />进入实验室</Button></section>}
 
           {authorEvents.map((event) => {
             const text = feedbackText(event);
@@ -167,7 +170,7 @@ export function CreationView({ project, events, currentArc, summaries, readiness
         </div>
       </div>
       {!following && <Button className={styles.jumpLatest} variant="secondary" onClick={() => { setFollowing(true); scrollToBottom(scrollRef.current); }}><ArrowDown size={14} />跳到最新</Button>}
-      <div className={styles.composerWrap}><CreationComposer value={feedback} sending={sendingFeedback || busy && model.stage === "story_arc_review"} mode={model.stage === "story_arc_review" ? "arc_revision" : "feedback"} onChange={onFeedbackChange} onSend={() => void submitComposer()} /></div>
+      {model.stage !== "benchmark_terminal" && <div className={styles.composerWrap}><CreationComposer value={feedback} sending={sendingFeedback || busy && model.stage === "story_arc_review"} mode={model.stage === "story_arc_review" ? "arc_revision" : "feedback"} onChange={onFeedbackChange} onSend={() => void submitComposer()} /></div>}
       <CreationDetailsSheet open={detailsOpen} events={events} summaries={summaries} readiness={readiness} onOpenChange={setDetailsOpen} onSelectArtifact={onSelectArtifact} />
     </section>
   );

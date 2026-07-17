@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { ExperimentFixtureStatus } from "../../types/domain";
+import type { BenchmarkFixtureLifecycle, ExperimentFixtureStatus } from "../../types/domain";
 import { ExperimentLab } from "./ExperimentLab";
 
 const checkpoint = {
@@ -16,69 +16,86 @@ const checkpoint = {
   checkpoint_fingerprint: "a".repeat(64)
 };
 
-describe("ExperimentLab", () => {
-  it("warns a full-auto project to switch to participatory mode", async () => {
-    const user = userEvent.setup();
-    const openSettings = vi.fn();
+const preparing: BenchmarkFixtureLifecycle = {
+  status: "preparing",
+  fixture_id: null,
+  checkpoint_fingerprint: null,
+  failure_code: null,
+  failure_message: null
+};
 
+describe("ExperimentLab", () => {
+  it("does not offer conversion or freezing for an ordinary project", () => {
     render(
       <ExperimentLab
         status={null}
-        operationMode="full_auto"
-        loading={true}
+        projectKind="novel"
+        lifecycle={null}
+        loading={false}
         busy={false}
-        onFreeze={vi.fn()}
-        onOpenSettings={openSettings}
+        onRetry={vi.fn()}
       />
     );
 
-    expect(screen.getByText("制作母本必须使用参与模式")).toBeInTheDocument();
-    expect(screen.getByText("当前项目是全自动模式，请先切换后再生成实验母本。")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "请先切换参与模式" })).toBeDisabled();
-    await user.click(screen.getByRole("button", { name: "前往设置切换" }));
-    expect(openSettings).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("heading", { name: "实验室" })).toBeInTheDocument();
+    expect(screen.getByText("当前小说不是实验母本项目")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /冻结/ })).not.toBeInTheDocument();
   });
 
-  it("keeps the experiment-only lab visible and explains an ineligible checkpoint", () => {
+  it("shows normal preparation progress before the checkpoint", () => {
     const status: ExperimentFixtureStatus = {
+      project_kind: "benchmark_mother",
+      lifecycle: preparing,
       eligible: false,
       issues: [{ code: "missing_warmup_arc", message: "至少需要一个已经完成的共享预热故事弧。" }],
       checkpoint: null,
       existing_fixture: null
     };
 
-    render(<ExperimentLab status={status} operationMode="participatory" loading={false} busy={false} onFreeze={vi.fn()} onOpenSettings={vi.fn()} />);
+    render(<ExperimentLab status={status} projectKind="benchmark_mother" lifecycle={preparing} loading={false} busy={false} onRetry={vi.fn()} />);
 
-    expect(screen.getByRole("heading", { name: "实验室" })).toBeInTheDocument();
     expect(screen.getByText("至少需要一个已经完成的共享预热故事弧。")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /检查点未就绪/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "等待自动冻结" })).toBeDisabled();
   });
 
-  it("confirms before freezing an eligible checkpoint", async () => {
+  it("offers only a local retry after automatic publication fails", async () => {
     const user = userEvent.setup();
-    const freeze = vi.fn().mockResolvedValue(true);
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const retry = vi.fn().mockResolvedValue(true);
+    const failed: BenchmarkFixtureLifecycle = {
+      ...preparing,
+      status: "freeze_failed",
+      failure_code: "fixture_publication_failed",
+      failure_message: "母本文件发布失败，请在实验室重试。"
+    };
     const status: ExperimentFixtureStatus = {
+      project_kind: "benchmark_mother",
+      lifecycle: failed,
       eligible: true,
       issues: [],
       checkpoint,
       existing_fixture: null
     };
 
-    render(<ExperimentLab status={status} operationMode="participatory" loading={false} busy={false} onFreeze={freeze} onOpenSettings={vi.fn()} />);
-    await user.click(screen.getByRole("button", { name: /冻结为实验母本/ }));
+    render(<ExperimentLab status={status} projectKind="benchmark_mother" lifecycle={failed} loading={false} busy={false} onRetry={retry} />);
+    await user.click(screen.getByRole("button", { name: "重试母本冻结" }));
 
-    expect(window.confirm).toHaveBeenCalled();
-    expect(freeze).toHaveBeenCalledTimes(1);
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/不会调用模型/)).toBeInTheDocument();
     expect(screen.getByText("11 章")).toBeInTheDocument();
   });
 
-  it("shows an existing matching fixture without offering another freeze", () => {
+  it("offers local lifecycle reconciliation after a fixture was already published", async () => {
+    const user = userEvent.setup();
+    const retry = vi.fn().mockResolvedValue(true);
     const status: ExperimentFixtureStatus = {
+      project_kind: "benchmark_mother",
+      lifecycle: preparing,
       eligible: true,
       issues: [],
       checkpoint,
       existing_fixture: {
+        fixture_version: "fixture-v1",
+        integrity_verified: true,
         fixture_id: "fixture-existing",
         created_at: "2026-07-13T00:00:00Z",
         relative_path: "experiments/fixtures/fixture-existing",
@@ -86,9 +103,40 @@ describe("ExperimentLab", () => {
       }
     };
 
-    render(<ExperimentLab status={status} operationMode="participatory" loading={false} busy={false} onFreeze={vi.fn()} onOpenSettings={vi.fn()} />);
+    render(<ExperimentLab status={status} projectKind="benchmark_mother" lifecycle={preparing} loading={false} busy={false} onRetry={retry} />);
+    await user.click(screen.getByRole("button", { name: "完成母本状态同步" }));
+
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("检测到已发布母本，等待完成状态同步")).toBeInTheDocument();
+  });
+
+  it("shows an existing frozen fixture without another mutation action", () => {
+    const frozen: BenchmarkFixtureLifecycle = {
+      ...preparing,
+      status: "frozen",
+      fixture_id: "fixture-existing",
+      checkpoint_fingerprint: checkpoint.checkpoint_fingerprint
+    };
+    const status: ExperimentFixtureStatus = {
+      project_kind: "benchmark_mother",
+      lifecycle: frozen,
+      eligible: true,
+      issues: [],
+      checkpoint,
+      existing_fixture: {
+        fixture_version: "fixture-v1",
+        integrity_verified: true,
+        fixture_id: "fixture-existing",
+        created_at: "2026-07-13T00:00:00Z",
+        relative_path: "experiments/fixtures/fixture-existing",
+        checkpoint
+      }
+    };
+
+    render(<ExperimentLab status={status} projectKind="benchmark_mother" lifecycle={frozen} loading={false} busy={false} onRetry={vi.fn()} />);
 
     expect(screen.getByText("fixture-existing")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /母本已冻结/ })).toBeDisabled();
+    expect(screen.getByText("fixture-v1 · 完整性已校验")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "母本已冻结" })).toBeDisabled();
   });
 });

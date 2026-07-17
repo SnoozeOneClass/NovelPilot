@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -10,8 +11,8 @@ from app.storage.json_files import read_json, write_json
 from app.storage.projects import (
     project_metadata_lock,
     read_project_metadata,
-    write_project_metadata,
 )
+from app.storage.transactions import commit_file_transaction
 
 
 def current_arc_state_path(project_path: Path) -> Path | None:
@@ -63,15 +64,23 @@ def approve_current_arc(
                     f"{MIN_ARC_CHAPTER_COUNT} and {MAX_ARC_CHAPTER_COUNT}."
                 )
             payload["target_chapter_count"] = target_chapter_count
+        approved_at = datetime.now(UTC).isoformat()
         payload["human_review"] = "approved"
         payload["status"] = "approved"
-        payload["approved_at"] = datetime.now(UTC).isoformat()
-        write_json(state_path, payload)
+        payload["approved_at"] = approved_at
 
         metadata = read_project_metadata(project_path)
         if metadata.run_status == "waiting_for_user":
             metadata.run_status = "idle"
-            write_project_metadata(project_path, metadata)
+        metadata.updated_at = datetime.now(UTC)
+        commit_file_transaction(
+            project_path,
+            kind=f"approve-story-arc-{payload['arc_id']}",
+            files={
+                state_path.relative_to(project_path).as_posix(): _json_document(payload),
+                "project.json": _json_document(metadata.model_dump(mode="json")),
+            },
+        )
 
         return CurrentArcState.model_validate(payload)
 
@@ -142,3 +151,7 @@ def _is_valid_chapter_count(value: object) -> bool:
         and not isinstance(value, bool)
         and MIN_ARC_CHAPTER_COUNT <= value <= MAX_ARC_CHAPTER_COUNT
     )
+
+
+def _json_document(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, indent=2) + "\n"

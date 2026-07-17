@@ -27,6 +27,53 @@ describe("project deletion API", () => {
   });
 });
 
+describe("project creation API", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("declares benchmark mother identity only in the creation payload", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          name: "benchmark-mother",
+          title: null,
+          path: "D:/output/benchmark-mother",
+          metadata: {
+            schema_version: 1,
+            project_id: "project-1",
+            title: null,
+            operation_mode: "participatory",
+            project_kind: "benchmark_mother",
+            benchmark_fixture: { status: "preparing" },
+            active_profile_id: null,
+            active_arc_id: null,
+            active_chapter_id: null,
+            run_status: "idle",
+            created_at: "2026-07-18T00:00:00Z",
+            updated_at: "2026-07-18T00:00:00Z"
+          }
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.createProject("participatory", "benchmark_mother");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          operation_mode: "participatory",
+          project_kind: "benchmark_mother"
+        })
+      })
+    );
+  });
+});
+
 describe("experiment fixture API errors", () => {
   afterEach(() => {
     vi.unstubAllGlobals();

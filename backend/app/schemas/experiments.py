@@ -6,6 +6,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.schemas.projects import (
     RETRY_BUDGET_SCOPE_VERSION,
     AgentPolicy,
+    BenchmarkFixtureLifecycle,
+    ProjectKind,
     RetryBudgetScopeVersion,
 )
 
@@ -71,6 +73,8 @@ class ExperimentFixtureIssue(_StrictExperimentModel):
 
 
 class ExperimentFixtureSummary(_StrictExperimentModel):
+    fixture_version: Literal["fixture-v1"] = "fixture-v1"
+    integrity_verified: Literal[True] = True
     fixture_id: str = Field(
         pattern=(
             r"^fixture-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
@@ -83,6 +87,8 @@ class ExperimentFixtureSummary(_StrictExperimentModel):
 
 
 class ExperimentFixtureStatus(_StrictExperimentModel):
+    project_kind: ProjectKind = "novel"
+    lifecycle: BenchmarkFixtureLifecycle | None = None
     eligible: bool
     issues: list[ExperimentFixtureIssue] = Field(default_factory=list)
     checkpoint: ExperimentFixtureCheckpoint | None = None
@@ -92,6 +98,13 @@ class ExperimentFixtureStatus(_StrictExperimentModel):
 class ExperimentFixtureCreateResponse(_StrictExperimentModel):
     created: bool
     fixture: ExperimentFixtureSummary
+
+
+class ExperimentFixtureTransition(_StrictExperimentModel):
+    status: Literal["freeze_failed", "frozen"]
+    fixture: ExperimentFixtureSummary | None = None
+    failure_code: str | None = None
+    failure_message: str | None = None
 
 
 class ExperimentArmRequest(_StrictExperimentModel):

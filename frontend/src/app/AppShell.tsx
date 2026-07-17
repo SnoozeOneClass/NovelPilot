@@ -74,6 +74,11 @@ export function AppShell({
   onCloseProject
 }: AppShellProps) {
   const [collapsed, setCollapsed] = useState(readCollapsed);
+  const motherLabel = project.metadata.project_kind === "benchmark_mother"
+    ? project.metadata.benchmark_fixture?.status === "frozen"
+      ? "已冻结母本"
+      : "母本制作中"
+    : null;
 
   function toggleCollapsed() {
     const next = !collapsed;
@@ -138,6 +143,7 @@ export function AppShell({
             <span>/ {locationLabels[location]}</span>
           </div>
           <div className={styles.statuses}>
+            {motherLabel && <span className={styles.motherStatus}>{motherLabel}</span>}
             <span>{formatOperationMode(project.metadata.operation_mode)}</span>
             <strong data-status={project.metadata.run_status}>{formatRunStatus(project.metadata.run_status)}</strong>
             <button className={styles.mobileSettings} title="设置" onClick={() => onLocationChange("settings")}><Settings2 size={17} /></button>

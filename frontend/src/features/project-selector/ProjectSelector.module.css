@@ -311,6 +311,30 @@
   white-space: nowrap;
 }
 
+.titleLine {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.titleLine strong {
+  min-width: 0;
+}
+
+.motherBadge {
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in srgb, var(--np-accent) 45%, var(--np-line));
+  border-radius: 999px;
+  padding: 2px 6px;
+  background: var(--np-accent-soft);
+  color: var(--np-accent);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .bookIcon {
   width: 34px;
   height: 34px;
@@ -412,6 +436,47 @@
 .modePicker span {
   font-size: 12px;
   line-height: 1.5;
+}
+
+.motherOption {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  margin-top: 14px;
+  border: 1px solid var(--np-line);
+  border-radius: var(--np-radius-md);
+  padding: 13px 14px;
+  background: var(--np-surface-muted);
+  color: var(--np-text-secondary);
+  cursor: pointer;
+}
+
+.motherOption[data-disabled="true"] {
+  opacity: 0.58;
+  cursor: not-allowed;
+}
+
+.motherOption input {
+  width: 17px;
+  height: 17px;
+  margin: 2px 0 0;
+  accent-color: var(--np-accent);
+}
+
+.motherOption span {
+  display: grid;
+  gap: 4px;
+}
+
+.motherOption strong {
+  color: var(--np-text);
+  font-size: 13px;
+}
+
+.motherOption small {
+  color: var(--np-text-muted);
+  font-size: 11px;
+  line-height: 1.55;
 }
 
 .newBookDialog > footer {

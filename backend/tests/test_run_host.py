@@ -214,15 +214,16 @@ def test_run_host_reconciles_durable_running_intent_after_restart(
 ) -> None:
     project_path = tmp_path / "project"
     project_path.mkdir()
+    metadata = ProjectMetadata(title="Novel", run_status="running")
     write_json(
         project_path / "project.json",
-        ProjectMetadata(title="Novel", run_status="running").model_dump(mode="json"),
+        metadata.model_dump(mode="json"),
     )
     set_run_intent(project_path, desired_state="running", run_id="run-1")
     monkeypatch.setattr(
         run_host,
         "list_projects",
-        lambda: [SimpleNamespace(path=str(project_path))],
+        lambda: [SimpleNamespace(path=str(project_path), metadata=metadata)],
     )
     woken: list = []
     host = run_host.RunHost()
@@ -231,6 +232,40 @@ def test_run_host_reconciles_durable_running_intent_after_restart(
     host.reconcile()
 
     assert woken == [project_path]
+
+
+def test_run_host_keeps_frozen_benchmark_stopped_after_restart(
+    tmp_path, monkeypatch
+) -> None:
+    project_path = tmp_path / "benchmark-mother"
+    project_path.mkdir()
+    metadata = ProjectMetadata(
+        title="Benchmark mother",
+        operation_mode="participatory",
+        project_kind="benchmark_mother",
+        benchmark_fixture={
+            "status": "frozen",
+            "fixture_id": "fixture-00000000-0000-0000-0000-000000000001",
+            "checkpoint_fingerprint": "0" * 64,
+        },
+        run_status="running",
+    )
+    write_json(project_path / "project.json", metadata.model_dump(mode="json"))
+    set_run_intent(project_path, desired_state="running", run_id="run-1")
+    monkeypatch.setattr(
+        run_host,
+        "list_projects",
+        lambda: [SimpleNamespace(path=str(project_path), metadata=metadata)],
+    )
+    woken: list = []
+    host = run_host.RunHost()
+    monkeypatch.setattr(host, "wake", woken.append)
+
+    host.reconcile()
+
+    assert woken == []
+    assert read_run_control_state(project_path).desired_state == "stopped"
+    assert read_project_metadata(project_path).run_status == "paused"
 
 
 def test_run_host_progress_guard_stops_an_action_without_durable_event(

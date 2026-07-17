@@ -2,6 +2,7 @@ from threading import Event, Thread
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from app.api import profiles as profile_api
 from app.api import projects as project_api
@@ -43,6 +44,39 @@ def test_create_project_initializes_document_first_layout(tmp_path, monkeypatch)
     assert (project_path / "canon" / "world_facts.json").exists()
     assert (project_path / "canon" / "foreshadowing.json").exists()
     assert not (project_storage.OUTPUT_DIR / ".creating").exists()
+
+
+def test_create_benchmark_mother_requires_and_locks_participatory_mode(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _isolate_project_runtime(tmp_path, monkeypatch)
+
+    with pytest.raises(ValidationError, match="participatory mode"):
+        CreateProjectRequest(
+            operation_mode="full_auto",
+            project_kind="benchmark_mother",
+        )
+
+    project = create_project(
+        CreateProjectRequest(
+            operation_mode="participatory",
+            project_kind="benchmark_mother",
+        )
+    )
+    assert project.metadata.project_kind == "benchmark_mother"
+    assert project.metadata.benchmark_fixture is not None
+    assert project.metadata.benchmark_fixture.status == "preparing"
+
+    with pytest.raises(HTTPException) as caught:
+        project_api.update_operation_mode(
+            UpdateOperationModeRequest(operation_mode="full_auto")
+        )
+
+    assert caught.value.status_code == 409
+    assert "永久使用参与模式" in str(caught.value.detail)
+    persisted = project_storage.read_project_metadata(resolve_project_path(project.name))
+    assert persisted.operation_mode == "participatory"
 
 
 def test_create_project_does_not_publish_partial_initialization(tmp_path, monkeypatch) -> None:
@@ -260,6 +294,41 @@ def test_delete_projects_removes_selected_project_directory_only(
     assert not selected_path.exists()
     assert preserved_path.exists()
     assert project_storage.get_active_project_path() == preserved_path
+
+
+def test_frozen_benchmark_mother_uses_ordinary_project_deletion(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _isolate_project_runtime(tmp_path, monkeypatch)
+    project = create_project(
+        CreateProjectRequest(
+            operation_mode="participatory",
+            project_kind="benchmark_mother",
+        )
+    )
+    project_path = resolve_project_path(project.name)
+    metadata = project_storage.read_project_metadata(project_path)
+    assert metadata.benchmark_fixture is not None
+    metadata.benchmark_fixture = metadata.benchmark_fixture.model_copy(
+        update={
+            "status": "frozen",
+            "fixture_id": "fixture-00000000-0000-0000-0000-000000000001",
+            "checkpoint_fingerprint": "0" * 64,
+        }
+    )
+    metadata.run_status = "paused"
+    project_storage.write_project_metadata(project_path, metadata)
+
+    response = project_api.delete_projects(
+        DeleteProjectsRequest(project_ids=[project.metadata.project_id])
+    )
+
+    assert [item.project_id for item in response.deleted] == [
+        project.metadata.project_id
+    ]
+    assert response.active_project_closed is True
+    assert not project_path.exists()
 
 
 def test_delete_projects_supports_batch_and_closes_deleted_active_project(

@@ -12,7 +12,10 @@ from app.storage.completion import audit_project_completion
 from app.storage.events import read_events
 from app.storage.json_files import read_json
 from app.storage.profiles import list_public_profiles
-from app.storage.projects import read_project_metadata
+from app.storage.projects import (
+    benchmark_source_is_generation_terminal,
+    read_project_metadata,
+)
 from app.storage.retries import retry_scope_for_chapter
 from app.storage.run_state import read_run_control_state, run_dispatch_is_pending
 from app.storage.setup import read_setup_state
@@ -74,6 +77,24 @@ def build_project_readiness(
         _run_control_gate(metadata.run_status),
         _completion_gate(project_path),
     ]
+    if benchmark_source_is_generation_terminal(project_path, metadata):
+        lifecycle = metadata.benchmark_fixture
+        fixture_status = lifecycle.status if lifecycle is not None else "preparing"
+        gates.append(
+            ReadinessGate(
+                id="benchmark_fixture_terminal",
+                status="passed",
+                required=False,
+                message="Benchmark source generation ended at the approved arc-002 checkpoint.",
+                evidence=[f"fixture_status:{fixture_status}", "desired_state:stopped"],
+            )
+        )
+        return ProjectReadiness(
+            status="passed",
+            can_start_run=False,
+            gates=gates,
+            next_action=_benchmark_terminal_next_action(metadata),
+        )
     required_gates = [gate for gate in gates if gate.required]
     can_start_run = all(gate.status == "passed" for gate in required_gates)
     status = _overall_status(required_gates)
@@ -82,6 +103,39 @@ def build_project_readiness(
         can_start_run=can_start_run,
         gates=gates,
         next_action=_next_action(project_path, metadata, gates, active_runner),
+    )
+
+
+def _benchmark_terminal_next_action(metadata: ProjectMetadata) -> RunNextAction:
+    lifecycle = metadata.benchmark_fixture
+    status = lifecycle.status if lifecycle is not None else "preparing"
+    if lifecycle is not None and lifecycle.status == "frozen":
+        return RunNextAction(
+            id="open_experiment_lab",
+            requires_user=True,
+            message="母本已经冻结，源项目创作已结束；请进入实验室继续。",
+            evidence=[
+                f"fixture_id:{lifecycle.fixture_id}",
+                f"checkpoint_fingerprint:{lifecycle.checkpoint_fingerprint}",
+            ],
+        )
+    return RunNextAction(
+        id="retry_experiment_fixture",
+        command="POST /api/experiments/fixtures",
+        requires_user=True,
+        message=(
+            lifecycle.failure_message
+            if lifecycle is not None and lifecycle.failure_message
+            else "故事弧已经批准，创作已停止；请在实验室完成母本冻结。"
+        ),
+        evidence=[
+            f"fixture_status:{status}",
+            *(
+                [f"failure_code:{lifecycle.failure_code}"]
+                if lifecycle is not None and lifecycle.failure_code
+                else []
+            ),
+        ],
     )
 
 

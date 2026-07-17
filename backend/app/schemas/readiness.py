@@ -18,6 +18,8 @@ RunNextActionId = Literal[
     "retry_provider_connection",
     "retry_failed_run",
     "retry_current_chapter",
+    "retry_experiment_fixture",
+    "open_experiment_lab",
     "approve_story_arc",
     "start_run",
     "resume_run",

@@ -10,7 +10,12 @@ from app.harness.run_control import begin_active_runner, end_active_runner
 from app.schemas.events import HarnessEvent
 from app.schemas.runs import HarnessCheckpoint
 from app.storage.events import append_event, read_events
-from app.storage.projects import list_projects, read_project_metadata, write_project_metadata
+from app.storage.projects import (
+    benchmark_source_is_generation_terminal,
+    list_projects,
+    read_project_metadata,
+    write_project_metadata,
+)
 from app.storage.run_state import (
     action_key_for_project,
     begin_harness_checkpoint,
@@ -71,6 +76,16 @@ class RunHost:
     def reconcile(self) -> None:
         for project in list_projects():
             project_path = Path(project.path)
+            if benchmark_source_is_generation_terminal(project_path, project.metadata):
+                set_run_intent(
+                    project_path,
+                    desired_state="stopped",
+                    clear_provider_wait=True,
+                )
+                if project.metadata.run_status != "paused":
+                    project.metadata.run_status = "paused"
+                    write_project_metadata(project_path, project.metadata)
+                continue
             try:
                 state = read_run_control_state(project_path)
             except (OSError, ValueError):
@@ -121,6 +136,16 @@ class RunHost:
         try:
             while True:
                 metadata = read_project_metadata(project_path)
+                if benchmark_source_is_generation_terminal(project_path, metadata):
+                    set_run_intent(
+                        project_path,
+                        desired_state="stopped",
+                        clear_provider_wait=True,
+                    )
+                    if metadata.run_status != "paused":
+                        metadata.run_status = "paused"
+                        write_project_metadata(project_path, metadata)
+                    return None
                 state = read_run_control_state(project_path)
                 provider_wait = state.provider_wait
                 provider_due = (
@@ -361,6 +386,17 @@ def get_run_host() -> RunHost:
 
 def continue_after_user_gate(project_path: Path) -> bool:
     """Wake an already-started continuous run after an allowed human checkpoint."""
+    metadata = read_project_metadata(project_path)
+    if benchmark_source_is_generation_terminal(project_path, metadata):
+        set_run_intent(
+            project_path,
+            desired_state="stopped",
+            clear_provider_wait=True,
+        )
+        if metadata.run_status != "paused":
+            metadata.run_status = "paused"
+            write_project_metadata(project_path, metadata)
+        return False
     state = read_run_control_state(project_path)
     if state.desired_state != "running":
         return False

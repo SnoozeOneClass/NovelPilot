@@ -30,6 +30,8 @@ from app.schemas.profiles import (
 )
 from app.storage import profiles as profile_storage
 from app.storage.projects import (
+    ProjectReadOnlyError,
+    ensure_creative_mutation_allowed,
     get_active_project_path,
     project_metadata_lock,
     read_project_metadata,
@@ -225,6 +227,16 @@ def _profile_mutation_transition() -> Iterator[Path | None]:
                 ),
             )
         try:
+            if project_path is not None:
+                try:
+                    ensure_creative_mutation_allowed(project_path)
+                except ProjectReadOnlyError as exc:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "实验母本源项目已经冻结，不能更改其活动模型配置。"
+                        ),
+                    ) from exc
             yield project_path
         finally:
             if project_path is not None:

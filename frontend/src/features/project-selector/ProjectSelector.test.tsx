@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
@@ -16,6 +16,8 @@ const project: ProjectSummary = {
     project_id: "project-1",
     title: "测试小说",
     operation_mode: "participatory",
+    project_kind: "novel",
+    benchmark_fixture: null,
     active_profile_id: null,
     active_arc_id: "arc-001",
     active_chapter_id: "chapter-002",
@@ -79,7 +81,66 @@ describe("ProjectSelector", () => {
     await user.click(screen.getByRole("button", { name: /创建并进入共创/ }));
 
     await waitFor(() => expect(opened).toHaveBeenCalled());
-    expect(create).toHaveBeenCalledWith("full_auto");
+    expect(create).toHaveBeenCalledWith("full_auto", "novel");
+  });
+
+  it("creates a benchmark mother only from participatory mode", async () => {
+    const user = userEvent.setup();
+    renderSelector();
+    const create = vi.spyOn(api, "createProject").mockResolvedValue({
+      ...project,
+      metadata: {
+        ...project.metadata,
+        project_kind: "benchmark_mother",
+        benchmark_fixture: {
+          status: "preparing",
+          fixture_id: null,
+          checkpoint_fingerprint: null,
+          failure_code: null,
+          failure_message: null
+        }
+      }
+    });
+
+    await user.click(screen.getByRole("button", { name: "新建小说" }));
+    const dialog = screen.getByRole("dialog", { name: "开始一本新书" });
+    const option = within(dialog).getByRole("checkbox", { name: /创建实验母本项目/ });
+    expect(option).toBeDisabled();
+    await user.click(within(dialog).getByRole("button", { name: /参与模式/ }));
+    await user.click(option);
+    await user.click(within(dialog).getByRole("button", { name: /创建并进入共创/ }));
+
+    await waitFor(() => expect(create).toHaveBeenCalledWith(
+      "participatory",
+      "benchmark_mother"
+    ));
+  });
+
+  it("keeps a frozen mother in the ordinary open and delete list", async () => {
+    const user = userEvent.setup();
+    const frozen = {
+      ...project,
+      metadata: {
+        ...project.metadata,
+        project_kind: "benchmark_mother" as const,
+        benchmark_fixture: {
+          status: "frozen" as const,
+          fixture_id: "fixture-00000000-0000-0000-0000-000000000001",
+          checkpoint_fingerprint: "a".repeat(64),
+          failure_code: null,
+          failure_message: null
+        }
+      }
+    };
+    vi.mocked(api.listProjects).mockResolvedValue([frozen]);
+    vi.spyOn(api, "openProject").mockResolvedValue(frozen);
+    const opened = renderSelector();
+
+    expect(await screen.findByText("已冻结母本")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /测试小说/ }));
+
+    await waitFor(() => expect(opened).toHaveBeenCalledWith(frozen));
+    expect(screen.getByRole("checkbox", { name: "选择《测试小说》" })).toBeEnabled();
   });
 
   it("offers an in-page reconnect when the initial project request fails", async () => {

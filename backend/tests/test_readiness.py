@@ -14,7 +14,7 @@ from app.harness.agents.models import AgentBudgets, AgentIdentity, AgentState
 from app.harness.agents.persistence import save_agent_state
 from app.schemas.events import HarnessEvent
 from app.schemas.profiles import LlmProfileUpsert
-from app.schemas.projects import CreateProjectRequest
+from app.schemas.projects import BenchmarkFixtureLifecycle, CreateProjectRequest
 from app.schemas.setup import (
     BookDirectionConstraints,
     BookDirectionReview,
@@ -346,6 +346,57 @@ def test_readiness_recommends_explicit_retry_for_generic_failed_runs(
         "advance_to_next_checkpoint",
         "Harness run failed: checkpoint execution could not continue.",
     ]
+
+
+def test_approved_benchmark_checkpoint_projects_only_fixture_actions(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _isolate_runtime_paths(tmp_path, monkeypatch)
+    project = project_storage.create_project(
+        CreateProjectRequest(
+            operation_mode="participatory",
+            project_kind="benchmark_mother",
+        )
+    )
+    project_path = Path(project.path)
+    metadata = read_project_metadata(project_path)
+    metadata.active_arc_id = "arc-002"
+    write_project_metadata(project_path, metadata)
+    write_json(
+        project_path / "arcs" / "arc-002" / "state.json",
+        {
+            "arc_id": "arc-002",
+            "status": "approved",
+            "plan_path": "arcs/arc-002/plan.md",
+            "human_review": "approved",
+            "approved_at": "2026-07-18T00:00:00Z",
+            "recommended_target_chapter_count": 10,
+            "target_chapter_count": 10,
+            "completed_chapter_ids": [],
+            "completed_at": None,
+        },
+    )
+
+    pending = build_project_readiness(project_path, active_runner=False)
+    assert pending.can_start_run is False
+    assert pending.next_action.id == "retry_experiment_fixture"
+
+    with pytest.raises(HTTPException) as caught:
+        runs_api.start_run()
+    assert caught.value.status_code == 409
+
+    metadata = read_project_metadata(project_path)
+    metadata.benchmark_fixture = BenchmarkFixtureLifecycle(
+        status="frozen",
+        fixture_id="fixture-00000000-0000-0000-0000-000000000001",
+        checkpoint_fingerprint="0" * 64,
+    )
+    metadata.run_status = "paused"
+    write_project_metadata(project_path, metadata)
+    frozen = build_project_readiness(project_path, active_runner=False)
+    assert frozen.can_start_run is False
+    assert frozen.next_action.id == "open_experiment_lab"
 
 
 @pytest.mark.parametrize(

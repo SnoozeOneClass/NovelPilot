@@ -5,7 +5,7 @@ import { api, formatApiError } from "../../api/client";
 import { Dialog } from "../../components/ui/Dialog";
 import { ThemeToggle } from "../../components/ui/ThemeToggle";
 import { formatOperationMode, formatProjectTitle, formatRunStatus } from "../../types/display";
-import type { OperationMode, ProjectSummary } from "../../types/domain";
+import type { OperationMode, ProjectKind, ProjectSummary } from "../../types/domain";
 import styles from "./ProjectSelector.module.css";
 
 interface ProjectSelectorProps {
@@ -33,12 +33,16 @@ export function ProjectSelector({ onProjectOpened }: ProjectSelectorProps) {
   const [newBookOpen, setNewBookOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [mode, setMode] = useState<OperationMode>("full_auto");
+  const [createMother, setCreateMother] = useState(false);
   const [notice, setNotice] = useState<PageNotice | null>(null);
   const [selectedProjectIds, setSelectedProjectIds] = useState<Set<string>>(new Set());
   const projectsQuery = useQuery({ queryKey: ["projects"], queryFn: api.listProjects });
 
   const createMutation = useMutation({
-    mutationFn: (operationMode: OperationMode) => api.createProject(operationMode),
+    mutationFn: ({ operationMode, projectKind }: {
+      operationMode: OperationMode;
+      projectKind: ProjectKind;
+    }) => api.createProject(operationMode, projectKind),
     onSuccess: (project) => {
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
       onProjectOpened(project);
@@ -82,7 +86,10 @@ export function ProjectSelector({ onProjectOpened }: ProjectSelectorProps) {
 
   function createProject() {
     setNotice(null);
-    createMutation.mutate(mode);
+    createMutation.mutate({
+      operationMode: mode,
+      projectKind: createMother ? "benchmark_mother" : "novel"
+    });
   }
 
   function openProject(project: ProjectSummary) {
@@ -197,7 +204,19 @@ export function ProjectSelector({ onProjectOpened }: ProjectSelectorProps) {
                   >
                     <span className={styles.projectIdentity}>
                       <span className={styles.bookIcon}><BookOpen size={18} /></span>
-                      <span><strong>{title}</strong><small>{project.name}</small></span>
+                      <span>
+                        <span className={styles.titleLine}>
+                          <strong>{title}</strong>
+                          {project.metadata.project_kind === "benchmark_mother" && (
+                            <em className={styles.motherBadge}>
+                              {project.metadata.benchmark_fixture?.status === "frozen"
+                                ? "已冻结母本"
+                                : "母本制作中"}
+                            </em>
+                          )}
+                        </span>
+                        <small>{project.name}</small>
+                      </span>
                     </span>
                     <span className={styles.progress}>
                       <strong>{project.metadata.active_chapter_id ?? project.metadata.active_arc_id ?? "尚未开始"}</strong>
@@ -238,13 +257,25 @@ export function ProjectSelector({ onProjectOpened }: ProjectSelectorProps) {
           <p>项目会先以“未命名新书”创建，正式书名在全书方向审阅通过后确定。</p>
           <fieldset className={styles.modePicker}>
             <legend>初始创作模式</legend>
-            <button type="button" className={mode === "full_auto" ? styles.selected : ""} onClick={() => setMode("full_auto")}>
+            <button type="button" className={mode === "full_auto" ? styles.selected : ""} onClick={() => { setMode("full_auto"); setCreateMother(false); }}>
               <strong>全自动</strong><span>故事弧和章节由 Harness 连续推进。</span>
             </button>
             <button type="button" className={mode === "participatory" ? styles.selected : ""} onClick={() => setMode("participatory")}>
               <strong>参与模式</strong><span>每个故事弧计划等待你的批准。</span>
             </button>
           </fieldset>
+          <label className={styles.motherOption} data-disabled={mode !== "participatory" || undefined}>
+            <input
+              type="checkbox"
+              checked={createMother}
+              disabled={mode !== "participatory"}
+              onChange={(event) => setCreateMother(event.target.checked)}
+            />
+            <span>
+              <strong>创建实验母本项目</strong>
+              <small>仅参与模式可用。完成第一故事弧并批准第二故事弧规划后，项目会自动冻结并停止续写。</small>
+            </span>
+          </label>
           <footer>
             <button type="button" className={styles.cancelButton} disabled={createMutation.isPending} onClick={() => setNewBookOpen(false)}>取消</button>
             <button type="button" className={styles.primaryButton} disabled={createMutation.isPending} onClick={createProject}>

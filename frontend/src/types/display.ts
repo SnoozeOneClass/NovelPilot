@@ -252,6 +252,8 @@ const runNextActionLabels: Record<RunNextAction["id"], string> = {
   retry_provider_connection: "重新连接并继续",
   retry_failed_run: "重试当前步骤",
   retry_current_chapter: "重试当前章节",
+  retry_experiment_fixture: "重试母本冻结",
+  open_experiment_lab: "进入实验室",
   approve_story_arc: "批准当前故事弧",
   start_run: "启动 harness",
   resume_run: "继续 harness"

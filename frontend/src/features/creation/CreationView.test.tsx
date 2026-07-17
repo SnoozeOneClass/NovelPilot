@@ -14,6 +14,8 @@ const project: ProjectSummary = {
     project_id: "project-1",
     title: "退潮前的十一分钟",
     operation_mode: "participatory",
+    project_kind: "novel",
+    benchmark_fixture: null,
     active_profile_id: "main",
     active_arc_id: null,
     active_chapter_id: null,
@@ -88,6 +90,7 @@ function renderCreation(overrides: Partial<React.ComponentProps<typeof CreationV
     onRetryFailedRun: vi.fn().mockResolvedValue(undefined),
     onRetryChapter: vi.fn().mockResolvedValue(undefined),
     onRecoverStale: vi.fn().mockResolvedValue(undefined),
+    onOpenExperiments: vi.fn(),
     onSelectArtifact: vi.fn(),
     ...overrides
   };

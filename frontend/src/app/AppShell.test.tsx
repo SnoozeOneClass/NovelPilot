@@ -14,6 +14,8 @@ const project: ProjectSummary = {
     project_id: "project-1",
     title: "测试小说",
     operation_mode: "full_auto",
+    project_kind: "novel",
+    benchmark_fixture: null,
     active_profile_id: null,
     active_arc_id: null,
     active_chapter_id: null,

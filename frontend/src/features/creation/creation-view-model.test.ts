@@ -15,6 +15,8 @@ const project: ProjectSummary = {
     project_id: "project-1",
     title: "退潮前的十一分钟",
     operation_mode: "participatory",
+    project_kind: "novel",
+    benchmark_fixture: null,
     active_profile_id: "main",
     active_arc_id: null,
     active_chapter_id: null,
@@ -193,5 +195,72 @@ describe("deriveCreationViewModel", () => {
     expect(model.primaryAction).toBeNull();
     expect(model.isRunning).toBe(true);
     expect(model.description).toContain("2026-07-16T12:00:10Z");
+  });
+
+  it("projects a frozen mother as terminal experiment provenance", () => {
+    const model = deriveCreationViewModel({
+      project: {
+        ...project,
+        metadata: {
+          ...project.metadata,
+          project_kind: "benchmark_mother",
+          benchmark_fixture: {
+            status: "frozen",
+            fixture_id: "fixture-1",
+            checkpoint_fingerprint: "a".repeat(64),
+            failure_code: null,
+            failure_message: null
+          },
+          active_arc_id: "arc-002",
+          run_status: "paused"
+        }
+      },
+      readiness: readiness("open_experiment_lab", { requires_user: true }),
+      currentArc: null,
+      bookRevision: null,
+      events: []
+    });
+
+    expect(model.stage).toBe("benchmark_terminal");
+    expect(model.primaryAction).toBe("open_experiment_lab");
+    expect(model.description).toContain("实验室");
+  });
+
+  it("keeps an approved Arc-2 mother terminal before readiness refreshes", () => {
+    const model = deriveCreationViewModel({
+      project: {
+        ...project,
+        metadata: {
+          ...project.metadata,
+          project_kind: "benchmark_mother",
+          benchmark_fixture: {
+            status: "preparing",
+            fixture_id: null,
+            checkpoint_fingerprint: null,
+            failure_code: null,
+            failure_message: null
+          },
+          active_arc_id: "arc-002",
+          run_status: "paused"
+        }
+      },
+      readiness: null,
+      currentArc: {
+        arc_id: "arc-002",
+        status: "planned",
+        plan_path: "arcs/arc-002/plan.md",
+        human_review: "approved",
+        approved_at: "2026-07-18T00:00:00Z",
+        recommended_target_chapter_count: 10,
+        target_chapter_count: 10,
+        completed_chapter_ids: [],
+        completed_at: null
+      },
+      bookRevision: null,
+      events: []
+    });
+
+    expect(model.stage).toBe("benchmark_terminal");
+    expect(model.primaryAction).toBe("open_experiment_lab");
   });
 });

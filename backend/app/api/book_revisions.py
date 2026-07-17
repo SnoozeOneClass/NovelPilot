@@ -7,7 +7,12 @@ from app.schemas.events import HarnessEvent
 from app.harness.run_host import continue_after_user_gate
 from app.storage import book_revisions as book_revision_storage
 from app.storage.events import append_event
-from app.storage.projects import get_active_project_path, read_project_metadata
+from app.storage.projects import (
+    ProjectReadOnlyError,
+    ensure_creative_mutation_allowed,
+    get_active_project_path,
+    read_project_metadata,
+)
 
 
 router = APIRouter()
@@ -23,6 +28,10 @@ def approve_book_revision(
     request: BookRevisionApprovalRequest,
 ) -> BookRevisionState:
     project_path = _active_project_or_404()
+    try:
+        ensure_creative_mutation_allowed(project_path)
+    except ProjectReadOnlyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     try:
         state = book_revision_storage.approve_book_revision(project_path, request)
     except book_revision_storage.BookRevisionConflict as exc:

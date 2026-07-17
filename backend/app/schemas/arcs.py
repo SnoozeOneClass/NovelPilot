@@ -2,6 +2,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.experiments import ExperimentFixtureTransition
+
 
 ArcReviewStatus = Literal["not_required", "awaiting_review", "approved"]
 MIN_ARC_CHAPTER_COUNT = 1
@@ -52,3 +54,4 @@ class CurrentArcState(BaseModel):
 class CurrentArcApprovalResponse(BaseModel):
     arc: CurrentArcState
     run_status: str
+    fixture_transition: ExperimentFixtureTransition | None = None

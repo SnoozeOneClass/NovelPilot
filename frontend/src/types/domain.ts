@@ -1,4 +1,6 @@
 export type OperationMode = "full_auto" | "participatory";
+export type ProjectKind = "novel" | "benchmark_mother";
+export type BenchmarkFixtureLifecycleStatus = "preparing" | "freeze_failed" | "frozen";
 export type RunStatus =
   | "idle"
   | "running"
@@ -43,6 +45,8 @@ export interface ProjectMetadata {
   project_id: string;
   title: string | null;
   operation_mode: OperationMode;
+  project_kind: ProjectKind;
+  benchmark_fixture: BenchmarkFixtureLifecycle | null;
   active_profile_id: string | null;
   agent_policy?: AgentPolicy;
   active_arc_id: string | null;
@@ -50,6 +54,14 @@ export interface ProjectMetadata {
   run_status: RunStatus;
   created_at: string;
   updated_at: string;
+}
+
+export interface BenchmarkFixtureLifecycle {
+  status: BenchmarkFixtureLifecycleStatus;
+  fixture_id: string | null;
+  checkpoint_fingerprint: string | null;
+  failure_code: string | null;
+  failure_message: string | null;
 }
 
 export interface ProjectSummary {
@@ -280,6 +292,8 @@ export interface ExperimentFixtureCheckpoint {
 }
 
 export interface ExperimentFixtureSummary {
+  fixture_version: "fixture-v1";
+  integrity_verified: true;
   fixture_id: string;
   created_at: string;
   relative_path: string;
@@ -287,6 +301,8 @@ export interface ExperimentFixtureSummary {
 }
 
 export interface ExperimentFixtureStatus {
+  project_kind: ProjectKind;
+  lifecycle: BenchmarkFixtureLifecycle | null;
   eligible: boolean;
   issues: ExperimentFixtureIssue[];
   checkpoint: ExperimentFixtureCheckpoint | null;
@@ -298,9 +314,17 @@ export interface ExperimentFixtureCreateResponse {
   fixture: ExperimentFixtureSummary;
 }
 
+export interface ExperimentFixtureTransition {
+  status: "freeze_failed" | "frozen";
+  fixture: ExperimentFixtureSummary | null;
+  failure_code: string | null;
+  failure_message: string | null;
+}
+
 export interface CurrentArcApprovalResponse {
   arc: CurrentArcState;
   run_status: RunStatus;
+  fixture_transition: ExperimentFixtureTransition | null;
 }
 
 export interface ChapterRetryResponse {
@@ -489,6 +513,8 @@ export type RunNextActionId =
   | "retry_provider_connection"
   | "retry_failed_run"
   | "retry_current_chapter"
+  | "retry_experiment_fixture"
+  | "open_experiment_lab"
   | "approve_story_arc"
   | "start_run"
   | "resume_run";

@@ -3,12 +3,15 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
+from app.api import arcs as arcs_api
 from app.api import experiments as experiment_api
 from app.core import config
 from app.harness.run_control import begin_active_runner, end_active_runner
+from app.schemas.arcs import CurrentArcApprovalRequest
 from app.schemas.projects import ProjectMetadata
 from app.schemas.setup import SetupStateDocument
-from app.storage import experiment_fixtures
+from app.storage import benchmark_sources, experiment_fixtures
+from app.storage import setup as setup_storage
 from app.storage.events import read_events
 from app.storage.experiment_fixtures import (
     ExperimentFixtureIneligibleError,
@@ -18,6 +21,7 @@ from app.storage.experiment_fixtures import (
     verify_fixture,
 )
 from app.storage.json_files import read_json, write_json
+from app.storage.run_state import read_run_control_state, set_run_intent
 
 
 def test_fixture_status_requires_the_approved_pre_chapter_checkpoint(
@@ -203,8 +207,11 @@ def test_experiment_api_records_one_sanitized_event_for_new_fixture(
     second = experiment_api.freeze_fixture()
     events = [event for event in read_events(project_path) if event.kind == "benchmark_fixture_frozen"]
 
-    assert first.created is True
-    assert second.created is False
+    assert first.status == "frozen"
+    assert second.status == "frozen"
+    assert first.fixture is not None
+    assert second.fixture is not None
+    assert second.fixture.fixture_id == first.fixture.fixture_id
     assert len(events) == 1
     assert events[0].payload == {
         "fixture_id": first.fixture.fixture_id,
@@ -214,6 +221,56 @@ def test_experiment_api_records_one_sanitized_event_for_new_fixture(
     }
     assert "api_key" not in str(events[0].payload)
     assert "base_url" not in str(events[0].payload)
+
+
+def test_fixture_retry_reconciles_publication_that_preceded_lifecycle_state(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_path = _eligible_project(tmp_path, monkeypatch)
+    published = create_fixture(project_path)
+    monkeypatch.setattr(experiment_api, "get_active_project_path", lambda: project_path)
+
+    transition = experiment_api.freeze_fixture()
+
+    metadata = ProjectMetadata.model_validate(read_json(project_path / "project.json"))
+    assert transition.status == "frozen"
+    assert transition.fixture is not None
+    assert transition.fixture.fixture_id == published.fixture.fixture_id
+    assert metadata.benchmark_fixture is not None
+    assert metadata.benchmark_fixture.status == "frozen"
+    assert metadata.benchmark_fixture.fixture_id == published.fixture.fixture_id
+    assert len(list((config.OUTPUT_DIR / "experiments" / "fixtures").iterdir())) == 1
+
+
+def test_fixture_event_uses_outbox_without_losing_frozen_lifecycle(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_path = _eligible_project(tmp_path, monkeypatch)
+    monkeypatch.setattr(experiment_api, "get_active_project_path", lambda: project_path)
+    real_append = benchmark_sources.append_event
+    monkeypatch.setattr(
+        benchmark_sources,
+        "append_event",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("event log busy")),
+    )
+
+    transition = experiment_api.freeze_fixture()
+
+    metadata = ProjectMetadata.model_validate(read_json(project_path / "project.json"))
+    outbox = project_path / "book" / ".event-outbox"
+    assert transition.status == "frozen"
+    assert metadata.benchmark_fixture is not None
+    assert metadata.benchmark_fixture.status == "frozen"
+    assert len(list(outbox.glob("*.json"))) == 1
+
+    monkeypatch.setattr(benchmark_sources, "append_event", real_append)
+    setup_storage.flush_pending_setup_events(project_path)
+    assert not outbox.exists()
+    assert [event.kind for event in read_events(project_path)].count(
+        "benchmark_fixture_frozen"
+    ) == 1
 
 
 def test_experiment_api_returns_conflict_when_checkpoint_is_ineligible(
@@ -230,7 +287,122 @@ def test_experiment_api_returns_conflict_when_checkpoint_is_ineligible(
         experiment_api.freeze_fixture()
 
     assert caught.value.status_code == 409
-    assert "检查点" in caught.value.detail["message"]
+    assert "检查点" in str(caught.value.detail)
+
+
+def test_arc2_approval_freezes_declared_mother_before_chapter_generation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_path = _eligible_project(tmp_path, monkeypatch)
+    _reset_arc2_for_approval(project_path)
+    monkeypatch.setattr(arcs_api, "get_active_project_path", lambda: project_path)
+    monkeypatch.setattr(
+        arcs_api,
+        "continue_after_user_gate",
+        lambda _path: (_ for _ in ()).throw(AssertionError("must not wake RunHost")),
+    )
+    set_run_intent(project_path, desired_state="running", run_id="benchmark-run")
+
+    result = arcs_api.approve_current_arc(
+        CurrentArcApprovalRequest(target_chapter_count=12)
+    )
+
+    metadata = ProjectMetadata.model_validate(read_json(project_path / "project.json"))
+    arc = read_json(project_path / "arcs" / "arc-002" / "state.json")
+    events = read_events(project_path)
+    assert result.fixture_transition is not None
+    assert result.fixture_transition.status == "frozen"
+    assert result.fixture_transition.fixture is not None
+    assert result.arc.target_chapter_count == 12
+    assert metadata.benchmark_fixture is not None
+    assert metadata.benchmark_fixture.status == "frozen"
+    assert metadata.run_status == "paused"
+    assert metadata.active_chapter_id is None
+    assert arc["human_review"] == "approved"
+    assert read_run_control_state(project_path).desired_state == "stopped"
+    assert not (project_path / "chapters" / "chapter-003").exists()
+    assert [event.kind for event in events].count("story_arc_approved") == 1
+    assert [event.kind for event in events].count("benchmark_fixture_frozen") == 1
+
+    duplicate = arcs_api.approve_current_arc(
+        CurrentArcApprovalRequest(target_chapter_count=12)
+    )
+    assert duplicate.fixture_transition is not None
+    assert duplicate.fixture_transition.status == "frozen"
+    assert [event.kind for event in read_events(project_path)].count(
+        "story_arc_approved"
+    ) == 1
+
+
+def test_ordinary_arc_approval_keeps_the_existing_continue_behavior(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_path = _eligible_project(tmp_path, monkeypatch)
+    _reset_arc2_for_approval(project_path)
+    metadata = ProjectMetadata.model_validate(read_json(project_path / "project.json"))
+    metadata.project_kind = "novel"
+    metadata.benchmark_fixture = None
+    write_json(project_path / "project.json", metadata.model_dump(mode="json"))
+    monkeypatch.setattr(arcs_api, "get_active_project_path", lambda: project_path)
+    continued: list[Path] = []
+    monkeypatch.setattr(arcs_api, "continue_after_user_gate", continued.append)
+
+    result = arcs_api.approve_current_arc(
+        CurrentArcApprovalRequest(target_chapter_count=10)
+    )
+
+    assert result.fixture_transition is None
+    assert result.arc.human_review == "approved"
+    assert result.arc.target_chapter_count == 10
+    assert continued == [project_path]
+
+
+def test_arc2_freeze_failure_preserves_approval_and_retries_locally(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_path = _eligible_project(tmp_path, monkeypatch)
+    _reset_arc2_for_approval(project_path)
+    monkeypatch.setattr(arcs_api, "get_active_project_path", lambda: project_path)
+    monkeypatch.setattr(experiment_api, "get_active_project_path", lambda: project_path)
+    real_create_fixture = experiment_fixtures.create_fixture
+    attempts = 0
+
+    def fail_once(path: Path, *, ignore_active_runner: bool = False):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("injected publication failure")
+        return real_create_fixture(path, ignore_active_runner=ignore_active_runner)
+
+    monkeypatch.setattr(benchmark_sources, "create_fixture", fail_once)
+    set_run_intent(project_path, desired_state="running", run_id="benchmark-run")
+
+    failed = arcs_api.approve_current_arc(
+        CurrentArcApprovalRequest(target_chapter_count=11)
+    )
+    approved_at = failed.arc.approved_at
+    failed_metadata = ProjectMetadata.model_validate(
+        read_json(project_path / "project.json")
+    )
+    assert failed.fixture_transition is not None
+    assert failed.fixture_transition.status == "freeze_failed"
+    assert failed_metadata.benchmark_fixture is not None
+    assert failed_metadata.benchmark_fixture.status == "freeze_failed"
+    assert failed_metadata.run_status == "paused"
+    assert read_run_control_state(project_path).desired_state == "stopped"
+
+    retried = experiment_api.freeze_fixture()
+    retried_arc = read_json(project_path / "arcs" / "arc-002" / "state.json")
+    assert retried.status == "frozen"
+    assert retried.fixture is not None
+    assert retried_arc["approved_at"] == approved_at
+    assert attempts == 2
+    assert [event.kind for event in read_events(project_path)].count(
+        "story_arc_approved"
+    ) == 1
 
 
 def _eligible_project(tmp_path: Path, monkeypatch) -> Path:
@@ -244,6 +416,7 @@ def _eligible_project(tmp_path: Path, monkeypatch) -> Path:
         project_id="source-project-id",
         title="退潮前的十一分钟",
         operation_mode="participatory",
+        project_kind="benchmark_mother",
         active_arc_id="arc-002",
         run_status="idle",
     )
@@ -334,3 +507,24 @@ def _eligible_project(tmp_path: Path, monkeypatch) -> Path:
         )
     (project_path / "events.jsonl").write_text("", encoding="utf-8")
     return project_path
+
+
+def _reset_arc2_for_approval(project_path: Path) -> None:
+    metadata = ProjectMetadata.model_validate(read_json(project_path / "project.json"))
+    metadata.run_status = "waiting_for_user"
+    assert metadata.benchmark_fixture is not None
+    metadata.benchmark_fixture = metadata.benchmark_fixture.model_copy(
+        update={
+            "status": "preparing",
+            "fixture_id": None,
+            "checkpoint_fingerprint": None,
+            "failure_code": None,
+            "failure_message": None,
+        }
+    )
+    write_json(project_path / "project.json", metadata.model_dump(mode="json"))
+    arc = read_json(project_path / "arcs" / "arc-002" / "state.json")
+    arc["status"] = "planned"
+    arc["human_review"] = "awaiting_review"
+    arc["approved_at"] = None
+    write_json(project_path / "arcs" / "arc-002" / "state.json", arc)
