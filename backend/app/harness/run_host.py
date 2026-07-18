@@ -358,11 +358,12 @@ class RunHost:
             metadata = read_project_metadata(project_path)
             metadata.run_status = "failed"
             write_project_metadata(project_path, metadata)
-            set_run_intent(project_path, desired_state="stopped")
+            state = set_run_intent(project_path, desired_state="stopped")
             append_event(
                 project_path,
                 HarnessEvent(
                     project_id=metadata.project_id,
+                    run_id=state.run_id,
                     kind="run_host_failed",
                     loop_layer="system",
                     status="failed",

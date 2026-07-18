@@ -119,7 +119,8 @@ export function CreationView({ project, events, currentArc, summaries, readiness
     : latestDraft?.status ?? (fallbackSummary ? "candidate" as const : "streaming" as const);
   const completedChapterIds = useMemo(() => [...new Set(summaries.map((summary) => summary.path.match(/^chapters\/([^/]+)\/final\.md$/)?.[1]).filter((value): value is string => Boolean(value)))], [summaries]);
   const actionableFailure = latestActionableFailure(events, model);
-  const authorEvents = events.filter((event) => ["user_feedback", "feedback_processed"].includes(event.kind) || event.event_id === actionableFailure?.event_id).slice(-20);
+  const authorEvents = events.filter((event) => ["user_feedback", "feedback_processed"].includes(event.kind)).slice(-20);
+  const showFailureNotice = actionableFailure !== null || model.primaryAction === "retry_failed_run";
 
   useEffect(() => {
     if (!following) return;
@@ -160,9 +161,10 @@ export function CreationView({ project, events, currentArc, summaries, readiness
             const text = feedbackText(event);
             if (event.kind === "user_feedback" && text) return <article className={styles.message} data-role="user" key={event.event_id}><span>你</span><p>{text}</p></article>;
             if (event.kind === "feedback_processed" && text) return <article className={styles.message} data-role="agent" key={event.event_id}><span>NovelPilot</span><p>已接收并路由这条反馈：{text}</p></article>;
-            if (event.status === "failed") return <article className={styles.failureNotice} key={event.event_id}><strong>当前步骤未能继续</strong><p>{failureSummary(event)}</p><div className={styles.failureActions}><Button variant="ghost" size="sm" onClick={() => setDetailsOpen(true)}>查看详细证据</Button>{model.primaryAction === "retry_failed_run" && <Button variant="primary" size="sm" disabled={busy} onClick={() => void onRetryFailedRun()}><RotateCw size={15} />{busy ? "正在重试……" : readiness?.next_action.id === "retry_provider_connection" ? "重新连接并继续" : "重试当前步骤"}</Button>}</div></article>;
             return null;
           })}
+
+          {showFailureNotice && <article className={styles.failureNotice}><strong>当前步骤未能继续</strong><p>{actionableFailure ? failureSummary(actionableFailure) : model.description}</p><div className={styles.failureActions}><Button variant="ghost" size="sm" onClick={() => setDetailsOpen(true)}>查看详细证据</Button>{model.primaryAction === "retry_failed_run" && <Button variant="primary" size="sm" disabled={busy} onClick={() => void onRetryFailedRun()}><RotateCw size={15} />{busy ? "正在重试……" : readiness?.next_action.id === "retry_provider_connection" ? "重新连接并继续" : "重试当前步骤"}</Button>}</div></article>}
 
           {activeChapterId && (prose || model.stage === "writing_chapter" || model.stage === "evaluating_chapter" || model.stage === "repairing_chapter") && <LiveChapterDocument chapterId={activeChapterId} prose={prose} status={proseStatus} stageLabel={model.title} />}
 

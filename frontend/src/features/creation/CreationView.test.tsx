@@ -153,6 +153,36 @@ describe("CreationView", () => {
     expect(onRetryFailedRun).toHaveBeenCalledOnce();
   });
 
+  it("keeps failed-run recovery visible when the host failure has no run id", async () => {
+    const user = userEvent.setup();
+    const onRetryFailedRun = vi.fn().mockResolvedValue(undefined);
+    renderCreation({
+      project: { ...project, metadata: { ...project.metadata, run_status: "failed" } },
+      readiness: readiness("retry_failed_run"),
+      events: [
+        harnessEvent("event-120", "run_started", {}),
+        failedEvent("event-121", {
+          run_id: null,
+          kind: "run_host_failed",
+          loop_layer: "system",
+          atomic_action: null,
+          message: "RunHost stopped after an unexpected internal error (PermissionError)."
+        }),
+        {
+          ...harnessEvent("event-122", "user_feedback", { feedback: "重试" }),
+          run_id: null,
+          loop_layer: "book",
+          status: "completed"
+        }
+      ],
+      onRetryFailedRun
+    });
+
+    expect(screen.getByText("重试")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "重试当前步骤" }));
+    expect(onRetryFailedRun).toHaveBeenCalledOnce();
+  });
+
   it("labels a provider failure as reconnecting without submitting feedback", async () => {
     const user = userEvent.setup();
     const onRetryFailedRun = vi.fn().mockResolvedValue(undefined);

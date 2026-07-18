@@ -330,6 +330,28 @@ def test_run_host_finishes_checkpoint_when_action_raises(
     assert "provider secret" not in checkpoint["failure"]
 
 
+def test_run_host_failure_event_preserves_the_durable_run_identity(tmp_path) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    write_json(
+        project_path / "project.json",
+        ProjectMetadata(title="Novel", run_status="running").model_dump(mode="json"),
+    )
+    (project_path / "events.jsonl").write_text("", encoding="utf-8")
+    set_run_intent(project_path, desired_state="running", run_id="run-1")
+
+    run_host.RunHost()._record_host_failure(
+        project_path,
+        PermissionError("internal path must stay redacted"),
+    )
+
+    event = read_events(project_path)[-1]
+    assert event.kind == "run_host_failed"
+    assert event.run_id == "run-1"
+    assert "internal path" not in event.message
+    assert read_run_control_state(project_path).desired_state == "stopped"
+
+
 def test_run_host_preserves_pause_that_races_with_provider_wait(
     tmp_path, monkeypatch
 ) -> None:
