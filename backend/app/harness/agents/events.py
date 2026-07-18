@@ -38,6 +38,12 @@ _SAFE_SCALAR_KEYS = {
     "code",
     "cause_code",
     "recoverable",
+    "evaluation_mode",
+    "logical_candidate_revision",
+    "open_issue_count",
+    "resolved_issue_count",
+    "new_issue_count",
+    "late_discovery_count",
 }
 _SAFE_PATH_KEYS = {"artifact_paths", "evidence_paths"}
 
@@ -89,6 +95,12 @@ def _safe_payload(value: dict[str, Any]) -> dict[str, object]:
         payload["allowed_actions"] = [
             name for name in allowed_actions if isinstance(name, str)
         ][:100]
+    for key in ("allowed_components", "changed_components"):
+        item = value.get(key)
+        if isinstance(item, list):
+            payload[key] = [
+                name for name in item if isinstance(name, str)
+            ][:20]
     return payload
 
 

@@ -189,6 +189,23 @@ describe("CreationView", () => {
     expect(screen.getByRole("button", { name: "继续自动修订" })).toBeInTheDocument();
   });
 
+  it("explains semantic revision exhaustion without exposing the raw failure", () => {
+    renderCreation({
+      project: { ...project, metadata: { ...project.metadata, run_status: "failed" } },
+      readiness: readiness("retry_failed_run"),
+      events: [
+        harnessEvent("event-210", "run_started", {}),
+        failedEvent("event-211", {
+          message: "Candidate still requires local semantic repair.",
+          payload: { code: "semantic_revision_exhausted" }
+        })
+      ]
+    });
+
+    expect(screen.getByText(/自动语义修订达到上限/)).toBeInTheDocument();
+    expect(screen.queryByText("Candidate still requires local semantic repair.")).not.toBeInTheDocument();
+  });
+
   it("shows paused as inactive and resumes only after the explicit click", async () => {
     const user = userEvent.setup();
     const onResume = vi.fn().mockResolvedValue(undefined);

@@ -43,6 +43,10 @@ function feedbackText(event: HarnessEvent): string | null {
 }
 
 function failureSummary(event: HarnessEvent): string {
+  const code = event.payload.code;
+  if (code === "semantic_revision_exhausted") {
+    return "当前候选在自动语义修订达到上限后仍有未解决问题。最新候选、完整评审记录和修订链均已保留；你可以查看详细证据后重新尝试当前候选流程。";
+  }
   const category = event.payload.category;
   const message = event.message;
   if (category === "provider_auth" || category === "unsupported_capability") {

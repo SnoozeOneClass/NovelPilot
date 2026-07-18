@@ -13,12 +13,15 @@ from app.harness.agents.models import (
     AgentState,
     FailureCategory,
     FailureEnvelope,
+    RepairContract,
     ToolExecutionResult,
 )
 from app.harness.agents.persistence import (
     append_activation_log,
     clone_activation_candidate_workspace,
+    persist_pending_repair,
     read_agent_state,
+    read_repair_chain,
     save_agent_state,
     write_activation_document,
 )
@@ -59,6 +62,7 @@ class AgentActivation:
     on_text_delta: Callable[[Any], None] | None = None
     on_tool_event: Callable[[Any], None] | None = None
     experiment_strategy: ExperimentHookStrategy | None = None
+    repair_contract: RepairContract | None = None
 
 
 @dataclass
@@ -110,15 +114,21 @@ class AgentRuntime:
             and state.candidate_run_id == activation.candidate_run_id
             else None
         )
+        source_activation_id = prior_failed_activation_id or (
+            activation.repair_contract.source_activation_id
+            if activation.identity.role == "chapter"
+            and activation.repair_contract is not None
+            else None
+        )
         activation_id = uuid4().hex[:12]
         restored_candidate_paths = (
             clone_activation_candidate_workspace(
                 activation.project_path,
                 activation.identity,
-                source_activation_id=prior_failed_activation_id,
+                source_activation_id=source_activation_id,
                 target_activation_id=activation_id,
             )
-            if prior_failed_activation_id is not None
+            if source_activation_id is not None
             else []
         )
         state.activation_id = activation_id
@@ -143,6 +153,16 @@ class AgentRuntime:
                 "role": activation.identity.role,
                 "phase": activation.phase,
                 "allowed_tools": [spec.name for spec in specs],
+                "logical_candidate_revision": (
+                    activation.repair_contract.next_candidate_revision
+                    if activation.repair_contract is not None
+                    else 1
+                ),
+                "allowed_components": (
+                    list(activation.repair_contract.allowed_components)
+                    if activation.repair_contract is not None
+                    else []
+                ),
             },
         )
 
@@ -154,10 +174,9 @@ class AgentRuntime:
                     role="user",
                     content=(
                         "Harness restored the uncommitted Chapter candidate workspace "
-                        "from the prior failed activation for this candidate run. Reuse "
-                        "the preserved plan and draft where valid, and correct the prior "
-                        "validation failure through the exposed Tools. This workspace is "
-                        "candidate evidence, not committed prose."
+                        "for this candidate run. Reuse every preserved component and change "
+                        "only components authorized by the repair contract and exposed Tools. "
+                        "This workspace is candidate evidence, not committed prose."
                     ),
                 )
             )
@@ -235,6 +254,7 @@ class AgentRuntime:
                     tool_call_id=call.id,
                     phase=activation.phase,
                     expected_revision=activation.expected_revision,
+                    repair_contract=activation.repair_contract,
                     experiment_strategy=activation.experiment_strategy,
                 )
                 tool_result = self._registry.execute(context, call)
@@ -396,8 +416,7 @@ class AgentRuntime:
         self,
         activation: AgentActivation,
         *,
-        evaluation_id: str,
-        candidate_artifact_id: str,
+        repair_contract: RepairContract,
     ) -> bool:
         """Consume one candidate-local semantic-revision slot before another activation.
 
@@ -423,13 +442,29 @@ class AgentRuntime:
                     "Candidate still requires local semantic repair after its "
                     "automatic revision budget was exhausted."
                 ),
-                recoverable=False,
-                evidence=[candidate_artifact_id, evaluation_id],
+                recoverable=True,
+                evidence=[
+                    repair_contract.source_candidate_artifact_id,
+                    repair_contract.evaluation_id,
+                ],
                 allowed_actions=["retry_candidate_run", "request_user_decision"],
             )
             self._fail(activation, activation_id, state, failure)
             return False
 
+        candidate_kind: Literal["book_direction", "story_arc", "chapter"] = (
+            "book_direction"
+            if activation.identity.role == "book"
+            else activation.identity.role
+        )
+        chain = read_repair_chain(
+            activation.project_path,
+            activation.identity,
+            candidate_run_id=activation.candidate_run_id,
+            candidate_kind=candidate_kind,
+            semantic_revision_limit=budgets.semantic_revision_limit,
+        )
+        persist_pending_repair(activation.project_path, chain, repair_contract)
         budgets.used_semantic_revisions += 1
         state.lifecycle = "idle"
         state.summary = "Evaluator requested a bounded local candidate revision."
@@ -440,10 +475,9 @@ class AgentRuntime:
             activation_id,
             "semantic-repair.json",
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "retry_budget_scope_version": RETRY_BUDGET_SCOPE_VERSION,
-                "evaluation_id": evaluation_id,
-                "candidate_artifact_id": candidate_artifact_id,
+                "repair_contract": repair_contract.model_dump(mode="json"),
                 "revision": budgets.used_semantic_revisions,
                 "limit": budgets.semantic_revision_limit,
             },
@@ -454,9 +488,11 @@ class AgentRuntime:
                 "kind": "agent_semantic_revision_scheduled",
                 "activation_id": activation_id,
                 "candidate_run_id": activation.candidate_run_id,
-                "evaluation_id": evaluation_id,
+                "evaluation_id": repair_contract.evaluation_id,
                 "revision": budgets.used_semantic_revisions,
                 "limit": budgets.semantic_revision_limit,
+                "logical_candidate_revision": repair_contract.next_candidate_revision,
+                "allowed_components": list(repair_contract.allowed_components),
             },
         )
         return True
@@ -669,6 +705,11 @@ class AgentRuntime:
                 "experiment_strategy": (
                     activation.experiment_strategy.model_dump(mode="json")
                     if activation.experiment_strategy is not None
+                    else None
+                ),
+                "repair_contract": (
+                    activation.repair_contract.model_dump(mode="json")
+                    if activation.repair_contract is not None
                     else None
                 ),
             },

@@ -7,6 +7,13 @@ from typing import Any, Literal, TypeVar, cast
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.harness.agents.persistence import activation_relative, json_document
+from app.harness.agents.models import (
+    BookCandidateSnapshot,
+    CandidateSnapshot,
+    ChapterCandidateSnapshot,
+    StoryArcCandidateSnapshot,
+)
+from app.harness.agents.rubrics import changed_components, component_fingerprints
 from app.harness.agents.registry import (
     ToolExecutionContext,
     ToolExecutionPlan,
@@ -466,6 +473,21 @@ def _submit_book_direction_candidate(
 ) -> ToolExecutionPlan:
     request = _typed(arguments, BookDirectionCandidateInput)
     _expect_revision(context, request.expected_revision)
+    _enforce_repair_scope(
+        context,
+        BookCandidateSnapshot(
+            direction=request.direction_markdown,
+            constraints=request.constraints.model_dump(mode="json"),
+            confirmed_decision_coverage=[
+                item.model_dump(mode="json")
+                for item in request.confirmed_decision_coverage
+            ],
+            recommended_titles=[
+                item.model_dump(mode="json") for item in request.recommended_titles
+            ],
+            rolling_plan=request.rolling_plan_markdown,
+        ),
+    )
     relative = _candidate_relative(context, "book-direction.json")
     return _terminal_candidate_plan(
         context,
@@ -487,6 +509,14 @@ def _submit_story_arc_candidate(
             "Story Arc Tool can only write the Agent's owned arc.",
             recoverable=False,
         )
+    _enforce_repair_scope(
+        context,
+        StoryArcCandidateSnapshot(
+            plan=request.plan_markdown,
+            target_chapter_count=request.target_chapter_count,
+            change_summary=request.change_summary,
+        ),
+    )
     relative = _candidate_relative(context, "story-arc.json")
     return _terminal_candidate_plan(
         context,
@@ -677,6 +707,21 @@ def _submit_chapter_candidate(
     tool_request = _typed(arguments, SubmitChapterCandidateToolInput)
     request = _normalize_chapter_submission(context, tool_request)
     _expect_chapter(context, request.chapter_id, request.expected_revision)
+    expected_candidate_revision = (
+        context.repair_contract.next_candidate_revision
+        if context.repair_contract is not None
+        else 1
+    )
+    if request.candidate_revision != expected_candidate_revision:
+        raise ToolHandlerError(
+            "stale_candidate_revision",
+            (
+                "Chapter submission must use logical candidate revision "
+                f"{expected_candidate_revision}."
+            ),
+            recoverable=True,
+            allowed_actions=["retry:submit_chapter_candidate"],
+        )
     root = _candidate_root(context)
     state = _workspace_state(context)
     if int(state.get("plan_revision", 0)) != request.plan_revision:
@@ -695,7 +740,10 @@ def _submit_chapter_candidate(
         )
     plan_path = root / "plan.md"
     draft_path = root / "draft.md"
-    _read_required_text(context.project_path / plan_path, code="candidate_plan_missing")
+    plan = _read_required_text(
+        context.project_path / plan_path,
+        code="candidate_plan_missing",
+    )
     draft = _read_required_text(
         context.project_path / draft_path,
         code="candidate_draft_missing",
@@ -729,6 +777,15 @@ def _submit_chapter_candidate(
                 "retry:submit_chapter_candidate",
             ],
         )
+    _enforce_repair_scope(
+        context,
+        ChapterCandidateSnapshot(
+            plan=plan,
+            draft=draft,
+            observations=request.observations.model_dump(mode="json"),
+            state_patch=request.state_patch.model_dump(mode="json"),
+        ),
+    )
     observations_path = root / "obs.json"
     patch_path = root / "patch.json"
     manifest_path = root / "manifest.json"
@@ -774,6 +831,37 @@ def _submit_chapter_candidate(
         ],
         allowed_actions=["evaluate_chapter_candidate"],
     )
+
+
+def _enforce_repair_scope(
+    context: ToolExecutionContext,
+    candidate: CandidateSnapshot,
+) -> None:
+    contract = context.repair_contract
+    if contract is None:
+        return
+    current = component_fingerprints(candidate)
+    try:
+        changed = changed_components(contract.source_component_fingerprints, current)
+    except ValueError as exc:
+        raise ToolHandlerError(
+            "candidate_repair_component_mismatch",
+            "Repair candidate components do not match the source candidate kind.",
+            recoverable=False,
+        ) from exc
+    unexpected = sorted(set(changed) - set(contract.allowed_components))
+    if unexpected:
+        raise ToolHandlerError(
+            "candidate_repair_scope_violation",
+            "Candidate repair changed components outside the Evaluator-authorized scope.",
+            recoverable=True,
+            content={
+                "changed_components": changed,
+                "allowed_components": list(contract.allowed_components),
+                "unexpected_components": unexpected,
+            },
+            allowed_actions=["retry_with_authorized_components"],
+        )
 
 
 def _normalize_chapter_submission(

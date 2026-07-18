@@ -26,7 +26,7 @@ const defaultPolicy: AgentPolicy = {
   story_arc_max_turns: 20,
   chapter_max_turns: 30,
   tool_schema_repair_limit: 2,
-  semantic_revision_limit: 2,
+  semantic_revision_limit: 10,
   transport_retry_limit: 3
 };
 

@@ -9,6 +9,7 @@ from app.core.paths import ensure_relative_artifact_path
 from app.harness.agents.models import (
     AgentIdentity,
     AgentRole,
+    RepairContract,
     ToolExecutionResult,
     ToolReplayRecord,
 )
@@ -36,6 +37,7 @@ class ToolExecutionContext:
     tool_call_id: str
     phase: str
     expected_revision: int | None
+    repair_contract: RepairContract | None = None
     experiment_strategy: ExperimentHookStrategy | None = None
 
 

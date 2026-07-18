@@ -5,7 +5,19 @@ from pathlib import Path
 from typing import Any, Literal
 
 from app.core.paths import ensure_relative_artifact_path
-from app.harness.agents.models import AgentIdentity, AgentState, ToolReplayRecord
+from app.harness.agents.models import (
+    AgentIdentity,
+    AgentState,
+    CandidateKind,
+    EvaluationHistoryEntry,
+    EvaluationInput,
+    EvaluationRecord,
+    RepairChain,
+    RepairChainEntry,
+    RepairContract,
+    ToolReplayRecord,
+)
+from app.harness.agents.rubrics import changed_components
 from app.storage.file_lock import exclusive_file_lock
 from app.storage.json_files import read_json, write_json
 from app.storage.transactions import commit_file_transaction
@@ -27,6 +39,138 @@ def agent_scope_relative(identity: AgentIdentity) -> Path:
 def activation_relative(identity: AgentIdentity, activation_id: str) -> Path:
     safe_activation = ensure_relative_artifact_path((Path("a") / activation_id).as_posix())
     return agent_scope_relative(identity) / safe_activation
+
+
+def repair_chain_relative(identity: AgentIdentity) -> Path:
+    return agent_scope_relative(identity) / "repair-chain.json"
+
+
+def read_repair_chain(
+    project_path: Path,
+    identity: AgentIdentity,
+    *,
+    candidate_run_id: str,
+    candidate_kind: CandidateKind,
+    semantic_revision_limit: int,
+) -> RepairChain:
+    payload = read_json(project_path / repair_chain_relative(identity), default=None)
+    if payload is not None:
+        chain = RepairChain.model_validate(payload)
+        if chain.identity == identity and chain.candidate_run_id == candidate_run_id:
+            if chain.candidate_kind != candidate_kind:
+                raise ValueError("Repair chain candidate kind does not match the Agent run.")
+            return chain
+    return RepairChain(
+        identity=identity,
+        candidate_run_id=candidate_run_id,
+        candidate_kind=candidate_kind,
+        semantic_revision_limit=semantic_revision_limit,
+    )
+
+
+def save_repair_chain(project_path: Path, chain: RepairChain) -> None:
+    root = project_path / agent_scope_relative(chain.identity)
+    with exclusive_file_lock(root / ".repair-chain.lock"):
+        write_json(
+            project_path / repair_chain_relative(chain.identity),
+            chain.model_dump(mode="json"),
+        )
+
+
+def append_repair_chain_evaluation(
+    project_path: Path,
+    chain: RepairChain,
+    *,
+    activation_id: str,
+    evaluation_path: str,
+    evaluation_input: EvaluationInput,
+    evaluation: EvaluationRecord,
+) -> RepairChain:
+    if evaluation.candidate_run_id != chain.candidate_run_id:
+        raise ValueError("Evaluation does not belong to the repair chain candidate run.")
+    if evaluation.candidate_revision != evaluation_input.candidate_revision:
+        raise ValueError("Evaluation revision does not match its immutable input.")
+    existing = next(
+        (item for item in chain.entries if item.evaluation_id == evaluation.evaluation_id),
+        None,
+    )
+    if existing is not None:
+        return chain
+    if len(chain.entries) + 1 != evaluation_input.candidate_revision:
+        raise ValueError("Repair chain logical candidate revision is not sequential.")
+    prior_fingerprints = (
+        chain.entries[-1].component_fingerprints if chain.entries else None
+    )
+    changed = (
+        changed_components(
+            prior_fingerprints,
+            evaluation_input.component_fingerprints,
+        )
+        if prior_fingerprints is not None
+        else []
+    )
+    if evaluation_input.expected_repair is not None:
+        unexpected = set(changed) - set(
+            evaluation_input.expected_repair.allowed_components
+        )
+        if unexpected:
+            raise ValueError(
+                "Repaired candidate changed components outside the repair contract: "
+                + ", ".join(sorted(unexpected))
+            )
+    entry = RepairChainEntry(
+        activation_id=activation_id,
+        candidate_artifact_id=evaluation.candidate_artifact_id,
+        candidate_revision=evaluation.candidate_revision,
+        component_fingerprints=evaluation_input.component_fingerprints,
+        evaluation_id=evaluation.evaluation_id,
+        evaluation_path=evaluation_path,
+        changed_components=changed,
+        open_issue_ids=[
+            issue.issue_id
+            for issue in evaluation.result.issues
+            if issue.issue_id is not None
+        ],
+        resolved_issue_ids=evaluation.result.resolved_issue_ids,
+        new_issue_ids=evaluation.result.new_issue_ids,
+    )
+    history_entry = EvaluationHistoryEntry(
+        evaluation_id=evaluation.evaluation_id,
+        candidate_revision=evaluation.candidate_revision,
+        candidate_artifact_id=evaluation.candidate_artifact_id,
+        component_fingerprints=evaluation_input.component_fingerprints,
+        result=evaluation.result,
+    )
+    revised = chain.model_copy(
+        update={
+            "entries": [*chain.entries, entry],
+            "review_history": [*chain.review_history, history_entry],
+            "pending_repair": None,
+        }
+    )
+    save_repair_chain(project_path, revised)
+    return revised
+
+
+def persist_pending_repair(
+    project_path: Path,
+    chain: RepairChain,
+    contract: RepairContract,
+) -> RepairChain:
+    if contract.source_candidate_revision != len(chain.entries):
+        raise ValueError("Repair contract source revision is not the chain head.")
+    if chain.pending_repair is not None:
+        if chain.pending_repair == contract:
+            return chain
+        raise ValueError("Repair chain already has a different pending repair.")
+    revised = chain.model_copy(
+        update={
+            "used_semantic_revisions": chain.used_semantic_revisions + 1,
+            "pending_repair": contract,
+        }
+    )
+    save_repair_chain(project_path, revised)
+    return revised
 
 
 def read_agent_state(project_path: Path, identity: AgentIdentity) -> AgentState:

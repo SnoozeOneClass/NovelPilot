@@ -7,9 +7,13 @@ from pydantic import ValidationError
 
 from app.core.paths import ensure_relative_artifact_path
 from app.harness.agents.models import (
+    CandidateComponentName,
     EvaluationInput,
+    EvaluationIssue,
     EvaluationRecord,
     EvaluationResult,
+    ModelEvaluationResult,
+    NewEvaluationIssue,
 )
 from app.llm.gateway import (
     ChatMessage,
@@ -59,7 +63,7 @@ def evaluate_candidate(
     response_schema = ResponseSchema(
         name="novelpilot_evaluation_result",
         description="One stateless semantic evaluation for a fixed candidate revision.",
-        json_schema=strict_model_json_schema(EvaluationResult),
+        json_schema=strict_model_json_schema(ModelEvaluationResult),
     )
     evaluation: EvaluationResult | None = None
     result: ChatResult | None = None
@@ -105,6 +109,7 @@ def evaluate_candidate(
         evaluator_model_snapshot=result.model_snapshot,
         evaluator_provider_snapshot=result.provider_snapshot,
         rubric_version=evaluation_input.rubric_version,
+        evaluation_mode=evaluation_input.mode,
         result=evaluation,
     )
 
@@ -138,7 +143,7 @@ def _validated_evaluation(
             "fallbacks are not supported."
         )
     try:
-        evaluation = EvaluationResult.model_validate(payload)
+        model_result = ModelEvaluationResult.model_validate(payload)
     except ValidationError as exc:
         raise EvaluationValidationError(
             redact_profile_secrets(
@@ -146,8 +151,8 @@ def _validated_evaluation(
                 profile,
             )
         ) from exc
-    _validate_evidence_locators(evaluation_input, evaluation)
-    return evaluation
+    _validate_evidence_locators(evaluation_input, model_result)
+    return _normalize_evaluation(evaluation_input, model_result)
 
 
 def _evaluator_output_for_repair(result: ChatResult) -> str:
@@ -173,13 +178,13 @@ def _evaluator_validation_repair_prompt(
             "allowed_candidate_locator_roots": [
                 evaluation_input.candidate_artifact_id,
                 "candidate_artifact_id",
-                "candidate_content",
+                "candidate",
             ],
             "allowed_evidence_locator_roots": [
                 evaluation_input.candidate_artifact_id,
                 *(item.locator for item in evaluation_input.evidence),
                 "candidate_artifact_id",
-                "candidate_content",
+                "candidate",
                 "deterministic_prechecks",
             ],
             "committed_evidence_locator_roots": [
@@ -293,7 +298,7 @@ def render_verification(record: EvaluationRecord) -> dict[str, object]:
 
 def _validate_evidence_locators(
     evaluation_input: EvaluationInput,
-    result: EvaluationResult,
+    result: ModelEvaluationResult,
 ) -> None:
     committed_evidence = {item.locator for item in evaluation_input.evidence}
     approved_evidence = {
@@ -304,25 +309,25 @@ def _validate_evidence_locators(
         {
             *(
                 item.candidate_locator
-                for item in result.issues
+                for item in result.new_issues
                 if not _locator_is_scoped_to(
                     item.candidate_locator,
                     {evaluation_input.candidate_artifact_id},
                 )
                 and not _virtual_locator_is_scoped_to(
                     item.candidate_locator,
-                    {"candidate_artifact_id", "candidate_content"},
+                    {"candidate_artifact_id", "candidate"},
                 )
             ),
             *(
                 item.evidence_locator
-                for item in result.issues
+                for item in result.new_issues
                 if not _locator_is_scoped_to(item.evidence_locator, approved_evidence)
                 and not _virtual_locator_is_scoped_to(
                     item.evidence_locator,
                     {
                         "candidate_artifact_id",
-                        "candidate_content",
+                        "candidate",
                         "deterministic_prechecks",
                     },
                 )
@@ -335,7 +340,33 @@ def _validate_evidence_locators(
                     item.evidence_locator,
                     {
                         "candidate_artifact_id",
-                        "candidate_content",
+                        "candidate",
+                        "deterministic_prechecks",
+                    },
+                )
+            ),
+            *(
+                item.evidence_locator
+                for item in result.rubric_checks
+                if not _locator_is_scoped_to(item.evidence_locator, approved_evidence)
+                and not _virtual_locator_is_scoped_to(
+                    item.evidence_locator,
+                    {
+                        "candidate_artifact_id",
+                        "candidate",
+                        "deterministic_prechecks",
+                    },
+                )
+            ),
+            *(
+                item.evidence_locator
+                for item in result.prior_issue_checks
+                if not _locator_is_scoped_to(item.evidence_locator, approved_evidence)
+                and not _virtual_locator_is_scoped_to(
+                    item.evidence_locator,
+                    {
+                        "candidate_artifact_id",
+                        "candidate",
                         "deterministic_prechecks",
                     },
                 )
@@ -355,6 +386,166 @@ def _validate_evidence_locators(
         )
 
 
+def _normalize_evaluation(
+    evaluation_input: EvaluationInput,
+    result: ModelEvaluationResult,
+) -> EvaluationResult:
+    expected_dimensions = [
+        item.dimension_id for item in evaluation_input.rubric.dimensions
+    ]
+    actual_dimensions = [item.dimension_id for item in result.rubric_checks]
+    if len(actual_dimensions) != len(set(actual_dimensions)):
+        raise EvaluationValidationError("Evaluator returned duplicate rubric checks.")
+    if set(actual_dimensions) != set(expected_dimensions):
+        raise EvaluationValidationError(
+            "Evaluator must return exactly one check for every rubric dimension."
+        )
+
+    prior_open: dict[str, EvaluationIssue] = {}
+    if evaluation_input.review_history:
+        for issue in evaluation_input.review_history[-1].result.issues:
+            if issue.issue_id is None:
+                raise EvaluationValidationError(
+                    "Persisted review history contains an issue without a stable ID."
+                )
+            prior_open[issue.issue_id] = issue
+    checks = {item.issue_id: item for item in result.prior_issue_checks}
+    if len(checks) != len(result.prior_issue_checks):
+        raise EvaluationValidationError("Evaluator returned duplicate prior-issue checks.")
+    if set(checks) != set(prior_open):
+        raise EvaluationValidationError(
+            "Evaluator must account for every open prior issue exactly once."
+        )
+    if evaluation_input.mode == "initial" and result.prior_issue_checks:
+        raise EvaluationValidationError(
+            "Initial evaluation cannot report prior-issue checks."
+        )
+
+    remaining = [
+        prior_open[issue_id]
+        for issue_id, check in checks.items()
+        if check.status == "remaining"
+    ]
+    resolved_issue_ids = sorted(
+        issue_id for issue_id, check in checks.items() if check.status == "resolved"
+    )
+    new_issues: list[EvaluationIssue] = []
+    for index, proposal in enumerate(result.new_issues):
+        issue_id = _stable_issue_id(evaluation_input, proposal, index)
+        new_issues.append(
+            EvaluationIssue(
+                issue_id=issue_id,
+                discovery=(
+                    "late_discovery"
+                    if evaluation_input.mode == "repair_verification"
+                    else "initial_discovery"
+                ),
+                **proposal.model_dump(),
+            )
+        )
+    open_issues = [*remaining, *new_issues]
+    component_names = set(evaluation_input.component_fingerprints)
+    repair_scope = list(dict.fromkeys(result.repair_scope))
+    if any(name not in component_names for name in repair_scope):
+        raise EvaluationValidationError(
+            "Evaluator repair scope contains a component outside this candidate kind."
+        )
+
+    all_rubric_pass = all(item.status == "pass" for item in result.rubric_checks)
+    blocking_issues = [item for item in open_issues if item.severity == "blocking"]
+    if result.outcome == "pass":
+        if (
+            not result.contract_satisfied
+            or not all_rubric_pass
+            or open_issues
+            or repair_scope
+        ):
+            raise EvaluationValidationError(
+                "Passing evaluation requires all rubric checks to pass, no open issues, "
+                "and an empty repair scope."
+            )
+    if result.outcome == "local_repair":
+        if result.contract_satisfied or not blocking_issues or not repair_scope:
+            raise EvaluationValidationError(
+                "Local repair requires an unsatisfied contract, a blocking issue, "
+                "and non-empty repair scope."
+            )
+        required_components = {
+            component
+            for issue in blocking_issues
+            if (component := _issue_component(evaluation_input, issue)) is not None
+        }
+        if len(required_components) != len(blocking_issues):
+            raise EvaluationValidationError(
+                "Every blocking local issue must identify one candidate component."
+            )
+        if not required_components.issubset(set(repair_scope)):
+            raise EvaluationValidationError(
+                "Repair scope does not cover every blocking issue locator."
+            )
+
+    return EvaluationResult(
+        schema_version=2,
+        outcome=result.outcome,
+        contract_satisfied=result.contract_satisfied,
+        summary=result.summary,
+        issues=open_issues,
+        signals=result.signals,
+        repair_brief=result.repair_brief,
+        upstream_blocker=result.upstream_blocker,
+        rubric_checks=result.rubric_checks,
+        prior_issue_checks=result.prior_issue_checks,
+        new_issue_ids=[item.issue_id for item in new_issues if item.issue_id is not None],
+        resolved_issue_ids=resolved_issue_ids,
+        repair_scope=repair_scope,
+    )
+
+
+def _stable_issue_id(
+    evaluation_input: EvaluationInput,
+    issue: NewEvaluationIssue,
+    index: int,
+) -> str:
+    canonical = json.dumps(
+        {
+            "candidate_run_id": evaluation_input.candidate_run_id,
+            "candidate_revision": evaluation_input.candidate_revision,
+            "index": index,
+            "category": issue.category,
+            "severity": issue.severity,
+            "candidate_locator": issue.candidate_locator,
+            "evidence_locator": issue.evidence_locator,
+            "explanation": issue.explanation,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "issue-" + sha256(canonical.encode("utf-8")).hexdigest()[:20]
+
+
+def _issue_component(
+    evaluation_input: EvaluationInput,
+    issue: EvaluationIssue,
+) -> CandidateComponentName | None:
+    locator = issue.candidate_locator
+    candidate_artifact_ids = {
+        evaluation_input.candidate_artifact_id,
+        *(item.candidate_artifact_id for item in evaluation_input.review_history),
+    }
+    for component in evaluation_input.component_fingerprints:
+        if locator == f"candidate.{component}" or locator.startswith(
+            f"candidate.{component}."
+        ):
+            return component
+        if locator == f"candidate_artifact_id#{component}" or any(
+            locator == f"{artifact_id}#{component}"
+            for artifact_id in candidate_artifact_ids
+        ):
+            return component
+    return None
+
+
 def _locator_is_scoped_to(locator: str, allowed_roots: set[str]) -> bool:
     return any(locator == root or locator.startswith(f"{root}#") for root in allowed_roots)
 
@@ -370,18 +561,22 @@ def _virtual_locator_is_scoped_to(locator: str, allowed_roots: set[str]) -> bool
 
 def _evaluator_system_prompt() -> str:
     return (
-        "You are NovelPilot's stateless semantic Evaluator. Judge only the fixed candidate "
-        "and approved evidence in the supplied object. Do not infer access to the generating "
-        "Agent conversation, do not propose edits to committed prose or canon, and do not "
-        "invent evidence locators. Candidate locators should use the exact path value stored "
-        "in candidate_artifact_id (not the literal field name) with an optional #field "
-        "fragment, or candidate_content.field. Evidence locators must use an "
-        "approved evidence locator with an optional #field fragment, candidate_content.field, "
-        "or deterministic_prechecks.field. A committed_evidence_locator for cross-Loop "
-        "escalation must use an approved committed evidence locator, never a virtual locator. "
-        "Return exactly one result matching the response schema. "
-        "Use cross_loop_escalation only when an exact upper-contract field and revision is "
-        "impossible to satisfy alongside cited committed evidence; otherwise use local_repair."
+        "You are NovelPilot's stateless semantic Evaluator. The supplied object is the complete "
+        "evaluation context: a fixed typed candidate, an explicit versioned rubric, approved "
+        "evidence, and (during repair verification) the complete prior review history. Check "
+        "every rubric dimension exactly once. During repair verification, account for every "
+        "currently open prior issue exactly once as resolved or remaining; do not silently "
+        "erase it. Put only genuinely new findings in new_issues; the Harness assigns their "
+        "stable IDs. A new issue is allowed even when it concerns an unchanged "
+        "component, because the full history is present. Candidate locators must identify one "
+        "typed component as candidate.<component>. Evidence locators must use candidate.<component>, "
+        "deterministic_prechecks.<field>, or an approved evidence locator with an optional #field "
+        "fragment. For local_repair, repair_scope must list every candidate component needed to "
+        "fix current blocking issues and no unrelated component. Do not edit or propose mutation "
+        "of committed prose or canon. A committed_evidence_locator for cross-Loop escalation must "
+        "use approved committed evidence, never a virtual locator. Return exactly one schema-v2 "
+        "result. Use cross_loop_escalation only when an exact upper-contract field and revision "
+        "is impossible to satisfy alongside cited committed evidence; otherwise use local_repair."
     )
 
 

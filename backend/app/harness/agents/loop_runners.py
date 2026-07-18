@@ -1,6 +1,7 @@
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from hashlib import sha256
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -18,19 +19,28 @@ from app.harness.agents.evaluator import evaluate_candidate, evaluation_input_fi
 from app.harness.agents.models import (
     AgentIdentity,
     AgentRunResult,
+    BookCandidateSnapshot,
+    CandidateKind,
+    ChapterCandidateSnapshot,
     EvaluationEvidence,
     EvaluationInput,
     EvaluationIssue,
     EvaluationRecord,
     EvaluationResult,
+    RepairChain,
+    RepairContract,
+    StoryArcCandidateSnapshot,
     ToolExecutionResult,
 )
 from app.harness.agents.policy import ResolvedAgentPolicy
 from app.harness.agents.persistence import (
     activation_relative,
+    append_repair_chain_evaluation,
     read_agent_state,
+    read_repair_chain,
     write_activation_document,
 )
+from app.harness.agents.rubrics import component_fingerprints, resolve_rubric
 from app.harness.agents.runtime import AgentActivation, AgentRuntime
 from app.harness.loops.book import (
     BookDirectionSynthesis,
@@ -99,6 +109,8 @@ class StoryArcAgentResult:
     evaluation: EvaluationRecord
     run_result: AgentRunResult
     candidate_artifact_path: str
+    evaluation_input: EvaluationInput | None = None
+    change_summary: str = ""
 
 
 @dataclass(frozen=True)
@@ -108,6 +120,7 @@ class ChapterAgentResult:
     verification: ChapterVerification
     run_result: AgentRunResult
     candidate_root: str
+    evaluation_input: EvaluationInput | None = None
 
 
 @dataclass(frozen=True)
@@ -200,13 +213,31 @@ def run_book_direction_agent(
     runtime: AgentRuntime | None = None,
 ) -> tuple[BookDirectionSynthesis, EvaluationRecord, BookDirectionReview]:
     candidate_revision = state.candidate_revision_counter + 1
+    identity = AgentIdentity(project_id=metadata.project_id, role="book")
+    agent_state = read_agent_state(project_path, identity)
+    pending_candidate_run_id: str | None = None
+    if agent_state.candidate_run_id is not None:
+        existing_chain = _read_agent_repair_chain(
+            project_path,
+            identity,
+            candidate_run_id=agent_state.candidate_run_id,
+            candidate_kind="book_direction",
+            semantic_revision_limit=policy.semantic_revision_limit,
+        )
+        if existing_chain.pending_repair is not None:
+            pending_candidate_run_id = agent_state.candidate_run_id
+    candidate_run_id = (
+        pending_candidate_run_id
+        if pending_candidate_run_id is not None
+        else f"book-direction-{candidate_revision}-{uuid4().hex[:8]}"
+    )
     return _run_book_direction_candidate_agent(
         project_path,
         metadata,
         state,
         policy,
         candidate_revision=candidate_revision,
-        candidate_run_id=f"book-direction-{candidate_revision}-{uuid4().hex[:8]}",
+        candidate_run_id=candidate_run_id,
         system_prompt=_book_direction_agent_prompt(
             state_revision=state.revision,
             candidate_revision=candidate_revision,
@@ -366,6 +397,10 @@ def _run_book_direction_candidate_agent(
         on_text_delta=on_text_delta,
         on_tool_event=on_tool_event,
     )
+    activation = _resume_pending_semantic_repair(
+        activation,
+        candidate_kind="book_direction",
+    )
     result = runner.run(activation)
     synthesis, evaluation, review = _book_direction_attempt(
         project_path,
@@ -377,14 +412,22 @@ def _run_book_direction_candidate_agent(
         on_event,
     )
     while evaluation.result.outcome == "local_repair":
+        chain = _read_agent_repair_chain(
+            project_path,
+            identity,
+            candidate_run_id=activation.candidate_run_id,
+            candidate_kind="book_direction",
+            semantic_revision_limit=policy.semantic_revision_limit,
+        )
+        contract = _repair_contract_from_chain(chain, evaluation)
         if not runner.request_semantic_revision(
             activation,
-            evaluation_id=evaluation.evaluation_id,
-            candidate_artifact_id=evaluation.candidate_artifact_id,
+            repair_contract=contract,
         ):
             break
         activation = replace(
             activation,
+            repair_contract=contract,
             messages=(
                 ChatMessage(
                     role="user",
@@ -396,6 +439,8 @@ def _run_book_direction_candidate_agent(
                             **_book_synthesis_payload(synthesis),
                         },
                         evaluation,
+                        chain,
+                        contract,
                     ),
                 ),
             ),
@@ -452,6 +497,10 @@ def _book_direction_attempt(
         raise AgentCandidateError(
             "Book Direction Agent terminal candidate failed local validation."
         ) from exc
+    if candidate.candidate_revision != candidate_revision:
+        raise AgentCandidateError(
+            "Book Direction candidate revision does not match the Harness target."
+        )
     synthesis = BookDirectionSynthesis(
         direction_markdown=candidate.direction_markdown,
         constraints=candidate.constraints,
@@ -463,6 +512,23 @@ def _book_direction_attempt(
         usage=result.usage,
     )
     candidate_path = _terminal_artifact(result)
+    chain = _read_agent_repair_chain(
+        project_path,
+        identity,
+        candidate_run_id=result.candidate_run_id,
+        candidate_kind="book_direction",
+        semantic_revision_limit=policy.semantic_revision_limit,
+    )
+    chained = _chain_evaluation_for_activation(
+        project_path,
+        chain,
+        result.activation_id,
+    )
+    if chained is not None:
+        cached_evaluation, evaluation_path = chained
+        review = _book_review_from_evaluation(cached_evaluation)
+        _emit_evaluation_completed(on_event, cached_evaluation, evaluation_path)
+        return synthesis, cached_evaluation, review
     evaluation_input = _book_direction_evaluation_input(
         state,
         synthesis,
@@ -470,6 +536,7 @@ def _book_direction_attempt(
         candidate_revision=candidate_revision,
         identity=identity,
         candidate_run_id=result.candidate_run_id,
+        chain=chain,
     )
     evaluation_relative = (
         activation_relative(identity, result.activation_id) / "evaluation.json"
@@ -485,7 +552,7 @@ def _book_direction_attempt(
         if (
             existing.candidate_run_id == result.candidate_run_id
             and existing.candidate_artifact_id == candidate_path
-            and existing.candidate_revision == candidate_revision
+            and existing.candidate_revision == evaluation_input.candidate_revision
             and existing.input_fingerprint == expected_fingerprint
         ):
             evaluation = existing
@@ -499,11 +566,29 @@ def _book_direction_attempt(
             candidate_revision=candidate_revision,
             candidate_run_id=result.candidate_run_id,
             on_event=on_event,
+            evaluation_input=evaluation_input,
         )
+        evaluation = _normalize_runtime_evaluation(evaluation_input, evaluation)
         evaluation_path = _persist_activation_evaluation(project_path, result, evaluation)
     else:
+        evaluation = _normalize_runtime_evaluation(evaluation_input, evaluation)
         review = _book_review_from_evaluation(evaluation)
         evaluation_path = evaluation_relative
+        write_activation_document(
+            project_path,
+            identity,
+            result.activation_id,
+            "evaluation.json",
+            evaluation.model_dump(mode="json"),
+        )
+    _record_evaluation_chain(
+        project_path,
+        chain,
+        run_result=result,
+        evaluation_path=evaluation_path,
+        evaluation_input=evaluation_input,
+        evaluation=evaluation,
+    )
     _emit_evaluation_completed(on_event, evaluation, evaluation_path)
     return synthesis, evaluation, review
 
@@ -518,9 +603,10 @@ def evaluate_book_direction_candidate(
     candidate_revision: int,
     candidate_run_id: str | None = None,
     on_event: AgentEventCallback | None = None,
+    evaluation_input: EvaluationInput | None = None,
 ) -> tuple[EvaluationRecord, BookDirectionReview]:
     _require_policy_capabilities(policy)
-    evaluation_input = _book_direction_evaluation_input(
+    evaluation_input = evaluation_input or _book_direction_evaluation_input(
         state,
         synthesis,
         candidate_path=candidate_path,
@@ -584,6 +670,10 @@ def run_story_arc_agent(
         on_text_delta=on_text_delta,
         on_tool_event=on_tool_event,
     )
+    activation = _resume_pending_semantic_repair(
+        activation,
+        candidate_kind="story_arc",
+    )
     result = runner.run(activation)
     attempt = _story_arc_attempt(
         project_path,
@@ -596,14 +686,22 @@ def run_story_arc_agent(
         on_event,
     )
     while attempt.evaluation.result.outcome == "local_repair":
+        chain = _read_agent_repair_chain(
+            project_path,
+            identity,
+            candidate_run_id=activation.candidate_run_id,
+            candidate_kind="story_arc",
+            semantic_revision_limit=policy.semantic_revision_limit,
+        )
+        contract = _repair_contract_from_chain(chain, attempt.evaluation)
         if not runner.request_semantic_revision(
             activation,
-            evaluation_id=attempt.evaluation.evaluation_id,
-            candidate_artifact_id=attempt.evaluation.candidate_artifact_id,
+            repair_contract=contract,
         ):
             break
         activation = replace(
             activation,
+            repair_contract=contract,
             messages=(
                 ChatMessage(
                     role="user",
@@ -614,8 +712,11 @@ def run_story_arc_agent(
                             "intent": intent,
                             "expected_revision": expected_revision,
                             **attempt.proposal.model_dump(mode="json"),
+                            "change_summary": attempt.change_summary,
                         },
                         attempt.evaluation,
+                        chain,
+                        contract,
                     ),
                 ),
             ),
@@ -720,15 +821,41 @@ def _story_arc_attempt(
             f"Story Arc candidate intent {candidate.intent!r} does not match {intent!r}."
         )
     candidate_path = _terminal_artifact(result)
-    evaluation_input = EvaluationInput(
-        identity=identity,
+    chain = _read_agent_repair_chain(
+        project_path,
+        identity,
         candidate_run_id=result.candidate_run_id,
+        candidate_kind="story_arc",
+        semantic_revision_limit=policy.semantic_revision_limit,
+    )
+    chained = _chain_evaluation_for_activation(
+        project_path,
+        chain,
+        result.activation_id,
+    )
+    if chained is not None:
+        cached_evaluation, evaluation_path = chained
+        _emit_evaluation_completed(on_event, cached_evaluation, evaluation_path)
+        return StoryArcAgentResult(
+            proposal=StoryArcPlanProposal(
+                plan_markdown=candidate.plan_markdown,
+                target_chapter_count=candidate.target_chapter_count,
+            ),
+            evaluation=cached_evaluation,
+            run_result=result,
+            candidate_artifact_path=candidate_path,
+            evaluation_input=None,
+            change_summary=candidate.change_summary,
+        )
+    evaluation_input = _evaluation_input_for_chain(
+        chain,
+        identity=identity,
         checkpoint="story_arc_candidate",
         candidate_artifact_id=candidate_path,
-        candidate_revision=expected_revision + 1,
-        candidate_content=json.dumps(
-            candidate.model_dump(mode="json"),
-            ensure_ascii=False,
+        candidate=StoryArcCandidateSnapshot(
+            plan=candidate.plan_markdown,
+            target_chapter_count=candidate.target_chapter_count,
+            change_summary=candidate.change_summary,
         ),
         evidence=_story_arc_evidence(project_path, arc_id),
         deterministic_prechecks={
@@ -736,7 +863,6 @@ def _story_arc_attempt(
             "has_plan": bool(candidate.plan_markdown.strip()),
             "ownership_matches": candidate.arc_id == arc_id,
         },
-        rubric_version="story-arc-v1",
     )
     evaluation_relative = (
         activation_relative(identity, result.activation_id) / "evaluation.json"
@@ -752,7 +878,7 @@ def _story_arc_attempt(
         if (
             existing.candidate_run_id == result.candidate_run_id
             and existing.candidate_artifact_id == candidate_path
-            and existing.candidate_revision == expected_revision + 1
+            and existing.candidate_revision == evaluation_input.candidate_revision
             and existing.input_fingerprint == expected_fingerprint
         ):
             evaluation = existing
@@ -766,6 +892,23 @@ def _story_arc_attempt(
         evaluation_path = _persist_activation_evaluation(project_path, result, evaluation)
     else:
         evaluation_path = evaluation_relative
+    evaluation = _normalize_runtime_evaluation(evaluation_input, evaluation)
+    if evaluation_path == evaluation_relative:
+        write_activation_document(
+            project_path,
+            identity,
+            result.activation_id,
+            "evaluation.json",
+            evaluation.model_dump(mode="json"),
+        )
+    _record_evaluation_chain(
+        project_path,
+        chain,
+        run_result=result,
+        evaluation_path=evaluation_path,
+        evaluation_input=evaluation_input,
+        evaluation=evaluation,
+    )
     _emit_evaluation_completed(on_event, evaluation, evaluation_path)
     return StoryArcAgentResult(
         proposal=StoryArcPlanProposal(
@@ -775,6 +918,8 @@ def _story_arc_attempt(
         evaluation=evaluation,
         run_result=result,
         candidate_artifact_path=candidate_path,
+        evaluation_input=evaluation_input,
+        change_summary=candidate.change_summary,
     )
 
 
@@ -820,6 +965,10 @@ def run_chapter_agent(
         on_text_delta=on_text_delta,
         on_tool_event=on_tool_event,
     )
+    activation = _resume_pending_semantic_repair(
+        activation,
+        candidate_kind="chapter",
+    )
     result = runner.run(activation)
     attempt = _chapter_attempt(
         project_path,
@@ -831,15 +980,24 @@ def run_chapter_agent(
         on_event,
     )
     while attempt.evaluation.result.outcome == "local_repair":
+        chain = _read_agent_repair_chain(
+            project_path,
+            identity,
+            candidate_run_id=activation.candidate_run_id,
+            candidate_kind="chapter",
+            semantic_revision_limit=policy.semantic_revision_limit,
+        )
+        contract = _repair_contract_from_chain(chain, attempt.evaluation)
         if not runner.request_semantic_revision(
             activation,
-            evaluation_id=attempt.evaluation.evaluation_id,
-            candidate_artifact_id=attempt.evaluation.candidate_artifact_id,
+            repair_contract=contract,
         ):
             break
         candidate_root = project_path / attempt.candidate_root
         activation = replace(
             activation,
+            repair_contract=contract,
+            allowed_tools=_chapter_tools_for_repair(contract),
             messages=(
                 ChatMessage(
                     role="user",
@@ -857,6 +1015,8 @@ def run_chapter_agent(
                             ),
                         },
                         attempt.evaluation,
+                        chain,
+                        contract,
                     ),
                 ),
             ),
@@ -1019,21 +1179,43 @@ def _chapter_attempt(
     root = Path(manifest_path).parent
     plan = _read_candidate_text(project_path, root / "plan.md")
     draft = _read_candidate_text(project_path, root / "draft.md")
-    evaluation_input = EvaluationInput(
-        identity=identity,
+    chain = _read_agent_repair_chain(
+        project_path,
+        identity,
         candidate_run_id=result.candidate_run_id,
+        candidate_kind="chapter",
+        semantic_revision_limit=policy.semantic_revision_limit,
+    )
+    chained = _chain_evaluation_for_activation(
+        project_path,
+        chain,
+        result.activation_id,
+    )
+    if chained is not None:
+        cached_evaluation, evaluation_path = chained
+        _emit_evaluation_completed(on_event, cached_evaluation, evaluation_path)
+        return ChapterAgentResult(
+            submission=submission,
+            evaluation=cached_evaluation,
+            verification=chapter_verification_from_evaluation(
+                chapter_id,
+                cached_evaluation,
+            ),
+            run_result=result,
+            candidate_root=root.as_posix(),
+            evaluation_input=None,
+        )
+    evaluation_input = _evaluation_input_for_chain(
+        chain,
+        identity=identity,
         checkpoint="chapter_candidate",
         candidate_artifact_id=manifest_path,
-        candidate_revision=submission.candidate_revision,
-        candidate_content=json.dumps(
-            {
-                "plan": plan,
-                "draft": draft,
-                "observations": submission.observations.model_dump(mode="json"),
-                "state_patch": submission.state_patch.model_dump(mode="json"),
-            },
-            ensure_ascii=False,
-        )[:500_000],
+        candidate=ChapterCandidateSnapshot(
+            plan=plan,
+            draft=draft,
+            observations=submission.observations.model_dump(mode="json"),
+            state_patch=submission.state_patch.model_dump(mode="json"),
+        ),
         evidence=_chapter_evidence(project_path, metadata),
         deterministic_prechecks={
             "plan_revision": submission.plan_revision,
@@ -1041,7 +1223,6 @@ def _chapter_attempt(
             "draft_characters": len(draft),
             "has_observation_source": bool(submission.observations.based_on),
         },
-        rubric_version="chapter-candidate-v1",
     )
     evaluation_relative = (
         activation_relative(identity, result.activation_id) / "evaluation.json"
@@ -1057,7 +1238,7 @@ def _chapter_attempt(
         if (
             existing.candidate_run_id == result.candidate_run_id
             and existing.candidate_artifact_id == manifest_path
-            and existing.candidate_revision == submission.candidate_revision
+            and existing.candidate_revision == evaluation_input.candidate_revision
             and existing.input_fingerprint == expected_fingerprint
         ):
             evaluation = existing
@@ -1071,6 +1252,22 @@ def _chapter_attempt(
         evaluation_path = _persist_activation_evaluation(project_path, result, evaluation)
     else:
         evaluation_path = evaluation_relative
+    evaluation = _normalize_runtime_evaluation(evaluation_input, evaluation)
+    write_activation_document(
+        project_path,
+        identity,
+        result.activation_id,
+        "evaluation.json",
+        evaluation.model_dump(mode="json"),
+    )
+    _record_evaluation_chain(
+        project_path,
+        chain,
+        run_result=result,
+        evaluation_path=evaluation_path,
+        evaluation_input=evaluation_input,
+        evaluation=evaluation,
+    )
     _emit_evaluation_completed(on_event, evaluation, evaluation_path)
     return ChapterAgentResult(
         submission=submission,
@@ -1078,6 +1275,7 @@ def _chapter_attempt(
         verification=chapter_verification_from_evaluation(chapter_id, evaluation),
         run_result=result,
         candidate_root=root.as_posix(),
+        evaluation_input=evaluation_input,
     )
 
 
@@ -1142,17 +1340,21 @@ def apply_book_direction_prechecks(
     )
     if not missing:
         return evaluation
+    precheck_issue_id = "issue-precheck-" + sha256(
+        (evaluation.evaluation_id + "confirmed_decision_coverage").encode("utf-8")
+    ).hexdigest()[:16]
     issue = EvaluationIssue(
+        issue_id=precheck_issue_id,
         category="confirmed_decision_coverage",
         severity="blocking",
-        candidate_locator="confirmed_decision_coverage",
+        candidate_locator="candidate.confirmed_decision_coverage",
         evidence_locator="book/setup.json#confirmed_decisions",
         explanation="The candidate does not cite coverage for: " + "; ".join(missing),
     )
     original = evaluation.result
     repair = "Add explicit candidate evidence for every confirmed user decision."
     revised = EvaluationResult(
-        schema_version=1,
+        schema_version=2,
         outcome=(
             original.outcome if original.outcome != "pass" else "local_repair"
         ),
@@ -1162,6 +1364,18 @@ def apply_book_direction_prechecks(
         signals=original.signals,
         repair_brief=original.repair_brief or repair,
         upstream_blocker=original.upstream_blocker,
+        rubric_checks=original.rubric_checks,
+        prior_issue_checks=original.prior_issue_checks,
+        new_issue_ids=[
+            *original.new_issue_ids,
+            precheck_issue_id,
+        ],
+        resolved_issue_ids=original.resolved_issue_ids,
+        repair_scope=list(
+            dict.fromkeys(
+                [*original.repair_scope, "confirmed_decision_coverage"]
+            )
+        ),
     )
     return evaluation.model_copy(update={"result": revised})
 
@@ -1236,6 +1450,17 @@ def _emit_evaluation_completed(
             "evaluation_id": evaluation.evaluation_id,
             "candidate_artifact_id": evaluation.candidate_artifact_id,
             "outcome": evaluation.result.outcome,
+            "evaluation_mode": evaluation.evaluation_mode,
+            "logical_candidate_revision": evaluation.candidate_revision,
+            "open_issue_count": len(evaluation.result.issues),
+            "resolved_issue_count": len(evaluation.result.resolved_issue_ids),
+            "new_issue_count": len(evaluation.result.new_issue_ids),
+            "late_discovery_count": sum(
+                issue.discovery == "late_discovery"
+                for issue in evaluation.result.issues
+                if issue.issue_id in evaluation.result.new_issue_ids
+            ),
+            "allowed_components": list(evaluation.result.repair_scope),
             "evidence_paths": [evaluation.candidate_artifact_id, evaluation_path],
         }
     )
@@ -1253,6 +1478,287 @@ def _persist_activation_evaluation(
         "evaluation.json",
         evaluation.model_dump(mode="json"),
     )
+
+
+def _read_agent_repair_chain(
+    project_path: Path,
+    identity: AgentIdentity,
+    *,
+    candidate_run_id: str,
+    candidate_kind: CandidateKind,
+    semantic_revision_limit: int,
+) -> RepairChain:
+    return read_repair_chain(
+        project_path,
+        identity,
+        candidate_run_id=candidate_run_id,
+        candidate_kind=candidate_kind,
+        semantic_revision_limit=semantic_revision_limit,
+    )
+
+
+def _resume_pending_semantic_repair(
+    activation: AgentActivation,
+    *,
+    candidate_kind: CandidateKind,
+) -> AgentActivation:
+    chain = _read_agent_repair_chain(
+        activation.project_path,
+        activation.identity,
+        candidate_run_id=activation.candidate_run_id,
+        candidate_kind=candidate_kind,
+        semantic_revision_limit=activation.policy.semantic_revision_limit,
+    )
+    contract = chain.pending_repair
+    if contract is None:
+        return activation
+    if not chain.entries or chain.entries[-1].evaluation_id != contract.evaluation_id:
+        raise AgentCandidateError("Pending repair is not attached to the chain head.")
+    evaluation_payload = read_json(
+        activation.project_path / chain.entries[-1].evaluation_path,
+        default=None,
+    )
+    if evaluation_payload is None:
+        raise AgentCandidateError("Pending repair evaluation is missing.")
+    evaluation = EvaluationRecord.model_validate(evaluation_payload)
+    candidate_payload = read_json(
+        activation.project_path / contract.source_candidate_artifact_id,
+        default=None,
+    )
+    if not isinstance(candidate_payload, dict):
+        raise AgentCandidateError("Pending repair source candidate is missing.")
+    label = {
+        "book_direction": "Book Direction",
+        "story_arc": "Story Arc",
+        "chapter": "Chapter",
+    }[candidate_kind]
+    if candidate_kind == "chapter":
+        candidate_root = Path(contract.source_candidate_artifact_id).parent
+        candidate_payload = {
+            "submission": candidate_payload,
+            "plan": _read_candidate_text(
+                activation.project_path,
+                candidate_root / "plan.md",
+            ),
+            "draft": _read_candidate_text(
+                activation.project_path,
+                candidate_root / "draft.md",
+            ),
+        }
+    return replace(
+        activation,
+        repair_contract=contract,
+        allowed_tools=(
+            _chapter_tools_for_repair(contract)
+            if candidate_kind == "chapter"
+            else activation.allowed_tools
+        ),
+        messages=(
+            ChatMessage(
+                role="user",
+                content=_semantic_repair_prompt(
+                    label,
+                    candidate_payload,
+                    evaluation,
+                    chain,
+                    contract,
+                ),
+            ),
+        ),
+    )
+
+
+def _evaluation_input_for_chain(
+    chain: RepairChain,
+    *,
+    identity: AgentIdentity,
+    checkpoint: str,
+    candidate_artifact_id: str,
+    candidate: BookCandidateSnapshot
+    | StoryArcCandidateSnapshot
+    | ChapterCandidateSnapshot,
+    evidence: list[EvaluationEvidence],
+    deterministic_prechecks: dict[str, bool | int | float | str],
+) -> EvaluationInput:
+    fingerprints = component_fingerprints(candidate)
+    if not chain.entries:
+        return EvaluationInput(
+            identity=identity,
+            candidate_run_id=chain.candidate_run_id,
+            checkpoint=checkpoint,
+            candidate_artifact_id=candidate_artifact_id,
+            candidate_revision=1,
+            mode="initial",
+            candidate=candidate,
+            component_fingerprints=fingerprints,
+            evidence=evidence,
+            deterministic_prechecks=deterministic_prechecks,
+            rubric=resolve_rubric(candidate.kind),
+        )
+    contract = chain.pending_repair
+    if contract is None:
+        raise AgentCandidateError(
+            "Repair-chain head has no pending contract for the new candidate activation."
+        )
+    if contract.source_component_fingerprints != chain.entries[-1].component_fingerprints:
+        raise AgentCandidateError("Repair contract source fingerprints are stale.")
+    return EvaluationInput(
+        identity=identity,
+        candidate_run_id=chain.candidate_run_id,
+        checkpoint=checkpoint,
+        candidate_artifact_id=candidate_artifact_id,
+        candidate_revision=contract.next_candidate_revision,
+        mode="repair_verification",
+        candidate=candidate,
+        component_fingerprints=fingerprints,
+        evidence=evidence,
+        deterministic_prechecks=deterministic_prechecks,
+        rubric=resolve_rubric(candidate.kind),
+        review_history=chain.review_history,
+        expected_repair=contract,
+    )
+
+
+def _chain_evaluation_for_activation(
+    project_path: Path,
+    chain: RepairChain,
+    activation_id: str,
+) -> tuple[EvaluationRecord, str] | None:
+    for index, entry in enumerate(chain.entries):
+        if entry.activation_id != activation_id:
+            continue
+        payload = read_json(project_path / entry.evaluation_path, default=None)
+        if payload is None:
+            chain.entries = chain.entries[:index]
+            chain.review_history = chain.review_history[:index]
+            chain.pending_repair = None
+            chain.used_semantic_revisions = min(
+                chain.used_semantic_revisions,
+                max(index - 1, 0),
+            )
+            return None
+        record = EvaluationRecord.model_validate(payload)
+        if record.evaluation_id != entry.evaluation_id:
+            raise AgentCandidateError("Repair chain evaluation identity is inconsistent.")
+        return record, entry.evaluation_path
+    return None
+
+
+def _normalize_runtime_evaluation(
+    evaluation_input: EvaluationInput,
+    evaluation: EvaluationRecord,
+) -> EvaluationRecord:
+    result = evaluation.result
+    issues: list[EvaluationIssue] = []
+    assigned_ids: list[str] = []
+    for index, issue in enumerate(result.issues):
+        issue_id = issue.issue_id
+        if issue_id is None:
+            seed = json.dumps(
+                {
+                    "evaluation_id": evaluation.evaluation_id,
+                    "index": index,
+                    "category": issue.category,
+                    "candidate_locator": issue.candidate_locator,
+                    "evidence_locator": issue.evidence_locator,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            issue_id = "issue-" + sha256(seed.encode("utf-8")).hexdigest()[:20]
+            assigned_ids.append(issue_id)
+        issues.append(
+            issue.model_copy(
+                update={
+                    "issue_id": issue_id,
+                    "discovery": (
+                        "late_discovery"
+                        if evaluation_input.mode == "repair_verification"
+                        else issue.discovery
+                    ),
+                }
+            )
+        )
+    repair_scope = list(result.repair_scope)
+    if result.outcome == "local_repair" and not repair_scope:
+        repair_scope = list(evaluation_input.component_fingerprints)
+    normalized = result.model_copy(
+        update={
+            "schema_version": 2,
+            "issues": issues,
+            "new_issue_ids": list(dict.fromkeys([*result.new_issue_ids, *assigned_ids])),
+            "repair_scope": repair_scope,
+        }
+    )
+    return evaluation.model_copy(
+        update={
+            "candidate_run_id": evaluation_input.candidate_run_id,
+            "candidate_artifact_id": evaluation_input.candidate_artifact_id,
+            "candidate_revision": evaluation_input.candidate_revision,
+            "rubric_version": evaluation_input.rubric_version,
+            "evaluation_mode": evaluation_input.mode,
+            "result": normalized,
+        }
+    )
+
+
+def _record_evaluation_chain(
+    project_path: Path,
+    chain: RepairChain,
+    *,
+    run_result: AgentRunResult,
+    evaluation_path: str,
+    evaluation_input: EvaluationInput,
+    evaluation: EvaluationRecord,
+) -> RepairChain:
+    return append_repair_chain_evaluation(
+        project_path,
+        chain,
+        activation_id=run_result.activation_id,
+        evaluation_path=evaluation_path,
+        evaluation_input=evaluation_input,
+        evaluation=evaluation,
+    )
+
+
+def _repair_contract_from_chain(
+    chain: RepairChain,
+    evaluation: EvaluationRecord,
+) -> RepairContract:
+    if not chain.entries or chain.entries[-1].evaluation_id != evaluation.evaluation_id:
+        raise AgentCandidateError("Cannot schedule repair away from the chain head.")
+    if evaluation.result.outcome != "local_repair":
+        raise AgentCandidateError("Only local_repair can create a repair contract.")
+    open_issue_ids = [
+        issue.issue_id for issue in evaluation.result.issues if issue.issue_id is not None
+    ]
+    if not open_issue_ids or not evaluation.result.repair_brief:
+        raise AgentCandidateError("Local repair evaluation is missing its issue contract.")
+    entry = chain.entries[-1]
+    return RepairContract(
+        evaluation_id=evaluation.evaluation_id,
+        source_activation_id=entry.activation_id,
+        source_candidate_artifact_id=entry.candidate_artifact_id,
+        source_candidate_revision=entry.candidate_revision,
+        next_candidate_revision=entry.candidate_revision + 1,
+        open_issue_ids=open_issue_ids,
+        repair_brief=evaluation.result.repair_brief,
+        allowed_components=evaluation.result.repair_scope,
+        source_component_fingerprints=entry.component_fingerprints,
+    )
+
+
+def _chapter_tools_for_repair(contract: RepairContract) -> tuple[str, ...]:
+    allowed = set(contract.allowed_components)
+    tools = ["get_loop_context", "read_chapter_evidence"]
+    if "plan" in allowed:
+        tools.append("plan_chapter_candidate")
+    if "draft" in allowed:
+        tools.extend(["write_chapter_draft", "edit_chapter_draft"])
+    tools.extend(
+        ["inspect_chapter_consistency", "submit_chapter_candidate", "report_blocker"]
+    )
+    return tuple(tools)
 
 
 def _book_synthesis_payload(synthesis: BookDirectionSynthesis) -> dict[str, object]:
@@ -1274,6 +1780,8 @@ def _semantic_repair_prompt(
     candidate_kind: str,
     candidate_payload: dict[str, object],
     evaluation: EvaluationRecord,
+    chain: RepairChain,
+    contract: RepairContract,
 ) -> str:
     book_contract = (
         " For a Book candidate, copy every fixed-input confirmed decision verbatim into "
@@ -1283,11 +1791,14 @@ def _semantic_repair_prompt(
         else ""
     )
     return (
-        "The stateless Evaluator rejected the current candidate with local_repair. "
-        "Revise only this current candidate; do not rewrite committed prose or canon. "
-        "Create a complete replacement candidate through the same terminal Tool. For a "
-        "Chapter replacement, build a fresh candidate workspace starting its internal plan, "
-        "draft, and candidate revisions at 1."
+        "The Evaluator requested a scoped repair of the same uncommitted logical candidate. "
+        "The Harness has preserved the prior candidate and the complete review ledger. "
+        "Resolve every open issue in the repair contract. Change only allowed_components; "
+        "all other candidate components must remain byte-stable. Do not rewrite committed "
+        "prose or canon. Submit the complete candidate through the same terminal Tool. For a "
+        "Chapter repair, reuse the restored workspace, keep current internal plan/draft "
+        "revisions unless an authorized Tool changes that component, and submit using "
+        "next_candidate_revision from the repair contract."
         + book_contract
         + "\n\n"
         + json.dumps(
@@ -1296,6 +1807,10 @@ def _semantic_repair_prompt(
                 "current_candidate": candidate_payload,
                 "evaluation_id": evaluation.evaluation_id,
                 "evaluation": evaluation.result.model_dump(mode="json"),
+                "complete_review_history": [
+                    item.model_dump(mode="json") for item in chain.review_history
+                ],
+                "repair_contract": contract.model_dump(mode="json"),
             },
             ensure_ascii=False,
         )
@@ -1343,6 +1858,7 @@ def _book_direction_evaluation_input(
     candidate_revision: int,
     identity: AgentIdentity,
     candidate_run_id: str | None = None,
+    chain: RepairChain | None = None,
 ) -> EvaluationInput:
     evidence = [
         EvaluationEvidence(
@@ -1362,35 +1878,46 @@ def _book_direction_evaluation_input(
             excerpt=state.direction_draft[:4_000] or "尚无草稿",
         ),
     ]
+    candidate = BookCandidateSnapshot(
+        direction=synthesis.direction_markdown,
+        constraints=synthesis.constraints.model_dump(mode="json"),
+        confirmed_decision_coverage=[
+            item.model_dump(mode="json")
+            for item in synthesis.confirmed_decision_coverage
+        ],
+        recommended_titles=[
+            item.model_dump(mode="json") for item in synthesis.recommended_titles
+        ],
+        rolling_plan=synthesis.rolling_plan_markdown,
+    )
+    prechecks: dict[str, bool | int | float | str] = {
+        "has_direction": bool(synthesis.direction_markdown.strip()),
+        "title_count": len(synthesis.recommended_titles),
+        "confirmed_decision_count": len(state.confirmed_decisions),
+        "coverage_count": len(synthesis.confirmed_decision_coverage),
+        "direction_version": candidate_revision,
+    }
+    if chain is not None:
+        return _evaluation_input_for_chain(
+            chain,
+            identity=identity,
+            checkpoint="book_direction_candidate",
+            candidate_artifact_id=candidate_path,
+            candidate=candidate,
+            evidence=evidence,
+            deterministic_prechecks=prechecks,
+        )
     return EvaluationInput(
         identity=identity,
         candidate_run_id=candidate_run_id,
         checkpoint="book_direction_candidate",
         candidate_artifact_id=candidate_path,
-        candidate_revision=candidate_revision,
-        candidate_content=json.dumps(
-            {
-                "direction_markdown": synthesis.direction_markdown,
-                "constraints": synthesis.constraints.model_dump(mode="json"),
-                "confirmed_decision_coverage": [
-                    item.model_dump(mode="json")
-                    for item in synthesis.confirmed_decision_coverage
-                ],
-                "recommended_titles": [
-                    item.model_dump(mode="json") for item in synthesis.recommended_titles
-                ],
-                "rolling_plan_markdown": synthesis.rolling_plan_markdown,
-            },
-            ensure_ascii=False,
-        ),
+        candidate_revision=1,
+        candidate=candidate,
+        component_fingerprints=component_fingerprints(candidate),
         evidence=evidence,
-        deterministic_prechecks={
-            "has_direction": bool(synthesis.direction_markdown.strip()),
-            "title_count": len(synthesis.recommended_titles),
-            "confirmed_decision_count": len(state.confirmed_decisions),
-            "coverage_count": len(synthesis.confirmed_decision_coverage),
-        },
-        rubric_version="book-direction-v1",
+        deterministic_prechecks=prechecks,
+        rubric=resolve_rubric("book_direction"),
     )
 
 

@@ -33,7 +33,7 @@ class AgentPolicy(BaseModel):
     story_arc_max_turns: int = Field(default=20, ge=1, le=200)
     chapter_max_turns: int = Field(default=30, ge=1, le=200)
     tool_schema_repair_limit: int = Field(default=2, ge=0, le=20)
-    semantic_revision_limit: int = Field(default=2, ge=0, le=20)
+    semantic_revision_limit: int = Field(default=10, ge=0, le=20)
     transport_retry_limit: int = Field(default=3, ge=0, le=20)
 
 

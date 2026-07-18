@@ -211,14 +211,31 @@ def _fixture_call_llm(_profile: object, request: ChatRequest) -> ChatResult:
 
 def _fixture_agent_call_llm(_profile: object, request: ChatRequest) -> ChatResult:
     if request.response_schema is not None:
+        evaluation_input = json.loads(request.messages[1].content)
+        dimensions = evaluation_input["rubric"]["dimensions"]
+        candidate_components = [
+            key for key in evaluation_input["candidate"] if key != "kind"
+        ]
+        evidence_locator = f"candidate.{candidate_components[0]}"
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "outcome": "pass",
             "contract_satisfied": True,
             "summary": "The fixed candidate satisfies its contract.",
-            "issues": [],
+            "rubric_checks": [
+                {
+                    "dimension_id": item["dimension_id"],
+                    "status": "pass",
+                    "evidence_locator": evidence_locator,
+                    "explanation": "The fixture candidate satisfies this dimension.",
+                }
+                for item in dimensions
+            ],
+            "prior_issue_checks": [],
+            "new_issues": [],
             "signals": [],
             "repair_brief": None,
+            "repair_scope": [],
             "upstream_blocker": None,
         }
         return ChatResult(

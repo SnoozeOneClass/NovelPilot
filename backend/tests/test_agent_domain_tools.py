@@ -1,7 +1,12 @@
 from pathlib import Path
 
 from app.harness.agents.domain_tools import build_default_tool_registry
-from app.harness.agents.models import AgentIdentity
+from app.harness.agents.models import (
+    AgentIdentity,
+    RepairContract,
+    StoryArcCandidateSnapshot,
+)
+from app.harness.agents.rubrics import component_fingerprints
 from app.harness.agents.registry import ToolExecutionContext
 from app.llm.gateway import ToolCall
 from app.storage.json_files import read_json, write_json
@@ -182,6 +187,55 @@ def test_story_arc_tool_enforces_agent_ownership(tmp_path: Path) -> None:
 
     assert result.status == "error"
     assert result.error_code == "arc_ownership_mismatch"
+
+
+def test_story_arc_repair_rejects_changes_outside_authorized_components(
+    tmp_path: Path,
+) -> None:
+    source = StoryArcCandidateSnapshot(
+        plan="# Arc\n\nOriginal plan.",
+        target_chapter_count=10,
+        change_summary="Create the arc.",
+    )
+    contract = RepairContract(
+        evaluation_id="evaluation-1",
+        source_activation_id="source-activation",
+        source_candidate_artifact_id="arcs/arc-0001/source.json",
+        source_candidate_revision=1,
+        next_candidate_revision=2,
+        open_issue_ids=["issue-1"],
+        repair_brief="Repair only the plan.",
+        allowed_components=["plan"],
+        source_component_fingerprints=component_fingerprints(source),
+    )
+    result = build_default_tool_registry().execute(
+        _context(
+            tmp_path,
+            role="story_arc",
+            scope_id="arc-0001",
+            phase="planning",
+            revision=0,
+            call_id="repair-scope",
+            repair_contract=contract,
+        ),
+        _call(
+            "repair-scope",
+            "submit_story_arc_candidate",
+            {
+                "expected_revision": 0,
+                "intent": "create",
+                "arc_id": "arc-0001",
+                "plan_markdown": "# Arc\n\nRepaired plan.",
+                "target_chapter_count": 11,
+                "change_summary": "Create the arc.",
+            },
+        ),
+    )
+
+    assert result.status == "error"
+    assert result.error_code == "candidate_repair_scope_violation"
+    assert result.recoverable is True
+    assert result.content["unexpected_components"] == ["target_chapter_count"]
 
 
 def test_chapter_tools_build_quarantined_candidate_and_never_promote(
@@ -544,6 +598,7 @@ def _context(
     revision: int,
     call_id: str,
     scope_id: str | None = None,
+    repair_contract: RepairContract | None = None,
 ) -> ToolExecutionContext:
     if role != "book" and scope_id is None:
         scope_id = "scope-1"
@@ -559,6 +614,7 @@ def _context(
         tool_call_id=call_id,
         phase=phase,
         expected_revision=revision,
+        repair_contract=repair_contract,
     )
 
 

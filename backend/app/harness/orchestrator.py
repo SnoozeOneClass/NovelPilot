@@ -1240,7 +1240,7 @@ class HarnessOrchestrator:
                     scope_id=chapter_id,
                 ),
             )
-            if prior_state.lifecycle == "failed":
+            if prior_state.lifecycle in {"failed", "idle"}:
                 resume_candidate_run_id = prior_state.candidate_run_id
         try:
             agent_result = recover_completed_chapter_agent(
@@ -2437,7 +2437,11 @@ class HarnessOrchestrator:
                 scope_id=arc_path.name,
             ),
         )
-        return state.candidate_run_id if state.lifecycle == "failed" else None
+        return (
+            state.candidate_run_id
+            if state.lifecycle in {"failed", "idle"}
+            else None
+        )
 
     def _book_revision_resume_candidate_run_id(
         self,
@@ -2448,7 +2452,7 @@ class HarnessOrchestrator:
         state = read_agent_state(self.context.project_path, identity)
         if state.candidate_run_id is None:
             return None
-        if state.lifecycle == "failed":
+        if state.lifecycle in {"failed", "idle"}:
             return state.candidate_run_id
         if state.lifecycle != "completed" or state.activation_id is None:
             return None
