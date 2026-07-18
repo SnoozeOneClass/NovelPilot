@@ -212,7 +212,7 @@ def run_book_direction_agent(
     on_tool_event: Callable[[ChatChunk], None] | None = None,
     runtime: AgentRuntime | None = None,
 ) -> tuple[BookDirectionSynthesis, EvaluationRecord, BookDirectionReview]:
-    candidate_revision = state.candidate_revision_counter + 1
+    review_candidate_revision = state.candidate_revision_counter + 1
     identity = AgentIdentity(project_id=metadata.project_id, role="book")
     agent_state = read_agent_state(project_path, identity)
     pending_candidate_run_id: str | None = None
@@ -229,22 +229,22 @@ def run_book_direction_agent(
     candidate_run_id = (
         pending_candidate_run_id
         if pending_candidate_run_id is not None
-        else f"book-direction-{candidate_revision}-{uuid4().hex[:8]}"
+        else f"book-direction-{review_candidate_revision}-{uuid4().hex[:8]}"
     )
     return _run_book_direction_candidate_agent(
         project_path,
         metadata,
         state,
         policy,
-        candidate_revision=candidate_revision,
+        review_candidate_revision=review_candidate_revision,
         candidate_run_id=candidate_run_id,
         system_prompt=_book_direction_agent_prompt(
             state_revision=state.revision,
-            candidate_revision=candidate_revision,
+            candidate_revision=review_candidate_revision,
         ),
         input_payload={
             "state_revision": state.revision,
-            "candidate_revision": candidate_revision,
+            "candidate_revision": review_candidate_revision,
             "direction_draft": state.direction_draft,
             "discussion_summary": state.discussion_summary,
             "confirmed_decisions": state.confirmed_decisions,
@@ -333,7 +333,7 @@ def run_book_revision_agent(
         metadata,
         state,
         policy,
-        candidate_revision=target_direction_version,
+        review_candidate_revision=target_direction_version,
         candidate_run_id=resolved_candidate_run_id,
         system_prompt=_book_revision_agent_prompt(
             state_revision=state.revision,
@@ -360,7 +360,7 @@ def _run_book_direction_candidate_agent(
     state: SetupStateDocument,
     policy: ResolvedAgentPolicy,
     *,
-    candidate_revision: int,
+    review_candidate_revision: int,
     candidate_run_id: str,
     system_prompt: str,
     input_payload: dict[str, object],
@@ -392,6 +392,7 @@ def _run_book_direction_candidate_agent(
             ),
         ),
         policy=policy,
+        expected_candidate_revision=review_candidate_revision,
         initial_checkpoint_id=f"book-direction:{state.candidate_revision_counter}",
         on_event=on_event,
         on_text_delta=on_text_delta,
@@ -407,7 +408,7 @@ def _run_book_direction_candidate_agent(
         state,
         policy,
         identity,
-        candidate_revision,
+        review_candidate_revision,
         result,
         on_event,
     )
@@ -435,7 +436,7 @@ def _run_book_direction_candidate_agent(
                         "Book Direction",
                         {
                             "expected_revision": state.revision,
-                            "candidate_revision": candidate_revision,
+                            "candidate_revision": review_candidate_revision,
                             **_book_synthesis_payload(synthesis),
                         },
                         evaluation,
@@ -451,7 +452,7 @@ def _run_book_direction_candidate_agent(
             state,
             policy,
             identity,
-            candidate_revision,
+            review_candidate_revision,
             result,
             on_event,
         )
@@ -486,7 +487,7 @@ def _book_direction_attempt(
     state: SetupStateDocument,
     policy: ResolvedAgentPolicy,
     identity: AgentIdentity,
-    candidate_revision: int,
+    review_candidate_revision: int,
     result: AgentRunResult,
     on_event: AgentEventCallback | None,
 ) -> tuple[BookDirectionSynthesis, EvaluationRecord, BookDirectionReview]:
@@ -497,9 +498,9 @@ def _book_direction_attempt(
         raise AgentCandidateError(
             "Book Direction Agent terminal candidate failed local validation."
         ) from exc
-    if candidate.candidate_revision != candidate_revision:
+    if candidate.candidate_revision != review_candidate_revision:
         raise AgentCandidateError(
-            "Book Direction candidate revision does not match the Harness target."
+            "Book Direction candidate revision does not match the fixed Book review target."
         )
     synthesis = BookDirectionSynthesis(
         direction_markdown=candidate.direction_markdown,
@@ -533,7 +534,7 @@ def _book_direction_attempt(
         state,
         synthesis,
         candidate_path=candidate_path,
-        candidate_revision=candidate_revision,
+        review_candidate_revision=review_candidate_revision,
         identity=identity,
         candidate_run_id=result.candidate_run_id,
         chain=chain,
@@ -563,7 +564,7 @@ def _book_direction_attempt(
             policy,
             identity=identity,
             candidate_path=candidate_path,
-            candidate_revision=candidate_revision,
+            candidate_revision=review_candidate_revision,
             candidate_run_id=result.candidate_run_id,
             on_event=on_event,
             evaluation_input=evaluation_input,
@@ -610,7 +611,7 @@ def evaluate_book_direction_candidate(
         state,
         synthesis,
         candidate_path=candidate_path,
-        candidate_revision=candidate_revision,
+        review_candidate_revision=candidate_revision,
         identity=identity,
         candidate_run_id=candidate_run_id,
     )
@@ -1783,13 +1784,24 @@ def _semantic_repair_prompt(
     chain: RepairChain,
     contract: RepairContract,
 ) -> str:
+    book_revision_context: dict[str, object] = {}
     book_contract = (
         " For a Book candidate, copy every fixed-input confirmed decision verbatim into "
         "constraints.confirmed and confirmed_decision_coverage.decision. Do not paraphrase, "
-        "split, merge, or promote repair guidance into a new confirmed decision."
+        "split, merge, or promote repair guidance into a new confirmed decision. The "
+        "submit_book_direction_candidate.candidate_revision field must equal the fixed "
+        "book_review_candidate_revision. semantic_logical_candidate_revision belongs only "
+        "to the Harness/Evaluator repair chain and must never be copied into that Tool field."
         if candidate_kind == "Book Direction"
         else ""
     )
+    if candidate_kind == "Book Direction":
+        book_revision_context = {
+            "book_review_candidate_revision": candidate_payload.get(
+                "candidate_revision"
+            ),
+            "semantic_logical_candidate_revision": contract.next_candidate_revision,
+        }
     return (
         "The Evaluator requested a scoped repair of the same uncommitted logical candidate. "
         "The Harness has preserved the prior candidate and the complete review ledger. "
@@ -1804,6 +1816,7 @@ def _semantic_repair_prompt(
         + json.dumps(
             {
                 "candidate_kind": candidate_kind,
+                **book_revision_context,
                 "current_candidate": candidate_payload,
                 "evaluation_id": evaluation.evaluation_id,
                 "evaluation": evaluation.result.model_dump(mode="json"),
@@ -1855,7 +1868,7 @@ def _book_direction_evaluation_input(
     synthesis: BookDirectionSynthesis,
     *,
     candidate_path: str,
-    candidate_revision: int,
+    review_candidate_revision: int,
     identity: AgentIdentity,
     candidate_run_id: str | None = None,
     chain: RepairChain | None = None,
@@ -1895,7 +1908,7 @@ def _book_direction_evaluation_input(
         "title_count": len(synthesis.recommended_titles),
         "confirmed_decision_count": len(state.confirmed_decisions),
         "coverage_count": len(synthesis.confirmed_decision_coverage),
-        "direction_version": candidate_revision,
+        "direction_version": review_candidate_revision,
     }
     if chain is not None:
         return _evaluation_input_for_chain(

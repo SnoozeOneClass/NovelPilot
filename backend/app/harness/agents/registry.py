@@ -37,6 +37,7 @@ class ToolExecutionContext:
     tool_call_id: str
     phase: str
     expected_revision: int | None
+    expected_candidate_revision: int | None = None
     repair_contract: RepairContract | None = None
     experiment_strategy: ExperimentHookStrategy | None = None
 

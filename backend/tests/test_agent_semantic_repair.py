@@ -20,13 +20,14 @@ from app.harness.agents.models import (
     EvaluationResult,
     RepairContract,
 )
-from app.harness.agents.persistence import read_agent_state
+from app.harness.agents.persistence import read_agent_state, save_agent_state
 from app.harness.agents.policy import ResolvedAgentPolicy
 from app.harness.agents.runtime import AgentActivation, AgentRuntime
 from app.llm.gateway import ChatResult, ToolCall
 from app.schemas.profiles import LlmProfile
 from app.schemas.projects import ProjectMetadata
 from app.schemas.setup import SetupStateDocument
+from app.storage.json_files import read_json, write_json
 
 
 def test_user_decision_tool_is_not_exposed_to_downstream_agents() -> None:
@@ -174,6 +175,299 @@ def test_story_arc_agent_repairs_local_semantic_failure_with_candidate_budget(
             isinstance(path, str) and path.endswith("evaluation.json")
             for path in paths
         )
+
+
+def test_book_direction_repair_keeps_review_revision_while_logical_revision_advances(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    profile = LlmProfile(
+        id="main",
+        name="Main",
+        protocol="openai-compatible",
+        base_url="https://api.example.com/v1",
+        api_key=SecretStr("secret"),
+        model="book-model",
+    )
+    policy = ResolvedAgentPolicy(
+        role="book",
+        profile=profile,
+        evaluator_profile=profile,
+        max_turns=4,
+        tool_schema_repair_limit=2,
+        semantic_revision_limit=2,
+        transport_retry_limit=1,
+    )
+    submissions = [
+        _book_tool_response(
+            "book-initial",
+            _book_submission(
+                candidate_revision=1,
+                direction_markdown="# Direction\n\nThe initial direction has a continuity gap.",
+            ),
+        ),
+        _book_tool_response(
+            "book-repair-wrong-revision",
+            _book_submission(
+                candidate_revision=2,
+                direction_markdown="# Direction\n\nThe repaired direction closes the gap.",
+            ),
+        ),
+        _book_tool_response(
+            "book-repair-corrected",
+            _book_submission(
+                candidate_revision=1,
+                direction_markdown="# Direction\n\nThe repaired direction closes the gap.",
+            ),
+        ),
+    ]
+    requests = []
+
+    def fake_chat(_profile, request):
+        requests.append(request)
+        return submissions[len(requests) - 1]
+
+    evaluation_inputs: list[EvaluationInput] = []
+
+    def fake_evaluate(_profile, evaluation_input: EvaluationInput, **_kwargs):
+        evaluation_inputs.append(evaluation_input)
+        first = len(evaluation_inputs) == 1
+        return EvaluationRecord(
+            candidate_run_id=evaluation_input.candidate_run_id,
+            candidate_artifact_id=evaluation_input.candidate_artifact_id,
+            candidate_revision=evaluation_input.candidate_revision,
+            evaluator_profile_id="main",
+            evaluator_model_snapshot="book-model",
+            evaluator_provider_snapshot="openai-compatible",
+            rubric_version=evaluation_input.rubric_version,
+            result=EvaluationResult(
+                schema_version=1,
+                outcome="local_repair" if first else "pass",
+                contract_satisfied=not first,
+                summary=(
+                    "Close the continuity gap in the direction."
+                    if first
+                    else "Candidate passes."
+                ),
+                issues=(
+                    [
+                        EvaluationIssue(
+                            category="continuity",
+                            severity="blocking",
+                            candidate_locator="candidate.direction",
+                            evidence_locator="candidate.direction",
+                            explanation="The direction leaves a continuity gap.",
+                        )
+                    ]
+                    if first
+                    else []
+                ),
+                signals=[],
+                repair_brief=(
+                    "Close the continuity gap in the direction only." if first else None
+                ),
+                upstream_blocker=None,
+                repair_scope=["direction"] if first else [],
+            ),
+        )
+
+    monkeypatch.setattr(loop_runners, "_require_policy_capabilities", lambda _policy: None)
+    monkeypatch.setattr(loop_runners, "evaluate_candidate", fake_evaluate)
+    result = run_book_direction_agent(
+        tmp_path,
+        ProjectMetadata(project_id="project-1"),
+        SetupStateDocument(
+            revision=10,
+            direction_draft="# Direction\n\nA bounded mystery.",
+            selected_title="Harbor of Trust",
+        ),
+        policy,
+        runtime=AgentRuntime(build_default_tool_registry(), chat_call=fake_chat),
+    )
+
+    assert result[1].result.outcome == "pass"
+    assert [item.candidate_revision for item in evaluation_inputs] == [1, 2]
+    assert [len(item.review_history) for item in evaluation_inputs] == [0, 1]
+    assert len(requests) == 3
+    repair_prompt = "\n".join(message.content for message in requests[1].messages)
+    assert '"book_review_candidate_revision": 1' in repair_prompt
+    assert '"semantic_logical_candidate_revision": 2' in repair_prompt
+    correction_tool_results = [
+        tool_result.content.get("content", {})
+        for message in requests[2].messages
+        for tool_result in message.tool_results
+    ]
+    assert any(
+        "expected_candidate_revision" in content
+        for content in correction_tool_results
+    )
+    request_snapshots = [
+        read_json(path)
+        for path in (tmp_path / "book" / "agent" / "a").glob("*/request.json")
+    ]
+    assert len(request_snapshots) == 2
+    assert {item["expected_candidate_revision"] for item in request_snapshots} == {1}
+    chain = read_json(tmp_path / "book" / "agent" / "repair-chain.json")
+    assert [entry["candidate_revision"] for entry in chain["entries"]] == [1, 2]
+    assert [
+        read_json(tmp_path / entry["candidate_artifact_id"])["candidate_revision"]
+        for entry in chain["entries"]
+    ] == [1, 1]
+
+
+def test_pending_book_repair_ignores_completed_chain_external_activation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    profile = LlmProfile(
+        id="main",
+        name="Main",
+        protocol="openai-compatible",
+        base_url="https://api.example.com/v1",
+        api_key=SecretStr("secret"),
+        model="book-model",
+    )
+    policy = ResolvedAgentPolicy(
+        role="book",
+        profile=profile,
+        evaluator_profile=profile,
+        max_turns=4,
+        tool_schema_repair_limit=2,
+        semantic_revision_limit=2,
+        transport_retry_limit=1,
+    )
+    responses = iter(
+        [
+            _book_tool_response(
+                "book-initial",
+                _book_submission(
+                    candidate_revision=1,
+                    direction_markdown="# Direction\n\nThe initial direction has a gap.",
+                ),
+            ),
+            _book_tool_response(
+                "book-resumed-repair",
+                _book_submission(
+                    candidate_revision=1,
+                    direction_markdown="# Direction\n\nThe resumed repair closes the gap.",
+                ),
+            ),
+        ]
+    )
+    requests = []
+
+    def fake_chat(_profile, request):
+        requests.append(request)
+        return next(responses)
+
+    evaluation_inputs: list[EvaluationInput] = []
+
+    def fake_evaluate(_profile, evaluation_input: EvaluationInput, **_kwargs):
+        evaluation_inputs.append(evaluation_input)
+        first = len(evaluation_inputs) == 1
+        return EvaluationRecord(
+            candidate_run_id=evaluation_input.candidate_run_id,
+            candidate_artifact_id=evaluation_input.candidate_artifact_id,
+            candidate_revision=evaluation_input.candidate_revision,
+            evaluator_profile_id="main",
+            evaluator_model_snapshot="book-model",
+            evaluator_provider_snapshot="openai-compatible",
+            rubric_version=evaluation_input.rubric_version,
+            result=EvaluationResult(
+                schema_version=1,
+                outcome="local_repair" if first else "pass",
+                contract_satisfied=not first,
+                summary="Repair the direction." if first else "Candidate passes.",
+                issues=(
+                    [
+                        EvaluationIssue(
+                            category="continuity",
+                            severity="blocking",
+                            candidate_locator="candidate.direction",
+                            evidence_locator="candidate.direction",
+                            explanation="The direction has a continuity gap.",
+                        )
+                    ]
+                    if first
+                    else []
+                ),
+                signals=[],
+                repair_brief="Repair the direction only." if first else None,
+                upstream_blocker=None,
+                repair_scope=["direction"] if first else [],
+            ),
+        )
+
+    monkeypatch.setattr(loop_runners, "_require_policy_capabilities", lambda _policy: None)
+    monkeypatch.setattr(loop_runners, "evaluate_candidate", fake_evaluate)
+    metadata = ProjectMetadata(project_id="project-1")
+    setup_state = SetupStateDocument(
+        revision=10,
+        direction_draft="# Direction\n\nA bounded mystery.",
+        selected_title="Harbor of Trust",
+    )
+    with pytest.raises(RuntimeError, match="simulated process boundary"):
+        run_book_direction_agent(
+            tmp_path,
+            metadata,
+            setup_state,
+            policy,
+            runtime=_CrashAfterRepairScheduleRuntime(
+                build_default_tool_registry(),
+                chat_call=fake_chat,
+            ),
+        )
+
+    identity = AgentIdentity(project_id="project-1", role="book")
+    state = read_agent_state(tmp_path, identity)
+    original_candidate_run_id = state.candidate_run_id
+    assert original_candidate_run_id is not None
+    invalid_activation_id = "legacy-invalid-repair"
+    invalid_artifact = (
+        tmp_path
+        / "book"
+        / "agent"
+        / "a"
+        / invalid_activation_id
+        / "c"
+        / "book-direction.json"
+    )
+    write_json(
+        invalid_artifact,
+        _book_submission(
+            candidate_revision=2,
+            direction_markdown="# Direction\n\nA legacy repair used the logical revision.",
+        ),
+    )
+    state.activation_id = invalid_activation_id
+    state.lifecycle = "completed"
+    state.last_checkpoint_id = "book-direction:2"
+    state.summary = "Legacy repair completed outside the durable evaluation chain."
+    save_agent_state(tmp_path, state)
+
+    resumed = run_book_direction_agent(
+        tmp_path,
+        metadata,
+        setup_state,
+        policy,
+        runtime=AgentRuntime(build_default_tool_registry(), chat_call=fake_chat),
+    )
+
+    assert resumed[1].result.outcome == "pass"
+    assert resumed[1].candidate_run_id == original_candidate_run_id
+    assert [item.candidate_revision for item in evaluation_inputs] == [1, 2]
+    assert len(requests) == 2
+    assert "complete_review_history" in requests[-1].messages[-1].content
+    chain = read_json(tmp_path / "book" / "agent" / "repair-chain.json")
+    assert [entry["candidate_revision"] for entry in chain["entries"]] == [1, 2]
+    assert invalid_activation_id not in {
+        entry["activation_id"] for entry in chain["entries"]
+    }
+    assert read_json(invalid_artifact)["candidate_revision"] == 2
+    assert [
+        read_json(tmp_path / entry["candidate_artifact_id"])["candidate_revision"]
+        for entry in chain["entries"]
+    ] == [1, 1]
 
 
 def test_book_evaluator_needs_user_becomes_one_standard_discussion_question(
@@ -700,6 +994,52 @@ def test_story_arc_blocker_stops_at_typed_control_checkpoint(
     assert checkpoint.payload["routing_status"] == "proposal_only"
     assert checkpoint.payload["target_owner"] == "book"
     assert (tmp_path / checkpoint.artifact_path).is_file()
+
+
+def _book_tool_response(
+    call_id: str,
+    arguments: dict[str, object],
+) -> ChatResult:
+    return ChatResult(
+        content="",
+        tool_calls=[
+            ToolCall(
+                id=call_id,
+                name="submit_book_direction_candidate",
+                arguments=arguments,
+                raw_arguments=json.dumps(arguments),
+            )
+        ],
+        finish_reason="tool_call",
+        model_snapshot="book-model",
+        provider_snapshot="openai-compatible",
+    )
+
+
+def _book_submission(
+    *,
+    candidate_revision: int,
+    direction_markdown: str,
+) -> dict[str, object]:
+    return {
+        "expected_revision": 10,
+        "candidate_revision": candidate_revision,
+        "direction_markdown": direction_markdown,
+        "constraints": {
+            "confirmed": [],
+            "must_preserve": ["All reveals use visible evidence."],
+            "must_avoid": [],
+            "creative_freedoms": [],
+            "open_decisions": [],
+        },
+        "confirmed_decision_coverage": [],
+        "recommended_titles": [
+            {"title": "Harbor of Trust", "rationale": "The confirmed formal title."},
+            {"title": "Eleven Minutes", "rationale": "Names the missing interval."},
+            {"title": "The Closed Window", "rationale": "Names a recurring clue."},
+        ],
+        "rolling_plan_markdown": "Plan only the first active story arc.",
+    }
 
 
 def _arc_tool_response(call_id: str, plan_markdown: str) -> ChatResult:

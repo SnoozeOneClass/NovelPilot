@@ -473,6 +473,26 @@ def _submit_book_direction_candidate(
 ) -> ToolExecutionPlan:
     request = _typed(arguments, BookDirectionCandidateInput)
     _expect_revision(context, request.expected_revision)
+    if context.expected_candidate_revision is None:
+        raise ToolHandlerError(
+            "missing_expected_candidate_revision",
+            "Book Direction activation is missing its Harness candidate revision target.",
+            recoverable=False,
+        )
+    if request.candidate_revision != context.expected_candidate_revision:
+        raise ToolHandlerError(
+            "stale_candidate_revision",
+            (
+                "Book Direction submission must use review candidate revision "
+                f"{context.expected_candidate_revision}."
+            ),
+            recoverable=True,
+            content={
+                "expected_candidate_revision": context.expected_candidate_revision,
+                "received_candidate_revision": request.candidate_revision,
+            },
+            allowed_actions=["retry:submit_book_direction_candidate"],
+        )
     _enforce_repair_scope(
         context,
         BookCandidateSnapshot(

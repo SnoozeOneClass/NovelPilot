@@ -85,11 +85,59 @@ def test_book_direction_submission_is_candidate_only_and_revision_guarded(
     }
 
     stale = registry.execute(
-        _context(tmp_path, role="book", phase="direction", revision=3, call_id="stale"),
+        _context(
+            tmp_path,
+            role="book",
+            phase="direction",
+            revision=3,
+            call_id="stale",
+            expected_candidate_revision=2,
+        ),
         _call("stale", "submit_book_direction_candidate", arguments),
     )
+    wrong_candidate_revision = registry.execute(
+        _context(
+            tmp_path,
+            role="book",
+            phase="direction",
+            revision=4,
+            call_id="wrong-candidate-revision",
+            expected_candidate_revision=1,
+        ),
+        _call(
+            "wrong-candidate-revision",
+            "submit_book_direction_candidate",
+            arguments,
+        ),
+    )
+    missing_candidate_target = registry.execute(
+        _context(
+            tmp_path,
+            role="book",
+            phase="direction",
+            revision=4,
+            call_id="missing-candidate-target",
+        ),
+        _call(
+            "missing-candidate-target",
+            "submit_book_direction_candidate",
+            arguments,
+        ),
+    )
+
+    candidate_path = (
+        tmp_path / "book" / "agent" / "a" / "activation-1" / "c" / "book-direction.json"
+    )
+    assert not candidate_path.exists()
     accepted = registry.execute(
-        _context(tmp_path, role="book", phase="direction", revision=4, call_id="ok"),
+        _context(
+            tmp_path,
+            role="book",
+            phase="direction",
+            revision=4,
+            call_id="ok",
+            expected_candidate_revision=2,
+        ),
         _call("ok", "submit_book_direction_candidate", arguments),
     )
 
@@ -97,6 +145,16 @@ def test_book_direction_submission_is_candidate_only_and_revision_guarded(
     assert stale.error_code == "stale_candidate_revision"
     assert stale.recoverable is True
     assert stale.content == {"expected_revision": 3, "received_revision": 4}
+    assert wrong_candidate_revision.status == "error"
+    assert wrong_candidate_revision.error_code == "stale_candidate_revision"
+    assert wrong_candidate_revision.recoverable is True
+    assert wrong_candidate_revision.content == {
+        "expected_candidate_revision": 1,
+        "received_candidate_revision": 2,
+    }
+    assert missing_candidate_target.status == "error"
+    assert missing_candidate_target.error_code == "missing_expected_candidate_revision"
+    assert missing_candidate_target.recoverable is False
     assert accepted.status == "ok"
     assert accepted.terminal is True
     assert accepted.content["promotable"] is False
@@ -599,6 +657,7 @@ def _context(
     call_id: str,
     scope_id: str | None = None,
     repair_contract: RepairContract | None = None,
+    expected_candidate_revision: int | None = None,
 ) -> ToolExecutionContext:
     if role != "book" and scope_id is None:
         scope_id = "scope-1"
@@ -614,6 +673,7 @@ def _context(
         tool_call_id=call_id,
         phase=phase,
         expected_revision=revision,
+        expected_candidate_revision=expected_candidate_revision,
         repair_contract=repair_contract,
     )
 

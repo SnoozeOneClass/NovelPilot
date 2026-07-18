@@ -214,6 +214,7 @@ def test_book_direction_missing_markdown_is_repaired_within_bounded_agent_run(
         _activation(tmp_path),
         candidate_run_id="book-direction-repair",
         allowed_tools=("submit_book_direction_candidate",),
+        expected_candidate_revision=1,
     )
 
     result = runtime.run(activation)
@@ -228,6 +229,8 @@ def test_book_direction_missing_markdown_is_repaired_within_bounded_agent_run(
     telemetry = read_json(telemetry_path)
     assert telemetry["validation_failures"] == 1
     assert telemetry["tool_errors"] == 1
+    request_path = next((tmp_path / "book" / "agent" / "a").glob("*/request.json"))
+    assert read_json(request_path)["expected_candidate_revision"] == 1
 
 
 def test_write_tool_idempotency_replays_same_result_and_rejects_changed_arguments(

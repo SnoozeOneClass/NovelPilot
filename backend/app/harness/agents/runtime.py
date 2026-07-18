@@ -57,6 +57,7 @@ class AgentActivation:
     system_prompt: str
     messages: tuple[ChatMessage, ...]
     policy: ResolvedAgentPolicy
+    expected_candidate_revision: int | None = None
     initial_checkpoint_id: str | None = None
     on_event: AgentEventCallback | None = None
     on_text_delta: Callable[[Any], None] | None = None
@@ -254,6 +255,7 @@ class AgentRuntime:
                     tool_call_id=call.id,
                     phase=activation.phase,
                     expected_revision=activation.expected_revision,
+                    expected_candidate_revision=activation.expected_candidate_revision,
                     repair_contract=activation.repair_contract,
                     experiment_strategy=activation.experiment_strategy,
                 )
@@ -686,6 +688,7 @@ class AgentRuntime:
                 "activation_id": activation_id,
                 "phase": activation.phase,
                 "expected_revision": activation.expected_revision,
+                "expected_candidate_revision": activation.expected_candidate_revision,
                 "initial_checkpoint_id": activation.initial_checkpoint_id,
                 "profile": {
                     "id": activation.policy.profile.id,
