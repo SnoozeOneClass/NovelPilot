@@ -35,6 +35,7 @@ _RETRYABLE_TEXT = (
     "incompleteread",
     "timed out",
     "timeout",
+    "internal_error",
     "unexpected_eof",
     "unexpected eof",
     " eof",

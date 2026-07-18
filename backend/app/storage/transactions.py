@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from app.storage.atomic_files import atomic_replace
 from app.storage.file_lock import exclusive_file_lock
 from app.storage.json_files import read_json, write_json
 
@@ -158,7 +159,7 @@ def _atomic_replace_bytes(
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_name(f".{target.name}.{transaction_id}.{phase}.tmp")
     temporary.write_bytes(content)
-    temporary.replace(target)
+    atomic_replace(temporary, target)
 
 
 def _normalize_relative_path(project_path: Path, value: str) -> Path:

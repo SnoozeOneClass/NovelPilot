@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from app.storage.atomic_files import atomic_replace
+
 
 def read_json(path: Path, default: Any = None) -> Any:
     if not path.exists():
@@ -16,4 +18,4 @@ def write_json(path: Path, value: Any) -> None:
         json.dumps(value, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    tmp_path.replace(path)
+    atomic_replace(tmp_path, path)
