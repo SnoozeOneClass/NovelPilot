@@ -168,13 +168,29 @@ def _evaluator_validation_repair_prompt(
     evaluation_input: EvaluationInput,
     error: EvaluationValidationError,
 ) -> str:
+    component_names = sorted(evaluation_input.component_fingerprints)
     return json.dumps(
         {
             "instruction": (
                 "Return a complete corrected evaluation through native Structured Output. "
-                "Do not change the fixed candidate, invent evidence, or explain your repair."
+                "Use only the exact candidate component names and locator forms supplied "
+                "below. Multiple blocking issues may identify the same component. Do not "
+                "change the fixed candidate, invent evidence, guess an invalid locator, or "
+                "explain your repair."
             ),
             "validation_error": str(error),
+            "allowed_candidate_components": component_names,
+            "allowed_candidate_locators": [
+                *(f"candidate.{component}" for component in component_names),
+                *(
+                    f"candidate_artifact_id#{component}"
+                    for component in component_names
+                ),
+            ],
+            "allowed_candidate_artifact_locators": [
+                f"{evaluation_input.candidate_artifact_id}#{component}"
+                for component in component_names
+            ],
             "allowed_candidate_locator_roots": [
                 evaluation_input.candidate_artifact_id,
                 "candidate_artifact_id",
@@ -470,15 +486,14 @@ def _normalize_evaluation(
                 "Local repair requires an unsatisfied contract, a blocking issue, "
                 "and non-empty repair scope."
             )
-        required_components = {
-            component
-            for issue in blocking_issues
-            if (component := _issue_component(evaluation_input, issue)) is not None
-        }
-        if len(required_components) != len(blocking_issues):
-            raise EvaluationValidationError(
-                "Every blocking local issue must identify one candidate component."
-            )
+        required_components: set[CandidateComponentName] = set()
+        for issue in blocking_issues:
+            component = _issue_component(evaluation_input, issue)
+            if component is None:
+                raise EvaluationValidationError(
+                    "Every blocking local issue must identify one candidate component."
+                )
+            required_components.add(component)
         if not required_components.issubset(set(repair_scope)):
             raise EvaluationValidationError(
                 "Repair scope does not cover every blocking issue locator."
@@ -568,8 +583,10 @@ def _evaluator_system_prompt() -> str:
         "currently open prior issue exactly once as resolved or remaining; do not silently "
         "erase it. Put only genuinely new findings in new_issues; the Harness assigns their "
         "stable IDs. A new issue is allowed even when it concerns an unchanged "
-        "component, because the full history is present. Candidate locators must identify one "
-        "typed component as candidate.<component>. Evidence locators must use candidate.<component>, "
+        "component, because the full history is present. Candidate component names are exactly "
+        "the keys of component_fingerprints in the supplied input. Candidate locators must "
+        "identify one typed component as candidate.<component>; multiple blocking issues may "
+        "identify the same component. Evidence locators must use candidate.<component>, "
         "deterministic_prechecks.<field>, or an approved evidence locator with an optional #field "
         "fragment. For local_repair, repair_scope must list every candidate component needed to "
         "fix current blocking issues and no unrelated component. Do not edit or propose mutation "

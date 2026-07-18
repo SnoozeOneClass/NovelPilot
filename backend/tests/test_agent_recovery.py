@@ -112,6 +112,12 @@ def test_completed_chapter_candidate_reuses_or_repairs_only_its_evaluation(
         runtime=runtime,
     )
     activation_id = created.run_result.activation_id
+    candidate_root = tmp_path / created.candidate_root
+    candidate_snapshot = {
+        path.relative_to(candidate_root).as_posix(): path.read_bytes()
+        for path in candidate_root.rglob("*")
+        if path.is_file()
+    }
     evaluation_path = (
         tmp_path
         / "chapters"
@@ -142,9 +148,18 @@ def test_completed_chapter_candidate_reuses_or_repairs_only_its_evaluation(
     )
     assert repaired is not None
     assert repaired.run_result.candidate_run_id == "chapter-run-stable"
+    assert repaired.run_result.activation_id == activation_id
     assert evaluation_calls == 2
     assert chat_calls == 4
     assert evaluation_path.is_file()
+    assert repaired.evaluation.candidate_artifact_id == created.evaluation.candidate_artifact_id
+    assert repaired.evaluation.candidate_revision == created.evaluation.candidate_revision
+    assert repaired.evaluation.input_fingerprint == created.evaluation.input_fingerprint
+    assert {
+        path.relative_to(candidate_root).as_posix(): path.read_bytes()
+        for path in candidate_root.rglob("*")
+        if path.is_file()
+    } == candidate_snapshot
 
 
 def _next_chapter_tool(
