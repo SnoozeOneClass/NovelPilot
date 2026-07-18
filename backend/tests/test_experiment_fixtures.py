@@ -335,6 +335,43 @@ def test_arc2_approval_freezes_declared_mother_before_chapter_generation(
     ) == 1
 
 
+def test_arc1_approval_for_declared_mother_keeps_ordinary_continue_behavior(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_path = _eligible_project(tmp_path, monkeypatch)
+    metadata = ProjectMetadata.model_validate(read_json(project_path / "project.json"))
+    metadata.active_arc_id = "arc-001"
+    metadata.run_status = "waiting_for_user"
+    write_json(project_path / "project.json", metadata.model_dump(mode="json"))
+    arc = read_json(project_path / "arcs" / "arc-001" / "state.json")
+    arc.update(
+        status="planned",
+        human_review="awaiting_review",
+        approved_at=None,
+        completed_chapter_ids=[],
+        completed_at=None,
+    )
+    write_json(project_path / "arcs" / "arc-001" / "state.json", arc)
+    monkeypatch.setattr(arcs_api, "get_active_project_path", lambda: project_path)
+    continued: list[Path] = []
+    monkeypatch.setattr(arcs_api, "continue_after_user_gate", continued.append)
+
+    result = arcs_api.approve_current_arc(
+        CurrentArcApprovalRequest(target_chapter_count=10)
+    )
+
+    updated_metadata = ProjectMetadata.model_validate(
+        read_json(project_path / "project.json")
+    )
+    assert result.arc.arc_id == "arc-001"
+    assert result.arc.human_review == "approved"
+    assert result.fixture_transition is None
+    assert updated_metadata.benchmark_fixture is not None
+    assert updated_metadata.benchmark_fixture.status == "preparing"
+    assert continued == [project_path]
+
+
 def test_ordinary_arc_approval_keeps_the_existing_continue_behavior(
     tmp_path: Path,
     monkeypatch,

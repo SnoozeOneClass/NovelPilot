@@ -46,7 +46,10 @@ def approve_current_arc(
 ) -> CurrentArcApprovalResponse:
     project_path = _active_project_or_404()
     metadata = read_project_metadata(project_path)
-    if metadata.project_kind == "benchmark_mother":
+    if (
+        metadata.project_kind == "benchmark_mother"
+        and metadata.active_arc_id == "arc-002"
+    ):
         return _approve_benchmark_current_arc(project_path, request)
     return _approve_ordinary_current_arc(project_path, request)
 
