@@ -240,7 +240,11 @@ def clone_activation_candidate_workspace(
     target_root = activation_relative(identity, target_activation_id) / "c"
     files: dict[str, str | bytes] = {}
     for source in sorted(source_root.rglob("*")):
-        if not source.is_file() or source.name.endswith(".tmp"):
+        if (
+            not source.is_file()
+            or source.name.endswith(".tmp")
+            or source.name == "repair-workspace.json"
+        ):
             continue
         relative = target_root / source.relative_to(source_root)
         files[relative.as_posix()] = source.read_bytes()

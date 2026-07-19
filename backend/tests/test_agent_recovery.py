@@ -16,6 +16,7 @@ from app.harness.agents.runtime import AgentRuntime
 from app.llm.gateway import ChatRequest, ChatResult, ToolCall
 from app.schemas.profiles import LlmProfile
 from app.schemas.projects import ProjectMetadata
+from app.storage.json_files import write_json
 
 
 def test_completed_chapter_candidate_reuses_or_repairs_only_its_evaluation(
@@ -100,6 +101,7 @@ def test_completed_chapter_candidate_reuses_or_repairs_only_its_evaluation(
     monkeypatch.setattr(loop_runners, "_require_policy_capabilities", lambda _policy: None)
     monkeypatch.setattr(loop_runners, "evaluate_candidate", fake_evaluate)
     runtime = AgentRuntime(build_default_tool_registry(), chat_call=fake_chat)
+    _write_empty_canon(tmp_path)
 
     created = run_chapter_agent(
         tmp_path,
@@ -137,7 +139,7 @@ def test_completed_chapter_candidate_reuses_or_repairs_only_its_evaluation(
     assert reused is not None
     assert reused.run_result.candidate_run_id == "chapter-run-stable"
     assert evaluation_calls == 1
-    assert chat_calls == 4
+    assert chat_calls == 6
 
     evaluation_path.unlink()
     repaired = recover_completed_chapter_agent(
@@ -150,7 +152,7 @@ def test_completed_chapter_candidate_reuses_or_repairs_only_its_evaluation(
     assert repaired.run_result.candidate_run_id == "chapter-run-stable"
     assert repaired.run_result.activation_id == activation_id
     assert evaluation_calls == 2
-    assert chat_calls == 4
+    assert chat_calls == 6
     assert evaluation_path.is_file()
     assert repaired.evaluation.candidate_artifact_id == created.evaluation.candidate_artifact_id
     assert repaired.evaluation.candidate_revision == created.evaluation.candidate_revision
@@ -160,6 +162,19 @@ def test_completed_chapter_candidate_reuses_or_repairs_only_its_evaluation(
         for path in candidate_root.rglob("*")
         if path.is_file()
     } == candidate_snapshot
+
+
+def _write_empty_canon(project_path: Path) -> None:
+    for relative in (
+        "canon/characters.json",
+        "canon/relationships.json",
+        "canon/world_facts.json",
+        "canon/foreshadowing.json",
+    ):
+        write_json(
+            project_path / relative,
+            {"schema_version": 1, "version": 1, "items": {}},
+        )
 
 
 def _next_chapter_tool(
@@ -187,6 +202,27 @@ def _next_chapter_tool(
             "expected_revision": 0,
             "draft_revision": 1,
         }
+    if "write_chapter_observations" not in prior_calls:
+        return "write_chapter_observations", {
+            "chapter_id": "chapter-001",
+            "expected_revision": 0,
+            "draft_revision": 1,
+            "observations": {
+                "events": [],
+                "character_changes": [],
+                "relationship_changes": [],
+                "world_fact_candidates": [],
+                "foreshadowing_candidates": [],
+                "requires_commit": False,
+            },
+        }
+    if "write_chapter_state_patch" not in prior_calls:
+        return "write_chapter_state_patch", {
+            "chapter_id": "chapter-001",
+            "expected_revision": 0,
+            "draft_revision": 1,
+            "state_patch": {"operations": []},
+        }
     return "submit_chapter_candidate", {
         "chapter_id": "chapter-001",
         "expected_revision": 0,
@@ -194,13 +230,4 @@ def _next_chapter_tool(
         "plan_revision": 1,
         "draft_revision": 1,
         "summary": "The first fair clue is visible.",
-        "observations": {
-            "events": [],
-            "character_changes": [],
-            "relationship_changes": [],
-            "world_fact_candidates": [],
-            "foreshadowing_candidates": [],
-            "requires_commit": False,
-        },
-        "state_patch": {"operations": []},
     }

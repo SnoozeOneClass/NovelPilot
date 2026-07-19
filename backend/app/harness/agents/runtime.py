@@ -38,6 +38,7 @@ from app.llm.gateway import (
 )
 from app.llm.redaction import redact_profile_secrets
 from app.llm.retry import call_llm_with_transport_retries, is_retryable_provider_error
+from app.llm.usage import merge_usage
 from app.schemas.experiments import ExperimentHookStrategy
 from app.schemas.projects import RETRY_BUDGET_SCOPE_VERSION
 
@@ -115,11 +116,11 @@ class AgentRuntime:
             and state.candidate_run_id == activation.candidate_run_id
             else None
         )
-        source_activation_id = prior_failed_activation_id or (
+        source_activation_id = (
             activation.repair_contract.source_activation_id
             if activation.identity.role == "chapter"
             and activation.repair_contract is not None
-            else None
+            else prior_failed_activation_id
         )
         activation_id = uuid4().hex[:12]
         restored_candidate_paths = (
@@ -199,7 +200,7 @@ class AgentRuntime:
                 )
 
             telemetry.llm_calls += 1
-            telemetry.usage = _merge_usage(telemetry.usage, result.usage)
+            telemetry.usage = merge_usage(telemetry.usage, result.usage)
             telemetry.model_snapshot = result.model_snapshot
             telemetry.provider_snapshot = result.provider_snapshot
             budgets.used_turns += 1
@@ -258,6 +259,7 @@ class AgentRuntime:
                     expected_candidate_revision=activation.expected_candidate_revision,
                     repair_contract=activation.repair_contract,
                     experiment_strategy=activation.experiment_strategy,
+                    allowed_tools=frozenset(activation.allowed_tools),
                 )
                 tool_result = self._registry.execute(context, call)
                 if tool_result.status == "error":
@@ -944,28 +946,6 @@ def _tool_result_content(result: ToolExecutionResult) -> dict[str, Any]:
         "checkpoint_id": result.checkpoint_id,
         "allowed_actions": result.allowed_actions,
     }
-
-
-def _merge_usage(
-    accumulated: dict[str, Any],
-    current: dict[str, Any],
-) -> dict[str, Any]:
-    merged = dict(accumulated)
-    for key, value in current.items():
-        previous = merged.get(key)
-        if isinstance(value, dict):
-            nested = previous if isinstance(previous, dict) else {}
-            merged[key] = _merge_usage(nested, value)
-        elif isinstance(value, (int, float)) and not isinstance(value, bool):
-            prior_number = (
-                previous
-                if isinstance(previous, (int, float)) and not isinstance(previous, bool)
-                else 0
-            )
-            merged[key] = prior_number + value
-        else:
-            merged[key] = value
-    return merged
 
 
 def _context_characters(result: ToolExecutionResult) -> int:

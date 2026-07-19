@@ -59,7 +59,21 @@ def test_story_arc_agent_repairs_local_semantic_failure_with_candidate_budget(
     tool_responses = iter(
         [
             _arc_tool_response("call-initial", "Initial plan with a continuity defect."),
-            _arc_tool_response("call-revised", "Revised plan preserves committed evidence."),
+            _repair_tool_response(
+                "call-revised",
+                "replace_candidate_text",
+                {
+                    "component": "plan",
+                    "content": "Revised plan preserves committed evidence.",
+                },
+                model="story-model",
+            ),
+            _repair_tool_response(
+                "call-finalize",
+                "submit_candidate_repair",
+                {"summary": "Repair the clue chronology."},
+                model="story-model",
+            ),
         ]
     )
     requests = []
@@ -136,16 +150,20 @@ def test_story_arc_agent_repairs_local_semantic_failure_with_candidate_budget(
     assert len(evaluation_inputs[1].review_history) == 1
     assert evaluation_inputs[1].expected_repair is not None
     assert evaluation_inputs[1].expected_repair.allowed_components == ["plan"]
-    assert len(requests) == 2
+    assert len(requests) == 3
     assert "Keep the clue chronology consistent" in requests[1].messages[-1].content
     assert "complete_review_history" in requests[1].messages[-1].content
+    assert "submit_story_arc_candidate" not in {
+        tool.name for tool in requests[1].tools
+    }
+    assert "submit_candidate_repair" in {tool.name for tool in requests[1].tools}
     assert "fresh candidate workspace" not in requests[1].messages[-1].content
     state = read_agent_state(
         tmp_path,
         AgentIdentity(project_id="project-1", role="story_arc", scope_id="arc-001"),
     )
     assert state.budgets is not None
-    assert state.budgets.used_turns == 1
+    assert state.budgets.used_turns == 2
     assert state.budgets.used_semantic_revisions == 1
     activation_roots = sorted((tmp_path / "arcs" / "arc-001" / "agent" / "a").iterdir())
     assert len(activation_roots) == 2
@@ -206,19 +224,20 @@ def test_book_direction_repair_keeps_review_revision_while_logical_revision_adva
                 direction_markdown="# Direction\n\nThe initial direction has a continuity gap.",
             ),
         ),
-        _book_tool_response(
-            "book-repair-wrong-revision",
-            _book_submission(
-                candidate_revision=2,
-                direction_markdown="# Direction\n\nThe repaired direction closes the gap.",
-            ),
+        _repair_tool_response(
+            "book-repair-direction",
+            "replace_candidate_text",
+            {
+                "component": "direction",
+                "content": "# Direction\n\nThe repaired direction closes the gap.",
+            },
+            model="book-model",
         ),
-        _book_tool_response(
-            "book-repair-corrected",
-            _book_submission(
-                candidate_revision=1,
-                direction_markdown="# Direction\n\nThe repaired direction closes the gap.",
-            ),
+        _repair_tool_response(
+            "book-repair-finalize",
+            "submit_candidate_repair",
+            {"summary": "Close the direction continuity gap."},
+            model="book-model",
         ),
     ]
     requests = []
@@ -292,15 +311,8 @@ def test_book_direction_repair_keeps_review_revision_while_logical_revision_adva
     repair_prompt = "\n".join(message.content for message in requests[1].messages)
     assert '"book_review_candidate_revision": 1' in repair_prompt
     assert '"semantic_logical_candidate_revision": 2' in repair_prompt
-    correction_tool_results = [
-        tool_result.content.get("content", {})
-        for message in requests[2].messages
-        for tool_result in message.tool_results
-    ]
-    assert any(
-        "expected_candidate_revision" in content
-        for content in correction_tool_results
-    )
+    assert "candidate_revision" not in submissions[1].tool_calls[0].arguments
+    assert "candidate_revision" not in submissions[2].tool_calls[0].arguments
     request_snapshots = [
         read_json(path)
         for path in (tmp_path / "book" / "agent" / "a").glob("*/request.json")
@@ -345,12 +357,20 @@ def test_pending_book_repair_ignores_completed_chain_external_activation(
                     direction_markdown="# Direction\n\nThe initial direction has a gap.",
                 ),
             ),
-            _book_tool_response(
+            _repair_tool_response(
                 "book-resumed-repair",
-                _book_submission(
-                    candidate_revision=1,
-                    direction_markdown="# Direction\n\nThe resumed repair closes the gap.",
-                ),
+                "replace_candidate_text",
+                {
+                    "component": "direction",
+                    "content": "# Direction\n\nThe resumed repair closes the gap.",
+                },
+                model="book-model",
+            ),
+            _repair_tool_response(
+                "book-resumed-finalize",
+                "submit_candidate_repair",
+                {"summary": "Finish the resumed direction repair."},
+                model="book-model",
             ),
         ]
     )
@@ -456,8 +476,8 @@ def test_pending_book_repair_ignores_completed_chain_external_activation(
     assert resumed[1].result.outcome == "pass"
     assert resumed[1].candidate_run_id == original_candidate_run_id
     assert [item.candidate_revision for item in evaluation_inputs] == [1, 2]
-    assert len(requests) == 2
-    assert "complete_review_history" in requests[-1].messages[-1].content
+    assert len(requests) == 3
+    assert "complete_review_history" in requests[1].messages[-1].content
     chain = read_json(tmp_path / "book" / "agent" / "repair-chain.json")
     assert [entry["candidate_revision"] for entry in chain["entries"]] == [1, 2]
     assert invalid_activation_id not in {
@@ -612,6 +632,7 @@ def test_chapter_repair_chain_preserves_draft_before_late_discovery(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    _write_empty_canon(tmp_path)
     profile = LlmProfile(
         id="main",
         name="Main",
@@ -639,35 +660,36 @@ def test_chapter_repair_chain_preserves_draft_before_late_discovery(
         prior_calls = {
             call.name for message in request.messages for call in message.tool_calls
         }
-        prompt = "\n".join(message.content for message in request.messages)
         if "plan_chapter_candidate" in tool_names:
             name, arguments = _next_initial_chapter_tool(prior_calls)
-        elif '"next_candidate_revision": 2' in prompt:
-            name = "submit_chapter_candidate"
-            arguments = _chapter_submission(candidate_revision=2, draft_revision=1)
-        elif "edit_chapter_draft" not in prior_calls:
-            name = "edit_chapter_draft"
+        elif "add_state_patch_operation_repair" in tool_names:
+            if "add_state_patch_operation_repair" not in prior_calls:
+                name = "add_state_patch_operation_repair"
+                arguments = {
+                    "operation": {
+                        "op": "upsert",
+                        "target_file": "canon/world_facts.json",
+                        "target_id": "wet-key",
+                        "value_fields": [{"key": "status", "json_value": '"found"'}],
+                        "evidence_quotes": ["wet key"],
+                        "rationale": "The draft places the wet key on the table.",
+                    }
+                }
+            else:
+                name = "submit_candidate_repair"
+                arguments = {"summary": "Record the wet-key state change."}
+        elif "replace_candidate_text" not in prior_calls:
+            name = "replace_candidate_text"
             arguments = {
-                "chapter_id": "chapter-001",
-                "expected_revision": 0,
-                "draft_revision": 1,
-                "next_draft_revision": 2,
-                "anchor": "The witness places the wet key on the table.",
-                "replacement": (
+                "component": "draft",
+                "content": (
                     "The witness places the wet key on the table. "
                     "The stopped clock confirms the missing interval."
                 ),
             }
-        elif "inspect_chapter_consistency" not in prior_calls:
-            name = "inspect_chapter_consistency"
-            arguments = {
-                "chapter_id": "chapter-001",
-                "expected_revision": 0,
-                "draft_revision": 2,
-            }
         else:
-            name = "submit_chapter_candidate"
-            arguments = _chapter_submission(candidate_revision=3, draft_revision=2)
+            name = "submit_candidate_repair"
+            arguments = {"summary": "Add the stopped-clock confirmation."}
         return ChatResult(
             content="",
             tool_calls=[
@@ -786,6 +808,7 @@ def test_pending_chapter_repair_resumes_after_process_boundary(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    _write_empty_canon(tmp_path)
     profile = LlmProfile(
         id="main",
         name="Main",
@@ -814,9 +837,21 @@ def test_pending_chapter_repair_resumes_after_process_boundary(
         }
         if "plan_chapter_candidate" in tool_names:
             name, arguments = _next_initial_chapter_tool(prior_calls)
+        elif "add_state_patch_operation_repair" not in prior_calls:
+            name = "add_state_patch_operation_repair"
+            arguments = {
+                "operation": {
+                    "op": "upsert",
+                    "target_file": "canon/world_facts.json",
+                    "target_id": "wet-key",
+                    "value_fields": [{"key": "status", "json_value": '"found"'}],
+                    "evidence_quotes": ["wet key"],
+                    "rationale": "The draft places the wet key on the table.",
+                }
+            }
         else:
-            name = "submit_chapter_candidate"
-            arguments = _chapter_submission(candidate_revision=2, draft_revision=1)
+            name = "submit_candidate_repair"
+            arguments = {"summary": "Record the wet-key state change."}
         return ChatResult(
             content="",
             tool_calls=[
@@ -906,7 +941,7 @@ def test_pending_chapter_repair_resumes_after_process_boundary(
         "initial",
         "repair_verification",
     ]
-    assert len(requests) == 5
+    assert len(requests) == 8
     resumed_tools = {tool.name for tool in requests[-1].tools}
     assert "plan_chapter_candidate" not in resumed_tools
     assert "write_chapter_draft" not in resumed_tools
@@ -1016,6 +1051,29 @@ def _book_tool_response(
     )
 
 
+def _repair_tool_response(
+    call_id: str,
+    name: str,
+    arguments: dict[str, object],
+    *,
+    model: str,
+) -> ChatResult:
+    return ChatResult(
+        content="",
+        tool_calls=[
+            ToolCall(
+                id=call_id,
+                name=name,
+                arguments=arguments,
+                raw_arguments=json.dumps(arguments),
+            )
+        ],
+        finish_reason="tool_call",
+        model_snapshot=model,
+        provider_snapshot="openai-compatible",
+    )
+
+
 def _book_submission(
     *,
     candidate_revision: int,
@@ -1091,6 +1149,20 @@ def _next_initial_chapter_tool(
             "expected_revision": 0,
             "draft_revision": 1,
         }
+    if "write_chapter_observations" not in prior_calls:
+        return "write_chapter_observations", {
+            "chapter_id": "chapter-001",
+            "expected_revision": 0,
+            "draft_revision": 1,
+            "observations": _chapter_observations(),
+        }
+    if "write_chapter_state_patch" not in prior_calls:
+        return "write_chapter_state_patch", {
+            "chapter_id": "chapter-001",
+            "expected_revision": 0,
+            "draft_revision": 1,
+            "state_patch": {"operations": []},
+        }
     return "submit_chapter_candidate", {
         "chapter_id": "chapter-001",
         "expected_revision": 0,
@@ -1098,8 +1170,6 @@ def _next_initial_chapter_tool(
         "plan_revision": 1,
         "draft_revision": 1,
         "summary": "The fair clue is visible.",
-        "observations": _chapter_observations(),
-        "state_patch": {"operations": []},
     }
 
 
@@ -1122,7 +1192,6 @@ def _chapter_submission(
                     "op": "upsert",
                     "target_file": "canon/world_facts.json",
                     "target_id": "wet-key",
-                    "expected_version": 1,
                     "value_fields": [
                         {"key": "status", "json_value": '"found"'}
                     ],
@@ -1143,6 +1212,19 @@ def _chapter_observations() -> dict[str, object]:
         "foreshadowing_candidates": [],
         "requires_commit": False,
     }
+
+
+def _write_empty_canon(project_path: Path) -> None:
+    for relative in (
+        "canon/characters.json",
+        "canon/relationships.json",
+        "canon/world_facts.json",
+        "canon/foreshadowing.json",
+    ):
+        write_json(
+            project_path / relative,
+            {"schema_version": 1, "version": 1, "items": {}},
+        )
 
 
 class _CrashAfterRepairScheduleRuntime(AgentRuntime):

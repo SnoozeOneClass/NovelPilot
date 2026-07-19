@@ -38,12 +38,16 @@ def test_provider_strict_tool_schemas_require_defaulted_properties() -> None:
     assert "default" not in suggestion_schema["properties"]["recommended"]
 
 
-def test_chapter_submission_tool_schema_contains_no_open_json_objects() -> None:
-    schema = build_default_tool_registry().definitions(
+def test_chapter_submission_tool_schemas_contain_no_open_json_objects() -> None:
+    schemas = build_default_tool_registry().definitions(
         role="chapter",
         phase="chapter",
-        names=["submit_chapter_candidate"],
-    )[0].input_schema
+        names=[
+            "write_chapter_observations",
+            "write_chapter_state_patch",
+            "submit_chapter_candidate",
+        ],
+    )
 
     def assert_closed(value: object) -> None:
         if isinstance(value, dict):
@@ -55,7 +59,13 @@ def test_chapter_submission_tool_schema_contains_no_open_json_objects() -> None:
             for child in value:
                 assert_closed(child)
 
-    assert_closed(schema)
+    for definition in schemas:
+        assert_closed(definition.input_schema)
+    patch_operation_schema = schemas[1].input_schema["$defs"][
+        "ChapterPatchOperationInput"
+    ]
+    assert "expected_version" not in patch_operation_schema["properties"]
+    assert "expected_version" not in patch_operation_schema["required"]
 
 
 def test_book_direction_submission_is_candidate_only_and_revision_guarded(
@@ -296,6 +306,45 @@ def test_story_arc_repair_rejects_changes_outside_authorized_components(
     assert result.content["unexpected_components"] == ["target_chapter_count"]
 
 
+def test_runtime_allowlist_rejects_role_valid_but_unexposed_tool(
+    tmp_path: Path,
+) -> None:
+    context = _context(
+        tmp_path,
+        role="story_arc",
+        scope_id="arc-0001",
+        phase="planning",
+        revision=0,
+        call_id="old-terminal",
+    )
+    context = context.__class__(
+        **{
+            **context.__dict__,
+            "allowed_tools": frozenset({"replace_candidate_text"}),
+        }
+    )
+    result = build_default_tool_registry().execute(
+        context,
+        _call(
+            "old-terminal",
+            "submit_story_arc_candidate",
+            {
+                "expected_revision": 0,
+                "intent": "create",
+                "arc_id": "arc-0001",
+                "plan_markdown": "# Old complete-candidate protocol",
+                "target_chapter_count": 2,
+                "change_summary": "Should not be written.",
+            },
+        ),
+    )
+
+    assert result.status == "error"
+    assert result.error_code == "tool_not_exposed"
+    assert result.recoverable is True
+    assert not any(tmp_path.rglob("story-arc.json"))
+
+
 def test_chapter_tools_build_quarantined_candidate_and_never_promote(
     tmp_path: Path,
 ) -> None:
@@ -307,6 +356,10 @@ def test_chapter_tools_build_quarantined_candidate_and_never_promote(
         phase="chapter",
         revision=0,
         call_id="plan",
+    )
+    write_json(
+        tmp_path / "canon" / "world_facts.json",
+        {"schema_version": 1, "version": 2, "items": {}},
     )
     plan = registry.execute(
         context,
@@ -348,18 +401,15 @@ def test_chapter_tools_build_quarantined_candidate_and_never_promote(
             },
         ),
     )
-    submit = registry.execute(
-        context.__class__(**{**context.__dict__, "tool_call_id": "submit"}),
+    observations = registry.execute(
+        context.__class__(**{**context.__dict__, "tool_call_id": "observations"}),
         _call(
-            "submit",
-            "submit_chapter_candidate",
+            "observations",
+            "write_chapter_observations",
             {
                 "chapter_id": "chapter-0001",
                 "expected_revision": 0,
-                "candidate_revision": 1,
-                "plan_revision": 1,
                 "draft_revision": 1,
-                "summary": "第一章候选。",
                 "observations": {
                     "events": [
                         {
@@ -373,13 +423,24 @@ def test_chapter_tools_build_quarantined_candidate_and_never_promote(
                     "foreshadowing_candidates": [],
                     "requires_commit": True,
                 },
+            },
+        ),
+    )
+    patch = registry.execute(
+        context.__class__(**{**context.__dict__, "tool_call_id": "patch"}),
+        _call(
+            "patch",
+            "write_chapter_state_patch",
+            {
+                "chapter_id": "chapter-0001",
+                "expected_revision": 0,
+                "draft_revision": 1,
                 "state_patch": {
                     "operations": [
                         {
                             "op": "upsert",
                             "target_file": "canon/world_facts.json",
                             "target_id": "bell-arrival",
-                            "expected_version": 1,
                             "value_fields": [
                                 {"key": "visible", "json_value": "true"},
                                 {"key": "name", "json_value": "harbor bell"},
@@ -392,11 +453,28 @@ def test_chapter_tools_build_quarantined_candidate_and_never_promote(
             },
         ),
     )
+    submit = registry.execute(
+        context.__class__(**{**context.__dict__, "tool_call_id": "submit"}),
+        _call(
+            "submit",
+            "submit_chapter_candidate",
+            {
+                "chapter_id": "chapter-0001",
+                "expected_revision": 0,
+                "candidate_revision": 1,
+                "plan_revision": 1,
+                "draft_revision": 1,
+                "summary": "第一章候选。",
+            },
+        ),
+    )
 
     assert plan.status == "ok"
     assert draft.status == "ok"
     assert inspect.status == "ok"
     assert inspect.content["semantic_verdict"] is None
+    assert observations.status == "ok"
+    assert patch.status == "ok"
     assert submit.status == "ok"
     assert submit.terminal is True
     assert submit.content["promotable"] is False
@@ -410,6 +488,8 @@ def test_chapter_tools_build_quarantined_candidate_and_never_promote(
         "visible": True,
         "name": "harbor bell",
     }
+    assert manifest["state_patch"]["operations"][0]["expected_version"] == 2
+    assert manifest["canon_versions"]["canon/world_facts.json"] == 2
 
 
 def test_chapter_submission_rejects_non_verbatim_patch_evidence_before_checkpoint(
@@ -452,19 +532,15 @@ def test_chapter_submission_rejects_non_verbatim_patch_evidence_before_checkpoin
             },
         ),
     )
-
-    submit = registry.execute(
-        context.__class__(**{**context.__dict__, "tool_call_id": "submit"}),
+    registry.execute(
+        context.__class__(**{**context.__dict__, "tool_call_id": "observations"}),
         _call(
-            "submit",
-            "submit_chapter_candidate",
+            "observations",
+            "write_chapter_observations",
             {
                 "chapter_id": "chapter-0001",
                 "expected_revision": 0,
-                "candidate_revision": 1,
-                "plan_revision": 1,
                 "draft_revision": 1,
-                "summary": "The bell marks an arrival.",
                 "observations": {
                     "events": [],
                     "character_changes": [],
@@ -473,13 +549,24 @@ def test_chapter_submission_rejects_non_verbatim_patch_evidence_before_checkpoin
                     "foreshadowing_candidates": [],
                     "requires_commit": True,
                 },
+            },
+        ),
+    )
+    registry.execute(
+        context.__class__(**{**context.__dict__, "tool_call_id": "patch"}),
+        _call(
+            "patch",
+            "write_chapter_state_patch",
+            {
+                "chapter_id": "chapter-0001",
+                "expected_revision": 0,
+                "draft_revision": 1,
                 "state_patch": {
                     "operations": [
                         {
                             "op": "upsert",
                             "target_file": "canon/world_facts.json",
                             "target_id": "harbor-bell",
-                            "expected_version": 1,
                             "value_fields": [
                                 {"key": "heard", "json_value": "true"}
                             ],
@@ -495,13 +582,29 @@ def test_chapter_submission_rejects_non_verbatim_patch_evidence_before_checkpoin
         ),
     )
 
+    submit = registry.execute(
+        context.__class__(**{**context.__dict__, "tool_call_id": "submit"}),
+        _call(
+            "submit",
+            "submit_chapter_candidate",
+            {
+                "chapter_id": "chapter-0001",
+                "expected_revision": 0,
+                "candidate_revision": 1,
+                "plan_revision": 1,
+                "draft_revision": 1,
+                "summary": "The bell marks an arrival.",
+            },
+        ),
+    )
+
     assert submit.status == "error"
     assert submit.recoverable is True
     assert submit.error_code == "candidate_patch_evidence_not_verbatim"
     assert submit.content["rejected_evidence"] == [
-        {"operation_index": 0, "evidence_indexes": [0, 1]}
+        {"operation_index": 0, "evidence_indexes": [1]}
     ]
-    assert "retry:submit_chapter_candidate" in submit.allowed_actions
+    assert submit.allowed_actions == ["write_chapter_state_patch"]
     assert not any(tmp_path.rglob("manifest.json"))
 
 
@@ -661,6 +764,19 @@ def _context(
 ) -> ToolExecutionContext:
     if role != "book" and scope_id is None:
         scope_id = "scope-1"
+    if role == "chapter":
+        for relative in (
+            "canon/characters.json",
+            "canon/relationships.json",
+            "canon/world_facts.json",
+            "canon/foreshadowing.json",
+        ):
+            path = project_path / relative
+            if not path.is_file():
+                write_json(
+                    path,
+                    {"schema_version": 1, "version": 1, "items": {}},
+                )
     return ToolExecutionContext(
         project_path=project_path,
         identity=AgentIdentity(

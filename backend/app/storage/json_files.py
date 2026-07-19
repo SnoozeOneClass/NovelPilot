@@ -1,14 +1,25 @@
 import json
+import time
 from pathlib import Path
 from typing import Any
 
-from app.storage.atomic_files import atomic_replace
+from app.storage.atomic_files import (
+    ATOMIC_REPLACE_RETRY_DELAYS_SECONDS,
+    atomic_replace,
+)
 
 
 def read_json(path: Path, default: Any = None) -> Any:
-    if not path.exists():
-        return default
-    return json.loads(path.read_text(encoding="utf-8-sig"))
+    for attempt in range(len(ATOMIC_REPLACE_RETRY_DELAYS_SECONDS) + 1):
+        try:
+            if not path.exists():
+                return default
+            return json.loads(path.read_text(encoding="utf-8-sig"))
+        except PermissionError:
+            if attempt == len(ATOMIC_REPLACE_RETRY_DELAYS_SECONDS):
+                raise
+            time.sleep(ATOMIC_REPLACE_RETRY_DELAYS_SECONDS[attempt])
+    raise AssertionError("JSON read retry loop exited unexpectedly.")
 
 
 def write_json(path: Path, value: Any) -> None:

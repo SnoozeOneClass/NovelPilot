@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "case_id": "phase16-two-chapter-normal-flow-v1",
+  "case_id": "phase16-two-chapter-normal-flow-v2",
   "prompt_path": "scripts/live_acceptance_cases/phase16_two_chapter_prompt.md",
-  "prompt_sha256": "f2f308db45d4d70722d6745e67401f47c7f2e92d973cd7dc41ebab7137a1e6a1",
+  "prompt_sha256": "ef3579db7f0c049d02c8e287f7860d928374645d12e24ac9fc3f22059bfb5d88",
   "actor_policy_version": "recommended-only-v1",
   "operation_mode": "participatory",
   "first_arc": {

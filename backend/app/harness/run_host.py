@@ -64,7 +64,8 @@ class RunHost:
         if thread is not None:
             thread.join(timeout=timeout)
         with self._condition:
-            self._thread = None
+            if thread is not None and not thread.is_alive() and self._thread is thread:
+                self._thread = None
 
     def wake(self, project_path: Path) -> None:
         resolved = project_path.resolve()

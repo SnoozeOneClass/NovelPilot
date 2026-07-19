@@ -13,7 +13,7 @@ from app.harness.agents.models import (
 
 _RUBRICS: dict[CandidateKind, EvaluationRubricSnapshot] = {
     "book_direction": EvaluationRubricSnapshot(
-        version="book-direction-v2",
+        version="book-direction-v3",
         candidate_kind="book_direction",
         dimensions=[
             EvaluationRubricDimension(
@@ -29,7 +29,12 @@ _RUBRICS: dict[CandidateKind, EvaluationRubricSnapshot] = {
             ),
             EvaluationRubricDimension(
                 dimension_id="title_reader_promise",
-                instruction="Check title suggestions against genre and reader promise.",
+                instruction=(
+                    "Check the required 3-5 title suggestion records against genre and reader "
+                    "promise. When one formal title is already locked, the other structurally "
+                    "required records are comparison/reference suggestions, not evidence that "
+                    "the user must choose a title again."
+                ),
             ),
             EvaluationRubricDimension(
                 dimension_id="reveal_ending_feasibility",

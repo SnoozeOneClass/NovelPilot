@@ -234,6 +234,34 @@ def test_run_host_reconciles_durable_running_intent_after_restart(
     assert woken == [project_path]
 
 
+def test_run_host_stop_keeps_live_thread_reference_after_timeout() -> None:
+    joined: list[float] = []
+
+    class StubThread:
+        alive = True
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def join(self, *, timeout: float) -> None:
+            joined.append(timeout)
+
+    thread = StubThread()
+    host = run_host.RunHost()
+    host._thread = thread  # type: ignore[assignment]
+
+    host.stop(timeout=0.25)
+
+    assert joined == [0.25]
+    assert host.started is True
+    assert host._thread is thread
+
+    thread.alive = False
+    host.stop(timeout=0.5)
+    assert host.started is False
+    assert host._thread is None
+
+
 def test_run_host_keeps_frozen_benchmark_stopped_after_restart(
     tmp_path, monkeypatch
 ) -> None:

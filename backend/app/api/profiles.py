@@ -19,6 +19,8 @@ from app.llm.gateway import (
     call_llm,
 )
 from app.llm.redaction import redact_profile_secrets
+from app.llm.retry import call_llm_with_transport_retries
+from app.llm.usage import merge_usage
 from app.schemas.profiles import (
     LlmCapabilityCheck,
     LlmCapabilitySnapshot,
@@ -39,6 +41,9 @@ from app.storage.projects import (
 )
 
 router = APIRouter()
+
+_PROFILE_TRANSPORT_RETRY_LIMIT = 3
+_PROFILE_RETRY_DELAY_SECONDS = 0.5
 
 
 @router.get("", response_model=LlmProfilesPublicDocument)
@@ -96,8 +101,10 @@ def test_profile(profile_id: str) -> LlmProfileTestResult:
     if not profile.enabled:
         raise HTTPException(status_code=400, detail="Profile is disabled.")
 
-    tool_check, tool_result = _test_tool_calling(profile)
-    structured_check, structured_result = _test_structured_output(profile)
+    tool_check, tool_result, tool_transport_retries = _test_tool_calling(profile)
+    structured_check, structured_result, structured_transport_retries = (
+        _test_structured_output(profile)
+    )
     ready = tool_check.ok and structured_check.ok
     capability_test = LlmCapabilitySnapshot(
         profile_fingerprint=profile_storage.profile_fingerprint(profile),
@@ -125,6 +132,14 @@ def test_profile(profile_id: str) -> LlmProfileTestResult:
     if result is None:
         raise HTTPException(status_code=502, detail="Profile capability test returned no result.")
 
+    capability_results = [
+        ("tool_calling", tool_result),
+        ("structured_output", structured_result),
+    ]
+    completed_results = [item for _, item in capability_results if item is not None]
+    usage: dict[str, object] = {}
+    for item in completed_results:
+        usage = merge_usage(usage, item.usage)
     return LlmProfileTestResult(
         profile_id=profile.id,
         ok=True,
@@ -132,12 +147,39 @@ def test_profile(profile_id: str) -> LlmProfileTestResult:
         provider_snapshot=result.provider_snapshot,
         message="Tool Calling and Structured Output are available.",
         capability_test=capability_test,
+        usage=usage,
+        usage_available=bool(completed_results)
+        and all(bool(item.usage) for item in completed_results),
+        calls=[
+            {
+                "call_type": call_type,
+                "usage": item.usage,
+                "usage_available": bool(item.usage),
+                "transport_retries": (
+                    tool_transport_retries
+                    if call_type == "tool_calling"
+                    else structured_transport_retries
+                ),
+                "model_snapshot": item.model_snapshot,
+                "provider_snapshot": item.provider_snapshot,
+            }
+            for call_type, item in capability_results
+            if item is not None
+        ],
     )
 
 
-def _test_tool_calling(profile: LlmProfile) -> tuple[LlmCapabilityCheck, ChatResult | None]:
+def _test_tool_calling(
+    profile: LlmProfile,
+) -> tuple[LlmCapabilityCheck, ChatResult | None, int]:
+    transport_retries = 0
+
+    def record_transport_retry(_retry: int, _limit: int, _exc: Exception) -> None:
+        nonlocal transport_retries
+        transport_retries += 1
+
     try:
-        result = call_llm(
+        result = call_llm_with_transport_retries(
             profile,
             ChatRequest(
                 profile_id=profile.id,
@@ -164,25 +206,38 @@ def _test_tool_calling(profile: LlmProfile) -> tuple[LlmCapabilityCheck, ChatRes
                 ],
                 tool_choice=ToolChoice(mode="named", name="novelpilot_capability_echo"),
             ),
+            retry_limit=_PROFILE_TRANSPORT_RETRY_LIMIT,
+            llm_call=call_llm,
+            on_retry=record_transport_retry,
+            base_delay_seconds=_PROFILE_RETRY_DELAY_SECONDS,
         )
         if len(result.tool_calls) != 1:
             raise RuntimeError("provider did not return exactly one Tool call.")
         call = result.tool_calls[0]
         if call.parse_error is not None or call.arguments != {"value": "ok"}:
             raise RuntimeError("provider returned invalid Tool arguments.")
-        return LlmCapabilityCheck(ok=True, message="supported"), result
+        return LlmCapabilityCheck(ok=True, message="supported"), result, transport_retries
     except (RuntimeError, ValueError) as exc:
         return LlmCapabilityCheck(
             ok=False,
-            message=redact_profile_secrets(str(exc), profile)[:1_000],
-        ), None
+            message=redact_profile_secrets(
+                f"{exc} (transport retries: {transport_retries})",
+                profile,
+            )[:1_000],
+        ), None, transport_retries
 
 
 def _test_structured_output(
     profile: LlmProfile,
-) -> tuple[LlmCapabilityCheck, ChatResult | None]:
+) -> tuple[LlmCapabilityCheck, ChatResult | None, int]:
+    transport_retries = 0
+
+    def record_transport_retry(_retry: int, _limit: int, _exc: Exception) -> None:
+        nonlocal transport_retries
+        transport_retries += 1
+
     try:
-        result = call_llm(
+        result = call_llm_with_transport_retries(
             profile,
             ChatRequest(
                 profile_id=profile.id,
@@ -204,15 +259,22 @@ def _test_structured_output(
                     },
                 ),
             ),
+            retry_limit=_PROFILE_TRANSPORT_RETRY_LIMIT,
+            llm_call=call_llm,
+            on_retry=record_transport_retry,
+            base_delay_seconds=_PROFILE_RETRY_DELAY_SECONDS,
         )
         if result.structured_output != {"supported": True}:
             raise RuntimeError("provider returned an invalid Structured Output result.")
-        return LlmCapabilityCheck(ok=True, message="supported"), result
+        return LlmCapabilityCheck(ok=True, message="supported"), result, transport_retries
     except (RuntimeError, ValueError) as exc:
         return LlmCapabilityCheck(
             ok=False,
-            message=redact_profile_secrets(str(exc), profile)[:1_000],
-        ), None
+            message=redact_profile_secrets(
+                f"{exc} (transport retries: {transport_retries})",
+                profile,
+            )[:1_000],
+        ), None, transport_retries
 
 
 @contextmanager

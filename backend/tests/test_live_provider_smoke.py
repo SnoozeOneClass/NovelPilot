@@ -385,7 +385,7 @@ def _fixture_call_llm(_profile: object, request: ChatRequest) -> ChatResult:
 
 def _fixture_call_llm_with_bad_patch(_profile: object, request: ChatRequest) -> ChatResult:
     result = _fixture_agent_call_llm(_profile, request)
-    if result.tool_calls and result.tool_calls[0].name == "submit_chapter_candidate":
+    if result.tool_calls and result.tool_calls[0].name == "write_chapter_state_patch":
         call = result.tool_calls[0]
         arguments = dict(call.arguments)
         state_patch = dict(arguments["state_patch"])

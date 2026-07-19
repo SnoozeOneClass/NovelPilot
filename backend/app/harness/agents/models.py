@@ -234,6 +234,75 @@ CandidateSnapshot = Annotated[
 ]
 
 
+class RepairWorkspaceItem(BaseModel):
+    """Harness-owned handle for one structured candidate item.
+
+    The handle is durable across process restarts and semantic revisions. Models may
+    reference it for update/delete operations, but never create or rewrite it.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    item_id: str = Field(min_length=1, max_length=128)
+    component: CandidateComponentName
+    collection: str = Field(min_length=1, max_length=128)
+    index: int = Field(ge=0)
+
+
+class RepairWorkspaceMutation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sequence: int = Field(ge=1)
+    operation: Literal["replace", "add", "update", "delete"]
+    component: CandidateComponentName
+    item_id: str | None = Field(default=None, max_length=128)
+    before_fingerprint: str = Field(min_length=64, max_length=64)
+    after_fingerprint: str = Field(min_length=64, max_length=64)
+    tool_call_id: str = Field(min_length=1, max_length=200)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class RepairWorkspace(BaseModel):
+    """Durable Harness-owned working copy for one pending semantic repair."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[3] = 3
+    workspace_id: str = Field(min_length=1, max_length=128)
+    identity: AgentIdentity
+    candidate_run_id: str = Field(min_length=1, max_length=200)
+    candidate_kind: CandidateKind
+    evaluation_id: str = Field(min_length=1, max_length=200)
+    source_candidate_artifact_id: str = Field(min_length=1, max_length=1_000)
+    source_candidate_revision: int = Field(ge=1)
+    next_candidate_revision: int = Field(ge=2)
+    source_component_fingerprints: dict[CandidateComponentName, str]
+    current_components: dict[CandidateComponentName, Any]
+    source_payload: dict[str, Any]
+    item_handles: list[RepairWorkspaceItem] = Field(default_factory=list, max_length=2_000)
+    mutations: list[RepairWorkspaceMutation] = Field(default_factory=list, max_length=2_000)
+    status: Literal["open", "finalized"] = "open"
+    final_candidate_artifact_id: str | None = Field(default=None, max_length=1_000)
+
+    @model_validator(mode="after")
+    def validate_workspace(self) -> "RepairWorkspace":
+        if self.next_candidate_revision != self.source_candidate_revision + 1:
+            raise ValueError("Repair workspace must advance one logical revision.")
+        if set(self.source_component_fingerprints) != set(self.current_components):
+            raise ValueError("Repair workspace components do not match the source candidate.")
+        if any(len(value) != 64 for value in self.source_component_fingerprints.values()):
+            raise ValueError("Repair workspace fingerprints must be SHA-256.")
+        item_ids = [item.item_id for item in self.item_handles]
+        if len(item_ids) != len(set(item_ids)):
+            raise ValueError("Repair workspace item IDs must be unique.")
+        sequences = [item.sequence for item in self.mutations]
+        if sequences != list(range(1, len(sequences) + 1)):
+            raise ValueError("Repair workspace mutation sequence must be contiguous.")
+        if self.status == "finalized" and self.final_candidate_artifact_id is None:
+            raise ValueError("Finalized repair workspace requires a candidate artifact.")
+        return self
+
+
 class EvaluationRubricDimension(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -397,6 +466,7 @@ class RepairContract(BaseModel):
     repair_brief: str = Field(min_length=1, max_length=8_000)
     allowed_components: list[CandidateComponentName] = Field(min_length=1, max_length=20)
     source_component_fingerprints: dict[CandidateComponentName, str]
+    repair_workspace_id: str | None = Field(default=None, min_length=1, max_length=128)
 
     @model_validator(mode="after")
     def validate_revision_delta(self) -> "RepairContract":
@@ -513,7 +583,7 @@ class RepairChain(BaseModel):
 class EvaluationRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = 1
+    schema_version: Literal[1, 2] = 2
     evaluation_id: str = Field(default_factory=lambda: str(uuid4()))
     candidate_run_id: str | None = Field(default=None, min_length=1, max_length=200)
     input_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
@@ -525,4 +595,28 @@ class EvaluationRecord(BaseModel):
     rubric_version: str
     evaluation_mode: EvaluationMode = "initial"
     result: EvaluationResult
+    telemetry: "EvaluationTelemetry | None" = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class EvaluationCallTelemetry(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    attempt: int = Field(ge=1)
+    call_type: Literal["initial", "validation_repair"]
+    usage: dict[str, Any] = Field(default_factory=dict)
+    usage_available: bool = True
+    model_snapshot: str = Field(min_length=1)
+    provider_snapshot: str = Field(min_length=1)
+
+
+class EvaluationTelemetry(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = 1
+    calls: int = Field(ge=1)
+    validation_repairs: int = Field(ge=0)
+    transport_retries: int = Field(ge=0)
+    usage: dict[str, Any] = Field(default_factory=dict)
+    usage_available: bool = True
+    attempts: list[EvaluationCallTelemetry] = Field(min_length=1, max_length=20)

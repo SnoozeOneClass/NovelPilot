@@ -9,9 +9,11 @@ from app.core.paths import ensure_relative_artifact_path
 from app.harness.agents.models import (
     CandidateComponentName,
     EvaluationInput,
+    EvaluationCallTelemetry,
     EvaluationIssue,
     EvaluationRecord,
     EvaluationResult,
+    EvaluationTelemetry,
     ModelEvaluationResult,
     NewEvaluationIssue,
 )
@@ -25,6 +27,7 @@ from app.llm.gateway import (
 )
 from app.llm.redaction import redact_profile_secrets
 from app.llm.retry import TransportRetryCallback, call_llm_with_transport_retries
+from app.llm.usage import merge_usage
 from app.schemas.profiles import LlmProfile
 from app.storage.json_files import read_json
 from app.storage.profiles import profile_fingerprint
@@ -35,7 +38,7 @@ EvaluatorCall = Callable[[LlmProfile, ChatRequest], ChatResult]
 
 
 class EvaluationValidationError(RuntimeError):
-    pass
+    telemetry: EvaluationTelemetry | None = None
 
 
 def evaluate_candidate(
@@ -50,12 +53,16 @@ def evaluate_candidate(
     if max_validation_repairs < 0:
         raise ValueError("Evaluator validation repair limit must not be negative.")
     call = evaluator_call or call_llm
+    evaluation_payload = evaluation_input.model_dump(mode="json")
+    evaluation_payload["candidate_schema_invariants"] = (
+        _candidate_schema_invariants(evaluation_input)
+    )
     messages = [
         ChatMessage(role="system", content=_evaluator_system_prompt()),
         ChatMessage(
             role="user",
             content=json.dumps(
-                evaluation_input.model_dump(mode="json"),
+                evaluation_payload,
                 ensure_ascii=False,
             ),
         ),
@@ -67,6 +74,16 @@ def evaluate_candidate(
     )
     evaluation: EvaluationResult | None = None
     result: ChatResult | None = None
+    attempts: list[EvaluationCallTelemetry] = []
+    aggregate_usage: dict[str, object] = {}
+    transport_retries = 0
+
+    def record_transport_retry(retry: int, limit: int, exc: Exception) -> None:
+        nonlocal transport_retries
+        transport_retries += 1
+        if on_transport_retry is not None:
+            on_transport_retry(retry, limit, exc)
+
     for attempt in range(max_validation_repairs + 1):
         request = ChatRequest(
             profile_id=profile.id,
@@ -79,13 +96,32 @@ def evaluate_candidate(
             request,
             retry_limit=transport_retry_limit,
             llm_call=call,
-            on_retry=on_transport_retry,
+            on_retry=record_transport_retry,
+        )
+        aggregate_usage = merge_usage(aggregate_usage, result.usage)
+        attempts.append(
+            EvaluationCallTelemetry(
+                attempt=attempt + 1,
+                call_type="initial" if attempt == 0 else "validation_repair",
+                usage=result.usage,
+                usage_available=bool(result.usage),
+                model_snapshot=result.model_snapshot,
+                provider_snapshot=result.provider_snapshot,
+            )
         )
         try:
             evaluation = _validated_evaluation(profile, evaluation_input, result)
             break
         except EvaluationValidationError as exc:
             if attempt >= max_validation_repairs:
+                exc.telemetry = EvaluationTelemetry(
+                    calls=len(attempts),
+                    validation_repairs=max(len(attempts) - 1, 0),
+                    transport_retries=transport_retries,
+                    usage=aggregate_usage,
+                    usage_available=all(item.usage_available for item in attempts),
+                    attempts=attempts,
+                )
                 raise
             messages = [
                 *messages,
@@ -111,6 +147,14 @@ def evaluate_candidate(
         rubric_version=evaluation_input.rubric_version,
         evaluation_mode=evaluation_input.mode,
         result=evaluation,
+        telemetry=EvaluationTelemetry(
+            calls=len(attempts),
+            validation_repairs=max(len(attempts) - 1, 0),
+            transport_retries=transport_retries,
+            usage=aggregate_usage,
+            usage_available=all(item.usage_available for item in attempts),
+            attempts=attempts,
+        ),
     )
 
 
@@ -179,9 +223,13 @@ def _evaluator_validation_repair_prompt(
                 "explain your repair."
             ),
             "validation_error": str(error),
+            "candidate_schema_invariants": _candidate_schema_invariants(
+                evaluation_input
+            ),
             "allowed_candidate_components": component_names,
             "allowed_candidate_locators": [
                 *(f"candidate.{component}" for component in component_names),
+                *(f"candidate.{component}#<stable-item-id>" for component in component_names),
                 *(
                     f"candidate_artifact_id#{component}"
                     for component in component_names
@@ -549,12 +597,17 @@ def _issue_component(
         *(item.candidate_artifact_id for item in evaluation_input.review_history),
     }
     for component in evaluation_input.component_fingerprints:
-        if locator == f"candidate.{component}" or locator.startswith(
-            f"candidate.{component}."
+        if (
+            locator == f"candidate.{component}"
+            or locator.startswith(f"candidate.{component}.")
+            or locator.startswith(f"candidate.{component}#")
         ):
             return component
-        if locator == f"candidate_artifact_id#{component}" or any(
+        if locator == f"candidate_artifact_id#{component}" or locator.startswith(
+            f"candidate_artifact_id#{component}#"
+        ) or any(
             locator == f"{artifact_id}#{component}"
+            or locator.startswith(f"{artifact_id}#{component}#")
             for artifact_id in candidate_artifact_ids
         ):
             return component
@@ -585,16 +638,66 @@ def _evaluator_system_prompt() -> str:
         "stable IDs. A new issue is allowed even when it concerns an unchanged "
         "component, because the full history is present. Candidate component names are exactly "
         "the keys of component_fingerprints in the supplied input. Candidate locators must "
-        "identify one typed component as candidate.<component>; multiple blocking issues may "
+        "identify one typed component as candidate.<component> or optionally "
+        "candidate.<component>#<stable-item-id>; multiple blocking issues may "
         "identify the same component. Evidence locators must use candidate.<component>, "
         "deterministic_prechecks.<field>, or an approved evidence locator with an optional #field "
         "fragment. For local_repair, repair_scope must list every candidate component needed to "
         "fix current blocking issues and no unrelated component. Do not edit or propose mutation "
-        "of committed prose or canon. A committed_evidence_locator for cross-Loop escalation must "
+        "of committed prose or canon. Treat candidate_schema_invariants as authoritative: never "
+        "request a repair whose stated result would violate a minimum, maximum, required field, "
+        "or revision relationship. If a semantic preference conflicts with a structural invariant, "
+        "evaluate a structurally valid representation instead of asking the Agent to break the "
+        "candidate schema. A committed_evidence_locator for cross-Loop escalation must "
         "use approved committed evidence, never a virtual locator. Return exactly one schema-v2 "
         "result. Use cross_loop_escalation only when an exact upper-contract field and revision "
         "is impossible to satisfy alongside cited committed evidence; otherwise use local_repair."
     )
+
+
+def _candidate_schema_invariants(
+    evaluation_input: EvaluationInput,
+) -> dict[str, object]:
+    kind = evaluation_input.candidate.kind
+    common: dict[str, object] = {
+        "complete_candidate_required": True,
+        "all_components_must_remain_locally_schema_valid": True,
+    }
+    if kind == "book_direction":
+        common.update(
+            {
+                "recommended_titles": {
+                    "min_items": 3,
+                    "max_items": 5,
+                    "unique_title_text": True,
+                    "interpretation": (
+                        "The collection remains structurally required after one formal title is "
+                        "selected. Additional entries are comparison/reference suggestions and do "
+                        "not by themselves reopen the locked title decision."
+                    ),
+                },
+                "direction": {"non_blank": True},
+                "rolling_plan": {"non_blank": True},
+            }
+        )
+    elif kind == "story_arc":
+        common.update(
+            {
+                "plan": {"non_blank": True},
+                "change_summary": {"non_blank": True},
+                "target_chapter_count": {"minimum": 1, "maximum": 30},
+            }
+        )
+    else:
+        common.update(
+            {
+                "plan": {"non_blank": True},
+                "draft": {"non_blank": True},
+                "observations": {"required": True},
+                "state_patch": {"required": True},
+            }
+        )
+    return common
 
 
 def _json_document(value: object) -> str:

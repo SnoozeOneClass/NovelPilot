@@ -7,12 +7,30 @@ from typing import Any, Literal, TypeVar, cast
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.harness.agents.persistence import activation_relative, json_document
+from app.harness.agents.repair_workspace import (
+    add_book_item,
+    add_chapter_observation,
+    add_state_patch_operation,
+    book_item_update_value,
+    delete_structured_item,
+    edit_text_component,
+    ensure_repair_workspace,
+    finalize_repair_workspace,
+    repair_workspace_relative,
+    replace_text_component,
+    set_story_arc_chapter_count,
+    update_structured_item,
+    workspace_document,
+    workspace_public_view,
+)
 from app.harness.agents.models import (
+    AgentRole,
     BookCandidateSnapshot,
     CandidateSnapshot,
     ChapterCandidateSnapshot,
     StoryArcCandidateSnapshot,
 )
+from app.harness.agents.evidence_matching import resolve_verbatim_evidence_quote
 from app.harness.agents.rubrics import changed_components, component_fingerprints
 from app.harness.agents.registry import (
     ToolExecutionContext,
@@ -36,6 +54,7 @@ from app.schemas.setup import (
     SetupSuggestion,
     SupersededDecision,
 )
+from app.storage.patches import read_canon_versions
 
 
 _META_PRIORITY_QUESTION_FRAGMENTS = (
@@ -252,7 +271,6 @@ class ChapterPatchOperationInput(BaseModel):
         "canon/foreshadowing.json",
     ]
     target_id: str = Field(min_length=1, max_length=256)
-    expected_version: int = Field(ge=1)
     value_fields: list[ChapterPatchValueFieldInput] = Field(max_length=100)
     evidence_quotes: list[str] = Field(min_length=1, max_length=20)
     rationale: str = Field(min_length=1, max_length=8_000)
@@ -275,8 +293,30 @@ class ChapterCandidateStatePatchInput(BaseModel):
     operations: list[ChapterPatchOperationInput] = Field(max_length=100)
 
 
+class WriteChapterObservationsInput(BaseModel):
+    """Persist semantic observations separately from the terminal submission."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    chapter_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    expected_revision: int = Field(ge=0)
+    draft_revision: int = Field(ge=1)
+    observations: ChapterCandidateObservationsInput
+
+
+class WriteChapterStatePatchInput(BaseModel):
+    """Persist the candidate canon delta separately from the terminal submission."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    chapter_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    expected_revision: int = Field(ge=0)
+    draft_revision: int = Field(ge=1)
+    state_patch: ChapterCandidateStatePatchInput
+
+
 class SubmitChapterCandidateToolInput(BaseModel):
-    """Closed provider schema converted to the durable chapter candidate models."""
+    """Short terminal reference to components already stored in the workspace."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -286,8 +326,6 @@ class SubmitChapterCandidateToolInput(BaseModel):
     plan_revision: int = Field(ge=1)
     draft_revision: int = Field(ge=1)
     summary: str = Field(min_length=1, max_length=8_000)
-    observations: ChapterCandidateObservationsInput
-    state_patch: ChapterCandidateStatePatchInput
 
 
 class ChapterPatchEvidenceRepairItemInput(BaseModel):
@@ -314,6 +352,100 @@ class SubmitChapterPatchEvidenceRepairInput(BaseModel):
         min_length=1,
         max_length=100,
     )
+
+
+class OpenCandidateRepairInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class ReplaceCandidateTextInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    component: Literal["direction", "rolling_plan", "plan", "change_summary", "draft"]
+    content: str = Field(min_length=1, max_length=500_000)
+
+
+class EditCandidateTextInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    component: Literal["plan", "draft"]
+    anchor: str = Field(min_length=1, max_length=20_000)
+    replacement: str = Field(max_length=100_000)
+
+
+class SetStoryArcChapterCountInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_chapter_count: int = Field(ge=1, le=30, strict=True)
+
+
+class AddBookRepairItemInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    collection: Literal[
+        "constraints.must_avoid",
+        "constraints.creative_freedoms",
+        "constraints.open_decisions",
+        "confirmed_decision_coverage",
+        "recommended_titles",
+    ]
+    primary: str = Field(min_length=1, max_length=4_000)
+    secondary: str | None = Field(max_length=8_000)
+
+
+class UpdateBookRepairItemInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: str = Field(min_length=1, max_length=128)
+    primary: str = Field(min_length=1, max_length=4_000)
+    secondary: str | None = Field(max_length=8_000)
+
+
+class AddChapterObservationRepairInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    collection: Literal[
+        "events",
+        "character_changes",
+        "relationship_changes",
+        "world_fact_candidates",
+        "foreshadowing_candidates",
+    ]
+    summary: str = Field(min_length=1, max_length=4_000)
+    evidence_quote: str = Field(min_length=1, max_length=4_000)
+
+
+class UpdateChapterObservationRepairInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: str = Field(min_length=1, max_length=128)
+    summary: str = Field(min_length=1, max_length=4_000)
+    evidence_quote: str = Field(min_length=1, max_length=4_000)
+
+
+class AddStatePatchOperationRepairInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operation: ChapterPatchOperationInput
+
+
+class UpdateStatePatchOperationRepairInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: str = Field(min_length=1, max_length=128)
+    operation: ChapterPatchOperationInput
+
+
+class DeleteCandidateRepairItemInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: str = Field(min_length=1, max_length=128)
+
+
+class SubmitCandidateRepairInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(min_length=1, max_length=8_000)
 
 
 def build_default_tool_registry() -> ToolRegistry:
@@ -421,11 +553,41 @@ def register_domain_tools(registry: ToolRegistry) -> None:
     )
     registry.register(
         ToolSpec(
+            name="write_chapter_observations",
+            version=1,
+            description=(
+                "Write the semantic observations for the current quarantined draft. "
+                "Harness assigns durable item identifiers during final assembly."
+            ),
+            input_model=WriteChapterObservationsInput,
+            allowed_roles=frozenset({"chapter"}),
+            allowed_phases=frozenset({"chapter"}),
+            handler=_write_chapter_observations,
+            read_only=False,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="write_chapter_state_patch",
+            version=1,
+            description=(
+                "Write the semantic canon delta for the current quarantined draft. "
+                "This Tool never commits canon."
+            ),
+            input_model=WriteChapterStatePatchInput,
+            allowed_roles=frozenset({"chapter"}),
+            allowed_phases=frozenset({"chapter"}),
+            handler=_write_chapter_state_patch,
+            read_only=False,
+        )
+    )
+    registry.register(
+        ToolSpec(
             name="submit_chapter_candidate",
             version=1,
             description=(
-                "Bind the quarantined plan, draft, observations, and state patch into one "
-                "candidate. Harness evaluation and promotion remain separate."
+                "Ask Harness to assemble the stored plan, draft, observations, and state patch "
+                "into one candidate. Harness evaluation and promotion remain separate."
             ),
             input_model=SubmitChapterCandidateToolInput,
             allowed_roles=frozenset({"chapter"}),
@@ -451,6 +613,442 @@ def register_domain_tools(registry: ToolRegistry) -> None:
             terminal=True,
         )
     )
+    repair_phases = frozenset({"direction", "planning", "revision", "chapter"})
+    repair_roles: frozenset[AgentRole] = frozenset(
+        {"book", "story_arc", "chapter"}
+    )
+    registry.register(
+        ToolSpec(
+            name="open_candidate_repair",
+            version=1,
+            description=(
+                "Open the Harness-owned repair workspace and return stable IDs for "
+                "structured candidate items. Call this before structured updates."
+            ),
+            input_model=OpenCandidateRepairInput,
+            allowed_roles=repair_roles,
+            allowed_phases=repair_phases,
+            handler=_open_candidate_repair,
+            read_only=False,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="replace_candidate_text",
+            version=1,
+            description=(
+                "Replace one authorized semantic text artifact in the repair workspace. "
+                "Unchanged candidate artifacts remain Harness-owned."
+            ),
+            input_model=ReplaceCandidateTextInput,
+            allowed_roles=repair_roles,
+            allowed_phases=repair_phases,
+            handler=_replace_candidate_text,
+            read_only=False,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="edit_candidate_text",
+            version=1,
+            description=(
+                "Optionally replace one exact anchor in an authorized Chapter plan or "
+                "draft. Use replace_candidate_text if the anchor is unsuitable."
+            ),
+            input_model=EditCandidateTextInput,
+            allowed_roles=frozenset({"chapter"}),
+            allowed_phases=frozenset({"chapter"}),
+            handler=_edit_candidate_text,
+            read_only=False,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="set_story_arc_chapter_count",
+            version=1,
+            description="Set the authorized Story Arc target chapter count.",
+            input_model=SetStoryArcChapterCountInput,
+            allowed_roles=frozenset({"story_arc"}),
+            allowed_phases=frozenset({"planning", "revision"}),
+            handler=_set_story_arc_chapter_count,
+            read_only=False,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="add_book_repair_item",
+            version=1,
+            description=(
+                "Add one authorized Book constraint, coverage item, or title. The Harness "
+                "assigns its stable ID. secondary is null for constraints."
+            ),
+            input_model=AddBookRepairItemInput,
+            allowed_roles=frozenset({"book"}),
+            allowed_phases=frozenset({"direction"}),
+            handler=_add_book_repair_item,
+            read_only=False,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="update_book_repair_item",
+            version=1,
+            description=(
+                "Update one Book item by its Harness stable ID. Preserve confirmed user "
+                "decisions; secondary is null only for constraint items."
+            ),
+            input_model=UpdateBookRepairItemInput,
+            allowed_roles=frozenset({"book"}),
+            allowed_phases=frozenset({"direction"}),
+            handler=_update_book_repair_item,
+            read_only=False,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="add_chapter_observation_repair",
+            version=1,
+            description=(
+                "Add one Chapter observation; the Harness assigns its stable ID."
+            ),
+            input_model=AddChapterObservationRepairInput,
+            allowed_roles=frozenset({"chapter"}),
+            allowed_phases=frozenset({"chapter"}),
+            handler=_add_chapter_observation_repair,
+            read_only=False,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="update_chapter_observation_repair",
+            version=1,
+            description="Update one Chapter observation by its Harness stable ID.",
+            input_model=UpdateChapterObservationRepairInput,
+            allowed_roles=frozenset({"chapter"}),
+            allowed_phases=frozenset({"chapter"}),
+            handler=_update_chapter_observation_repair,
+            read_only=False,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="add_state_patch_operation_repair",
+            version=1,
+            description=(
+                "Add one Chapter canon operation; the Harness assigns its stable ID and "
+                "retains normal evidence/version/conflict validation."
+            ),
+            input_model=AddStatePatchOperationRepairInput,
+            allowed_roles=frozenset({"chapter"}),
+            allowed_phases=frozenset({"chapter"}),
+            handler=_add_state_patch_operation_repair,
+            read_only=False,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="update_state_patch_operation_repair",
+            version=1,
+            description="Update one Chapter canon operation by its Harness stable ID.",
+            input_model=UpdateStatePatchOperationRepairInput,
+            allowed_roles=frozenset({"chapter"}),
+            allowed_phases=frozenset({"chapter"}),
+            handler=_update_state_patch_operation_repair,
+            read_only=False,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="delete_candidate_repair_item",
+            version=1,
+            description="Delete one authorized structured candidate item by stable ID.",
+            input_model=DeleteCandidateRepairItemInput,
+            allowed_roles=repair_roles,
+            allowed_phases=repair_phases,
+            handler=_delete_candidate_repair_item,
+            read_only=False,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="submit_candidate_repair",
+            version=1,
+            description=(
+                "Finalize the Harness-owned repair workspace. Submit only a short summary; "
+                "the Harness preserves and assembles the complete candidate."
+            ),
+            input_model=SubmitCandidateRepairInput,
+            allowed_roles=repair_roles,
+            allowed_phases=repair_phases,
+            handler=_submit_candidate_repair,
+            read_only=False,
+            terminal=True,
+        )
+    )
+
+
+def _open_candidate_repair(
+    context: ToolExecutionContext, arguments: BaseModel
+) -> ToolExecutionPlan:
+    _typed(arguments, OpenCandidateRepairInput)
+    workspace = ensure_repair_workspace(context)
+    relative = repair_workspace_relative(context)
+    return ToolExecutionPlan(
+        content=workspace_public_view(workspace),
+        files={relative.as_posix(): workspace_document(workspace)},
+        artifact_paths=[relative.as_posix()],
+        allowed_actions=_repair_allowed_actions(context),
+    )
+
+
+def _replace_candidate_text(
+    context: ToolExecutionContext, arguments: BaseModel
+) -> ToolExecutionPlan:
+    request = _typed(arguments, ReplaceCandidateTextInput)
+    workspace = replace_text_component(
+        context,
+        ensure_repair_workspace(context),
+        component=request.component,
+        content=request.content,
+    )
+    return _repair_workspace_plan(context, workspace)
+
+
+def _edit_candidate_text(
+    context: ToolExecutionContext, arguments: BaseModel
+) -> ToolExecutionPlan:
+    request = _typed(arguments, EditCandidateTextInput)
+    workspace = edit_text_component(
+        context,
+        ensure_repair_workspace(context),
+        component=request.component,
+        anchor=request.anchor,
+        replacement=request.replacement,
+    )
+    return _repair_workspace_plan(context, workspace)
+
+
+def _set_story_arc_chapter_count(
+    context: ToolExecutionContext, arguments: BaseModel
+) -> ToolExecutionPlan:
+    request = _typed(arguments, SetStoryArcChapterCountInput)
+    workspace = set_story_arc_chapter_count(
+        context,
+        ensure_repair_workspace(context),
+        request.target_chapter_count,
+    )
+    return _repair_workspace_plan(context, workspace)
+
+
+def _add_book_repair_item(
+    context: ToolExecutionContext, arguments: BaseModel
+) -> ToolExecutionPlan:
+    request = _typed(arguments, AddBookRepairItemInput)
+    workspace, item_id = add_book_item(
+        context,
+        ensure_repair_workspace(context),
+        collection=request.collection,
+        primary=request.primary,
+        secondary=request.secondary,
+    )
+    return _repair_workspace_plan(context, workspace, item_id=item_id)
+
+
+def _update_book_repair_item(
+    context: ToolExecutionContext, arguments: BaseModel
+) -> ToolExecutionPlan:
+    request = _typed(arguments, UpdateBookRepairItemInput)
+    workspace = ensure_repair_workspace(context)
+    value = book_item_update_value(
+        workspace,
+        item_id=request.item_id,
+        primary=request.primary,
+        secondary=request.secondary,
+    )
+    workspace = update_structured_item(
+        context,
+        workspace,
+        item_id=request.item_id,
+        value=value,
+    )
+    return _repair_workspace_plan(context, workspace, item_id=request.item_id)
+
+
+def _add_chapter_observation_repair(
+    context: ToolExecutionContext, arguments: BaseModel
+) -> ToolExecutionPlan:
+    request = _typed(arguments, AddChapterObservationRepairInput)
+    workspace, item_id = add_chapter_observation(
+        context,
+        ensure_repair_workspace(context),
+        collection=request.collection,
+        summary=request.summary,
+        evidence_quote=request.evidence_quote,
+    )
+    return _repair_workspace_plan(context, workspace, item_id=item_id)
+
+
+def _update_chapter_observation_repair(
+    context: ToolExecutionContext, arguments: BaseModel
+) -> ToolExecutionPlan:
+    request = _typed(arguments, UpdateChapterObservationRepairInput)
+    workspace = update_structured_item(
+        context,
+        ensure_repair_workspace(context),
+        item_id=request.item_id,
+        value={
+            "summary": request.summary.strip(),
+            "evidence_quote": request.evidence_quote,
+        },
+    )
+    return _repair_workspace_plan(context, workspace, item_id=request.item_id)
+
+
+def _add_state_patch_operation_repair(
+    context: ToolExecutionContext, arguments: BaseModel
+) -> ToolExecutionPlan:
+    request = _typed(arguments, AddStatePatchOperationRepairInput)
+    chapter_id = context.identity.scope_id
+    if chapter_id is None:
+        raise ToolHandlerError(
+            "chapter_ownership_mismatch",
+            "Chapter repair activation is missing its owned chapter.",
+            recoverable=False,
+        )
+    operation = _semantic_patch_operation(
+        request.operation,
+        final_path=f"chapters/{chapter_id}/final.md",
+    )
+    workspace, item_id = add_state_patch_operation(
+        context,
+        ensure_repair_workspace(context),
+        operation=operation,
+    )
+    return _repair_workspace_plan(context, workspace, item_id=item_id)
+
+
+def _update_state_patch_operation_repair(
+    context: ToolExecutionContext, arguments: BaseModel
+) -> ToolExecutionPlan:
+    request = _typed(arguments, UpdateStatePatchOperationRepairInput)
+    chapter_id = context.identity.scope_id
+    if chapter_id is None:
+        raise ToolHandlerError(
+            "chapter_ownership_mismatch",
+            "Chapter repair activation is missing its owned chapter.",
+            recoverable=False,
+        )
+    operation = _semantic_patch_operation(
+        request.operation,
+        final_path=f"chapters/{chapter_id}/final.md",
+    )
+    workspace = update_structured_item(
+        context,
+        ensure_repair_workspace(context),
+        item_id=request.item_id,
+        value=operation,
+    )
+    return _repair_workspace_plan(context, workspace, item_id=request.item_id)
+
+
+def _delete_candidate_repair_item(
+    context: ToolExecutionContext, arguments: BaseModel
+) -> ToolExecutionPlan:
+    request = _typed(arguments, DeleteCandidateRepairItemInput)
+    workspace = delete_structured_item(
+        context,
+        ensure_repair_workspace(context),
+        item_id=request.item_id,
+    )
+    return _repair_workspace_plan(context, workspace, item_id=request.item_id)
+
+
+def _submit_candidate_repair(
+    context: ToolExecutionContext, arguments: BaseModel
+) -> ToolExecutionPlan:
+    request = _typed(arguments, SubmitCandidateRepairInput)
+    workspace = ensure_repair_workspace(context)
+    _, files, candidate_path, artifact_paths = finalize_repair_workspace(
+        context,
+        workspace,
+        summary=request.summary,
+    )
+    contract = context.repair_contract
+    if contract is None:
+        raise ToolHandlerError(
+            "repair_contract_missing",
+            "Candidate repair finalization requires a pending contract.",
+            recoverable=False,
+        )
+    return ToolExecutionPlan(
+        content={
+            "summary": "Candidate repair finalized for independent evaluation.",
+            "candidate_path": candidate_path,
+            "candidate_revision": contract.next_candidate_revision,
+            "promotable": False,
+        },
+        files=files,
+        checkpoint_id=(
+            f"{context.identity.role}:{context.identity.scope_id or 'book'}:"
+            f"repair:{contract.next_candidate_revision}"
+        ),
+        artifact_paths=artifact_paths,
+        allowed_actions=["evaluate_candidate"],
+    )
+
+
+def _repair_workspace_plan(
+    context: ToolExecutionContext,
+    workspace: Any,
+    *,
+    item_id: str | None = None,
+) -> ToolExecutionPlan:
+    relative = repair_workspace_relative(context)
+    content: dict[str, Any] = {
+        "workspace_id": workspace.workspace_id,
+        "mutation_count": len(workspace.mutations),
+    }
+    if item_id is not None:
+        content["item_id"] = item_id
+    return ToolExecutionPlan(
+        content=content,
+        files={relative.as_posix(): workspace_document(workspace)},
+        artifact_paths=[relative.as_posix()],
+        allowed_actions=_repair_allowed_actions(context),
+    )
+
+
+def _repair_allowed_actions(context: ToolExecutionContext) -> list[str]:
+    actions = ["submit_candidate_repair"]
+    contract = context.repair_contract
+    if contract is None:
+        return actions
+    for component in contract.allowed_components:
+        if component in {"direction", "rolling_plan", "plan", "change_summary", "draft"}:
+            actions.append("replace_candidate_text")
+        elif component in {"constraints", "confirmed_decision_coverage", "recommended_titles"}:
+            actions.extend(["add_book_repair_item", "update_book_repair_item"])
+        elif component == "observations":
+            actions.extend(
+                ["add_chapter_observation_repair", "update_chapter_observation_repair"]
+            )
+        elif component == "state_patch":
+            actions.extend(
+                ["add_state_patch_operation_repair", "update_state_patch_operation_repair"]
+            )
+    if any(
+        component
+        in {
+            "constraints",
+            "confirmed_decision_coverage",
+            "recommended_titles",
+            "observations",
+            "state_patch",
+        }
+        for component in contract.allowed_components
+    ):
+        actions.append("delete_candidate_repair_item")
+    return list(dict.fromkeys(actions))
 
 
 def _submit_book_discussion_update(
@@ -570,6 +1168,7 @@ def _plan_chapter_candidate(
             "chapter_id": request.chapter_id,
             "expected_revision": request.expected_revision,
             "plan_revision": request.plan_revision,
+            "canon_versions": read_canon_versions(context.project_path),
         }
     )
     return ToolExecutionPlan(
@@ -679,7 +1278,11 @@ def _edit_chapter_draft(
             state_path.as_posix(): json_document(state),
         },
         artifact_paths=[draft_path.as_posix(), state_path.as_posix()],
-        allowed_actions=["inspect_chapter_consistency", "submit_chapter_candidate"],
+        allowed_actions=[
+            "inspect_chapter_consistency",
+            "write_chapter_observations",
+            "write_chapter_state_patch",
+        ],
     )
 
 
@@ -717,7 +1320,77 @@ def _inspect_chapter_consistency(
         content=evidence,
         files={relative.as_posix(): json_document(evidence)},
         artifact_paths=[relative.as_posix()],
-        allowed_actions=["edit_chapter_draft", "submit_chapter_candidate"],
+        allowed_actions=[
+            "edit_chapter_draft",
+            "write_chapter_observations",
+            "write_chapter_state_patch",
+        ],
+    )
+
+
+def _write_chapter_observations(
+    context: ToolExecutionContext, arguments: BaseModel
+) -> ToolExecutionPlan:
+    request = _typed(arguments, WriteChapterObservationsInput)
+    _expect_chapter(context, request.chapter_id, request.expected_revision)
+    root = _candidate_root(context)
+    state_path = root / "workspace.json"
+    component_path = root / "observations-input.json"
+    state = _workspace_state(context)
+    _expect_current_draft_revision(state, request.draft_revision)
+    payload = request.observations.model_dump(mode="json")
+    state["observations_draft_revision"] = request.draft_revision
+    state["observations_sha256"] = _json_payload_sha256(payload)
+    observation_count = sum(
+        len(payload[name])
+        for name in (
+            "events",
+            "character_changes",
+            "relationship_changes",
+            "world_fact_candidates",
+            "foreshadowing_candidates",
+        )
+    )
+    return ToolExecutionPlan(
+        content={
+            "draft_revision": request.draft_revision,
+            "observation_count": observation_count,
+            "path": component_path.as_posix(),
+        },
+        files={
+            component_path.as_posix(): json_document(payload),
+            state_path.as_posix(): json_document(state),
+        },
+        artifact_paths=[component_path.as_posix(), state_path.as_posix()],
+        allowed_actions=["write_chapter_state_patch", "submit_chapter_candidate"],
+    )
+
+
+def _write_chapter_state_patch(
+    context: ToolExecutionContext, arguments: BaseModel
+) -> ToolExecutionPlan:
+    request = _typed(arguments, WriteChapterStatePatchInput)
+    _expect_chapter(context, request.chapter_id, request.expected_revision)
+    root = _candidate_root(context)
+    state_path = root / "workspace.json"
+    component_path = root / "state-patch-input.json"
+    state = _workspace_state(context)
+    _expect_current_draft_revision(state, request.draft_revision)
+    payload = request.state_patch.model_dump(mode="json")
+    state["state_patch_draft_revision"] = request.draft_revision
+    state["state_patch_sha256"] = _json_payload_sha256(payload)
+    return ToolExecutionPlan(
+        content={
+            "draft_revision": request.draft_revision,
+            "operation_count": len(request.state_patch.operations),
+            "path": component_path.as_posix(),
+        },
+        files={
+            component_path.as_posix(): json_document(payload),
+            state_path.as_posix(): json_document(state),
+        },
+        artifact_paths=[component_path.as_posix(), state_path.as_posix()],
+        allowed_actions=["write_chapter_observations", "submit_chapter_candidate"],
     )
 
 
@@ -725,14 +1398,13 @@ def _submit_chapter_candidate(
     context: ToolExecutionContext, arguments: BaseModel
 ) -> ToolExecutionPlan:
     tool_request = _typed(arguments, SubmitChapterCandidateToolInput)
-    request = _normalize_chapter_submission(context, tool_request)
-    _expect_chapter(context, request.chapter_id, request.expected_revision)
+    _expect_chapter(context, tool_request.chapter_id, tool_request.expected_revision)
     expected_candidate_revision = (
         context.repair_contract.next_candidate_revision
         if context.repair_contract is not None
         else 1
     )
-    if request.candidate_revision != expected_candidate_revision:
+    if tool_request.candidate_revision != expected_candidate_revision:
         raise ToolHandlerError(
             "stale_candidate_revision",
             (
@@ -744,20 +1416,33 @@ def _submit_chapter_candidate(
         )
     root = _candidate_root(context)
     state = _workspace_state(context)
-    if int(state.get("plan_revision", 0)) != request.plan_revision:
+    if int(state.get("plan_revision", 0)) != tool_request.plan_revision:
         raise ToolHandlerError(
             "stale_plan_revision",
             "Chapter submission references a stale plan revision.",
             recoverable=True,
             allowed_actions=["reload_chapter_workspace"],
         )
-    if int(state.get("draft_revision", 0)) != request.draft_revision:
+    if int(state.get("draft_revision", 0)) != tool_request.draft_revision:
         raise ToolHandlerError(
             "stale_draft_revision",
             "Chapter submission references a stale draft revision.",
             recoverable=True,
             allowed_actions=["reload_chapter_workspace"],
         )
+    _expect_component_revision(
+        state,
+        component="observations",
+        draft_revision=tool_request.draft_revision,
+        write_action="write_chapter_observations",
+    )
+    _expect_component_revision(
+        state,
+        component="state_patch",
+        draft_revision=tool_request.draft_revision,
+        write_action="write_chapter_state_patch",
+    )
+    request = _normalize_chapter_submission(context, tool_request)
     plan_path = root / "plan.md"
     draft_path = root / "draft.md"
     plan = _read_required_text(
@@ -768,20 +1453,30 @@ def _submit_chapter_candidate(
         context.project_path / draft_path,
         code="candidate_draft_missing",
     )
-    rejected_evidence = [
-        {
-            "operation_index": operation_index,
-            "evidence_indexes": [
-                evidence_index
-                for evidence_index, evidence in enumerate(operation.evidence)
-                if evidence.quote not in draft
-            ],
-        }
-        for operation_index, operation in enumerate(request.state_patch.operations)
-    ]
-    rejected_evidence = [
-        item for item in rejected_evidence if item["evidence_indexes"]
-    ]
+    normalized_operations = []
+    rejected_evidence = []
+    for operation_index, operation in enumerate(request.state_patch.operations):
+        normalized_evidence = []
+        rejected_indexes = []
+        for evidence_index, evidence in enumerate(operation.evidence):
+            resolved_quote = resolve_verbatim_evidence_quote(draft, evidence.quote)
+            if resolved_quote is None:
+                rejected_indexes.append(evidence_index)
+                normalized_evidence.append(evidence)
+            else:
+                normalized_evidence.append(
+                    evidence.model_copy(update={"quote": resolved_quote})
+                )
+        normalized_operations.append(
+            operation.model_copy(update={"evidence": normalized_evidence})
+        )
+        if rejected_indexes:
+            rejected_evidence.append(
+                {
+                    "operation_index": operation_index,
+                    "evidence_indexes": rejected_indexes,
+                }
+            )
     if rejected_evidence:
         raise ToolHandlerError(
             "candidate_patch_evidence_not_verbatim",
@@ -793,10 +1488,16 @@ def _submit_chapter_candidate(
             content={"rejected_evidence": rejected_evidence},
             artifact_paths=[plan_path.as_posix(), draft_path.as_posix()],
             allowed_actions=[
-                "inspect_chapter_consistency",
-                "retry:submit_chapter_candidate",
+                "write_chapter_state_patch",
             ],
         )
+    request = request.model_copy(
+        update={
+            "state_patch": request.state_patch.model_copy(
+                update={"operations": normalized_operations}
+            )
+        }
+    )
     _enforce_repair_scope(
         context,
         ChapterCandidateSnapshot(
@@ -820,6 +1521,7 @@ def _submit_chapter_candidate(
         "summary": request.summary,
         "observations": request.observations.model_dump(mode="json"),
         "state_patch": request.state_patch.model_dump(mode="json"),
+        "canon_versions": _required_canon_version_snapshot(state=state),
         "plan_path": plan_path.as_posix(),
         "draft_path": draft_path.as_posix(),
         "draft_sha256": sha256(draft.encode("utf-8")).hexdigest(),
@@ -889,30 +1591,61 @@ def _normalize_chapter_submission(
     request: SubmitChapterCandidateToolInput,
 ) -> SubmitChapterCandidateInput:
     root = _candidate_root(context)
+    observations_input = ChapterCandidateObservationsInput.model_validate(
+        _read_required_json_object(
+            context.project_path / root / "observations-input.json",
+            code="candidate_observations_missing",
+        )
+    )
+    state_patch_input = ChapterCandidateStatePatchInput.model_validate(
+        _read_required_json_object(
+            context.project_path / root / "state-patch-input.json",
+            code="candidate_state_patch_missing",
+        )
+    )
+    canon_versions = _required_canon_version_snapshot(state=_workspace_state(context))
 
     def observations(
+        collection: str,
         values: list[ChapterObservationInput],
     ) -> list[dict[str, str]]:
-        return [item.model_dump(mode="json") for item in values]
+        return [
+            {
+                "id": _candidate_item_id(context, "observations", collection, index),
+                **item.model_dump(mode="json"),
+            }
+            for index, item in enumerate(values)
+        ]
 
     normalized_observations = CandidateObservations(
         based_on=(root / "draft.md").as_posix(),
-        events=observations(request.observations.events),
-        character_changes=observations(request.observations.character_changes),
-        relationship_changes=observations(request.observations.relationship_changes),
+        events=observations("events", observations_input.events),
+        character_changes=observations(
+            "character_changes", observations_input.character_changes
+        ),
+        relationship_changes=observations(
+            "relationship_changes", observations_input.relationship_changes
+        ),
         world_fact_candidates=observations(
-            request.observations.world_fact_candidates
+            "world_fact_candidates",
+            observations_input.world_fact_candidates
         ),
         foreshadowing_candidates=observations(
-            request.observations.foreshadowing_candidates
+            "foreshadowing_candidates",
+            observations_input.foreshadowing_candidates
         ),
-        requires_commit=request.observations.requires_commit,
+        requires_commit=observations_input.requires_commit,
     )
     final_path = f"chapters/{request.chapter_id}/final.md"
     observations_path = f"chapters/{request.chapter_id}/observations.json"
     operations = [
-        _normalize_patch_operation(item, final_path=final_path)
-        for item in request.state_patch.operations
+        _normalize_patch_operation(
+            item,
+            final_path=final_path,
+            expected_version=canon_versions[item.target_file],
+            item_id=_candidate_item_id(context, "state_patch", "operations", index),
+        )
+        for index, item in enumerate(state_patch_input.operations)
     ]
     normalized_patch = CandidateStatePatch(
         based_on={
@@ -937,7 +1670,22 @@ def _normalize_patch_operation(
     operation: ChapterPatchOperationInput,
     *,
     final_path: str,
+    expected_version: int,
+    item_id: str | None = None,
 ) -> CandidatePatchOperation:
+    semantic = _semantic_patch_operation(operation, final_path=final_path)
+    return CandidatePatchOperation(
+        id=item_id,
+        expected_version=expected_version,
+        **semantic,
+    )
+
+
+def _semantic_patch_operation(
+    operation: ChapterPatchOperationInput,
+    *,
+    final_path: str,
+) -> dict[str, Any]:
     value: dict[str, Any] = {}
     for field in operation.value_fields:
         if field.key in value:
@@ -951,18 +1699,112 @@ def _normalize_patch_operation(
             value[field.key] = json.loads(field.json_value)
         except json.JSONDecodeError:
             value[field.key] = field.json_value
-    return CandidatePatchOperation(
-        op=operation.op,
-        target_file=operation.target_file,
-        target_id=operation.target_id,
-        expected_version=operation.expected_version,
-        value=value,
-        evidence=[
-            PatchEvidence(file=final_path, quote=quote)
+    return {
+        "op": operation.op,
+        "target_file": operation.target_file,
+        "target_id": operation.target_id,
+        "value": value,
+        "evidence": [
+            PatchEvidence(file=final_path, quote=quote).model_dump(mode="json")
             for quote in operation.evidence_quotes
         ],
-        rationale=operation.rationale,
+        "rationale": operation.rationale,
+    }
+
+
+def _required_canon_version_snapshot(*, state: dict[str, Any]) -> dict[str, int]:
+    raw = state.get("canon_versions")
+    if not isinstance(raw, dict):
+        raise ToolHandlerError(
+            "canon_version_snapshot_missing",
+            "Chapter candidate workspace has no Harness-owned canon version snapshot.",
+            recoverable=False,
+        )
+    versions: dict[str, int] = {}
+    for target_file in (
+        "canon/characters.json",
+        "canon/relationships.json",
+        "canon/world_facts.json",
+        "canon/foreshadowing.json",
+    ):
+        value = raw.get(target_file)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ToolHandlerError(
+                "canon_version_snapshot_invalid",
+                "Chapter candidate canon version snapshot is incomplete.",
+                recoverable=False,
+            )
+        versions[target_file] = value
+    return versions
+
+
+def _candidate_item_id(
+    context: ToolExecutionContext,
+    component: str,
+    collection: str,
+    index: int,
+) -> str:
+    seed = "\x1f".join(
+        [context.candidate_run_id, component, collection, str(index)]
     )
+    return "item-" + sha256(seed.encode("utf-8")).hexdigest()[:24]
+
+
+def _expect_current_draft_revision(state: dict[str, Any], draft_revision: int) -> None:
+    if int(state.get("draft_revision", 0)) != draft_revision:
+        raise ToolHandlerError(
+            "stale_draft_revision",
+            "Structured chapter data references a stale candidate draft.",
+            recoverable=True,
+            allowed_actions=["reload_chapter_workspace"],
+        )
+
+
+def _expect_component_revision(
+    state: dict[str, Any],
+    *,
+    component: Literal["observations", "state_patch"],
+    draft_revision: int,
+    write_action: str,
+) -> None:
+    if int(state.get(f"{component}_draft_revision", 0)) != draft_revision:
+        raise ToolHandlerError(
+            f"candidate_{component}_missing_or_stale",
+            (
+                f"Chapter {component.replace('_', ' ')} must be written for draft revision "
+                f"{draft_revision} before final submission."
+            ),
+            recoverable=True,
+            allowed_actions=[write_action],
+        )
+
+
+def _json_payload_sha256(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
+def _read_required_json_object(path: Path, *, code: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(_read_required_text(path, code=code))
+    except json.JSONDecodeError as exc:
+        raise ToolHandlerError(
+            code,
+            f"Required candidate JSON is invalid: {path.name}.",
+            recoverable=True,
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ToolHandlerError(
+            code,
+            f"Required candidate JSON must be an object: {path.name}.",
+            recoverable=True,
+        )
+    return cast(dict[str, Any], payload)
 
 
 def _submit_chapter_patch_evidence_repair(

@@ -55,6 +55,12 @@ def test_evaluator_uses_native_schema_and_persists_one_source_for_both_views(
     request = captured["request"]
     assert request.execution_mode == "structured_result"
     assert request.tools == []
+    evaluation_payload = json.loads(request.messages[1].content)
+    title_invariants = evaluation_payload["candidate_schema_invariants"][
+        "recommended_titles"
+    ]
+    assert title_invariants["min_items"] == 3
+    assert "do not by themselves reopen" in title_invariants["interpretation"]
     persist_evaluation_views(
         tmp_path,
         record,
@@ -284,6 +290,12 @@ def test_evaluator_repairs_one_invalid_locator_with_fixed_input() -> None:
         return ChatResult(
             content="{}",
             structured_output=payload,
+            usage={
+                "prompt_tokens": 100 + len(calls),
+                "completion_tokens": 20,
+                "cached_tokens": 50,
+                "total_tokens": 120 + len(calls),
+            },
             model_snapshot="judge-model",
             provider_snapshot="openai-compatible",
         )
@@ -292,6 +304,15 @@ def test_evaluator_repairs_one_invalid_locator_with_fixed_input() -> None:
 
     assert record.result.outcome == "pass"
     assert len(calls) == 2
+    assert record.telemetry is not None
+    assert record.telemetry.calls == 2
+    assert record.telemetry.validation_repairs == 1
+    assert record.telemetry.usage == {
+        "prompt_tokens": 203,
+        "completion_tokens": 40,
+        "cached_tokens": 100,
+        "total_tokens": 243,
+    }
     repair_context = json.loads(calls[1].messages[-1].content)
     assert repair_context["allowed_candidate_components"] == [
         "confirmed_decision_coverage",
@@ -306,6 +327,11 @@ def test_evaluator_repairs_one_invalid_locator_with_fixed_input() -> None:
         "candidate.direction",
         "candidate.recommended_titles",
         "candidate.rolling_plan",
+        "candidate.confirmed_decision_coverage#<stable-item-id>",
+        "candidate.constraints#<stable-item-id>",
+        "candidate.direction#<stable-item-id>",
+        "candidate.recommended_titles#<stable-item-id>",
+        "candidate.rolling_plan#<stable-item-id>",
         "candidate_artifact_id#confirmed_decision_coverage",
         "candidate_artifact_id#constraints",
         "candidate_artifact_id#direction",
@@ -381,6 +407,10 @@ def test_evaluator_validation_repair_lists_chapter_component_contract() -> None:
         "candidate.observations",
         "candidate.plan",
         "candidate.state_patch",
+        "candidate.draft#<stable-item-id>",
+        "candidate.observations#<stable-item-id>",
+        "candidate.plan#<stable-item-id>",
+        "candidate.state_patch#<stable-item-id>",
         "candidate_artifact_id#draft",
         "candidate_artifact_id#observations",
         "candidate_artifact_id#plan",

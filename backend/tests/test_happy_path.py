@@ -378,6 +378,45 @@ def _next_chapter_tool(
             "expected_revision": 0,
             "draft_revision": 1,
         }
+    if "write_chapter_observations" not in prior_calls:
+        return "write_chapter_observations", {
+            "chapter_id": "chapter-001",
+            "expected_revision": 0,
+            "draft_revision": 1,
+            "observations": {
+                "events": [
+                    {
+                        "summary": "The protagonist chooses trust.",
+                        "evidence_quote": "trusts companions",
+                    }
+                ],
+                "character_changes": [],
+                "relationship_changes": [],
+                "world_fact_candidates": [],
+                "foreshadowing_candidates": [],
+                "requires_commit": True,
+            },
+        }
+    if "write_chapter_state_patch" not in prior_calls:
+        return "write_chapter_state_patch", {
+            "chapter_id": "chapter-001",
+            "expected_revision": 0,
+            "draft_revision": 1,
+            "state_patch": {
+                "operations": [
+                    {
+                        "op": "upsert",
+                        "target_file": "canon/characters.json",
+                        "target_id": "protagonist",
+                        "value_fields": [
+                            {"key": "belief", "json_value": '"trusts companions"'}
+                        ],
+                        "evidence_quotes": ["trusts companions"],
+                        "rationale": "The candidate prose proves the trust change.",
+                    }
+                ],
+            },
+        }
     return "submit_chapter_candidate", {
         "chapter_id": "chapter-001",
         "expected_revision": 0,
@@ -385,34 +424,6 @@ def _next_chapter_tool(
         "plan_revision": 1,
         "draft_revision": 1,
         "summary": "The chapter makes the trust change visible.",
-        "observations": {
-            "events": [
-                {
-                    "summary": "The protagonist chooses trust.",
-                    "evidence_quote": "trusts companions",
-                }
-            ],
-            "character_changes": [],
-            "relationship_changes": [],
-            "world_fact_candidates": [],
-            "foreshadowing_candidates": [],
-            "requires_commit": True,
-        },
-        "state_patch": {
-            "operations": [
-                {
-                    "op": "upsert",
-                    "target_file": "canon/characters.json",
-                    "target_id": "protagonist",
-                    "expected_version": 1,
-                    "value_fields": [
-                        {"key": "belief", "json_value": '"trusts companions"'}
-                    ],
-                    "evidence_quotes": ["trusts companions"],
-                    "rationale": "The candidate prose proves the trust change.",
-                }
-            ],
-        },
     }
 
 

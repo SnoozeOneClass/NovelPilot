@@ -274,6 +274,60 @@ def test_profile_connection_test_calls_configured_provider(tmp_path, monkeypatch
     assert stored.capability_test.ready_for_harness is True
 
 
+def test_profile_connection_test_retries_transient_provider_failure(
+    tmp_path, monkeypatch
+) -> None:
+    profile_path = tmp_path / "llm-profiles.local.json"
+    monkeypatch.setattr(profile_storage, "LLM_PROFILES_PATH", profile_path)
+    monkeypatch.setattr(profiles_api, "_PROFILE_RETRY_DELAY_SECONDS", 0)
+    profile_storage.upsert_profile(
+        LlmProfileUpsert(
+            id="main",
+            name="Main Provider",
+            protocol="openai-compatible",
+            base_url="https://api.example.com/v1",
+            api_key="secret-key",
+            model="example-model",
+        )
+    )
+    attempts = 0
+
+    def flaky_call_llm(_profile, request):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("OpenAI-compatible provider returned 500: upstream EOF")
+        if request.execution_mode == "tools":
+            return ChatResult(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="call-1",
+                        name="novelpilot_capability_echo",
+                        arguments={"value": "ok"},
+                        raw_arguments='{"value":"ok"}',
+                    )
+                ],
+                finish_reason="tool_call",
+                model_snapshot="example-model",
+                provider_snapshot="openai-compatible",
+            )
+        return ChatResult(
+            content='{"supported":true}',
+            structured_output={"supported": True},
+            model_snapshot="example-model",
+            provider_snapshot="openai-compatible",
+        )
+
+    monkeypatch.setattr(profiles_api, "call_llm", flaky_call_llm)
+
+    result = profiles_api.test_profile("main")
+
+    assert attempts == 3
+    assert result.calls[0]["transport_retries"] == 1
+    assert result.calls[1]["transport_retries"] == 0
+
+
 def test_profile_connection_test_rejects_disabled_profile(tmp_path, monkeypatch) -> None:
     profile_path = tmp_path / "llm-profiles.local.json"
     monkeypatch.setattr(profile_storage, "LLM_PROFILES_PATH", profile_path)

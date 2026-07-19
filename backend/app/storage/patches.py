@@ -34,6 +34,15 @@ class PatchValidationError(ValueError):
         super().__init__("Candidate state patch failed validation.")
 
 
+def read_canon_versions(project_path: Path) -> dict[str, int]:
+    """Capture the concurrency versions owned by one Chapter activation."""
+
+    return {
+        target_file: _read_versioned_state(project_path / target_file).version
+        for target_file in sorted(ALLOWED_CANON_TARGETS)
+    }
+
+
 def validate_candidate_state_patch(
     project_path: Path,
     patch: CandidateStatePatch,

@@ -12,6 +12,7 @@ class PatchEvidence(BaseModel):
 
 
 class CandidatePatchOperation(BaseModel):
+    id: str | None = None
     op: PatchOperationName
     target_file: str
     target_id: str

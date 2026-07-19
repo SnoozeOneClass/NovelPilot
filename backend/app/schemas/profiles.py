@@ -64,6 +64,9 @@ class LlmProfileTestResult(BaseModel):
     provider_snapshot: str
     message: str
     capability_test: LlmCapabilitySnapshot
+    usage: dict[str, Any] = Field(default_factory=dict)
+    usage_available: bool = False
+    calls: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class LlmProfileUpsert(BaseModel):

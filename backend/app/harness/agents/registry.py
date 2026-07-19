@@ -40,6 +40,7 @@ class ToolExecutionContext:
     expected_candidate_revision: int | None = None
     repair_contract: RepairContract | None = None
     experiment_strategy: ExperimentHookStrategy | None = None
+    allowed_tools: frozenset[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -156,6 +157,14 @@ class ToolRegistry:
                 code="unknown_tool",
                 message="The requested Tool was not exposed by the Harness.",
                 recoverable=False,
+            )
+        if context.allowed_tools is not None and call.name not in context.allowed_tools:
+            return _error_result(
+                call,
+                code="tool_not_exposed",
+                message="The Tool was not exposed for this Harness activation.",
+                recoverable=True,
+                allowed_actions=["call_an_exposed_tool"],
             )
         if not spec.is_allowed(context.identity.role, context.phase):
             return _error_result(

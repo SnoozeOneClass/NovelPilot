@@ -81,6 +81,8 @@ CHAPTER_AGENT_TOOLS = (
     "write_chapter_draft",
     "edit_chapter_draft",
     "inspect_chapter_consistency",
+    "write_chapter_observations",
+    "write_chapter_state_patch",
     "submit_chapter_candidate",
     "report_blocker",
 )
@@ -429,6 +431,7 @@ def _run_book_direction_candidate_agent(
         activation = replace(
             activation,
             repair_contract=contract,
+            allowed_tools=_repair_tools_for_contract(contract, "book_direction"),
             messages=(
                 ChatMessage(
                     role="user",
@@ -491,7 +494,11 @@ def _book_direction_attempt(
     result: AgentRunResult,
     on_event: AgentEventCallback | None,
 ) -> tuple[BookDirectionSynthesis, EvaluationRecord, BookDirectionReview]:
-    payload = _terminal_payload(project_path, result, "submit_book_direction_candidate")
+    payload = _terminal_payload(
+        project_path,
+        result,
+        ("submit_book_direction_candidate", "submit_candidate_repair"),
+    )
     try:
         candidate = BookDirectionCandidateInput.model_validate(payload)
     except ValidationError as exc:
@@ -703,6 +710,7 @@ def run_story_arc_agent(
         activation = replace(
             activation,
             repair_contract=contract,
+            allowed_tools=_repair_tools_for_contract(contract, "story_arc"),
             messages=(
                 ChatMessage(
                     role="user",
@@ -812,7 +820,11 @@ def _story_arc_attempt(
     result: AgentRunResult,
     on_event: AgentEventCallback | None,
 ) -> StoryArcAgentResult:
-    payload = _terminal_payload(project_path, result, "submit_story_arc_candidate")
+    payload = _terminal_payload(
+        project_path,
+        result,
+        ("submit_story_arc_candidate", "submit_candidate_repair"),
+    )
     try:
         candidate = StoryArcCandidateInput.model_validate(payload)
     except ValidationError as exc:
@@ -998,7 +1010,7 @@ def run_chapter_agent(
         activation = replace(
             activation,
             repair_contract=contract,
-            allowed_tools=_chapter_tools_for_repair(contract),
+            allowed_tools=_repair_tools_for_contract(contract, "chapter"),
             messages=(
                 ChatMessage(
                     role="user",
@@ -1166,7 +1178,11 @@ def _chapter_attempt(
     result: AgentRunResult,
     on_event: AgentEventCallback | None,
 ) -> ChapterAgentResult:
-    payload = _terminal_payload(project_path, result, "submit_chapter_candidate")
+    payload = _terminal_payload(
+        project_path,
+        result,
+        ("submit_chapter_candidate", "submit_candidate_repair"),
+    )
     try:
         submission = SubmitChapterCandidateInput.model_validate(
             {
@@ -1549,11 +1565,7 @@ def _resume_pending_semantic_repair(
     return replace(
         activation,
         repair_contract=contract,
-        allowed_tools=(
-            _chapter_tools_for_repair(contract)
-            if candidate_kind == "chapter"
-            else activation.allowed_tools
-        ),
+        allowed_tools=_repair_tools_for_contract(contract, candidate_kind),
         messages=(
             ChatMessage(
                 role="user",
@@ -1746,20 +1758,61 @@ def _repair_contract_from_chain(
         repair_brief=evaluation.result.repair_brief,
         allowed_components=evaluation.result.repair_scope,
         source_component_fingerprints=entry.component_fingerprints,
+        repair_workspace_id=(
+            "repair-"
+            + sha256(
+                (
+                    chain.candidate_run_id
+                    + "\x1f"
+                    + evaluation.evaluation_id
+                    + "\x1f"
+                    + entry.candidate_artifact_id
+                ).encode("utf-8")
+            ).hexdigest()[:24]
+        ),
     )
 
 
-def _chapter_tools_for_repair(contract: RepairContract) -> tuple[str, ...]:
+def _repair_tools_for_contract(
+    contract: RepairContract,
+    candidate_kind: CandidateKind,
+) -> tuple[str, ...]:
     allowed = set(contract.allowed_components)
-    tools = ["get_loop_context", "read_chapter_evidence"]
-    if "plan" in allowed:
-        tools.append("plan_chapter_candidate")
-    if "draft" in allowed:
-        tools.extend(["write_chapter_draft", "edit_chapter_draft"])
-    tools.extend(
-        ["inspect_chapter_consistency", "submit_chapter_candidate", "report_blocker"]
-    )
-    return tuple(tools)
+    tools = ["get_loop_context", "open_candidate_repair"]
+    if candidate_kind in {"story_arc", "chapter"}:
+        tools.append("read_chapter_evidence")
+    if allowed & {"direction", "rolling_plan", "plan", "change_summary", "draft"}:
+        tools.append("replace_candidate_text")
+    if candidate_kind == "chapter" and allowed & {"plan", "draft"}:
+        tools.append("edit_candidate_text")
+    if "target_chapter_count" in allowed:
+        tools.append("set_story_arc_chapter_count")
+    if allowed & {"constraints", "confirmed_decision_coverage", "recommended_titles"}:
+        tools.extend(
+            [
+                "add_book_repair_item",
+                "update_book_repair_item",
+                "delete_candidate_repair_item",
+            ]
+        )
+    if "observations" in allowed:
+        tools.extend(
+            [
+                "add_chapter_observation_repair",
+                "update_chapter_observation_repair",
+                "delete_candidate_repair_item",
+            ]
+        )
+    if "state_patch" in allowed:
+        tools.extend(
+            [
+                "add_state_patch_operation_repair",
+                "update_state_patch_operation_repair",
+                "delete_candidate_repair_item",
+            ]
+        )
+    tools.extend(["submit_candidate_repair", "report_blocker"])
+    return tuple(dict.fromkeys(tools))
 
 
 def _book_synthesis_payload(synthesis: BookDirectionSynthesis) -> dict[str, object]:
@@ -1785,16 +1838,6 @@ def _semantic_repair_prompt(
     contract: RepairContract,
 ) -> str:
     book_revision_context: dict[str, object] = {}
-    book_contract = (
-        " For a Book candidate, copy every fixed-input confirmed decision verbatim into "
-        "constraints.confirmed and confirmed_decision_coverage.decision. Do not paraphrase, "
-        "split, merge, or promote repair guidance into a new confirmed decision. The "
-        "submit_book_direction_candidate.candidate_revision field must equal the fixed "
-        "book_review_candidate_revision. semantic_logical_candidate_revision belongs only "
-        "to the Harness/Evaluator repair chain and must never be copied into that Tool field."
-        if candidate_kind == "Book Direction"
-        else ""
-    )
     if candidate_kind == "Book Direction":
         book_revision_context = {
             "book_review_candidate_revision": candidate_payload.get(
@@ -1804,14 +1847,16 @@ def _semantic_repair_prompt(
         }
     return (
         "The Evaluator requested a scoped repair of the same uncommitted logical candidate. "
-        "The Harness has preserved the prior candidate and the complete review ledger. "
-        "Resolve every open issue in the repair contract. Change only allowed_components; "
-        "all other candidate components must remain byte-stable. Do not rewrite committed "
-        "prose or canon. Submit the complete candidate through the same terminal Tool. For a "
-        "Chapter repair, reuse the restored workspace, keep current internal plan/draft "
-        "revisions unless an authorized Tool changes that component, and submit using "
-        "next_candidate_revision from the repair contract."
-        + book_contract
+        "The Harness owns the source candidate, unchanged artifacts, stable item IDs, revision "
+        "assembly, and the complete review ledger. Resolve every open issue using only the "
+        "artifact-level repair Tools that are exposed. Do not resubmit or restate unchanged "
+        "candidate components, fingerprints, IDs, or revision numbers. Call "
+        "open_candidate_repair before structured item updates to obtain Harness stable IDs. "
+        "For prose or plan problems, replace_candidate_text may submit the complete revised "
+        "text; edit_candidate_text is optional and an anchor failure may be followed by a full "
+        "replacement. When the semantic changes are complete, call submit_candidate_repair "
+        "with only a short summary. The Harness will merge the working copy and send the full "
+        "candidate to an independent Evaluator. Do not rewrite committed prose or canon."
         + "\n\n"
         + json.dumps(
             {
@@ -1833,7 +1878,7 @@ def _semantic_repair_prompt(
 def _terminal_payload(
     project_path: Path,
     result: AgentRunResult,
-    expected_tool: str,
+    expected_tool: str | tuple[str, ...],
 ) -> dict[str, object]:
     if result.outcome in {"waiting_user", "blocked"}:
         path = _terminal_artifact(result)
@@ -1846,9 +1891,13 @@ def _terminal_payload(
     if result.outcome != "candidate" or result.terminal_result is None:
         detail = result.failure.message if result.failure is not None else result.outcome
         raise AgentCandidateError(f"Agent did not submit a candidate: {detail}")
-    if result.terminal_result.tool_name != expected_tool:
+    expected_tools = (
+        (expected_tool,) if isinstance(expected_tool, str) else expected_tool
+    )
+    if result.terminal_result.tool_name not in expected_tools:
         raise AgentCandidateError(
-            f"Agent stopped with {result.terminal_result.tool_name}, expected {expected_tool}."
+            "Agent stopped with "
+            f"{result.terminal_result.tool_name}, expected one of {expected_tools}."
         )
     path = _terminal_artifact(result)
     payload = read_json(project_path / path)
@@ -1968,6 +2017,10 @@ def _book_discussion_agent_prompt() -> str:
         "Use only exposed Tools. Read context only when needed. Update the complete working "
         "Book Direction, respond to the user's latest input, and choose the single highest-value "
         "concrete question yourself. Do not ask the user which topic to discuss next. "
+        "When the user explicitly delegates local creative choices, resolve those choices inside "
+        "the stated constraints instead of turning each one into a clarification question. Ask "
+        "only when missing human intent would materially change the Book contract and cannot be "
+        "resolved by an expressed preference or delegation. "
         "Keep confirmed_decisions cumulative and copy every existing entry verbatim; never "
         "paraphrase, split, merge, or remove one. Add a new confirmed decision only when the "
         "latest human message explicitly confirms it; review feedback and repair guidance are "
@@ -2056,10 +2109,14 @@ def _chapter_agent_prompt(*, chapter_id: str, expected_revision: int) -> str:
         "contracts; no user-decision Tool or chapter approval gate is available. "
         + "Read bounded context, call "
         "plan_chapter_candidate, write visible prose through write_chapter_draft, optionally use "
-        "targeted edits, call inspect_chapter_consistency, then bind plan, draft, candidate "
-        "observations, and candidate state patch with submit_chapter_candidate. Start plan, draft, "
-        "and candidate revisions at 1 for a fresh workspace. Never write final.md, never commit "
-        "canon, and never claim semantic approval. Use report_blocker only with exact evidence."
+        "targeted edits, and call inspect_chapter_consistency. Then write semantic observations "
+        "with write_chapter_observations and the canon delta with write_chapter_state_patch. "
+        "Finally call submit_chapter_candidate with only revisions and a concise summary; the "
+        "Harness will assemble the stored components. If patch evidence is rejected, rewrite only "
+        "the state-patch component with exact draft quotes and resubmit the short reference. Start "
+        "plan, draft, and candidate revisions at 1 for a fresh workspace. Never write final.md, "
+        "never commit canon, and never claim semantic approval. Use report_blocker only with exact "
+        "evidence."
     )
 def _chapter_patch_evidence_repair_prompt(
     *, chapter_id: str, expected_revision: int
