@@ -30,7 +30,7 @@ def test_context_pack_is_role_authorized_and_excludes_uncommitted_prose(
         _call(
             "allowed",
             "get_loop_context",
-            {"pack": "committed_chapters", "max_characters": 10_000},
+            {"pack": "committed_chapters"},
         ),
     )
 
@@ -40,10 +40,42 @@ def test_context_pack_is_role_authorized_and_excludes_uncommitted_prose(
     rendered = str(allowed.content)
     assert "committed prose" in rendered
     assert "secret candidate prose" not in rendered
-    assert "chapters/*/draft.md" in rendered
+    assert "sha256" not in rendered
+    assert "source_path" not in rendered
 
 
-def test_request_user_decision_requires_one_question_and_unique_suggestions(
+def test_context_pack_strips_harness_control_metadata_from_json(
+    tmp_path: Path,
+) -> None:
+    _project(tmp_path)
+    write_json(
+        tmp_path / "arcs/arc-001/state.json",
+        {
+            "schema_version": 2,
+            "version": 9,
+            "arc_id": "arc-001",
+            "plan_path": "arcs/arc-001/plan.md",
+            "target_chapter_count": 3,
+            "status": "approved",
+        },
+    )
+
+    result = _registry().execute(
+        _context(tmp_path, role="story_arc", call_id="semantic-json"),
+        _call("semantic-json", "get_loop_context", {"pack": "story_arc"}),
+    )
+
+    assert result.status == "ok"
+    rendered = str(result.content)
+    assert "target_chapter_count" in rendered
+    assert "approved" in rendered
+    assert "arc-001" not in rendered
+    assert "plan_path" not in rendered
+    assert "version" not in rendered
+    assert "schema_version" not in rendered
+
+
+def test_request_user_decision_normalizes_question_control_in_harness(
     tmp_path: Path,
 ) -> None:
     _project(tmp_path)
@@ -78,8 +110,11 @@ def test_request_user_decision_requires_one_question_and_unique_suggestions(
         ),
     )
 
-    assert invalid.status == "error"
-    assert invalid.error_code == "invalid_tool_arguments"
+    assert invalid.status == "ok"
+    invalid_wait_path = next(
+        path for path in invalid.artifact_paths if path.endswith("wait.json")
+    )
+    assert read_json(tmp_path / invalid_wait_path)["question"].endswith("？")
     assert valid.status == "ok"
     assert valid.terminal is True
     assert valid.checkpoint_id is not None
@@ -110,18 +145,21 @@ def test_cross_loop_blocker_requires_complete_evidence_and_never_routes(
             {
                 "kind": "cross_loop",
                 "summary": "章节目标与已提交事实无法同时满足",
-                "evidence": ["chapters/chapter-0001/final.md#L12"],
-                "target_owner": "story_arc",
-                "contract_field": "required_outcome",
-                "contract_revision": 2,
-                "committed_evidence_locator": "chapters/chapter-0001/final.md#L12",
+                "semantic_evidence": [
+                    "The current Arc requires a surviving witness."
+                ],
+                "upper_scope": "story_arc_contract",
+                "contract_concern": (
+                    "The required outcome needs a surviving witness."
+                ),
+                "evidence_hint": "The current Arc requires a surviving witness.",
                 "impossibility_reason": "既定死亡事实排除了当前目标。",
             },
         ),
     )
 
     assert invalid.status == "error"
-    assert invalid.error_code == "invalid_tool_arguments"
+    assert invalid.error_code == "cross_loop_semantics_incomplete"
     assert valid.status == "ok"
     assert valid.content["routing_status"] == "proposal_only"
     blocker_path = next(
@@ -136,10 +174,22 @@ def _project(project_path: Path) -> None:
     project_path.mkdir(parents=True, exist_ok=True)
     write_json(
         project_path / "project.json",
-        ProjectMetadata(project_id="project-1").model_dump(mode="json"),
+        ProjectMetadata(
+            project_id="project-1",
+            active_arc_id="arc-001",
+        ).model_dump(mode="json"),
     )
     for relative in ["book", "arcs", "chapters", "canon"]:
         (project_path / relative).mkdir(exist_ok=True)
+    (project_path / "arcs/arc-001").mkdir(parents=True, exist_ok=True)
+    (project_path / "arcs/arc-001/plan.md").write_text(
+        "The current Arc requires a surviving witness.",
+        encoding="utf-8",
+    )
+    write_json(
+        project_path / "arcs/arc-001/state.json",
+        {"schema_version": 2, "version": 2},
+    )
 
 
 def _registry() -> ToolRegistry:

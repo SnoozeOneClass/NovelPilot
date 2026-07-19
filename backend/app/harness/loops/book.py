@@ -118,6 +118,10 @@ def assemble_discussion_context(
         {"id": message.id, "role": message.role, "content": message.content}
         for message in recent
     ]
+    recent_prompt_payload = [
+        {"role": message.role, "content": message.content}
+        for message in recent
+    ]
     prompt = "\n\n".join(
         [
             "下面是 Harness 为本轮全书共创装配的上下文。",
@@ -129,7 +133,7 @@ def assemble_discussion_context(
             "已发现矛盾：\n" + _json_text(state.contradictions),
             "已确认正式书名：\n" + (state.selected_title or "尚未确定"),
             "近期已取代决定：\n" + _json_text(superseded_payload),
-            "最近原始对话：\n" + _json_text(recent_payload),
+            "最近原始对话：\n" + _json_text(recent_prompt_payload),
             f"用户本轮输入：\n{user_message}",
         ]
     )
@@ -498,7 +502,12 @@ def _recent_superseded_payload(state: SetupStateDocument) -> list[dict[str, Any]
     selected: list[dict[str, Any]] = []
     character_count = 0
     for item in reversed(state.superseded_decisions):
-        payload = item.model_dump(mode="json")
+        payload = {
+            "decision": item.decision,
+            "replacement": item.replacement,
+            "reason": item.reason,
+            "user_evidence": item.user_evidence,
+        }
         item_count = len(_json_text(payload))
         if character_count + item_count > SUPERSEDED_HISTORY_CHARACTER_BUDGET:
             break

@@ -7,7 +7,6 @@ from pydantic import SecretStr
 from app.harness import orchestrator
 from app.harness.agents.loop_runners import (
     ChapterAgentResult,
-    ChapterPatchEvidenceRepairResult,
     StoryArcAgentResult,
 )
 from app.harness.agents.models import (
@@ -1299,9 +1298,9 @@ def test_context_snapshot_summarizes_prior_committed_chapters_only(
     prior_summary = sources_by_id["prior-committed-chapters"]["summary"]
     excluded_sources = {item["source"] for item in snapshot["excluded"]}
 
-    assert "chapter-001" in prior_summary
+    assert "Prior chapter 1" in prior_summary
     assert "First final" in prior_summary
-    assert "chapter-000" in prior_summary
+    assert "Prior chapter 0" in prior_summary
     assert "committed final without Markdown heading" in prior_summary
     assert "very long opening prose line" not in prior_summary
     assert "full committed body" not in prior_summary
@@ -1384,10 +1383,14 @@ def test_chapter_goal_prompt_uses_context_snapshot_sources(
     assert "keep pressure rising" in prompt
     assert "# Arc 1" in prompt
     assert '"target_chapter_count": 3' in prompt
-    assert "canon/characters.json has 1 committed item(s)." in prompt
-    assert "Excluded sources:" in prompt
-    assert "chapters/chapter-001/draft.md" in prompt
-    assert "chapters/chapter-001/observations.json" in prompt
+    assert "Committed characters: 1 item(s)." in prompt
+    assert "Excluded candidate material:" in prompt
+    assert "chapters/chapter-001/draft.md" not in prompt
+    assert "chapters/chapter-001/observations.json" not in prompt
+    assert "path=" not in prompt
+    assert "version=" not in prompt
+    assert '"version": 7' not in prompt
+    assert '"arc_id"' not in prompt
 
 
 def test_orchestrator_processes_feedback_before_next_checkpoint(
@@ -1963,47 +1966,6 @@ def test_repairs_rejected_patch_quotes_without_changing_operations(
     )
     monkeypatch.setattr(orchestrator, "get_active_profile", lambda: profile)
 
-    def fake_repair(*_args, **_kwargs) -> ChapterPatchEvidenceRepairResult:
-        repaired = patch.model_copy(
-            update={
-                "operations": [
-                    patch.operations[0].model_copy(
-                        update={
-                            "evidence": [
-                                patch.operations[0].evidence[0].model_copy(
-                                    update={"quote": "trusts companions"}
-                                )
-                            ]
-                        }
-                    )
-                ]
-            }
-        )
-        identity = AgentIdentity(
-            project_id=metadata.project_id,
-            role="chapter",
-            scope_id="chapter-001",
-        )
-        return ChapterPatchEvidenceRepairResult(
-            patch=repaired,
-            run_result=AgentRunResult(
-                outcome="candidate",
-                identity=identity,
-                candidate_run_id="patch-repair-run",
-                activation_id="patch-repair-activation",
-                turns_used=1,
-            ),
-            candidate_artifact_path=(
-                "chapters/chapter-001/agent/a/patch-repair/c/"
-                "state-patch-evidence-repair.json"
-            ),
-        )
-
-    monkeypatch.setattr(
-        orchestrator,
-        "run_chapter_patch_evidence_repair_agent",
-        fake_repair,
-    )
     harness = HarnessOrchestrator(
         HarnessRunContext(project_path=project_path, run_id="run-1")
     )
@@ -2018,7 +1980,7 @@ def test_repairs_rejected_patch_quotes_without_changing_operations(
         "belief": "trusts companions"
     }
     assert repaired_patch["operations"][0]["evidence"][0]["quote"] == (
-        "trusts companions"
+        "The protagonist trusts companions after the trial."
     )
 
     harness.advance_to_next_checkpoint()

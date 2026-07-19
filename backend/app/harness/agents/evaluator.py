@@ -6,16 +6,25 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from app.core.paths import ensure_relative_artifact_path
+from app.harness.agents.evidence_matching import resolve_semantic_evidence_quote
 from app.harness.agents.models import (
     CandidateComponentName,
-    EvaluationInput,
     EvaluationCallTelemetry,
+    EvaluationInput,
     EvaluationIssue,
     EvaluationRecord,
     EvaluationResult,
+    EvaluationRubricCheck,
+    EvaluationSignal,
     EvaluationTelemetry,
     ModelEvaluationResult,
     NewEvaluationIssue,
+    PriorIssueCheck,
+    UpstreamBlockerProposal,
+)
+from app.harness.agents.semantic_boundary import (
+    semantic_model_text,
+    semantic_model_value,
 )
 from app.llm.gateway import (
     ChatMessage,
@@ -53,10 +62,7 @@ def evaluate_candidate(
     if max_validation_repairs < 0:
         raise ValueError("Evaluator validation repair limit must not be negative.")
     call = evaluator_call or call_llm
-    evaluation_payload = evaluation_input.model_dump(mode="json")
-    evaluation_payload["candidate_schema_invariants"] = (
-        _candidate_schema_invariants(evaluation_input)
-    )
+    evaluation_payload = _semantic_evaluation_payload(evaluation_input)
     messages = [
         ChatMessage(role="system", content=_evaluator_system_prompt()),
         ChatMessage(
@@ -195,7 +201,6 @@ def _validated_evaluation(
                 profile,
             )
         ) from exc
-    _validate_evidence_locators(evaluation_input, model_result)
     return _normalize_evaluation(evaluation_input, model_result)
 
 
@@ -212,48 +217,20 @@ def _evaluator_validation_repair_prompt(
     evaluation_input: EvaluationInput,
     error: EvaluationValidationError,
 ) -> str:
-    component_names = sorted(evaluation_input.component_fingerprints)
     return json.dumps(
         {
             "instruction": (
                 "Return a complete corrected evaluation through native Structured Output. "
-                "Use only the exact candidate component names and locator forms supplied "
-                "below. Multiple blocking issues may identify the same component. Do not "
-                "change the fixed candidate, invent evidence, guess an invalid locator, or "
-                "explain your repair."
+                "Keep rubric_checks and prior_issue_checks in the same semantic order as "
+                "the supplied rubric and prior issues. Describe affected meaning and evidence; "
+                "do not return IDs, revisions, paths, locators, fingerprints, or exact quote "
+                "tokens. Harness will bind all control data. Do not change the fixed candidate "
+                "or explain your repair outside the schema."
             ),
             "validation_error": str(error),
-            "candidate_schema_invariants": _candidate_schema_invariants(
+            "semantic_evaluation_context": _semantic_evaluation_payload(
                 evaluation_input
             ),
-            "allowed_candidate_components": component_names,
-            "allowed_candidate_locators": [
-                *(f"candidate.{component}" for component in component_names),
-                *(f"candidate.{component}#<stable-item-id>" for component in component_names),
-                *(
-                    f"candidate_artifact_id#{component}"
-                    for component in component_names
-                ),
-            ],
-            "allowed_candidate_artifact_locators": [
-                f"{evaluation_input.candidate_artifact_id}#{component}"
-                for component in component_names
-            ],
-            "allowed_candidate_locator_roots": [
-                evaluation_input.candidate_artifact_id,
-                "candidate_artifact_id",
-                "candidate",
-            ],
-            "allowed_evidence_locator_roots": [
-                evaluation_input.candidate_artifact_id,
-                *(item.locator for item in evaluation_input.evidence),
-                "candidate_artifact_id",
-                "candidate",
-                "deterministic_prechecks",
-            ],
-            "committed_evidence_locator_roots": [
-                item.locator for item in evaluation_input.evidence
-            ],
         },
         ensure_ascii=False,
     )
@@ -360,141 +337,75 @@ def render_verification(record: EvaluationRecord) -> dict[str, object]:
     }
 
 
-def _validate_evidence_locators(
-    evaluation_input: EvaluationInput,
-    result: ModelEvaluationResult,
-) -> None:
-    committed_evidence = {item.locator for item in evaluation_input.evidence}
-    approved_evidence = {
-        evaluation_input.candidate_artifact_id,
-        *committed_evidence,
-    }
-    missing = sorted(
-        {
-            *(
-                item.candidate_locator
-                for item in result.new_issues
-                if not _locator_is_scoped_to(
-                    item.candidate_locator,
-                    {evaluation_input.candidate_artifact_id},
-                )
-                and not _virtual_locator_is_scoped_to(
-                    item.candidate_locator,
-                    {"candidate_artifact_id", "candidate"},
-                )
-            ),
-            *(
-                item.evidence_locator
-                for item in result.new_issues
-                if not _locator_is_scoped_to(item.evidence_locator, approved_evidence)
-                and not _virtual_locator_is_scoped_to(
-                    item.evidence_locator,
-                    {
-                        "candidate_artifact_id",
-                        "candidate",
-                        "deterministic_prechecks",
-                    },
-                )
-            ),
-            *(
-                item.evidence_locator
-                for item in result.signals
-                if not _locator_is_scoped_to(item.evidence_locator, approved_evidence)
-                and not _virtual_locator_is_scoped_to(
-                    item.evidence_locator,
-                    {
-                        "candidate_artifact_id",
-                        "candidate",
-                        "deterministic_prechecks",
-                    },
-                )
-            ),
-            *(
-                item.evidence_locator
-                for item in result.rubric_checks
-                if not _locator_is_scoped_to(item.evidence_locator, approved_evidence)
-                and not _virtual_locator_is_scoped_to(
-                    item.evidence_locator,
-                    {
-                        "candidate_artifact_id",
-                        "candidate",
-                        "deterministic_prechecks",
-                    },
-                )
-            ),
-            *(
-                item.evidence_locator
-                for item in result.prior_issue_checks
-                if not _locator_is_scoped_to(item.evidence_locator, approved_evidence)
-                and not _virtual_locator_is_scoped_to(
-                    item.evidence_locator,
-                    {
-                        "candidate_artifact_id",
-                        "candidate",
-                        "deterministic_prechecks",
-                    },
-                )
-            ),
-        }
-    )
-    blocker = result.upstream_blocker
-    if blocker is not None and not _locator_is_scoped_to(
-        blocker.committed_evidence_locator,
-        committed_evidence,
-    ):
-        missing.append(blocker.committed_evidence_locator)
-    if missing:
-        raise EvaluationValidationError(
-            "Evaluator cited evidence outside the approved bundle: "
-            + ", ".join(sorted(set(missing)))
-        )
-
-
 def _normalize_evaluation(
     evaluation_input: EvaluationInput,
     result: ModelEvaluationResult,
 ) -> EvaluationResult:
-    expected_dimensions = [
-        item.dimension_id for item in evaluation_input.rubric.dimensions
-    ]
-    actual_dimensions = [item.dimension_id for item in result.rubric_checks]
-    if len(actual_dimensions) != len(set(actual_dimensions)):
-        raise EvaluationValidationError("Evaluator returned duplicate rubric checks.")
-    if set(actual_dimensions) != set(expected_dimensions):
+    dimensions = evaluation_input.rubric.dimensions
+    if len(result.rubric_checks) != len(dimensions):
         raise EvaluationValidationError(
-            "Evaluator must return exactly one check for every rubric dimension."
+            "Evaluator must return one semantic check for every rubric item, in order."
         )
+    rubric_checks = [
+        EvaluationRubricCheck(
+            dimension_id=dimension.dimension_id,
+            status=check.status,
+            evidence_locator=_bind_evidence_locator(
+                evaluation_input,
+                check.evidence_hint,
+            ),
+            explanation=check.explanation,
+        )
+        for dimension, check in zip(dimensions, result.rubric_checks, strict=True)
+    ]
 
-    prior_open: dict[str, EvaluationIssue] = {}
+    prior_open: list[EvaluationIssue] = []
     if evaluation_input.review_history:
         for issue in evaluation_input.review_history[-1].result.issues:
             if issue.issue_id is None:
                 raise EvaluationValidationError(
                     "Persisted review history contains an issue without a stable ID."
                 )
-            prior_open[issue.issue_id] = issue
-    checks = {item.issue_id: item for item in result.prior_issue_checks}
-    if len(checks) != len(result.prior_issue_checks):
-        raise EvaluationValidationError("Evaluator returned duplicate prior-issue checks.")
-    if set(checks) != set(prior_open):
+            prior_open.append(issue)
+    if len(result.prior_issue_checks) != len(prior_open):
         raise EvaluationValidationError(
-            "Evaluator must account for every open prior issue exactly once."
+            "Evaluator must account for every open prior issue in the supplied order."
         )
     if evaluation_input.mode == "initial" and result.prior_issue_checks:
         raise EvaluationValidationError(
             "Initial evaluation cannot report prior-issue checks."
         )
 
-    remaining = [
-        prior_open[issue_id]
-        for issue_id, check in checks.items()
-        if check.status == "remaining"
-    ]
-    resolved_issue_ids = sorted(
-        issue_id for issue_id, check in checks.items() if check.status == "resolved"
-    )
+    prior_issue_checks: list[PriorIssueCheck] = []
+    remaining: list[EvaluationIssue] = []
+    resolved_issue_ids: list[str] = []
+    for issue, check in zip(prior_open, result.prior_issue_checks, strict=True):
+        issue_id = issue.issue_id
+        if issue_id is None:
+            raise EvaluationValidationError(
+                "Persisted review history contains an issue without a stable ID."
+            )
+        component = _issue_component(evaluation_input, issue)
+        prior_issue_checks.append(
+            PriorIssueCheck(
+                issue_id=issue_id,
+                status=check.status,
+                evidence_locator=_bind_evidence_locator(
+                    evaluation_input,
+                    check.evidence_hint,
+                    preferred_component=component,
+                ),
+                explanation=check.explanation,
+            )
+        )
+        if check.status == "remaining":
+            remaining.append(issue)
+        else:
+            resolved_issue_ids.append(issue_id)
+
     new_issues: list[EvaluationIssue] = []
     for index, proposal in enumerate(result.new_issues):
+        component = _component_for_semantic_area(evaluation_input, proposal.affected_area)
         issue_id = _stable_issue_id(evaluation_input, proposal, index)
         new_issues.append(
             EvaluationIssue(
@@ -504,19 +415,42 @@ def _normalize_evaluation(
                     if evaluation_input.mode == "repair_verification"
                     else "initial_discovery"
                 ),
-                **proposal.model_dump(),
+                category=proposal.category,
+                severity=proposal.severity,
+                candidate_locator=f"candidate.{component}",
+                evidence_locator=_bind_evidence_locator(
+                    evaluation_input,
+                    proposal.evidence_hint,
+                    preferred_component=component,
+                ),
+                explanation=proposal.explanation,
             )
         )
     open_issues = [*remaining, *new_issues]
-    component_names = set(evaluation_input.component_fingerprints)
-    repair_scope = list(dict.fromkeys(result.repair_scope))
-    if any(name not in component_names for name in repair_scope):
-        raise EvaluationValidationError(
-            "Evaluator repair scope contains a component outside this candidate kind."
+    signals = [
+        EvaluationSignal(
+            name=signal.name,
+            value=signal.value,
+            evidence_locator=_bind_evidence_locator(
+                evaluation_input,
+                signal.evidence_hint,
+            ),
         )
+        for signal in result.signals
+    ]
+    upstream_blocker = _bind_upstream_blocker(evaluation_input, result)
 
-    all_rubric_pass = all(item.status == "pass" for item in result.rubric_checks)
+    all_rubric_pass = all(item.status == "pass" for item in rubric_checks)
     blocking_issues = [item for item in open_issues if item.severity == "blocking"]
+    repair_scope: list[CandidateComponentName] = []
+    for issue in blocking_issues:
+        component = _issue_component(evaluation_input, issue)
+        if component is None:
+            raise EvaluationValidationError(
+                "Harness could not bind a blocking issue to a candidate component."
+            )
+        if component not in repair_scope:
+            repair_scope.append(component)
     if result.outcome == "pass":
         if (
             not result.contract_satisfied
@@ -534,18 +468,6 @@ def _normalize_evaluation(
                 "Local repair requires an unsatisfied contract, a blocking issue, "
                 "and non-empty repair scope."
             )
-        required_components: set[CandidateComponentName] = set()
-        for issue in blocking_issues:
-            component = _issue_component(evaluation_input, issue)
-            if component is None:
-                raise EvaluationValidationError(
-                    "Every blocking local issue must identify one candidate component."
-                )
-            required_components.add(component)
-        if not required_components.issubset(set(repair_scope)):
-            raise EvaluationValidationError(
-                "Repair scope does not cover every blocking issue locator."
-            )
 
     return EvaluationResult(
         schema_version=2,
@@ -553,11 +475,11 @@ def _normalize_evaluation(
         contract_satisfied=result.contract_satisfied,
         summary=result.summary,
         issues=open_issues,
-        signals=result.signals,
+        signals=signals,
         repair_brief=result.repair_brief,
-        upstream_blocker=result.upstream_blocker,
-        rubric_checks=result.rubric_checks,
-        prior_issue_checks=result.prior_issue_checks,
+        upstream_blocker=upstream_blocker,
+        rubric_checks=rubric_checks,
+        prior_issue_checks=prior_issue_checks,
         new_issue_ids=[item.issue_id for item in new_issues if item.issue_id is not None],
         resolved_issue_ids=resolved_issue_ids,
         repair_scope=repair_scope,
@@ -576,8 +498,8 @@ def _stable_issue_id(
             "index": index,
             "category": issue.category,
             "severity": issue.severity,
-            "candidate_locator": issue.candidate_locator,
-            "evidence_locator": issue.evidence_locator,
+            "affected_area": issue.affected_area,
+            "evidence_hint": issue.evidence_hint,
             "explanation": issue.explanation,
         },
         ensure_ascii=False,
@@ -614,44 +536,243 @@ def _issue_component(
     return None
 
 
-def _locator_is_scoped_to(locator: str, allowed_roots: set[str]) -> bool:
-    return any(locator == root or locator.startswith(f"{root}#") for root in allowed_roots)
+def _component_for_semantic_area(
+    evaluation_input: EvaluationInput,
+    affected_area: str,
+) -> CandidateComponentName:
+    mappings: dict[str, dict[str, CandidateComponentName]] = {
+        "book_direction": {
+            "story_direction": "direction",
+            "story_constraints": "constraints",
+            "decision_coverage": "confirmed_decision_coverage",
+            "title_comparison": "recommended_titles",
+            "rolling_plan": "rolling_plan",
+        },
+        "story_arc": {
+            "arc_plan": "plan",
+            "chapter_count": "target_chapter_count",
+            "change_summary": "change_summary",
+        },
+        "chapter": {
+            "chapter_plan": "plan",
+            "chapter_draft": "draft",
+            "observations": "observations",
+            "canon_changes": "state_patch",
+        },
+    }
+    component = mappings[evaluation_input.candidate.kind].get(affected_area)
+    if component is None or component not in evaluation_input.component_fingerprints:
+        raise EvaluationValidationError(
+            "Evaluator selected a semantic area outside this candidate kind."
+        )
+    return component
 
 
-def _virtual_locator_is_scoped_to(locator: str, allowed_roots: set[str]) -> bool:
-    return any(
-        locator == root
-        or locator.startswith(f"{root}.")
-        or locator.startswith(f"{root}#")
-        for root in allowed_roots
+def _bind_evidence_locator(
+    evaluation_input: EvaluationInput,
+    evidence_hint: str,
+    *,
+    preferred_component: CandidateComponentName | None = None,
+) -> str:
+    """Materialize an internal locator from semantic evidence supplied by the model."""
+
+    if preferred_component is not None:
+        return f"candidate.{preferred_component}"
+
+    candidate_payload = evaluation_input.candidate.model_dump(mode="json")
+    candidate_matches: list[CandidateComponentName] = []
+    for component in evaluation_input.component_fingerprints:
+        value = candidate_payload.get(component)
+        if value is None:
+            continue
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        if resolve_semantic_evidence_quote(text, [evidence_hint]) is not None:
+            candidate_matches.append(component)
+    if len(candidate_matches) == 1:
+        return f"candidate.{candidate_matches[0]}"
+
+    committed_matches = [
+        item.locator
+        for item in evaluation_input.evidence
+        if resolve_semantic_evidence_quote(item.excerpt, [evidence_hint]) is not None
+    ]
+    if len(committed_matches) == 1:
+        return committed_matches[0]
+    return evaluation_input.candidate_artifact_id
+
+
+def _bind_upstream_blocker(
+    evaluation_input: EvaluationInput,
+    result: ModelEvaluationResult,
+) -> UpstreamBlockerProposal | None:
+    blocker = result.upstream_blocker
+    if blocker is None:
+        return None
+    role = evaluation_input.identity.role
+    if blocker.upper_scope == "story_arc_contract":
+        if role != "chapter":
+            raise EvaluationValidationError(
+                "Only a Chapter evaluation may escalate to a Story Arc contract."
+            )
+        owner = "story_arc"
+        state_locator = next(
+            (
+                item.locator
+                for item in evaluation_input.evidence
+                if item.locator.startswith("arcs/")
+                and item.locator.endswith("/state.json")
+            ),
+            None,
+        )
+        candidates = [
+            item
+            for item in evaluation_input.evidence
+            if item.locator.startswith("arcs/") and item.locator.endswith("/plan.md")
+        ]
+    else:
+        if role == "book":
+            raise EvaluationValidationError("Book evaluation cannot escalate to itself.")
+        owner = "book"
+        state_locator = "book/state.json"
+        candidates = [
+            item
+            for item in evaluation_input.evidence
+            if item.locator
+            in {
+                "book/direction.md",
+                "book/settings.md",
+                "book/outline.md",
+                "book/constraints.json",
+                "book/state.json",
+            }
+        ]
+    hints = [
+        blocker.evidence_hint,
+        blocker.contract_concern,
+        blocker.impossibility_reason,
+    ]
+    matched = [
+        item.locator
+        for item in candidates
+        if resolve_semantic_evidence_quote(item.excerpt, hints) is not None
+    ]
+    if len(matched) != 1:
+        raise EvaluationValidationError(
+            "Harness could not bind the upstream concern to one committed evidence source."
+        )
+    contract_revision = _contract_revision_from_evidence(
+        evaluation_input,
+        state_locator=state_locator,
     )
+    return UpstreamBlockerProposal(
+        owner=owner,
+        contract_field=blocker.contract_concern,
+        contract_revision=contract_revision,
+        committed_evidence_locator=matched[0],
+        impossibility_reason=blocker.impossibility_reason,
+    )
+
+
+def _contract_revision_from_evidence(
+    evaluation_input: EvaluationInput,
+    *,
+    state_locator: str | None,
+) -> int:
+    if state_locator is None:
+        raise EvaluationValidationError(
+            "Harness could not find the current upper-contract state evidence."
+        )
+    for item in evaluation_input.evidence:
+        if item.locator != state_locator:
+            continue
+        try:
+            payload = json.loads(item.excerpt)
+        except json.JSONDecodeError:
+            continue
+        revision = payload.get("version") if isinstance(payload, dict) else None
+        if isinstance(revision, int) and not isinstance(revision, bool) and revision >= 1:
+            return revision
+    raise EvaluationValidationError(
+        "Harness could not read the current upper-contract revision from approved state."
+    )
+
+
+def _semantic_evaluation_payload(
+    evaluation_input: EvaluationInput,
+) -> dict[str, object]:
+    last_issues = (
+        evaluation_input.review_history[-1].result.issues
+        if evaluation_input.review_history
+        else []
+    )
+    return {
+        "candidate_kind": evaluation_input.candidate.kind,
+        "evaluation_mode": evaluation_input.mode,
+        "candidate": semantic_model_value(
+            evaluation_input.candidate.model_dump(mode="json")
+        ),
+        "rubric": [
+            {"instruction": item.instruction}
+            for item in evaluation_input.rubric.dimensions
+        ],
+        "current_prior_issues": [
+            _semantic_issue_view(evaluation_input, issue) for issue in last_issues
+        ],
+        "complete_review_history": [
+            {
+                "outcome": entry.result.outcome,
+                "summary": entry.result.summary,
+                "issues": [
+                    _semantic_issue_view(evaluation_input, issue)
+                    for issue in entry.result.issues
+                ],
+                "rubric_checks": [
+                    {
+                        "status": check.status,
+                        "explanation": check.explanation,
+                    }
+                    for check in entry.result.rubric_checks
+                ],
+                "repair_brief": entry.result.repair_brief,
+            }
+            for entry in evaluation_input.review_history
+        ],
+        "approved_evidence": [
+            {"excerpt": semantic_model_text(item.excerpt)}
+            for item in evaluation_input.evidence
+        ],
+        "deterministic_prechecks": semantic_model_value(
+            evaluation_input.deterministic_prechecks
+        ),
+        "candidate_schema_invariants": _candidate_schema_invariants(evaluation_input),
+    }
+
+
+def _semantic_issue_view(
+    evaluation_input: EvaluationInput,
+    issue: EvaluationIssue,
+) -> dict[str, object]:
+    component = _issue_component(evaluation_input, issue)
+    return {
+        "category": issue.category,
+        "severity": issue.severity,
+        "affected_semantic_content": component or "candidate_as_a_whole",
+        "explanation": issue.explanation,
+    }
 
 
 def _evaluator_system_prompt() -> str:
     return (
-        "You are NovelPilot's stateless semantic Evaluator. The supplied object is the complete "
-        "evaluation context: a fixed typed candidate, an explicit versioned rubric, approved "
-        "evidence, and (during repair verification) the complete prior review history. Check "
-        "every rubric dimension exactly once. During repair verification, account for every "
-        "currently open prior issue exactly once as resolved or remaining; do not silently "
-        "erase it. Put only genuinely new findings in new_issues; the Harness assigns their "
-        "stable IDs. A new issue is allowed even when it concerns an unchanged "
-        "component, because the full history is present. Candidate component names are exactly "
-        "the keys of component_fingerprints in the supplied input. Candidate locators must "
-        "identify one typed component as candidate.<component> or optionally "
-        "candidate.<component>#<stable-item-id>; multiple blocking issues may "
-        "identify the same component. Evidence locators must use candidate.<component>, "
-        "deterministic_prechecks.<field>, or an approved evidence locator with an optional #field "
-        "fragment. For local_repair, repair_scope must list every candidate component needed to "
-        "fix current blocking issues and no unrelated component. Do not edit or propose mutation "
-        "of committed prose or canon. Treat candidate_schema_invariants as authoritative: never "
-        "request a repair whose stated result would violate a minimum, maximum, required field, "
-        "or revision relationship. If a semantic preference conflicts with a structural invariant, "
-        "evaluate a structurally valid representation instead of asking the Agent to break the "
-        "candidate schema. A committed_evidence_locator for cross-Loop escalation must "
-        "use approved committed evidence, never a virtual locator. Return exactly one schema-v2 "
-        "result. Use cross_loop_escalation only when an exact upper-contract field and revision "
-        "is impossible to satisfy alongside cited committed evidence; otherwise use local_repair."
+        "You are NovelPilot's stateless semantic Evaluator. Review the fixed candidate against "
+        "each rubric instruction in the supplied order. During repair verification, review each "
+        "currently open prior issue in the supplied order and mark its meaning resolved or "
+        "remaining; do not silently erase it. Put only genuinely new semantic findings in "
+        "new_issues. For every finding, choose the affected semantic area and describe evidence "
+        "in your own words. Never return or reconstruct IDs, revisions, paths, locators, "
+        "fingerprints, exact quote tokens, or mutation coordinates; Harness owns those bindings. "
+        "Do not edit committed prose or canon. Treat candidate_schema_invariants as authoritative. "
+        "Use cross_loop_escalation only when an upper semantic contract is genuinely impossible "
+        "to satisfy; otherwise use local_repair. Return only the native structured result."
     )
 
 

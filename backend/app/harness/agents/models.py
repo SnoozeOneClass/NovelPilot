@@ -334,12 +334,32 @@ class EvaluationRubricCheck(BaseModel):
     explanation: str = Field(min_length=1, max_length=4_000)
 
 
+class SemanticRubricCheck(BaseModel):
+    """Provider assessment bound to a rubric dimension by Harness list position."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["pass", "warning", "blocking"]
+    evidence_hint: str = Field(min_length=1, max_length=4_000)
+    explanation: str = Field(min_length=1, max_length=4_000)
+
+
 class PriorIssueCheck(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     issue_id: str = Field(min_length=1, max_length=128)
     status: Literal["resolved", "remaining"]
     evidence_locator: str = Field(min_length=1, max_length=1_000)
+    explanation: str = Field(min_length=1, max_length=4_000)
+
+
+class SemanticPriorIssueCheck(BaseModel):
+    """Provider assessment bound to one prior issue by Harness list position."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["resolved", "remaining"]
+    evidence_hint: str = Field(min_length=1, max_length=4_000)
     explanation: str = Field(min_length=1, max_length=4_000)
 
 
@@ -355,15 +375,31 @@ class EvaluationIssue(BaseModel):
     explanation: str = Field(min_length=1, max_length=4_000)
 
 
+AffectedSemanticArea = Literal[
+    "story_direction",
+    "story_constraints",
+    "decision_coverage",
+    "title_comparison",
+    "rolling_plan",
+    "arc_plan",
+    "chapter_count",
+    "change_summary",
+    "chapter_plan",
+    "chapter_draft",
+    "observations",
+    "canon_changes",
+]
+
+
 class NewEvaluationIssue(BaseModel):
-    """A provider finding whose stable identity is assigned by the Harness."""
+    """A semantic provider finding whose control bindings are assigned by Harness."""
 
     model_config = ConfigDict(extra="forbid")
 
     category: str = Field(min_length=1, max_length=128)
     severity: Literal["warning", "blocking"]
-    candidate_locator: str = Field(min_length=1, max_length=1_000)
-    evidence_locator: str = Field(min_length=1, max_length=1_000)
+    affected_area: AffectedSemanticArea
+    evidence_hint: str = Field(min_length=1, max_length=4_000)
     explanation: str = Field(min_length=1, max_length=4_000)
 
 
@@ -375,6 +411,14 @@ class EvaluationSignal(BaseModel):
     evidence_locator: str = Field(min_length=1, max_length=1_000)
 
 
+class SemanticEvaluationSignal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=128)
+    value: int | float | bool | str
+    evidence_hint: str = Field(min_length=1, max_length=4_000)
+
+
 class UpstreamBlockerProposal(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -382,6 +426,15 @@ class UpstreamBlockerProposal(BaseModel):
     contract_field: str = Field(min_length=1, max_length=1_000)
     contract_revision: int = Field(ge=1)
     committed_evidence_locator: str = Field(min_length=1, max_length=1_000)
+    impossibility_reason: str = Field(min_length=1, max_length=4_000)
+
+
+class SemanticUpstreamBlocker(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    upper_scope: Literal["book_contract", "story_arc_contract"]
+    contract_concern: str = Field(min_length=1, max_length=1_000)
+    evidence_hint: str = Field(min_length=1, max_length=4_000)
     impossibility_reason: str = Field(min_length=1, max_length=4_000)
 
 
@@ -420,17 +473,15 @@ class ModelEvaluationResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[2]
     outcome: Literal["pass", "local_repair", "cross_loop_escalation", "needs_user"]
     contract_satisfied: bool
     summary: str = Field(min_length=1, max_length=8_000)
-    rubric_checks: list[EvaluationRubricCheck] = Field(min_length=1, max_length=30)
-    prior_issue_checks: list[PriorIssueCheck] = Field(max_length=100)
+    rubric_checks: list[SemanticRubricCheck] = Field(min_length=1, max_length=30)
+    prior_issue_checks: list[SemanticPriorIssueCheck] = Field(max_length=100)
     new_issues: list[NewEvaluationIssue] = Field(max_length=100)
-    signals: list[EvaluationSignal] = Field(max_length=100)
+    signals: list[SemanticEvaluationSignal] = Field(max_length=100)
     repair_brief: str | None = Field(max_length=8_000)
-    repair_scope: list[CandidateComponentName] = Field(max_length=20)
-    upstream_blocker: UpstreamBlockerProposal | None
+    upstream_blocker: SemanticUpstreamBlocker | None
 
     @model_validator(mode="after")
     def validate_outcome_payload(self) -> "ModelEvaluationResult":

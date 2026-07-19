@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,6 @@ from app.api import projects as projects_api
 from app.api import setup as setup_api
 from app.core import config as core_config
 from app.core import paths as core_paths
-from app.harness import orchestrator as harness_orchestrator
 from app.harness.agents import evaluator as agent_evaluator
 from app.harness.agents import runtime as agent_runtime
 from app.llm.gateway import ChatRequest, ChatResult, ToolCall
@@ -34,7 +34,7 @@ def test_live_provider_smoke_runs_fixture_flow_and_restores_active_state(
 ) -> None:
     _isolate_runtime_paths(tmp_path, monkeypatch)
     monkeypatch.setattr(profiles_api, "call_llm", _capability_fixture_call_llm)
-    monkeypatch.setattr(agent_runtime, "call_llm", _fixture_agent_call_llm)
+    monkeypatch.setattr(agent_runtime, "call_llm", _live_fixture_agent_call_llm)
     monkeypatch.setattr(agent_evaluator, "call_llm", _fixture_agent_call_llm)
 
     previous_project = projects_api.create_project(
@@ -154,11 +154,6 @@ def test_live_provider_smoke_failure_reports_harness_context(
     monkeypatch.setattr(profiles_api, "call_llm", _capability_fixture_call_llm)
     monkeypatch.setattr(agent_runtime, "call_llm", _fixture_call_llm_with_bad_patch)
     monkeypatch.setattr(agent_evaluator, "call_llm", _fixture_agent_call_llm)
-    monkeypatch.setattr(
-        harness_orchestrator,
-        "_is_evidence_quote_repairable",
-        lambda _reasons: False,
-    )
     profile_storage.upsert_profile(
         LlmProfileUpsert(
             id="main",
@@ -181,11 +176,11 @@ def test_live_provider_smoke_failure_reports_harness_context(
     assert "missing=" in message
     assert "Inspect project:" in message
     assert "Last harness event: run_failed" in message
-    assert "State-patch evidence must quote exact substrings" in message
+    assert "no uniquely bindable support" in message
     assert report["status"] == "failed"
     assert report["failure"]["last_event"]["kind"] == "run_failed"
     assert report["failure"]["last_event"]["artifact_path"] is None
-    assert "State-patch evidence must quote exact substrings" in (
+    assert "no uniquely bindable support" in (
         report["failure"]["last_event"]["message"]
     )
     report_payload = json.dumps(report, ensure_ascii=False)
@@ -290,107 +285,21 @@ def _capability_fixture_call_llm(
     return _fixture_agent_call_llm(_profile, request)
 
 
-def _fixture_call_llm(_profile: object, request: ChatRequest) -> ChatResult:
-    action = str(request.metadata.get("atomic_action", "profile_test"))
-    content_by_action = {
-        "profile_test": "Profile works.",
-        "continue_book_discussion": json.dumps(
-            {
-                "reply": "The direction is concrete and remains open to further discussion.",
-                "direction_draft": _fixture_direction(),
-                "discussion_summary": "A fair near-future mystery about earned trust.",
-                "confirmed_decisions": ["Fair clues", "Earned trust", "Costly hope"],
-                "superseded_decisions": [],
-                "unresolved_questions": [],
-                "assumptions": [],
-                "contradictions": [],
-                "question": None,
-                "suggestions": [],
-                "ready_status": "ready",
-                "readiness_reason": "Stable direction and rolling freedoms are explicit.",
-            }
-        ),
-        "synthesize_book_direction": json.dumps(
-            {
-                "direction_markdown": _fixture_direction(),
-                "constraints": {
-                    "confirmed": ["Fair clues", "Earned trust", "Costly hope"],
-                    "must_preserve": ["Reveals change relationships."],
-                    "must_avoid": ["No arbitrary technology solution."],
-                    "creative_freedoms": ["Choose local arc routes from committed canon."],
-                    "open_decisions": ["The exact final loss remains open."],
-                },
-                "confirmed_decision_coverage": [
-                    {"decision": "Fair clues", "candidate_evidence": "visible clues"},
-                    {"decision": "Earned trust", "candidate_evidence": "earned trust"},
-                    {"decision": "Costly hope", "candidate_evidence": "hard-won hope"},
-                ],
-                "recommended_titles": [
-                    {"title": "Smoke Fixture", "rationale": "Names the smoke fixture."},
-                    {"title": "Hard-Won Hope", "rationale": "Centers the emotional promise."},
-                    {"title": "Visible Clues", "rationale": "Signals the fair mystery."},
-                ],
-                "rolling_plan_markdown": _fixture_rolling_contract(),
-            }
-        ),
-        "review_book_direction": json.dumps(
-            {
-                "summary": "The candidate preserves confirmed intent and rolling scope.",
-                "issues": [],
-                "signals": ["confirmed_decisions_preserved:passed", "rolling_scope:passed"],
-            }
-        ),
-        "plan_current_arc": json.dumps(
-            {
-                "plan_markdown": "# Arc 1\n\nA rolling first arc focused on earned trust.",
-                "target_chapter_count": 3,
-            }
-        ),
-        "generate_chapter_goal": (
-            "# Chapter Goal\n\nProve the protagonist can trust companions without breaking continuity."
-        ),
-        "draft_chapter": "The protagonist trusts companions after the trial.",
-        "extract_candidate_observations": (
-            '{"schema_version":1,"status":"candidate","based_on":"chapters/chapter-001/draft.md",'
-            '"events":[{"summary":"The protagonist chooses trust."}],'
-            '"character_changes":[{"id":"protagonist","belief":"trusts companions"}],'
-            '"relationship_changes":[],"world_fact_candidates":[],'
-            '"foreshadowing_candidates":[],"requires_commit":true}'
-        ),
-        "semantic_review": (
-            "# Review\n\nThe draft satisfies the chapter contract and keeps state changes explicit."
-        ),
-        "verify_chapter": (
-            '{"goal_satisfied":true,"commit_allowed":true,"routing_decision":"commit",'
-            '"signals":[{"name":"chapter_contract","status":"passed",'
-            '"evidence":"The trust shift is visible in the draft."}],'
-            '"reasons":[]}'
-        ),
-        "generate_candidate_state_patch": (
-            '{"schema_version":1,"status":"candidate","based_on":{},'
-            '"operations":[{"op":"upsert","target_file":"canon/characters.json",'
-            '"target_id":"protagonist","expected_version":1,'
-            '"value":{"belief":"trusts companions"},'
-            '"evidence":[{"file":"chapters/chapter-001/final.md",'
-            '"quote":"trusts companions"}],'
-            '"rationale":"The committed chapter states that the protagonist trusts companions."}]}'
-        ),
-    }
-    return ChatResult(
-        content=content_by_action.get(action, f"# {action}\n"),
-        model_snapshot="fixture-model",
-        provider_snapshot="openai-compatible",
-    )
-
-
 def _fixture_call_llm_with_bad_patch(_profile: object, request: ChatRequest) -> ChatResult:
-    result = _fixture_agent_call_llm(_profile, request)
+    result = _live_fixture_agent_call_llm(_profile, request)
     if result.tool_calls and result.tool_calls[0].name == "write_chapter_state_patch":
         call = result.tool_calls[0]
         arguments = dict(call.arguments)
         state_patch = dict(arguments["state_patch"])
         operations = [dict(item) for item in state_patch["operations"]]
-        operations[0]["evidence_quotes"] = ["quote absent from final prose"]
+        operations[0] = {
+            "change_kind": "establish",
+            "entity_kind": "world_fact",
+            "entity_name": "月球补给站",
+            "resulting_state": "月球补给站已经永久关闭。",
+            "evidence_hint": "月球补给站在陨石雨中永久关闭。",
+            "rationale": "陨石雨摧毁了月球补给站。",
+        }
         state_patch["operations"] = operations
         arguments["state_patch"] = state_patch
         bad_call = call.model_copy(
@@ -403,25 +312,30 @@ def _fixture_call_llm_with_bad_patch(_profile: object, request: ChatRequest) -> 
     return result
 
 
-def _fixture_direction() -> str:
-    return (
-        "# Book Direction\n\nThe novel is a grounded near-future coastal mystery about earned "
-        "trust. Every reveal must follow visible clues and alter a meaningful relationship, so plot "
-        "knowledge and emotional consequence advance together. The protagonist begins capable but "
-        "isolated, then gains agency through difficult alliances. Victories carry durable personal "
-        "costs while preserving hard-won hope. Technology remains limited, socially consequential, "
-        "and unable to erase earlier choices. Later antagonists, local conflicts, and the exact final "
-        "loss remain open for rolling planning from committed canon."
-    )
-
-
-def _fixture_rolling_contract() -> str:
-    return (
-        "# Rolling Story Arc Contract\n\nPlan only the current story arc from approved direction and "
-        "committed canon. Give it one mystery advance, one relationship change, and one test of "
-        "earned trust. After chapters commit, reconcile observations and state patches before "
-        "planning the next arc. Return to the book loop only when an approved highest-level decision "
-        "must change."
+def _live_fixture_agent_call_llm(
+    profile: object,
+    request: ChatRequest,
+) -> ChatResult:
+    result = _fixture_agent_call_llm(profile, request)
+    if not result.tool_calls or result.tool_calls[0].name != "submit_book_discussion_update":
+        return result
+    conversation = "\n".join(message.content for message in request.messages)
+    title_match = re.search(r"正式书名确定为《([^》]+)》", conversation)
+    if title_match is None:
+        return result
+    call = result.tool_calls[0]
+    arguments = {**call.arguments, "newly_selected_title": title_match.group(1)}
+    return result.model_copy(
+        update={
+            "tool_calls": [
+                call.model_copy(
+                    update={
+                        "arguments": arguments,
+                        "raw_arguments": json.dumps(arguments, ensure_ascii=False),
+                    }
+                )
+            ]
+        }
     )
 
 

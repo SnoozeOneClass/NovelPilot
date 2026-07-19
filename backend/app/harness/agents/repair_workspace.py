@@ -18,10 +18,11 @@ from app.harness.agents.models import (
     RepairContract,
     StoryArcCandidateSnapshot,
 )
-from app.harness.agents.evidence_matching import resolve_verbatim_evidence_quote
+from app.harness.agents.evidence_matching import resolve_semantic_evidence_quote
 from app.harness.agents.persistence import activation_relative, json_document
 from app.harness.agents.registry import ToolExecutionContext, ToolHandlerError
 from app.harness.agents.rubrics import changed_components, component_fingerprints
+from app.harness.agents.semantic_boundary import semantic_model_value
 from app.storage.json_files import read_json
 
 
@@ -108,28 +109,24 @@ def workspace_document(workspace: RepairWorkspace) -> str:
 
 
 def workspace_public_view(workspace: RepairWorkspace) -> dict[str, Any]:
-    structured_items = []
-    for handle in workspace.item_handles:
-        value = _item_value(workspace, handle)
-        if handle.component == "state_patch" and isinstance(value, dict):
-            value = deepcopy(value)
-            value.pop("expected_version", None)
-        structured_items.append(
-            {
-                "item_id": handle.item_id,
-                "component": handle.component,
-                "collection": handle.collection,
-                "value": value,
-            }
-        )
+    semantic_candidate = semantic_model_value(workspace.current_components)
     return {
-        "workspace_id": workspace.workspace_id,
         "candidate_kind": workspace.candidate_kind,
-        "source_candidate_revision": workspace.source_candidate_revision,
-        "next_candidate_revision": workspace.next_candidate_revision,
-        "structured_items": structured_items,
-        "mutations": [item.model_dump(mode="json") for item in workspace.mutations],
+        "current_candidate": semantic_candidate,
+        "instruction": (
+            "Select structured items by their current meaning. Harness owns every hidden "
+            "identity, revision, path, and exact evidence span."
+        ),
     }
+
+
+def workspace_item_value(
+    workspace: RepairWorkspace,
+    handle: RepairWorkspaceItem,
+) -> Any:
+    """Return one item for deterministic semantic selection inside the Harness."""
+
+    return _item_value(workspace, handle)
 
 
 def replace_text_component(
@@ -152,43 +149,6 @@ def replace_text_component(
             allowed_actions=["open_candidate_repair"],
         )
     return _replace_component(context, workspace, component, content.strip())
-
-
-def edit_text_component(
-    context: ToolExecutionContext,
-    workspace: RepairWorkspace,
-    *,
-    component: CandidateComponentName,
-    anchor: str,
-    replacement: str,
-) -> RepairWorkspace:
-    if workspace.candidate_kind != "chapter" or component not in {"plan", "draft"}:
-        raise ToolHandlerError(
-            "repair_component_not_editable_text",
-            "Exact-anchor editing is available only for Chapter plan or draft.",
-            recoverable=True,
-        )
-    current = workspace.current_components.get(component)
-    if not isinstance(current, str):
-        raise ToolHandlerError(
-            "repair_component_invalid",
-            "The selected text component is structurally invalid.",
-            recoverable=False,
-        )
-    occurrences = current.count(anchor)
-    if occurrences != 1:
-        raise ToolHandlerError(
-            "edit_anchor_not_unique",
-            f"Targeted edit anchor matched {occurrences} locations; exactly one is required.",
-            recoverable=True,
-            allowed_actions=["replace_candidate_text"],
-        )
-    return _replace_component(
-        context,
-        workspace,
-        component,
-        current.replace(anchor, replacement, 1),
-    )
 
 
 def set_story_arc_chapter_count(
@@ -374,7 +334,6 @@ def book_item_update_value(
                 "repair_book_authority_violation",
                 "A coverage repair cannot replace its Harness-confirmed decision text.",
                 recoverable=True,
-                content={"required_primary": decision},
                 allowed_actions=["open_candidate_repair"],
             )
     return _book_item_value(collection, primary, secondary)
@@ -394,10 +353,7 @@ def delete_structured_item(
     if minimum is not None and len(values) <= minimum:
         raise ToolHandlerError(
             "repair_collection_minimum_violation",
-            (
-                f"The {handle.component}.{handle.collection} collection must retain at least "
-                f"{minimum} items in every complete candidate."
-            ),
+            "This semantic collection must retain its required minimum item count.",
             recoverable=True,
             content={
                 "component": handle.component,
@@ -461,6 +417,7 @@ def finalize_repair_workspace(
             recoverable=False,
         )
     if workspace.candidate_kind == "chapter":
+        workspace = _bind_chapter_semantic_metadata(workspace)
         workspace = _bind_chapter_canon_versions(workspace)
     try:
         candidate = _snapshot_from_components(workspace)
@@ -485,10 +442,7 @@ def finalize_repair_workspace(
             },
             allowed_actions=["open_candidate_repair"],
         ) from exc
-    changed = changed_components(
-        contract.source_component_fingerprints,
-        component_fingerprints(candidate),
-    )
+    changed = _semantic_changed_components(source, candidate)
     if not changed:
         raise ToolHandlerError(
             "repair_workspace_no_changes",
@@ -568,6 +522,104 @@ def _bind_chapter_canon_versions(workspace: RepairWorkspace) -> RepairWorkspace:
     components = deepcopy(workspace.current_components)
     components["state_patch"] = normalized_patch
     return workspace.model_copy(update={"current_components": components})
+
+
+def _bind_chapter_semantic_metadata(workspace: RepairWorkspace) -> RepairWorkspace:
+    draft = workspace.current_components.get("draft")
+    observations = workspace.current_components.get("observations")
+    state_patch = workspace.current_components.get("state_patch")
+    if not isinstance(draft, str) or not isinstance(observations, dict):
+        raise ToolHandlerError(
+            "repair_chapter_semantic_source_invalid",
+            "Chapter repair requires valid draft and observation components.",
+            recoverable=True,
+        )
+    normalized_observations = deepcopy(observations)
+    for collection in (
+        "events",
+        "character_changes",
+        "relationship_changes",
+        "world_fact_candidates",
+        "foreshadowing_candidates",
+    ):
+        values = normalized_observations.get(collection, [])
+        if not isinstance(values, list):
+            continue
+        for index, value in enumerate(values):
+            if not isinstance(value, dict):
+                continue
+            summary = value.get("summary")
+            quote = resolve_semantic_evidence_quote(
+                draft,
+                [summary] if isinstance(summary, str) else [],
+            )
+            if quote is None:
+                raise ToolHandlerError(
+                    "candidate_observation_not_supported",
+                    "A repaired observation has no uniquely bindable support in the draft.",
+                    recoverable=True,
+                    content={"collection": collection, "semantic_index": index},
+                    allowed_actions=[
+                        "update_chapter_observation_repair",
+                        "replace_candidate_text",
+                    ],
+                )
+            value["evidence_quote"] = quote
+
+    normalized_patch = deepcopy(state_patch)
+    if isinstance(normalized_patch, dict):
+        operations = normalized_patch.get("operations")
+        if isinstance(operations, list):
+            for index, operation in enumerate(operations):
+                if not isinstance(operation, dict):
+                    continue
+                hints = [
+                    str(operation.get("rationale", "")),
+                    str(operation.get("target_id", "")),
+                    json.dumps(operation.get("value", {}), ensure_ascii=False),
+                ]
+                quote = resolve_semantic_evidence_quote(draft, hints)
+                if quote is None:
+                    raise ToolHandlerError(
+                        "candidate_canon_fact_not_supported",
+                        "A repaired canon change has no uniquely bindable draft support.",
+                        recoverable=True,
+                        content={"semantic_index": index},
+                        allowed_actions=[
+                            "update_state_patch_operation_repair",
+                            "replace_candidate_text",
+                        ],
+                    )
+                prior_evidence = operation.get("evidence")
+                evidence_file = ""
+                if isinstance(prior_evidence, list) and prior_evidence:
+                    first = prior_evidence[0]
+                    if isinstance(first, dict) and isinstance(first.get("file"), str):
+                        evidence_file = first["file"]
+                operation["evidence"] = [{"file": evidence_file, "quote": quote}]
+
+    components = deepcopy(workspace.current_components)
+    components["observations"] = normalized_observations
+    if isinstance(normalized_patch, dict):
+        components["state_patch"] = normalized_patch
+    return workspace.model_copy(update={"current_components": components})
+
+
+def _semantic_changed_components(
+    source: CandidateSnapshot,
+    candidate: CandidateSnapshot,
+) -> list[CandidateComponentName]:
+    try:
+        return changed_components(
+            component_fingerprints(source),
+            component_fingerprints(candidate),
+        )
+    except ValueError as exc:
+        raise ToolHandlerError(
+            "repair_component_set_mismatch",
+            "Repair candidate components do not match the source candidate kind.",
+            recoverable=False,
+        ) from exc
 
 
 def _replace_component(
@@ -1105,24 +1157,16 @@ def _validate_patch_evidence(draft: str, state_patch: dict[str, Any]) -> None:
             continue
         for evidence_index, item in enumerate(evidence):
             quote = item.get("quote") if isinstance(item, dict) else None
-            resolved_quote = (
-                resolve_verbatim_evidence_quote(draft, quote)
-                if isinstance(quote, str)
-                else None
-            )
-            if resolved_quote is None:
+            if not isinstance(quote, str) or quote not in draft:
                 rejected.append(
                     {
                         "operation_index": operation_index,
                         "evidence_index": evidence_index,
                     }
                 )
-            else:
-                item["quote"] = resolved_quote
     if rejected:
         raise ToolHandlerError(
             "candidate_patch_evidence_not_verbatim",
-            "State-patch evidence must quote exact substrings from the repaired draft.",
-            recoverable=True,
-            content={"rejected_evidence": rejected},
+            "Harness failed to bind exact state-patch evidence from semantic intent.",
+            recoverable=False,
         )

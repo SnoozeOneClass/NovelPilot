@@ -39,6 +39,7 @@ class ToolExecutionContext:
     expected_revision: int | None
     expected_candidate_revision: int | None = None
     repair_contract: RepairContract | None = None
+    control_data: dict[str, Any] = field(default_factory=dict)
     experiment_strategy: ExperimentHookStrategy | None = None
     allowed_tools: frozenset[str] | None = None
 

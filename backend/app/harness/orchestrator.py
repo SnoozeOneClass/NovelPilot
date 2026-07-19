@@ -12,11 +12,11 @@ from app.harness.agents.evaluator import evaluation_view_files
 from app.harness.agents.events import project_agent_event
 from app.harness.agents.loop_runners import (
     AgentControlCheckpoint,
+    bind_chapter_patch_evidence,
     recover_completed_chapter_agent,
     recover_completed_story_arc_agent,
     run_book_revision_agent,
     run_chapter_agent,
-    run_chapter_patch_evidence_repair_agent,
     run_story_arc_agent,
 )
 from app.harness.agents.models import AgentIdentity, EvaluationRecord
@@ -27,6 +27,7 @@ from app.harness.agents.persistence import (
 )
 from app.harness.agents.policy import ResolvedAgentPolicy, resolve_agent_policy
 from app.harness.agents.public_stream import ChapterDraftStreamProjector
+from app.harness.agents.semantic_boundary import semantic_model_value
 from app.harness.stream_progress import StreamProgressAccumulator
 from app.llm.gateway import ChatChunk, ChatMessage, ChatRequest, ChatResult, call_llm
 from app.llm.profiles import get_active_profile
@@ -245,7 +246,6 @@ class HarnessOrchestrator:
             return
         if (chapter_path / "state_patch_rejection.json").exists():
             self._repair_state_patch_evidence(
-                profile,
                 metadata,
                 chapter_id,
                 chapter_path,
@@ -325,8 +325,8 @@ class HarnessOrchestrator:
                     "chosen from the approved rolling contract and current pacing needs.",
                     f"Book settings:\n{settings}",
                     f"Approved rolling story arc contract:\n{rolling_contract}",
-                    f"Book state:\n{book_state}",
-                    f"Canon summary:\n{canon_summary}",
+                    f"Book state:\n{semantic_model_value(book_state)}",
+                    f"Canon summary:\n{semantic_model_value(canon_summary)}",
                     f"Book feedback memo:\n{book_feedback}",
                     feedback_block,
                 ]
@@ -932,7 +932,7 @@ class HarnessOrchestrator:
             if event.kind == "feedback_processed"
         ]
         processed_feedback.append((routing_decision, feedback))
-        summary = "; ".join(f"{route}: {text}" for route, text in processed_feedback[-5:])
+        summary = "; ".join(text for _route, text in processed_feedback[-5:])
         sources.append(
             ContextSource(
                 id="processed-user-feedback",
@@ -975,7 +975,7 @@ class HarnessOrchestrator:
         if not processed_feedback:
             return []
         summary = "; ".join(
-            f"{event.routing_decision}: {event.payload.get('feedback', '')}"
+            str(event.payload.get("feedback", ""))
             for event in processed_feedback[-5:]
         )
         return [
@@ -1012,6 +1012,7 @@ class HarnessOrchestrator:
                 "canon-"
                 + relative_path.removeprefix("canon/").removesuffix(".json").replace("_", "-")
             )
+            semantic_name = source_id.removeprefix("canon-").replace("-", " ")
             sources.append(
                 ContextSource(
                     id=source_id,
@@ -1019,7 +1020,7 @@ class HarnessOrchestrator:
                     version=version if isinstance(version, int) else None,
                     usage="summary",
                     included_fields=["version", "item_count"],
-                    summary=f"{relative_path} has {item_count} committed item(s).",
+                    summary=f"Committed {semantic_name}: {item_count} item(s).",
                 )
             )
         return sources
@@ -1045,7 +1046,7 @@ class HarnessOrchestrator:
             final_text = read_text_file(final_path)
             heading = _markdown_heading(final_text)
             summary = heading if heading else "committed final without Markdown heading"
-            summaries.append(f"{chapter_path.name} ({len(final_text)} chars): {summary}")
+            summaries.append(f"Prior chapter {prior_number}: {summary}")
 
         if not summaries:
             return []
@@ -1067,22 +1068,20 @@ class HarnessOrchestrator:
             return "Context snapshot could not be loaded; use other provided chapter inputs only."
 
         lines = [
-            f"Chapter: {snapshot.chapter_id}",
             f"Assembly rationale: {snapshot.assembly_rationale}",
-            "Included sources:",
+            "Included semantic sources:",
         ]
-        for source in snapshot.sources:
-            version = f", version={source.version}" if source.version is not None else ""
-            lines.append(f"- {source.id} [{source.usage}] path={source.path}{version}")
+        for index, source in enumerate(snapshot.sources, start=1):
+            lines.append(f"- Source {index} [{source.usage}]")
             if source.usage == "direct":
                 lines.append(_indent_block(self._direct_context_source_content(source)))
             elif source.summary:
                 lines.append(_indent_block(f"Summary: {source.summary}"))
 
         if snapshot.excluded:
-            lines.append("Excluded sources:")
+            lines.append("Excluded candidate material:")
             for exclusion in snapshot.excluded:
-                lines.append(f"- {exclusion.source}: {exclusion.reason}")
+                lines.append(f"- {exclusion.reason}")
         return "\n".join(lines)
 
     def _direct_context_source_content(self, source: ContextSource) -> str:
@@ -1103,7 +1102,11 @@ class HarnessOrchestrator:
                 if field in payload
             }
             if selected:
-                return json.dumps(selected, ensure_ascii=False, indent=2)
+                return json.dumps(
+                    semantic_model_value(selected),
+                    ensure_ascii=False,
+                    indent=2,
+                )
             return "[no selected fields present]"
         return read_text_file(path).strip() or "[empty context source]"
 
@@ -1119,7 +1122,6 @@ class HarnessOrchestrator:
         lines = [
             "- "
             + str(event.payload.get("feedback", "")).strip()
-            + f" [route: {event.routing_decision}]"
             for event in processed_feedback[-5:]
             if str(event.payload.get("feedback", "")).strip()
         ]
@@ -1178,7 +1180,7 @@ class HarnessOrchestrator:
         policy = self._resolve_agent_policy(metadata, "chapter", profile)
         instruction = "\n\n".join(
             [
-                f"Create the complete candidate transaction for {chapter_id}.",
+                "Create the complete candidate transaction for the current chapter.",
                 "The draft should be visible chapter prose, while observations and state patch "
                 "remain candidate-only until Harness promotion.",
                 "Assembled context snapshot:\n"
@@ -1888,15 +1890,10 @@ class HarnessOrchestrator:
         )
         revision_request = json.dumps(
             {
-                "route_id": route_id,
                 "lower_loop": loop_layer,
-                "source_artifact": source_artifact,
                 "summary": proposal.get("summary"),
-                "contract_field": proposal.get("contract_field"),
-                "contract_revision": proposal.get("contract_revision"),
-                "committed_evidence_locator": proposal.get(
-                    "committed_evidence_locator"
-                ),
+                "contract_concern": proposal.get("contract_field"),
+                "semantic_evidence": proposal.get("evidence"),
                 "impossibility_reason": proposal.get("impossibility_reason"),
             },
             ensure_ascii=False,
@@ -2056,15 +2053,10 @@ class HarnessOrchestrator:
             str(proposal["impossibility_reason"]),
         ]
         revision_request = {
-            "route_id": route_id,
             "source_loop": loop_layer,
-            "source_artifact": source_artifact,
             "summary": proposal.get("summary"),
-            "contract_field": proposal.get("contract_field"),
-            "contract_revision": proposal.get("contract_revision"),
-            "committed_evidence_locator": proposal.get(
-                "committed_evidence_locator"
-            ),
+            "contract_concern": proposal.get("contract_field"),
+            "semantic_evidence": proposal.get("evidence"),
             "impossibility_reason": proposal.get("impossibility_reason"),
             "immutable_history_rule": (
                 "Committed prose and canon cannot be rewritten; revise only future or "
@@ -2800,7 +2792,6 @@ class HarnessOrchestrator:
 
     def _repair_state_patch_evidence(
         self,
-        profile: LlmProfile,
         metadata: ProjectMetadata,
         chapter_id: str,
         chapter_path: Path,
@@ -2831,64 +2822,19 @@ class HarnessOrchestrator:
         self._emit_started(
             metadata,
             "repair_state_patch_evidence",
-            f"Repairing rejected state-patch evidence for {chapter_id}.",
+            f"Harness is rebinding rejected state-patch evidence for {chapter_id}.",
         )
-        policy = self._resolve_agent_policy(metadata, "chapter", profile)
-        instruction = json.dumps(
-            {
-                "chapter_id": chapter_id,
-                "final_markdown": _read_text(chapter_path / "final.md"),
-                "candidate_state_patch": read_json(
-                    chapter_path / "candidate_state_patch.json"
-                ),
-                "rejection_reasons": reasons,
-            },
-            ensure_ascii=False,
-        )
-        stream_callback = self._agent_stream_callback(
-            metadata,
-            "chapter",
-            "repair_state_patch_evidence",
-        )
-        prior_state = read_agent_state(
+        repair = bind_chapter_patch_evidence(
             self.context.project_path,
-            AgentIdentity(
-                project_id=metadata.project_id,
-                role="chapter",
-                scope_id=chapter_id,
+            metadata,
+            chapter_id=chapter_id,
+            expected_revision=attempts,
+            on_event=self._agent_event_callback(
+                metadata,
+                "chapter",
+                "repair_state_patch_evidence",
             ),
         )
-        resume_candidate_run_id = (
-            prior_state.candidate_run_id
-            if prior_state.lifecycle == "failed"
-            and prior_state.phase == "state_patch_repair"
-            else None
-        )
-        try:
-            repair = run_chapter_patch_evidence_repair_agent(
-                self.context.project_path,
-                metadata,
-                policy,
-                chapter_id=chapter_id,
-                expected_revision=attempts,
-                instruction=instruction,
-                candidate_run_id=resume_candidate_run_id,
-                on_event=self._agent_event_callback(
-                    metadata,
-                    "chapter",
-                    "repair_state_patch_evidence",
-                ),
-                on_text_delta=stream_callback,
-                on_tool_event=stream_callback,
-            )
-        except AgentControlCheckpoint as checkpoint:
-            self._handle_agent_control_checkpoint(
-                metadata,
-                checkpoint,
-                loop_layer="chapter",
-                action="repair_state_patch_evidence",
-            )
-            return
 
         attempt_number = attempts + 1
         state = {

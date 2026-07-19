@@ -16,8 +16,6 @@ from app.harness.agents.models import (
     EvaluationEvidence,
     EvaluationHistoryEntry,
     EvaluationInput,
-    EvaluationIssue,
-    EvaluationResult,
     RepairContract,
 )
 from app.harness.agents.rubrics import component_fingerprints, resolve_rubric
@@ -26,41 +24,111 @@ from app.schemas.profiles import LlmProfile
 from app.storage.json_files import read_json
 
 
-def test_evaluator_uses_native_schema_and_persists_one_source_for_both_views(
-    tmp_path,
-) -> None:
+def test_evaluator_provider_boundary_contains_only_semantic_context_and_schema() -> None:
     captured = {}
+    evaluation_input = _book_input().model_copy(
+        update={
+            "evidence": [
+                *_book_input().evidence,
+                EvaluationEvidence(
+                    locator="book/state.json",
+                    excerpt=json.dumps(
+                        {
+                            "schema_version": 1,
+                            "version": 7,
+                            "book_direction_version": 3,
+                            "confirmed_decisions": ["Keep clues fair."],
+                        }
+                    ),
+                ),
+            ],
+            "deterministic_prechecks": {
+                "direction_version": 3,
+                "has_direction": True,
+            },
+        }
+    )
 
     def fake_call(_profile, request):
         captured["request"] = request
-        return ChatResult(
-            content='{"schema_version":1,"outcome":"pass"}',
-            structured_output=_provider_payload(
-                outcome="pass",
-                contract_satisfied=True,
-                summary="候选满足本轮契约。",
-                signals=[
+        return _result(_provider_payload(summary="The candidate passes."))
+
+    evaluate_candidate(_profile(), evaluation_input, evaluator_call=fake_call)
+    request = captured["request"]
+    payload = json.loads(request.messages[1].content)
+    serialized_payload = json.dumps(payload, ensure_ascii=False)
+    assert payload["approved_evidence"][0] == {
+        "excerpt": "The approved discussion requires a coherent direction."
+    }
+    assert "Keep clues fair." in payload["approved_evidence"][1]["excerpt"]
+    assert "candidate_revision" not in serialized_payload
+    assert "candidate_artifact_id" not in serialized_payload
+    assert "component_fingerprints" not in serialized_payload
+    assert "evaluation_id" not in serialized_payload
+    assert "book/candidate/direction.md" not in serialized_payload
+    assert "book:direction:r1" not in serialized_payload
+    assert '"version": 7' not in serialized_payload
+    assert "book_direction_version" not in serialized_payload
+    assert "direction_version" not in serialized_payload
+    assert payload["deterministic_prechecks"] == {"has_direction": True}
+
+    property_names: set[str] = set()
+
+    def collect(value: object) -> None:
+        if isinstance(value, dict):
+            properties = value.get("properties")
+            if isinstance(properties, dict):
+                property_names.update(properties)
+            for child in value.values():
+                collect(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child)
+
+    collect(request.response_schema.json_schema)
+    assert not property_names.intersection(
+        {
+            "schema_version",
+            "dimension_id",
+            "issue_id",
+            "candidate_locator",
+            "evidence_locator",
+            "repair_scope",
+            "contract_revision",
+            "committed_evidence_locator",
+        }
+    )
+
+
+def test_evaluator_binds_semantic_issue_to_internal_scope_and_persists_views(
+    tmp_path,
+) -> None:
+    record = evaluate_candidate(
+        _profile(),
+        _book_input(),
+        evaluator_call=lambda _profile, _request: _result(
+            _provider_payload(
+                outcome="local_repair",
+                contract_satisfied=False,
+                summary="The reader promise needs one repair.",
+                new_issues=[
                     {
-                        "name": "contract_alignment",
-                        "value": True,
-                        "evidence_locator": "book:direction:r1",
+                        "category": "reader_promise",
+                        "severity": "blocking",
+                        "affected_area": "story_direction",
+                        "evidence_hint": "The direction is coherent but not concrete.",
+                        "explanation": "State the central reader promise concretely.",
                     }
                 ],
-            ),
-            model_snapshot="judge-model",
-            provider_snapshot="openai-compatible",
-        )
+                repair_brief="Clarify the central reader promise.",
+            )
+        ),
+    )
 
-    record = evaluate_candidate(_profile(), _input(), evaluator_call=fake_call)
-    request = captured["request"]
-    assert request.execution_mode == "structured_result"
-    assert request.tools == []
-    evaluation_payload = json.loads(request.messages[1].content)
-    title_invariants = evaluation_payload["candidate_schema_invariants"][
-        "recommended_titles"
-    ]
-    assert title_invariants["min_items"] == 3
-    assert "do not by themselves reopen" in title_invariants["interpretation"]
+    assert record.result.repair_scope == ["direction"]
+    assert record.result.issues[0].candidate_locator == "candidate.direction"
+    assert record.result.issues[0].evidence_locator == "candidate.direction"
+    assert record.result.issues[0].issue_id is not None
     persist_evaluation_views(
         tmp_path,
         record,
@@ -68,198 +136,42 @@ def test_evaluator_uses_native_schema_and_persists_one_source_for_both_views(
         review_path="book/candidate/review.md",
         verification_path="book/candidate/verification.json",
     )
-
-    evaluation = read_json(tmp_path / "book" / "candidate" / "evaluation.json")
-    verification = read_json(tmp_path / "book" / "candidate" / "verification.json")
-    review = (tmp_path / "book" / "candidate" / "review.md").read_text(encoding="utf-8")
+    evaluation = read_json(tmp_path / "book/candidate/evaluation.json")
+    verification = read_json(tmp_path / "book/candidate/verification.json")
     assert evaluation["evaluation_id"] == verification["evaluation_id"]
-    assert verification["commit_allowed"] is True
-    assert "候选满足本轮契约" in review
+    assert verification["commit_allowed"] is False
 
 
-def test_evaluator_rejects_evidence_outside_approved_bundle() -> None:
-    def fake_call(_profile, _request):
-        return ChatResult(
-            content="{}",
-            structured_output=_provider_payload(
-                outcome="local_repair",
-                contract_satisfied=False,
-                summary="存在冲突。",
-                new_issues=[
-                    {
-                        "category": "continuity",
-                        "severity": "blocking",
-                        "candidate_locator": "candidate:paragraph-2",
-                        "evidence_locator": "invented:evidence",
-                        "explanation": "与证据冲突。",
-                    }
-                ],
-                repair_brief="修改当前候选，不要改动已提交内容。",
-                repair_scope=["direction"],
-            ),
-            model_snapshot="judge-model",
-            provider_snapshot="openai-compatible",
-        )
-
-    try:
-        evaluate_candidate(_profile(), _input(), evaluator_call=fake_call)
-    except EvaluationValidationError as exc:
-        assert "outside the approved bundle" in str(exc)
-    else:
-        raise AssertionError("Evaluator accepted an invented evidence locator.")
-
-
-def test_evaluator_accepts_candidate_and_evidence_field_locators() -> None:
-    def fake_call(_profile, _request):
-        return ChatResult(
-            content="{}",
-            structured_output=_provider_payload(
-                outcome="local_repair",
-                contract_satisfied=False,
-                summary="The candidate needs one local repair.",
-                new_issues=[
-                    {
-                        "category": "coverage",
-                        "severity": "blocking",
-                        "candidate_locator": "candidate.direction",
-                        "evidence_locator": "deterministic_prechecks.coverage_count",
-                        "explanation": "The candidate omits a confirmed decision.",
-                    }
-                ],
-                signals=[
-                    {
-                        "name": "decision_coverage",
-                        "value": False,
-                        "evidence_locator": "book:direction:r1#confirmed_decisions",
-                    }
-                ],
-                repair_brief="Cover the missing confirmed decision.",
-                repair_scope=["direction"],
-            ),
-            model_snapshot="judge-model",
-            provider_snapshot="openai-compatible",
-        )
-
-    record = evaluate_candidate(_profile(), _input(), evaluator_call=fake_call)
-
-    assert record.result.outcome == "local_repair"
-
-
-def test_evaluator_accepts_multiple_blocking_issues_for_one_component() -> None:
-    record = evaluate_candidate(
-        _profile(),
-        _input(),
-        evaluator_call=lambda _profile, _request: ChatResult(
-            content="{}",
-            structured_output=_provider_payload(
-                outcome="local_repair",
-                contract_satisfied=False,
-                summary="The direction has two independent local defects.",
-                new_issues=[
-                    {
-                        "category": "reader_promise",
-                        "severity": "blocking",
-                        "candidate_locator": "candidate.direction",
-                        "evidence_locator": "candidate.direction",
-                        "explanation": "The reader promise is not concrete enough.",
-                    },
-                    {
-                        "category": "structure",
-                        "severity": "blocking",
-                        "candidate_locator": "candidate.direction",
-                        "evidence_locator": "candidate.direction",
-                        "explanation": "The long-form escalation is not yet visible.",
-                    },
-                ],
-                repair_brief="Repair both direction defects.",
-                repair_scope=["direction"],
-            ),
-            model_snapshot="judge-model",
-            provider_snapshot="openai-compatible",
-        ),
-        max_validation_repairs=0,
-    )
-
-    assert record.result.outcome == "local_repair"
-    assert record.result.repair_scope == ["direction"]
-    assert len(record.result.issues) == 2
-    assert len({issue.issue_id for issue in record.result.issues}) == 2
-
-
-def test_evaluator_rejects_one_unmapped_blocking_issue() -> None:
+def test_evaluator_rejects_semantic_area_from_another_candidate_kind() -> None:
     with pytest.raises(
         EvaluationValidationError,
-        match="Every blocking local issue must identify one candidate component",
+        match="semantic area outside this candidate kind",
     ):
         evaluate_candidate(
             _profile(),
-            _input(),
-            evaluator_call=lambda _profile, _request: ChatResult(
-                content="{}",
-                structured_output=_provider_payload(
+            _book_input(),
+            evaluator_call=lambda _profile, _request: _result(
+                _provider_payload(
                     outcome="local_repair",
                     contract_satisfied=False,
-                    summary="One issue has no typed candidate component.",
+                    summary="An invalid semantic area was selected.",
                     new_issues=[
                         {
-                            "category": "reader_promise",
+                            "category": "prose",
                             "severity": "blocking",
-                            "candidate_locator": "candidate.unknown_component",
-                            "evidence_locator": "candidate.direction",
-                            "explanation": "The locator is invalid.",
+                            "affected_area": "chapter_draft",
+                            "evidence_hint": "The prose is unclear.",
+                            "explanation": "This area does not belong to a Book candidate.",
                         }
                     ],
-                    repair_brief="Repair the direction.",
-                    repair_scope=["direction"],
-                ),
-                model_snapshot="judge-model",
-                provider_snapshot="openai-compatible",
+                    repair_brief="Repair the prose.",
+                )
             ),
             max_validation_repairs=0,
         )
 
 
-def test_evaluator_rejects_repair_scope_missing_a_mapped_component() -> None:
-    with pytest.raises(
-        EvaluationValidationError,
-        match="Repair scope does not cover every blocking issue locator",
-    ):
-        evaluate_candidate(
-            _profile(),
-            _input(),
-            evaluator_call=lambda _profile, _request: ChatResult(
-                content="{}",
-                structured_output=_provider_payload(
-                    outcome="local_repair",
-                    contract_satisfied=False,
-                    summary="Two components require repair.",
-                    new_issues=[
-                        {
-                            "category": "reader_promise",
-                            "severity": "blocking",
-                            "candidate_locator": "candidate.direction",
-                            "evidence_locator": "candidate.direction",
-                            "explanation": "The direction needs repair.",
-                        },
-                        {
-                            "category": "constraints",
-                            "severity": "blocking",
-                            "candidate_locator": "candidate.constraints",
-                            "evidence_locator": "candidate.constraints",
-                            "explanation": "The constraints need repair.",
-                        },
-                    ],
-                    repair_brief="Repair the direction and constraints.",
-                    repair_scope=["direction"],
-                ),
-                model_snapshot="judge-model",
-                provider_snapshot="openai-compatible",
-            ),
-            max_validation_repairs=0,
-        )
-
-
-def test_evaluator_repairs_one_invalid_locator_with_fixed_input() -> None:
+def test_evaluator_validation_repair_never_teaches_exact_control_protocol() -> None:
     calls = []
 
     def fake_call(_profile, request):
@@ -268,183 +180,57 @@ def test_evaluator_repairs_one_invalid_locator_with_fixed_input() -> None:
             payload = _provider_payload(
                 outcome="local_repair",
                 contract_satisfied=False,
-                summary="One citation is malformed.",
+                summary="The first output includes a forbidden control field.",
                 new_issues=[
                     {
                         "category": "coverage",
                         "severity": "blocking",
-                        "candidate_locator": "book/candidate/direction-typo.md#body",
-                        "evidence_locator": "book:direction:r1",
-                        "explanation": "The candidate needs a local correction.",
+                        "affected_area": "story_direction",
+                        "evidence_hint": "The direction omits the promise.",
+                        "explanation": "The promise is missing.",
+                        "candidate_locator": "candidate.direction",
                     }
                 ],
-                repair_brief="Cover the missing decision.",
-                repair_scope=["direction"],
+                repair_brief="Cover the promise.",
             )
         else:
-            payload = _provider_payload(
-                outcome="pass",
-                contract_satisfied=True,
-                summary="The fixed candidate passes.",
-            )
-        return ChatResult(
-            content="{}",
-            structured_output=payload,
-            usage={
-                "prompt_tokens": 100 + len(calls),
-                "completion_tokens": 20,
-                "cached_tokens": 50,
-                "total_tokens": 120 + len(calls),
-            },
-            model_snapshot="judge-model",
-            provider_snapshot="openai-compatible",
-        )
+            payload = _provider_payload(summary="The corrected result passes.")
+        return _result(payload)
 
-    record = evaluate_candidate(_profile(), _input(), evaluator_call=fake_call)
+    record = evaluate_candidate(_profile(), _book_input(), evaluator_call=fake_call)
 
     assert record.result.outcome == "pass"
     assert len(calls) == 2
-    assert record.telemetry is not None
-    assert record.telemetry.calls == 2
-    assert record.telemetry.validation_repairs == 1
-    assert record.telemetry.usage == {
-        "prompt_tokens": 203,
-        "completion_tokens": 40,
-        "cached_tokens": 100,
-        "total_tokens": 243,
-    }
     repair_context = json.loads(calls[1].messages[-1].content)
-    assert repair_context["allowed_candidate_components"] == [
-        "confirmed_decision_coverage",
-        "constraints",
-        "direction",
-        "recommended_titles",
-        "rolling_plan",
-    ]
-    assert repair_context["allowed_candidate_locators"] == [
-        "candidate.confirmed_decision_coverage",
-        "candidate.constraints",
-        "candidate.direction",
-        "candidate.recommended_titles",
-        "candidate.rolling_plan",
-        "candidate.confirmed_decision_coverage#<stable-item-id>",
-        "candidate.constraints#<stable-item-id>",
-        "candidate.direction#<stable-item-id>",
-        "candidate.recommended_titles#<stable-item-id>",
-        "candidate.rolling_plan#<stable-item-id>",
-        "candidate_artifact_id#confirmed_decision_coverage",
-        "candidate_artifact_id#constraints",
-        "candidate_artifact_id#direction",
-        "candidate_artifact_id#recommended_titles",
-        "candidate_artifact_id#rolling_plan",
-    ]
-    assert repair_context["allowed_candidate_artifact_locators"] == [
-        "book/candidate/direction.md#confirmed_decision_coverage",
-        "book/candidate/direction.md#constraints",
-        "book/candidate/direction.md#direction",
-        "book/candidate/direction.md#recommended_titles",
-        "book/candidate/direction.md#rolling_plan",
-    ]
-    assert calls[0].messages[1].content == calls[1].messages[1].content
-
-
-def test_evaluator_validation_repair_lists_chapter_component_contract() -> None:
-    calls = []
-
-    def fake_call(_profile, request):
-        calls.append(request)
-        payload = (
-            _provider_payload(
-                outcome="local_repair",
-                contract_satisfied=False,
-                summary="The Chapter issue uses an invalid component locator.",
-                new_issues=[
-                    {
-                        "category": "prose",
-                        "severity": "blocking",
-                        "candidate_locator": "candidate.chapter_body",
-                        "evidence_locator": "candidate.draft",
-                        "explanation": "The candidate locator must name a typed component.",
-                    }
-                ],
-                repair_brief="Repair the Chapter draft.",
-                repair_scope=["draft"],
-                candidate_kind="chapter",
-                rubric_evidence_locator="arcs/arc-001/plan.md",
-            )
-            if len(calls) == 1
-            else _provider_payload(
-                outcome="pass",
-                contract_satisfied=True,
-                summary="The Chapter candidate passes.",
-                candidate_kind="chapter",
-                rubric_evidence_locator="arcs/arc-001/plan.md",
-            )
-        )
-        return ChatResult(
-            content="{}",
-            structured_output=payload,
-            model_snapshot="judge-model",
-            provider_snapshot="openai-compatible",
-        )
-
-    record = evaluate_candidate(
-        _profile(),
-        _chapter_input(),
-        evaluator_call=fake_call,
-    )
-
-    assert record.result.outcome == "pass"
-    repair_context = json.loads(calls[1].messages[-1].content)
-    assert repair_context["allowed_candidate_components"] == [
-        "draft",
-        "observations",
-        "plan",
-        "state_patch",
-    ]
-    assert repair_context["allowed_candidate_locators"] == [
-        "candidate.draft",
-        "candidate.observations",
-        "candidate.plan",
-        "candidate.state_patch",
-        "candidate.draft#<stable-item-id>",
-        "candidate.observations#<stable-item-id>",
-        "candidate.plan#<stable-item-id>",
-        "candidate.state_patch#<stable-item-id>",
-        "candidate_artifact_id#draft",
-        "candidate_artifact_id#observations",
-        "candidate_artifact_id#plan",
-        "candidate_artifact_id#state_patch",
-    ]
-    assert "component_fingerprints" in calls[0].messages[0].content
-    assert "multiple blocking issues may identify the same component" in (
-        calls[0].messages[0].content
+    serialized = json.dumps(repair_context, ensure_ascii=False)
+    assert "allowed_candidate_locators" not in serialized
+    assert "allowed_evidence_locator_roots" not in serialized
+    assert "candidate_artifact_id" not in serialized
+    assert "component_fingerprints" not in serialized
+    assert repair_context["semantic_evaluation_context"] == json.loads(
+        calls[0].messages[1].content
     )
 
 
-def test_evaluator_rejects_text_json_when_native_structured_output_is_missing() -> None:
-    def fake_call(_profile, _request):
-        return ChatResult(
-            content=(
-                '{"schema_version":1,"outcome":"pass","contract_satisfied":true,'
-                '"summary":"looks valid","issues":[],"signals":[],'
-                '"repair_brief":null,"upstream_blocker":null}'
+def test_evaluator_rejects_text_json_without_native_structured_output() -> None:
+    with pytest.raises(
+        EvaluationValidationError,
+        match="missing native Structured Output",
+    ):
+        evaluate_candidate(
+            _profile(),
+            _book_input(),
+            evaluator_call=lambda _profile, _request: ChatResult(
+                content='{"outcome":"pass"}',
+                structured_output=None,
+                model_snapshot="judge-model",
+                provider_snapshot="openai-compatible",
             ),
-            structured_output=None,
-            model_snapshot="judge-model",
-            provider_snapshot="openai-compatible",
+            max_validation_repairs=0,
         )
 
-    try:
-        evaluate_candidate(_profile(), _input(), evaluator_call=fake_call)
-    except EvaluationValidationError as exc:
-        assert "missing native Structured Output" in str(exc)
-        assert "fallbacks are not supported" in str(exc)
-    else:
-        raise AssertionError("Evaluator accepted prompt-parsed JSON fallback output.")
 
-
-def test_evaluator_retries_a_transient_provider_failure_before_validation() -> None:
+def test_evaluator_retries_transient_transport_failure() -> None:
     calls = 0
     retries: list[tuple[int, int]] = []
 
@@ -456,93 +242,67 @@ def test_evaluator_retries_a_transient_provider_failure_before_validation() -> N
                 "OpenAI-compatible provider request failed: "
                 "[SSL: UNEXPECTED_EOF_WHILE_READING]"
             )
-        return ChatResult(
-            content="{}",
-            structured_output=_provider_payload(
-                outcome="pass",
-                contract_satisfied=True,
-                summary="The candidate passes.",
-            ),
-            model_snapshot="judge-model",
-            provider_snapshot="openai-compatible",
-        )
+        return _result(_provider_payload(summary="The candidate passes."))
 
     record = evaluate_candidate(
         _profile(),
-        _input(),
+        _book_input(),
         evaluator_call=fake_call,
         transport_retry_limit=2,
         on_transport_retry=lambda retry, limit, _exc: retries.append((retry, limit)),
     )
-
     assert record.result.outcome == "pass"
     assert calls == 2
     assert retries == [(1, 2)]
 
 
-def test_evaluation_fingerprint_binds_candidate_input_and_profile() -> None:
-    def passing_call(_profile, _request):
-        return ChatResult(
-            content="{}",
-            structured_output=_provider_payload(
-                outcome="pass",
-                contract_satisfied=True,
-                summary="The candidate passes.",
-            ),
-            model_snapshot="judge-model",
-            provider_snapshot="openai-compatible",
-        )
-
-    first = evaluate_candidate(_profile(), _input(), evaluator_call=passing_call)
+def test_evaluation_fingerprint_still_binds_internal_candidate_and_profile() -> None:
+    passing = lambda _profile, _request: _result(  # noqa: E731
+        _provider_payload(summary="The candidate passes.")
+    )
+    first = evaluate_candidate(_profile(), _book_input(), evaluator_call=passing)
     second = evaluate_candidate(
         _profile(),
-        _input().model_copy(update={"candidate_revision": 2}),
-        evaluator_call=passing_call,
+        _book_input().model_copy(update={"candidate_revision": 2}),
+        evaluator_call=passing,
     )
     third = evaluate_candidate(
         _profile().model_copy(update={"model": "judge-model-v2"}),
-        _input(),
-        evaluator_call=passing_call,
+        _book_input(),
+        evaluator_call=passing,
     )
-
-    assert first.input_fingerprint
     assert first.input_fingerprint != second.input_fingerprint
     assert first.input_fingerprint != third.input_fingerprint
 
 
-def test_repair_verification_carries_history_and_marks_late_discovery() -> None:
-    first_input = _input()
+def test_repair_verification_binds_prior_issues_by_order_and_records_late_findings() -> None:
+    first_input = _book_input()
     first = evaluate_candidate(
         _profile(),
         first_input,
-        evaluator_call=lambda _profile, _request: ChatResult(
-            content="{}",
-            structured_output=_provider_payload(
+        evaluator_call=lambda _profile, _request: _result(
+            _provider_payload(
                 outcome="local_repair",
                 contract_satisfied=False,
-                summary="The constraints need repair.",
+                summary="The constraints conflict.",
                 new_issues=[
                     {
                         "category": "constraints",
                         "severity": "blocking",
-                        "candidate_locator": "candidate.constraints",
-                        "evidence_locator": "candidate.constraints",
-                        "explanation": "One constraint conflicts with the direction.",
+                        "affected_area": "story_constraints",
+                        "evidence_hint": "The constraints conflict with the direction.",
+                        "explanation": "Remove the contradiction.",
                     }
                 ],
-                repair_brief="Repair the conflicting constraint.",
-                repair_scope=["constraints"],
-            ),
-            model_snapshot="judge-model",
-            provider_snapshot="openai-compatible",
+                repair_brief="Repair the constraints.",
+            )
         ),
     )
     prior_issue_id = first.result.issues[0].issue_id
     assert prior_issue_id is not None
     repaired_candidate = first_input.candidate.model_copy(
-        update={"constraints": {"confirmed": ["The conflict is repaired."]}}
+        update={"constraints": {"must_avoid": ["No contradiction."]}}
     )
-    repaired_fingerprints = component_fingerprints(repaired_candidate)
     contract = RepairContract(
         evaluation_id=first.evaluation_id,
         source_activation_id="activation-1",
@@ -550,7 +310,7 @@ def test_repair_verification_carries_history_and_marks_late_discovery() -> None:
         source_candidate_revision=1,
         next_candidate_revision=2,
         open_issue_ids=[prior_issue_id],
-        repair_brief="Repair the conflicting constraint.",
+        repair_brief="Repair the constraints.",
         allowed_components=["constraints"],
         source_component_fingerprints=first_input.component_fingerprints,
     )
@@ -562,7 +322,7 @@ def test_repair_verification_carries_history_and_marks_late_discovery() -> None:
         candidate_revision=2,
         mode="repair_verification",
         candidate=repaired_candidate,
-        component_fingerprints=repaired_fingerprints,
+        component_fingerprints=component_fingerprints(repaired_candidate),
         evidence=first_input.evidence,
         deterministic_prechecks=first_input.deterministic_prechecks,
         rubric=first_input.rubric,
@@ -580,17 +340,15 @@ def test_repair_verification_carries_history_and_marks_late_discovery() -> None:
     second = evaluate_candidate(
         _profile(),
         second_input,
-        evaluator_call=lambda _profile, _request: ChatResult(
-            content="{}",
-            structured_output=_provider_payload(
+        evaluator_call=lambda _profile, _request: _result(
+            _provider_payload(
                 outcome="local_repair",
                 contract_satisfied=False,
-                summary="The old issue is resolved; a direction issue was found.",
+                summary="The old issue is resolved; a new direction issue remains.",
                 prior_issue_checks=[
                     {
-                        "issue_id": prior_issue_id,
                         "status": "resolved",
-                        "evidence_locator": "candidate.constraints",
+                        "evidence_hint": "The contradiction is gone.",
                         "explanation": "The repaired constraint now agrees.",
                     }
                 ],
@@ -598,94 +356,44 @@ def test_repair_verification_carries_history_and_marks_late_discovery() -> None:
                     {
                         "category": "reader_promise",
                         "severity": "blocking",
-                        "candidate_locator": "candidate.direction",
-                        "evidence_locator": "candidate.direction",
-                        "explanation": "A previously missed reader-promise conflict remains.",
+                        "affected_area": "story_direction",
+                        "evidence_hint": "The direction is still too general.",
+                        "explanation": "Clarify the reader promise.",
                     }
                 ],
-                repair_brief="Repair the reader-promise conflict in the direction.",
-                repair_scope=["direction"],
-            ),
-            model_snapshot="judge-model",
-            provider_snapshot="openai-compatible",
+                repair_brief="Clarify the direction.",
+            )
         ),
     )
-
     assert second.result.resolved_issue_ids == [prior_issue_id]
-    assert len(second.result.issues) == 1
+    assert second.result.repair_scope == ["direction"]
     assert second.result.issues[0].discovery == "late_discovery"
-    assert (
-        second_input.component_fingerprints["direction"]
-        == first_input.component_fingerprints["direction"]
-    )
 
 
-def test_repair_verification_rejects_missing_prior_issue_status() -> None:
-    first_input = _input()
-    first_issue_id = "issue-prior"
-    prior_evaluation = _history_result(first_issue_id)
-    contract = RepairContract(
-        evaluation_id="evaluation-1",
-        source_activation_id="activation-1",
-        source_candidate_artifact_id=first_input.candidate_artifact_id,
-        source_candidate_revision=1,
-        next_candidate_revision=2,
-        open_issue_ids=[first_issue_id],
-        repair_brief="Repair the prior issue.",
-        allowed_components=["direction"],
-        source_component_fingerprints=first_input.component_fingerprints,
-    )
-    repair_input = EvaluationInput(
-        identity=first_input.identity,
-        candidate_run_id="candidate-run-1",
-        checkpoint=first_input.checkpoint,
-        candidate_artifact_id="book/candidate/direction-r2.md",
-        candidate_revision=2,
-        mode="repair_verification",
-        candidate=first_input.candidate,
-        component_fingerprints=first_input.component_fingerprints,
-        evidence=first_input.evidence,
-        deterministic_prechecks=first_input.deterministic_prechecks,
-        rubric=first_input.rubric,
-        review_history=[
-            EvaluationHistoryEntry(
-                evaluation_id="evaluation-1",
-                candidate_revision=1,
-                candidate_artifact_id=first_input.candidate_artifact_id,
-                component_fingerprints=first_input.component_fingerprints,
-                result=prior_evaluation,
+def test_chapter_cross_loop_semantics_are_bound_to_current_arc_control_data() -> None:
+    record = evaluate_candidate(
+        _profile(),
+        _chapter_input(),
+        evaluator_call=lambda _profile, _request: _result(
+            _provider_payload(
+                outcome="cross_loop_escalation",
+                contract_satisfied=False,
+                summary="The chapter cannot satisfy the current Arc promise.",
+                candidate_kind="chapter",
+                upstream_blocker={
+                    "upper_scope": "story_arc_contract",
+                    "contract_concern": "The Arc requires the bell clue to remain fair.",
+                    "evidence_hint": "The approved Arc requires a fair bell clue.",
+                    "impossibility_reason": "The current Chapter instruction forbids showing it.",
+                },
             )
-        ],
-        expected_repair=contract,
+        ),
     )
-
-    with pytest.raises(EvaluationValidationError, match="every open prior issue"):
-        evaluate_candidate(
-            _profile(),
-            repair_input,
-            evaluator_call=lambda _profile, _request: ChatResult(
-                content="{}",
-                structured_output=_provider_payload(
-                    outcome="local_repair",
-                    contract_satisfied=False,
-                    summary="The prior issue was omitted.",
-                    new_issues=[
-                        {
-                            "category": "direction",
-                            "severity": "blocking",
-                            "candidate_locator": "candidate.direction",
-                            "evidence_locator": "candidate.direction",
-                            "explanation": "A direction repair is still required.",
-                        }
-                    ],
-                    repair_brief="Repair the direction.",
-                    repair_scope=["direction"],
-                ),
-                model_snapshot="judge-model",
-                provider_snapshot="openai-compatible",
-            ),
-            max_validation_repairs=0,
-        )
+    blocker = record.result.upstream_blocker
+    assert blocker is not None
+    assert blocker.owner == "story_arc"
+    assert blocker.contract_revision == 6
+    assert blocker.committed_evidence_locator == "arcs/arc-001/plan.md"
 
 
 def _profile() -> LlmProfile:
@@ -699,7 +407,7 @@ def _profile() -> LlmProfile:
     )
 
 
-def _input() -> EvaluationInput:
+def _book_input() -> EvaluationInput:
     candidate = BookCandidateSnapshot(
         direction="# Direction\n\nA coherent direction.",
         constraints={},
@@ -731,9 +439,9 @@ def _input() -> EvaluationInput:
 
 def _chapter_input() -> EvaluationInput:
     candidate = ChapterCandidateSnapshot(
-        plan="# Plan\n\nReveal one fair clue.",
-        draft="The witness places the wet key on the table.",
-        observations={"based_on": "candidate.draft", "items": []},
+        plan="Reveal one fair bell clue.",
+        draft="The bell remains hidden from every witness.",
+        observations={"events": []},
         state_patch={"operations": []},
     )
     return EvaluationInput(
@@ -744,17 +452,23 @@ def _chapter_input() -> EvaluationInput:
         ),
         candidate_run_id="chapter-run-1",
         checkpoint="chapter_candidate",
-        candidate_artifact_id=(
-            "chapters/chapter-001/agent/a/activation-1/c/manifest.json"
-        ),
+        candidate_artifact_id="chapters/chapter-001/candidate.json",
         candidate_revision=1,
         candidate=candidate,
         component_fingerprints=component_fingerprints(candidate),
         evidence=[
             EvaluationEvidence(
+                locator="book/state.json",
+                excerpt='{"schema_version":1,"version":11}',
+            ),
+            EvaluationEvidence(
                 locator="arcs/arc-001/plan.md",
-                excerpt="The approved Arc requires a fair clue.",
-            )
+                excerpt="The approved Arc requires a fair bell clue.",
+            ),
+            EvaluationEvidence(
+                locator="arcs/arc-001/state.json",
+                excerpt='{"schema_version":1,"version":6}',
+            ),
         ],
         deterministic_prechecks={"schema_valid": True},
         rubric=resolve_rubric("chapter"),
@@ -763,59 +477,40 @@ def _chapter_input() -> EvaluationInput:
 
 def _provider_payload(
     *,
-    outcome: str,
-    contract_satisfied: bool,
+    outcome: str = "pass",
+    contract_satisfied: bool = True,
     summary: str,
     new_issues: list[dict[str, object]] | None = None,
     signals: list[dict[str, object]] | None = None,
     prior_issue_checks: list[dict[str, object]] | None = None,
     repair_brief: str | None = None,
-    repair_scope: list[str] | None = None,
+    upstream_blocker: dict[str, object] | None = None,
     candidate_kind: CandidateKind = "book_direction",
-    rubric_evidence_locator: str = "book:direction:r1",
 ) -> dict[str, object]:
     return {
-        "schema_version": 2,
         "outcome": outcome,
         "contract_satisfied": contract_satisfied,
         "summary": summary,
         "rubric_checks": [
             {
-                "dimension_id": item.dimension_id,
                 "status": "pass",
-                "evidence_locator": rubric_evidence_locator,
-                "explanation": "Checked against the approved evidence.",
+                "evidence_hint": "The candidate aligns with the supplied semantic evidence.",
+                "explanation": "The rubric instruction was checked semantically.",
             }
-            for item in resolve_rubric(candidate_kind).dimensions
+            for _item in resolve_rubric(candidate_kind).dimensions
         ],
         "prior_issue_checks": prior_issue_checks or [],
         "new_issues": new_issues or [],
         "signals": signals or [],
         "repair_brief": repair_brief,
-        "repair_scope": repair_scope or [],
-        "upstream_blocker": None,
+        "upstream_blocker": upstream_blocker,
     }
 
 
-def _history_result(issue_id: str) -> EvaluationResult:
-    return EvaluationResult(
-        schema_version=2,
-        outcome="local_repair",
-        contract_satisfied=False,
-        summary="A prior direction issue remains open.",
-        issues=[
-            EvaluationIssue(
-                issue_id=issue_id,
-                category="direction",
-                severity="blocking",
-                candidate_locator="candidate.direction",
-                evidence_locator="candidate.direction",
-                explanation="The direction still needs repair.",
-            )
-        ],
-        signals=[],
-        repair_brief="Repair the direction.",
-        upstream_blocker=None,
-        repair_scope=["direction"],
-        new_issue_ids=[issue_id],
+def _result(payload: dict[str, object]) -> ChatResult:
+    return ChatResult(
+        content="{}",
+        structured_output=payload,
+        model_snapshot="judge-model",
+        provider_snapshot="openai-compatible",
     )

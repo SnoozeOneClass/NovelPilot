@@ -9,13 +9,14 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from app.harness.agents.domain_tools import (
-    BookDirectionCandidateInput,
-    BookDiscussionUpdateInput,
-    StoryArcCandidateInput,
+    BoundBookDirectionCandidate,
+    BoundBookDiscussionUpdate,
+    BoundStoryArcCandidate,
     SubmitChapterCandidateInput,
     build_default_tool_registry,
 )
 from app.harness.agents.evaluator import evaluate_candidate, evaluation_input_fingerprint
+from app.harness.agents.evidence_matching import resolve_semantic_evidence_quote
 from app.harness.agents.models import (
     AgentIdentity,
     AgentRunResult,
@@ -41,6 +42,7 @@ from app.harness.agents.persistence import (
     write_activation_document,
 )
 from app.harness.agents.rubrics import component_fingerprints, resolve_rubric
+from app.harness.agents.semantic_boundary import semantic_model_value
 from app.harness.agents.runtime import AgentActivation, AgentRuntime
 from app.harness.loops.book import (
     BookDirectionSynthesis,
@@ -50,7 +52,7 @@ from app.harness.loops.book import (
 from app.llm.gateway import ChatChunk, ChatMessage
 from app.llm.redaction import redact_profile_secrets
 from app.llm.retry import is_retryable_provider_error
-from app.schemas.patches import CandidateStatePatch
+from app.schemas.patches import CandidateStatePatch, PatchEvidence
 from app.schemas.projects import ProjectMetadata
 from app.schemas.profiles import LlmProfile
 from app.schemas.arcs import StoryArcPlanProposal
@@ -63,23 +65,21 @@ from app.schemas.setup import (
 )
 from app.storage.json_files import read_json
 from app.storage.profiles import require_harness_capabilities
+from app.storage.transactions import commit_file_transaction
 
 
 AgentEventCallback = Callable[[dict[str, object]], None]
 
 STORY_ARC_AGENT_TOOLS = (
     "get_loop_context",
-    "read_chapter_evidence",
     "submit_story_arc_candidate",
     "report_blocker",
 )
 
 CHAPTER_AGENT_TOOLS = (
     "get_loop_context",
-    "read_chapter_evidence",
     "plan_chapter_candidate",
     "write_chapter_draft",
-    "edit_chapter_draft",
     "inspect_chapter_consistency",
     "write_chapter_observations",
     "write_chapter_state_patch",
@@ -126,7 +126,7 @@ class ChapterAgentResult:
 
 
 @dataclass(frozen=True)
-class ChapterPatchEvidenceRepairResult:
+class ChapterPatchEvidenceBindingResult:
     patch: CandidateStatePatch
     run_result: AgentRunResult
     candidate_artifact_path: str
@@ -165,12 +165,19 @@ def run_book_discussion_agent(
             messages=(
                 ChatMessage(
                     role="user",
-                    content=(
-                        f"Harness expected_revision={state.revision}.\n\n{assembly.prompt}"
-                    ),
+                    content=assembly.prompt,
                 ),
             ),
             policy=policy,
+            control_data={
+                "confirmed_decisions": state.confirmed_decisions,
+                "superseded_decisions": [
+                    item.model_dump(mode="json")
+                    for item in state.superseded_decisions
+                ],
+                "selected_title": state.selected_title,
+                "turn": state.turn_count + 1,
+            },
             initial_checkpoint_id=f"book-discussion:{state.revision}",
             on_event=on_event,
             on_text_delta=on_text_delta,
@@ -179,7 +186,7 @@ def run_book_discussion_agent(
     )
     payload = _terminal_payload(project_path, result, "submit_book_discussion_update")
     try:
-        candidate = BookDiscussionUpdateInput.model_validate(payload)
+        candidate = BoundBookDiscussionUpdate.model_validate(payload)
     except ValidationError as exc:
         raise AgentCandidateError(
             "Book Agent terminal candidate failed local validation."
@@ -240,13 +247,8 @@ def run_book_direction_agent(
         policy,
         review_candidate_revision=review_candidate_revision,
         candidate_run_id=candidate_run_id,
-        system_prompt=_book_direction_agent_prompt(
-            state_revision=state.revision,
-            candidate_revision=review_candidate_revision,
-        ),
+        system_prompt=_book_direction_agent_prompt(),
         input_payload={
-            "state_revision": state.revision,
-            "candidate_revision": review_candidate_revision,
             "direction_draft": state.direction_draft,
             "discussion_summary": state.discussion_summary,
             "confirmed_decisions": state.confirmed_decisions,
@@ -337,13 +339,8 @@ def run_book_revision_agent(
         policy,
         review_candidate_revision=target_direction_version,
         candidate_run_id=resolved_candidate_run_id,
-        system_prompt=_book_revision_agent_prompt(
-            state_revision=state.revision,
-            candidate_revision=target_direction_version,
-        ),
+        system_prompt=_book_revision_agent_prompt(),
         input_payload={
-            "state_revision": state.revision,
-            "candidate_revision": target_direction_version,
             "approved_direction": state.direction_draft,
             "confirmed_decisions": state.confirmed_decisions,
             "must_preserve": state.confirmed_decisions,
@@ -390,11 +387,18 @@ def _run_book_direction_candidate_agent(
         messages=(
             ChatMessage(
                 role="user",
-                content=json.dumps(input_payload, ensure_ascii=False),
+                content=json.dumps(
+                    semantic_model_value(input_payload),
+                    ensure_ascii=False,
+                ),
             ),
         ),
         policy=policy,
         expected_candidate_revision=review_candidate_revision,
+        control_data={
+            "confirmed_decisions": state.confirmed_decisions,
+            "selected_title": state.selected_title,
+        },
         initial_checkpoint_id=f"book-direction:{state.candidate_revision_counter}",
         on_event=on_event,
         on_text_delta=on_text_delta,
@@ -471,8 +475,9 @@ def _run_book_direction_candidate_agent(
                         {
                             "candidate_kind": "Book Direction",
                             "selected_title": state.selected_title,
-                            "evaluation_id": evaluation.evaluation_id,
-                            "evaluation": evaluation.result.model_dump(mode="json"),
+                            "evaluation": _semantic_evaluation_view(
+                                evaluation.result
+                            ),
                         },
                         ensure_ascii=False,
                     ),
@@ -500,7 +505,7 @@ def _book_direction_attempt(
         ("submit_book_direction_candidate", "submit_candidate_repair"),
     )
     try:
-        candidate = BookDirectionCandidateInput.model_validate(payload)
+        candidate = BoundBookDirectionCandidate.model_validate(payload)
     except ValidationError as exc:
         raise AgentCandidateError(
             "Book Direction Agent terminal candidate failed local validation."
@@ -666,11 +671,7 @@ def run_story_arc_agent(
         phase="planning" if intent == "create" else "revision",
         expected_revision=expected_revision,
         allowed_tools=STORY_ARC_AGENT_TOOLS,
-        system_prompt=_story_arc_agent_prompt(
-            arc_id=arc_id,
-            intent=intent,
-            expected_revision=expected_revision,
-        ),
+        system_prompt=_story_arc_agent_prompt(),
         messages=(ChatMessage(role="user", content=instruction),),
         policy=policy,
         initial_checkpoint_id=f"story-arc:{arc_id}:{expected_revision}",
@@ -826,7 +827,7 @@ def _story_arc_attempt(
         ("submit_story_arc_candidate", "submit_candidate_repair"),
     )
     try:
-        candidate = StoryArcCandidateInput.model_validate(payload)
+        candidate = BoundStoryArcCandidate.model_validate(payload)
     except ValidationError as exc:
         raise AgentCandidateError("Story Arc candidate failed local validation.") from exc
     if candidate.intent != intent:
@@ -967,10 +968,7 @@ def run_chapter_agent(
         phase="chapter",
         expected_revision=expected_revision,
         allowed_tools=CHAPTER_AGENT_TOOLS,
-        system_prompt=_chapter_agent_prompt(
-            chapter_id=chapter_id,
-            expected_revision=expected_revision,
-        ),
+        system_prompt=_chapter_agent_prompt(),
         messages=(ChatMessage(role="user", content=instruction),),
         policy=policy,
         initial_checkpoint_id=f"chapter:{chapter_id}:{expected_revision}",
@@ -1104,68 +1102,108 @@ def recover_completed_chapter_agent(
     )
 
 
-def run_chapter_patch_evidence_repair_agent(
+def bind_chapter_patch_evidence(
     project_path: Path,
     metadata: ProjectMetadata,
-    policy: ResolvedAgentPolicy,
     *,
     chapter_id: str,
     expected_revision: int,
-    instruction: str,
-    candidate_run_id: str | None = None,
     on_event: AgentEventCallback | None = None,
-    on_text_delta: Callable[[ChatChunk], None] | None = None,
-    on_tool_event: Callable[[ChatChunk], None] | None = None,
-    runtime: AgentRuntime | None = None,
-) -> ChapterPatchEvidenceRepairResult:
-    _require_policy_capabilities(policy)
+) -> ChapterPatchEvidenceBindingResult:
+    """Rebind exact patch evidence locally from provider-authored semantic intent."""
     identity = AgentIdentity(
         project_id=metadata.project_id,
         role="chapter",
         scope_id=chapter_id,
     )
-    runner = runtime or AgentRuntime(build_default_tool_registry())
-    result = runner.run(
-        AgentActivation(
-            project_path=project_path,
-            identity=identity,
-            candidate_run_id=candidate_run_id
-            or f"chapter-patch-{chapter_id}-{expected_revision + 1}-{uuid4().hex[:8]}",
-            phase="state_patch_repair",
-            expected_revision=expected_revision,
-            allowed_tools=(
-                "get_loop_context",
-                "read_chapter_evidence",
-                "submit_chapter_patch_evidence_repair",
-                "report_blocker",
-            ),
-            system_prompt=_chapter_patch_evidence_repair_prompt(
-                chapter_id=chapter_id,
-                expected_revision=expected_revision,
-            ),
-            messages=(ChatMessage(role="user", content=instruction),),
-            policy=policy,
-            initial_checkpoint_id=f"chapter-patch:{chapter_id}:{expected_revision}",
-            on_event=on_event,
-            on_text_delta=on_text_delta,
-            on_tool_event=on_tool_event,
+    patch_payload = read_json(
+        project_path / "chapters" / chapter_id / "candidate_state_patch.json",
+        default=None,
+    )
+    if patch_payload is None:
+        raise AgentCandidateError("Chapter candidate state patch is missing.")
+    patch = CandidateStatePatch.model_validate(patch_payload)
+    final_path = project_path / "chapters" / chapter_id / "final.md"
+    final_text = final_path.read_text(encoding="utf-8-sig")
+    operations = []
+    for index, operation in enumerate(patch.operations):
+        quote = resolve_semantic_evidence_quote(
+            final_text,
+            [
+                operation.rationale,
+                operation.target_id,
+                json.dumps(operation.value, ensure_ascii=False),
+            ],
         )
+        if quote is None:
+            raise AgentCandidateError(
+                "Harness could not bind semantic evidence for state-patch operation "
+                f"{index}."
+            )
+        evidence_file = f"chapters/{chapter_id}/final.md"
+        operations.append(
+            operation.model_copy(
+                update={
+                    "evidence": [
+                        PatchEvidence(file=evidence_file, quote=quote)
+                    ]
+                }
+            )
+        )
+    repaired = patch.model_copy(update={"operations": operations})
+    resolved_run_id = (
+        f"chapter-patch-{chapter_id}-{expected_revision + 1}-{uuid4().hex[:8]}"
     )
-    payload = _terminal_payload(
+    activation_id = f"harness-bind-{uuid4().hex[:12]}"
+    relative = (
+        Path("chapters")
+        / chapter_id
+        / "state_patch_repairs"
+        / f"{activation_id}.json"
+    ).as_posix()
+    commit_file_transaction(
         project_path,
-        result,
-        "submit_chapter_patch_evidence_repair",
+        kind=f"harness-evidence-bind-{chapter_id}",
+        files={
+            relative: json.dumps(
+                repaired.model_dump(mode="json"),
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n"
+        },
     )
-    try:
-        patch = CandidateStatePatch.model_validate(payload)
-    except ValidationError as exc:
-        raise AgentCandidateError(
-            "Chapter state-patch evidence repair failed local validation."
-        ) from exc
-    return ChapterPatchEvidenceRepairResult(
-        patch=patch,
+    result = AgentRunResult(
+        outcome="candidate",
+        identity=identity,
+        candidate_run_id=resolved_run_id,
+        activation_id=activation_id,
+        turns_used=0,
+        terminal_result=ToolExecutionResult(
+            status="ok",
+            tool_name="harness_bind_state_patch_evidence",
+            tool_call_id=f"harness:{activation_id}",
+            content={"summary": "Harness rebound exact evidence from semantic intent."},
+            checkpoint_id=f"chapter-patch:{chapter_id}:{expected_revision + 1}",
+            terminal=True,
+            artifact_paths=[relative],
+        ),
+        usage={},
+    )
+    if on_event is not None:
+        on_event(
+            {
+                "kind": "harness_semantic_evidence_bound",
+                "candidate_run_id": resolved_run_id,
+                "activation_id": activation_id,
+                "chapter_id": chapter_id,
+                "operation_count": len(operations),
+            }
+        )
+    return ChapterPatchEvidenceBindingResult(
+        patch=repaired,
         run_result=result,
-        candidate_artifact_path=_terminal_artifact(result),
+        candidate_artifact_path=relative,
     )
 
 
@@ -1779,12 +1817,8 @@ def _repair_tools_for_contract(
 ) -> tuple[str, ...]:
     allowed = set(contract.allowed_components)
     tools = ["get_loop_context", "open_candidate_repair"]
-    if candidate_kind in {"story_arc", "chapter"}:
-        tools.append("read_chapter_evidence")
     if allowed & {"direction", "rolling_plan", "plan", "change_summary", "draft"}:
         tools.append("replace_candidate_text")
-    if candidate_kind == "chapter" and allowed & {"plan", "draft"}:
-        tools.append("edit_candidate_text")
     if "target_chapter_count" in allowed:
         tools.append("set_story_arc_chapter_count")
     if allowed & {"constraints", "confirmed_decision_coverage", "recommended_titles"}:
@@ -1837,42 +1871,50 @@ def _semantic_repair_prompt(
     chain: RepairChain,
     contract: RepairContract,
 ) -> str:
-    book_revision_context: dict[str, object] = {}
-    if candidate_kind == "Book Direction":
-        book_revision_context = {
-            "book_review_candidate_revision": candidate_payload.get(
-                "candidate_revision"
-            ),
-            "semantic_logical_candidate_revision": contract.next_candidate_revision,
-        }
     return (
         "The Evaluator requested a scoped repair of the same uncommitted logical candidate. "
-        "The Harness owns the source candidate, unchanged artifacts, stable item IDs, revision "
-        "assembly, and the complete review ledger. Resolve every open issue using only the "
+        "The Harness owns the source candidate, unchanged artifacts, identities, revisions, "
+        "exact evidence, assembly, and the complete review ledger. Resolve every open issue "
+        "semantically using only the "
         "artifact-level repair Tools that are exposed. Do not resubmit or restate unchanged "
-        "candidate components, fingerprints, IDs, or revision numbers. Call "
-        "open_candidate_repair before structured item updates to obtain Harness stable IDs. "
-        "For prose or plan problems, replace_candidate_text may submit the complete revised "
-        "text; edit_candidate_text is optional and an anchor failure may be followed by a full "
-        "replacement. When the semantic changes are complete, call submit_candidate_repair "
+        "candidate components or any identity, path, locator, quote, fingerprint, or revision. "
+        "Call open_candidate_repair before structured updates; select an existing item by its "
+        "current meaning, never by an opaque handle. For prose or plan problems, "
+        "replace_candidate_text submits complete revised text. When the semantic changes are "
+        "complete, call submit_candidate_repair "
         "with only a short summary. The Harness will merge the working copy and send the full "
         "candidate to an independent Evaluator. Do not rewrite committed prose or canon."
         + "\n\n"
         + json.dumps(
             {
                 "candidate_kind": candidate_kind,
-                **book_revision_context,
-                "current_candidate": candidate_payload,
-                "evaluation_id": evaluation.evaluation_id,
-                "evaluation": evaluation.result.model_dump(mode="json"),
+                "current_candidate": semantic_model_value(candidate_payload),
+                "evaluation": _semantic_evaluation_view(evaluation.result),
                 "complete_review_history": [
-                    item.model_dump(mode="json") for item in chain.review_history
+                    _semantic_evaluation_view(item.result)
+                    for item in chain.review_history
                 ],
-                "repair_contract": contract.model_dump(mode="json"),
             },
             ensure_ascii=False,
         )
     )
+
+
+def _semantic_evaluation_view(result: EvaluationResult) -> dict[str, object]:
+    return {
+        "outcome": result.outcome,
+        "contract_satisfied": result.contract_satisfied,
+        "summary": result.summary,
+        "issues": [
+            {
+                "category": item.category,
+                "severity": item.severity,
+                "explanation": item.explanation,
+            }
+            for item in result.issues
+        ],
+        "repair_brief": result.repair_brief,
+    }
 
 
 def _terminal_payload(
@@ -2021,34 +2063,29 @@ def _book_discussion_agent_prompt() -> str:
         "the stated constraints instead of turning each one into a clarification question. Ask "
         "only when missing human intent would materially change the Book contract and cannot be "
         "resolved by an expressed preference or delegation. "
-        "Keep confirmed_decisions cumulative and copy every existing entry verbatim; never "
-        "paraphrase, split, merge, or remove one. Add a new confirmed decision only when the "
+        "Submit only newly confirmed decisions from the latest human message; the Harness "
+        "preserves all earlier decisions and assigns every internal identity. Add a new "
+        "confirmed decision only when the "
         "latest human message explicitly confirms it; review feedback and repair guidance are "
         "not new user-confirmed decisions. When clarification is needed, call "
         "submit_book_discussion_update with exactly one question "
         "and two or three actionable suggestions. After every substantive story decision has "
-        "converged, if selected_title is still empty, make the final question exactly: "
-        "‘以下哪个书名最适合作为正式书名？’ Offer two or three concrete title choices whose "
-        "suggestion messages contain "
-        "the exact title, while the Web UI supplies the custom-input option. Set selected_title "
+        "converged, if no title is selected, ask one concrete title-selection question and "
+        "offer two or three meaningful title choices. Set newly_selected_title "
         "only when the latest human message explicitly chooses or supplies that title. Do not "
-        "mark readiness=ready until selected_title is non-empty. When the direction and title "
+        "mark readiness=ready until a title is selected. When the direction and title "
         "are genuinely ready, submit readiness=ready with no question or suggestions. Never "
         "claim approval or commit state."
     )
 
 
-def _book_direction_agent_prompt(*, state_revision: int, candidate_revision: int) -> str:
+def _book_direction_agent_prompt() -> str:
     return (
         "You are the Book Agent preparing one candidate for Harness evaluation. Use only exposed "
-        "Tools. Copy every fixed-input confirmed user decision verbatim into both "
-        "constraints.confirmed and confirmed_decision_coverage.decision; do not paraphrase, "
-        "split, or merge those strings. Preserve the already user-confirmed selected_title as "
-        "the authoritative formal title; do not ask the user to choose another title. Surface "
-        "open decisions, produce three to five unique compatibility title entries with the "
-        "selected title first, and create a rolling plan. Call "
-        "submit_book_direction_candidate with "
-        f"expected_revision={state_revision} and candidate_revision={candidate_revision}. "
+        "Tools. The Harness injects all confirmed decisions, formal-title authority, coverage, "
+        "identity, and revision metadata. Do not copy or maintain them. Surface open decisions, "
+        "produce two to four semantic comparison titles, and create a rolling plan. Call "
+        "submit_book_direction_candidate with only the semantic candidate fields. "
         "Do not review, approve, or commit the candidate yourself."
     )
 
@@ -2064,27 +2101,22 @@ def _book_evaluation_user_decision_prompt() -> str:
     )
 
 
-def _book_revision_agent_prompt(*, state_revision: int, candidate_revision: int) -> str:
+def _book_revision_agent_prompt() -> str:
     return (
         "You are the Book Agent preparing a revision candidate for an already approved Book "
         "Direction. Use only exposed Tools. Treat committed prose and canon as immutable "
         "history. Revise only future or unfulfilled Book instructions needed to resolve the "
         "evidenced blocker, while preserving every unaffected approved decision. Return a "
         "complete replacement direction and rolling plan so the Harness can evaluate a single "
-        "candidate. Keep three to five title suggestions for schema compatibility, but do not "
-        "change the approved project title. Call submit_book_direction_candidate with "
-        f"expected_revision={state_revision} and candidate_revision={candidate_revision}. "
+        "candidate. Provide two to four semantic comparison titles; Harness preserves the "
+        "approved project title and all control metadata. Call submit_book_direction_candidate "
+        "with semantic fields only. "
         "Never approve or "
         "commit the revision; even full-auto mode requires explicit user approval."
     )
 
 
-def _story_arc_agent_prompt(
-    *,
-    arc_id: str,
-    intent: str,
-    expected_revision: int,
-) -> str:
+def _story_arc_agent_prompt() -> str:
     return (
         "You are the persistent logical Story Arc Agent inside NovelPilot's deterministic "
         "Harness. Use only exposed Tools and never activate another Agent. Read bounded context "
@@ -2092,43 +2124,31 @@ def _story_arc_agent_prompt(
         "Resolve local creative choices yourself within the approved Book contract; no "
         "user-decision Tool is available. Human participation happens only when the submitted "
         "Story Arc plan is reviewed. "
-        + "Submit "
-        f"one {intent} candidate for {arc_id} with expected_revision={expected_revision} through "
-        "submit_story_arc_candidate. Choose a target chapter count from 1 through 30. Do not "
+        + "Submit one semantic candidate through submit_story_arc_candidate. Harness binds "
+        "arc ownership, create/revise intent, and revisions. Choose a target chapter count from "
+        "1 through 30. Do not "
         "approve or commit the plan. If an upper contract is truly impossible, report an "
         "evidence-complete proposal and let the Harness route it."
     )
 
 
-def _chapter_agent_prompt(*, chapter_id: str, expected_revision: int) -> str:
+def _chapter_agent_prompt() -> str:
     return (
         "You are the persistent logical Chapter Agent inside NovelPilot's deterministic Harness. "
-        "Use only exposed Tools and never activate another Agent. For the owned chapter "
-        f"{chapter_id}, expected_revision={expected_revision}: "
+        "Use only exposed Tools and never activate another Agent. Harness owns chapter identity, "
+        "all revisions, paths, and component assembly. "
         "Resolve chapter-local creative choices yourself within the approved Book and Story Arc "
         "contracts; no user-decision Tool or chapter approval gate is available. "
         + "Read bounded context, call "
-        "plan_chapter_candidate, write visible prose through write_chapter_draft, optionally use "
-        "targeted edits, and call inspect_chapter_consistency. Then write semantic observations "
+        "plan_chapter_candidate, write the complete visible prose through write_chapter_draft, "
+        "and call inspect_chapter_consistency. Then write semantic observations "
         "with write_chapter_observations and the canon delta with write_chapter_state_patch. "
-        "Finally call submit_chapter_candidate with only revisions and a concise summary; the "
-        "Harness will assemble the stored components. If patch evidence is rejected, rewrite only "
-        "the state-patch component with exact draft quotes and resubmit the short reference. Start "
-        "plan, draft, and candidate revisions at 1 for a fresh workspace. Never write final.md, "
-        "never commit canon, and never claim semantic approval. Use report_blocker only with exact "
-        "evidence."
-    )
-def _chapter_patch_evidence_repair_prompt(
-    *, chapter_id: str, expected_revision: int
-) -> str:
-    return (
-        "You are the Chapter Agent repairing only rejected evidence quotes for an otherwise "
-        "accepted current chapter candidate. final.md and every patch operation, target, value, "
-        "and rationale are immutable. Read the supplied final prose and rejection reasons. For "
-        "each rejected operation index, choose one or more short verbatim substrings that occur "
-        "exactly in final.md, then call submit_chapter_patch_evidence_repair with "
-        f"chapter_id={chapter_id} and expected_revision={expected_revision}. Do not rewrite prose, "
-        "do not change canon intent, and do not request a user decision."
+        "Describe each canon change by semantic change kind, entity kind/name, resulting state, "
+        "and an evidence hint; never provide storage operations, field keys, JSON encodings, a "
+        "target file, canonical ID, version, locator, or exact quote. Finally call "
+        "submit_chapter_candidate with only a concise summary; Harness binds exact evidence and "
+        "assembles the stored components. Never write final.md, never commit canon, and never "
+        "claim semantic approval."
     )
 
 
@@ -2155,6 +2175,7 @@ def _chapter_evidence(
     paths = [
         Path("book/settings.md"),
         Path("book/outline.md"),
+        Path("book/state.json"),
         Path("canon/characters.json"),
         Path("canon/relationships.json"),
         Path("canon/world_facts.json"),
@@ -2162,6 +2183,7 @@ def _chapter_evidence(
     ]
     if metadata.active_arc_id is not None:
         paths.append(Path("arcs") / metadata.active_arc_id / "plan.md")
+        paths.append(Path("arcs") / metadata.active_arc_id / "state.json")
     paths.extend(
         sorted(
             path.relative_to(project_path)

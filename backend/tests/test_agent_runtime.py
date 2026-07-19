@@ -160,24 +160,13 @@ def test_book_direction_missing_markdown_is_repaired_within_bounded_agent_run(
     tmp_path: Path,
 ) -> None:
     valid_arguments = {
-        "expected_revision": 1,
-        "candidate_revision": 1,
         "direction_markdown": "# Direction\n\nA fair-play mystery with bounded secrets.",
         "constraints": {
-            "confirmed": ["Clues remain fair."],
-            "must_preserve": [],
             "must_avoid": [],
             "creative_freedoms": [],
             "open_decisions": [],
         },
-        "confirmed_decision_coverage": [
-            {
-                "decision": "Clues remain fair.",
-                "candidate_evidence": "The direction explicitly requires fair-play clues.",
-            }
-        ],
-        "recommended_titles": [
-            {"title": "The First Tide", "rationale": "Names the opening mystery."},
+        "comparison_titles": [
             {"title": "Eleven Minutes", "rationale": "Names the central time gap."},
             {"title": "The Closed Window", "rationale": "Names a recurring clue."},
         ],
@@ -215,6 +204,10 @@ def test_book_direction_missing_markdown_is_repaired_within_bounded_agent_run(
         candidate_run_id="book-direction-repair",
         allowed_tools=("submit_book_direction_candidate",),
         expected_candidate_revision=1,
+        control_data={
+            "confirmed_decisions": ["Clues remain fair."],
+            "selected_title": "The First Tide",
+        },
     )
 
     result = runtime.run(activation)

@@ -120,13 +120,10 @@ def component_fingerprints(
     candidate: CandidateSnapshot,
 ) -> dict[CandidateComponentName, str]:
     components = candidate_components(candidate)
-    if candidate.kind == "chapter":
-        observations = components.get("observations")
-        if isinstance(observations, dict):
-            observations = dict(observations)
-            observations["based_on"] = "candidate.draft"
-            components["observations"] = observations
-    return {name: _component_digest(value) for name, value in components.items()}
+    return {
+        name: _component_digest(_semantic_component_value(value))
+        for name, value in components.items()
+    }
 
 
 def changed_components(
@@ -149,3 +146,52 @@ def _component_digest(value: Any) -> str:
             separators=(",", ":"),
         ).encode("utf-8")
     return sha256(encoded).hexdigest()
+
+
+def _semantic_component_value(value: Any) -> Any:
+    """Remove Harness-derived metadata from semantic change fingerprints.
+
+    Candidate identity is still bound by the complete EvaluationInput fingerprint. These
+    per-component digests exist to decide which semantic artifacts changed during repair, so
+    regenerated IDs, evidence spans, versions, and paths must not widen repair scope.
+    """
+
+    if isinstance(value, dict):
+        return {
+            key: _semantic_component_value(item)
+            for key, item in value.items()
+            if not _fingerprint_control_key(key)
+        }
+    if isinstance(value, list):
+        return [_semantic_component_value(item) for item in value]
+    return value
+
+
+def _fingerprint_control_key(key: str) -> bool:
+    normalized = key.casefold()
+    if normalized in {
+        "id",
+        "schema_version",
+        "status",
+        "based_on",
+        "file",
+        "evidence",
+        "evidence_quote",
+        "evidence_quotes",
+        "candidate_evidence",
+        "requires_commit",
+        "chapter_id",
+        "arc_id",
+        "expected_revision",
+        "candidate_revision",
+        "plan_revision",
+        "draft_revision",
+        "expected_version",
+    }:
+        return True
+    return (
+        normalized.startswith("based_on_")
+        or normalized.endswith("_path")
+        or normalized.endswith("_locator")
+        or normalized.endswith("_fingerprint")
+    )

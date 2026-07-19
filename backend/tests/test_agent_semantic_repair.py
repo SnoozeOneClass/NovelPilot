@@ -63,7 +63,7 @@ def test_story_arc_agent_repairs_local_semantic_failure_with_candidate_budget(
                 "call-revised",
                 "replace_candidate_text",
                 {
-                    "component": "plan",
+                    "content_kind": "arc_plan",
                     "content": "Revised plan preserves committed evidence.",
                 },
                 model="story-model",
@@ -228,7 +228,7 @@ def test_book_direction_repair_keeps_review_revision_while_logical_revision_adva
             "book-repair-direction",
             "replace_candidate_text",
             {
-                "component": "direction",
+                "content_kind": "book_direction",
                 "content": "# Direction\n\nThe repaired direction closes the gap.",
             },
             model="book-model",
@@ -309,8 +309,10 @@ def test_book_direction_repair_keeps_review_revision_while_logical_revision_adva
     assert [len(item.review_history) for item in evaluation_inputs] == [0, 1]
     assert len(requests) == 3
     repair_prompt = "\n".join(message.content for message in requests[1].messages)
-    assert '"book_review_candidate_revision": 1' in repair_prompt
-    assert '"semantic_logical_candidate_revision": 2' in repair_prompt
+    assert "complete_review_history" in repair_prompt
+    assert "candidate_revision" not in repair_prompt
+    assert "candidate_artifact_id" not in repair_prompt
+    assert "evidence_locator" not in repair_prompt
     assert "candidate_revision" not in submissions[1].tool_calls[0].arguments
     assert "candidate_revision" not in submissions[2].tool_calls[0].arguments
     request_snapshots = [
@@ -361,7 +363,7 @@ def test_pending_book_repair_ignores_completed_chain_external_activation(
                 "book-resumed-repair",
                 "replace_candidate_text",
                 {
-                    "component": "direction",
+                    "content_kind": "book_direction",
                     "content": "# Direction\n\nThe resumed repair closes the gap.",
                 },
                 model="book-model",
@@ -454,7 +456,7 @@ def test_pending_book_repair_ignores_completed_chain_external_activation(
     )
     write_json(
         invalid_artifact,
-        _book_submission(
+        _bound_book_submission(
             candidate_revision=2,
             direction_markdown="# Direction\n\nA legacy repair used the logical revision.",
         ),
@@ -512,19 +514,13 @@ def test_book_evaluator_needs_user_becomes_one_standard_discussion_question(
         transport_retry_limit=1,
     )
     candidate_arguments = {
-        "expected_revision": 1,
-        "candidate_revision": 1,
         "direction_markdown": "# Direction\n\nA fair-play mystery with an unresolved ending cost.",
         "constraints": {
-            "confirmed": [],
-            "must_preserve": ["All reveals use visible evidence."],
             "must_avoid": [],
             "creative_freedoms": [],
             "open_decisions": ["Which relationship pays the ending cost."],
         },
-        "confirmed_decision_coverage": [],
-        "recommended_titles": [
-            {"title": "Harbor of Trust", "rationale": "The confirmed formal title."},
+        "comparison_titles": [
             {"title": "Eleven Minutes", "rationale": "Names the missing interval."},
             {"title": "The Closed Window", "rationale": "Names a recurring clue."},
         ],
@@ -667,11 +663,11 @@ def test_chapter_repair_chain_preserves_draft_before_late_discovery(
                 name = "add_state_patch_operation_repair"
                 arguments = {
                     "operation": {
-                        "op": "upsert",
-                        "target_file": "canon/world_facts.json",
-                        "target_id": "wet-key",
-                        "value_fields": [{"key": "status", "json_value": '"found"'}],
-                        "evidence_quotes": ["wet key"],
+                        "change_kind": "establish",
+                        "entity_kind": "world_fact",
+                        "entity_name": "wet key",
+                        "resulting_state": "The wet key has been found.",
+                        "evidence_hint": "wet key",
                         "rationale": "The draft places the wet key on the table.",
                     }
                 }
@@ -681,7 +677,7 @@ def test_chapter_repair_chain_preserves_draft_before_late_discovery(
         elif "replace_candidate_text" not in prior_calls:
             name = "replace_candidate_text"
             arguments = {
-                "component": "draft",
+                "content_kind": "chapter_draft",
                 "content": (
                     "The witness places the wet key on the table. "
                     "The stopped clock confirms the missing interval."
@@ -841,11 +837,11 @@ def test_pending_chapter_repair_resumes_after_process_boundary(
             name = "add_state_patch_operation_repair"
             arguments = {
                 "operation": {
-                    "op": "upsert",
-                    "target_file": "canon/world_facts.json",
-                    "target_id": "wet-key",
-                    "value_fields": [{"key": "status", "json_value": '"found"'}],
-                    "evidence_quotes": ["wet key"],
+                    "change_kind": "establish",
+                    "entity_kind": "world_fact",
+                    "entity_name": "wet key",
+                    "resulting_state": "The wet key has been found.",
+                    "evidence_hint": "wet key",
                     "rationale": "The draft places the wet key on the table.",
                 }
             }
@@ -955,6 +951,15 @@ def test_story_arc_blocker_stops_at_typed_control_checkpoint(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    write_json(
+        tmp_path / "project.json",
+        ProjectMetadata(project_id="project-1").model_dump(mode="json"),
+    )
+    write_json(tmp_path / "book/state.json", {"schema_version": 2, "version": 2})
+    (tmp_path / "book/direction.md").write_text(
+        "The approved ending must preserve the witness's visible sacrifice.",
+        encoding="utf-8",
+    )
     profile = LlmProfile(
         id="main",
         name="Main",
@@ -981,12 +986,13 @@ def test_story_arc_blocker_stops_at_typed_control_checkpoint(
                 arguments={
                     "kind": "cross_loop",
                     "summary": "The approved ending contradicts committed evidence.",
-                    "evidence": ["chapters/chapter-001/final.md#ending"],
-                    "target_owner": "book",
-                    "contract_field": "ending_constraint",
-                    "contract_revision": 2,
-                    "committed_evidence_locator": (
-                        "chapters/chapter-001/final.md#ending"
+                    "semantic_evidence": [
+                        "The witness's visible sacrifice cannot be removed."
+                    ],
+                    "upper_scope": "book_contract",
+                    "contract_concern": "The ending constraint requires the sacrifice.",
+                    "evidence_hint": (
+                        "The approved ending must preserve the witness's visible sacrifice."
                     ),
                     "impossibility_reason": (
                         "No current arc can satisfy both instructions."
@@ -1079,22 +1085,43 @@ def _book_submission(
     candidate_revision: int,
     direction_markdown: str,
 ) -> dict[str, object]:
+    del candidate_revision
+    return {
+        "direction_markdown": direction_markdown,
+        "constraints": {
+            "must_avoid": [],
+            "creative_freedoms": [],
+            "open_decisions": [],
+        },
+        "comparison_titles": [
+            {"title": "Eleven Minutes", "rationale": "Names the missing interval."},
+            {"title": "The Closed Window", "rationale": "Names a recurring clue."},
+        ],
+        "rolling_plan_markdown": "Plan only the first active story arc.",
+    }
+
+
+def _bound_book_submission(
+    *,
+    candidate_revision: int,
+    direction_markdown: str,
+) -> dict[str, object]:
     return {
         "expected_revision": 10,
         "candidate_revision": candidate_revision,
         "direction_markdown": direction_markdown,
         "constraints": {
             "confirmed": [],
-            "must_preserve": ["All reveals use visible evidence."],
+            "must_preserve": [],
             "must_avoid": [],
             "creative_freedoms": [],
             "open_decisions": [],
         },
         "confirmed_decision_coverage": [],
         "recommended_titles": [
-            {"title": "Harbor of Trust", "rationale": "The confirmed formal title."},
-            {"title": "Eleven Minutes", "rationale": "Names the missing interval."},
-            {"title": "The Closed Window", "rationale": "Names a recurring clue."},
+            {"title": "Harbor of Trust", "rationale": "Formal title."},
+            {"title": "Eleven Minutes", "rationale": "Missing interval."},
+            {"title": "The Closed Window", "rationale": "Recurring clue."},
         ],
         "rolling_plan_markdown": "Plan only the first active story arc.",
     }
@@ -1108,9 +1135,6 @@ def _arc_tool_response(call_id: str, plan_markdown: str) -> ChatResult:
                 id=call_id,
                 name="submit_story_arc_candidate",
                 arguments={
-                    "expected_revision": 0,
-                    "intent": "create",
-                    "arc_id": "arc-001",
                     "plan_markdown": plan_markdown,
                     "target_chapter_count": 10,
                     "change_summary": "Created or repaired the rolling arc.",
@@ -1129,77 +1153,24 @@ def _next_initial_chapter_tool(
 ) -> tuple[str, dict[str, object]]:
     if "plan_chapter_candidate" not in prior_calls:
         return "plan_chapter_candidate", {
-            "chapter_id": "chapter-001",
-            "expected_revision": 0,
-            "plan_revision": 1,
             "plan_markdown": "# Chapter goal\n\nReveal one fair clue.",
         }
     if "write_chapter_draft" not in prior_calls:
         return "write_chapter_draft", {
-            "chapter_id": "chapter-001",
-            "expected_revision": 0,
-            "plan_revision": 1,
-            "draft_revision": 1,
-            "mode": "write",
             "content": "The witness places the wet key on the table.",
         }
     if "inspect_chapter_consistency" not in prior_calls:
-        return "inspect_chapter_consistency", {
-            "chapter_id": "chapter-001",
-            "expected_revision": 0,
-            "draft_revision": 1,
-        }
+        return "inspect_chapter_consistency", {}
     if "write_chapter_observations" not in prior_calls:
         return "write_chapter_observations", {
-            "chapter_id": "chapter-001",
-            "expected_revision": 0,
-            "draft_revision": 1,
             "observations": _chapter_observations(),
         }
     if "write_chapter_state_patch" not in prior_calls:
         return "write_chapter_state_patch", {
-            "chapter_id": "chapter-001",
-            "expected_revision": 0,
-            "draft_revision": 1,
             "state_patch": {"operations": []},
         }
     return "submit_chapter_candidate", {
-        "chapter_id": "chapter-001",
-        "expected_revision": 0,
-        "candidate_revision": 1,
-        "plan_revision": 1,
-        "draft_revision": 1,
         "summary": "The fair clue is visible.",
-    }
-
-
-def _chapter_submission(
-    *,
-    candidate_revision: int,
-    draft_revision: int,
-) -> dict[str, object]:
-    return {
-        "chapter_id": "chapter-001",
-        "expected_revision": 0,
-        "candidate_revision": candidate_revision,
-        "plan_revision": 1,
-        "draft_revision": draft_revision,
-        "summary": "The fair clue and state change are recorded.",
-        "observations": _chapter_observations(),
-        "state_patch": {
-            "operations": [
-                {
-                    "op": "upsert",
-                    "target_file": "canon/world_facts.json",
-                    "target_id": "wet-key",
-                    "value_fields": [
-                        {"key": "status", "json_value": '"found"'}
-                    ],
-                    "evidence_quotes": ["wet key"],
-                    "rationale": "The draft places the wet key on the table.",
-                }
-            ]
-        },
     }
 
 
@@ -1210,7 +1181,6 @@ def _chapter_observations() -> dict[str, object]:
         "relationship_changes": [],
         "world_fact_candidates": [],
         "foreshadowing_candidates": [],
-        "requires_commit": False,
     }
 
 

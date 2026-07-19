@@ -1,11 +1,13 @@
+import json
+import re
 from hashlib import sha256
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
-from app.core.paths import ensure_relative_artifact_path
 from app.harness.agents.models import AgentRole
+from app.harness.agents.evidence_matching import resolve_semantic_evidence_quote
 from app.harness.agents.persistence import activation_relative, json_document
 from app.harness.agents.registry import (
     ToolExecutionContext,
@@ -14,7 +16,9 @@ from app.harness.agents.registry import (
     ToolRegistry,
     ToolSpec,
 )
+from app.harness.agents.semantic_boundary import semantic_model_value
 from app.storage.projects import read_project_metadata
+from app.storage.json_files import read_json
 
 
 ContextPackName = Literal[
@@ -32,24 +36,6 @@ class GetLoopContextInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     pack: ContextPackName
-    max_characters: int = Field(default=30_000, ge=1_000, le=100_000)
-
-
-class ReadChapterEvidenceInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    chapter_id: str = Field(min_length=1, max_length=128)
-    source: Literal["final"] = "final"
-    start_character: int = Field(default=0, ge=0)
-    max_characters: int = Field(default=12_000, ge=1, le=50_000)
-
-    @field_validator("chapter_id")
-    @classmethod
-    def validate_chapter_id(cls, value: str) -> str:
-        ensure_relative_artifact_path(value)
-        if len(Path(value).parts) != 1:
-            raise ValueError("Chapter ID cannot contain path separators.")
-        return value
 
 
 class DecisionSuggestion(BaseModel):
@@ -67,46 +53,17 @@ class RequestUserDecisionInput(BaseModel):
     context: str = Field(default="", max_length=4_000)
     suggestions: list[DecisionSuggestion] = Field(min_length=2, max_length=3)
 
-    @model_validator(mode="after")
-    def validate_single_question(self) -> "RequestUserDecisionInput":
-        stripped = self.question.strip()
-        if stripped.count("?") + stripped.count("？") != 1:
-            raise ValueError("User decision must contain exactly one question mark.")
-        if not stripped.endswith(("?", "？")):
-            raise ValueError("User decision must end with its one question mark.")
-        labels = [item.label.strip().casefold() for item in self.suggestions]
-        messages = [item.message.strip().casefold() for item in self.suggestions]
-        if len(labels) != len(set(labels)) or len(messages) != len(set(messages)):
-            raise ValueError("User decision suggestions must be unique.")
-        return self
-
 
 class ReportBlockerInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["local", "needs_user", "cross_loop"]
     summary: str = Field(min_length=1, max_length=4_000)
-    evidence: list[str] = Field(default_factory=list, max_length=50)
-    target_owner: Literal["book", "story_arc"] | None = None
-    contract_field: str | None = Field(default=None, max_length=1_000)
-    contract_revision: int | None = Field(default=None, ge=1)
-    committed_evidence_locator: str | None = Field(default=None, max_length=1_000)
+    semantic_evidence: list[str] = Field(default_factory=list, max_length=50)
+    upper_scope: Literal["book_contract", "story_arc_contract"] | None = None
+    contract_concern: str | None = Field(default=None, max_length=1_000)
+    evidence_hint: str | None = Field(default=None, max_length=4_000)
     impossibility_reason: str | None = Field(default=None, max_length=4_000)
-
-    @model_validator(mode="after")
-    def validate_cross_loop_evidence(self) -> "ReportBlockerInput":
-        cross_fields = [
-            self.target_owner,
-            self.contract_field,
-            self.contract_revision,
-            self.committed_evidence_locator,
-            self.impossibility_reason,
-        ]
-        if self.kind == "cross_loop" and any(item is None for item in cross_fields):
-            raise ValueError("Cross-Loop blocker requires complete contract evidence.")
-        if self.kind != "cross_loop" and any(item is not None for item in cross_fields):
-            raise ValueError("Upper-contract fields are only valid for cross-Loop blockers.")
-        return self
 
 
 PACK_ROLES: dict[ContextPackName, frozenset[AgentRole]] = {
@@ -138,21 +95,10 @@ def register_shared_tools(registry: ToolRegistry) -> None:
     )
     registry.register(
         ToolSpec(
-            name="read_chapter_evidence",
-            version=1,
-            description="Read a bounded range from committed chapter prose.",
-            input_model=ReadChapterEvidenceInput,
-            allowed_roles=all_roles,
-            handler=_read_chapter_evidence,
-            read_only=False,
-        )
-    )
-    registry.register(
-        ToolSpec(
             name="request_user_decision",
             version=1,
             description=(
-                "Pause for exactly one concrete user decision with two or three suggestions."
+                "Pause for one concrete user decision with two or three semantic suggestions."
             ),
             input_model=RequestUserDecisionInput,
             allowed_roles=all_roles,
@@ -185,6 +131,7 @@ def _get_loop_context(
     arguments: BaseModel,
 ) -> ToolExecutionPlan:
     request = _typed(arguments, GetLoopContextInput)
+    max_characters = 30_000
     if context.identity.role not in PACK_ROLES[request.pack]:
         raise ToolHandlerError(
             "context_pack_not_authorized",
@@ -193,21 +140,23 @@ def _get_loop_context(
             allowed_actions=["choose_authorized_context_pack"],
         )
     sources = _pack_sources(context.project_path, request.pack)
-    resolved, remaining = [], request.max_characters
+    resolved, remaining = [], max_characters
     for relative in sources:
         path = context.project_path / relative
         if not path.is_file():
             continue
         raw = path.read_bytes()
         text = raw.decode("utf-8-sig")
-        excerpt = text[:remaining]
+        semantic_text = _semantic_source_text(path, text)
+        excerpt = semantic_text[:remaining]
         resolved.append(
             {
                 "source": relative.as_posix(),
                 "sha256": sha256(raw).hexdigest(),
-                "characters": len(text),
+                "raw_characters": len(text),
+                "characters": len(semantic_text),
                 "included_characters": len(excerpt),
-                "truncated": len(excerpt) < len(text),
+                "truncated": len(excerpt) < len(semantic_text),
                 "content": excerpt,
             }
         )
@@ -218,53 +167,28 @@ def _get_loop_context(
         "schema_version": 1,
         "pack": request.pack,
         "caller": context.identity.model_dump(mode="json"),
-        "max_characters": request.max_characters,
+        "max_characters": max_characters,
         "sources": resolved,
         "excluded": _excluded_context_sources(request.pack),
     }
     snapshot_path = _audit_relative(context, "context")
+    public_snapshot = {
+        "pack": request.pack,
+        "sources": [
+            {
+                "characters": item["characters"],
+                "included_characters": item["included_characters"],
+                "truncated": item["truncated"],
+                "content": item["content"],
+            }
+            for item in resolved
+        ],
+    }
     return ToolExecutionPlan(
-        content=snapshot,
+        content=public_snapshot,
         files={snapshot_path: json_document(snapshot)},
         artifact_paths=[snapshot_path],
         allowed_actions=["request_another_context_pack", "submit_candidate"],
-    )
-
-
-def _read_chapter_evidence(
-    context: ToolExecutionContext,
-    arguments: BaseModel,
-) -> ToolExecutionPlan:
-    request = _typed(arguments, ReadChapterEvidenceInput)
-    relative = Path("chapters") / request.chapter_id / "final.md"
-    path = context.project_path / relative
-    if not path.is_file():
-        raise ToolHandlerError(
-            "committed_chapter_not_found",
-            f"Committed chapter evidence does not exist: {request.chapter_id}",
-            recoverable=True,
-            allowed_actions=["choose_committed_chapter"],
-        )
-    raw = path.read_bytes()
-    text = raw.decode("utf-8-sig")
-    start = min(request.start_character, len(text))
-    excerpt = text[start : start + request.max_characters]
-    payload = {
-        "chapter_id": request.chapter_id,
-        "source": request.source,
-        "source_path": relative.as_posix(),
-        "sha256": sha256(raw).hexdigest(),
-        "start_character": start,
-        "end_character": start + len(excerpt),
-        "truncated": start + len(excerpt) < len(text),
-        "content": excerpt,
-    }
-    snapshot_path = _audit_relative(context, "chapter-evidence")
-    return ToolExecutionPlan(
-        content=payload,
-        files={snapshot_path: json_document(payload)},
-        artifact_paths=[snapshot_path],
-        allowed_actions=["read_chapter_evidence", "submit_candidate"],
     )
 
 
@@ -273,6 +197,7 @@ def _request_user_decision(
     arguments: BaseModel,
 ) -> ToolExecutionPlan:
     request = _typed(arguments, RequestUserDecisionInput)
+    question = _normalize_question(request.question)
     checkpoint_id = f"user-decision:{context.activation_id}:{_call_token(context)}"
     relative = activation_relative(context.identity, context.activation_id) / "wait.json"
     payload = {
@@ -280,11 +205,12 @@ def _request_user_decision(
         "checkpoint_id": checkpoint_id,
         "candidate_run_id": context.candidate_run_id,
         **request.model_dump(mode="json"),
+        "question": question,
     }
     return ToolExecutionPlan(
         content={
             "checkpoint_id": checkpoint_id,
-            "question": request.question,
+            "question": question,
             "suggestion_count": len(request.suggestions),
             "summary": "Waiting for one user decision.",
         },
@@ -302,17 +228,18 @@ def _report_blocker(
     request = _typed(arguments, ReportBlockerInput)
     checkpoint_id = f"blocker:{context.activation_id}:{_call_token(context)}"
     relative = activation_relative(context.identity, context.activation_id) / "blocker.json"
+    bound = _bind_blocker_control(context, request)
     payload = {
         "schema_version": 1,
         "checkpoint_id": checkpoint_id,
         "candidate_run_id": context.candidate_run_id,
         "routing_status": "proposal_only",
-        **request.model_dump(mode="json"),
+        **bound,
     }
     return ToolExecutionPlan(
         content={
             "checkpoint_id": checkpoint_id,
-            "kind": request.kind,
+            "kind": bound["kind"],
             "routing_status": "proposal_only",
             "summary": request.summary,
         },
@@ -321,6 +248,133 @@ def _report_blocker(
         artifact_paths=[relative.as_posix()],
         allowed_actions=["await_harness_routing"],
     )
+
+
+def _normalize_question(question: str) -> str:
+    normalized = re.sub(r"[?？]+", "，", question.strip()).rstrip("，,。!！ ")
+    return normalized + "？"
+
+
+def _bind_blocker_control(
+    context: ToolExecutionContext,
+    request: ReportBlockerInput,
+) -> dict[str, object]:
+    base: dict[str, object] = {
+        "kind": request.kind,
+        "summary": request.summary,
+        "evidence": request.semantic_evidence,
+        "target_owner": None,
+        "contract_field": None,
+        "contract_revision": None,
+        "committed_evidence_locator": None,
+        "impossibility_reason": None,
+    }
+    if request.kind != "cross_loop":
+        return base
+    if not all(
+        (
+            request.upper_scope,
+            request.contract_concern,
+            request.evidence_hint,
+            request.impossibility_reason,
+        )
+    ):
+        raise ToolHandlerError(
+            "cross_loop_semantics_incomplete",
+            "Cross-Loop escalation requires an upper scope, concern, evidence meaning, and reason.",
+            recoverable=True,
+            allowed_actions=["retry:report_blocker"],
+        )
+    metadata = read_project_metadata(context.project_path)
+    if request.upper_scope == "story_arc_contract":
+        if context.identity.role != "chapter" or metadata.active_arc_id is None:
+            raise ToolHandlerError(
+                "cross_loop_owner_unavailable",
+                "Only a Chapter may semantically escalate to its active Story Arc.",
+                recoverable=False,
+            )
+        owner = "story_arc"
+        state = read_json(
+            context.project_path / "arcs" / metadata.active_arc_id / "state.json",
+            default=None,
+        )
+        revision = state.get("version") if isinstance(state, dict) else None
+        locator = f"arcs/{metadata.active_arc_id}/plan.md"
+        candidates = [locator]
+    else:
+        if context.identity.role == "book":
+            raise ToolHandlerError(
+                "cross_loop_owner_unavailable",
+                "Book cannot escalate to itself.",
+                recoverable=False,
+            )
+        owner = "book"
+        state = read_json(context.project_path / "book" / "state.json", default=None)
+        revision = state.get("version") if isinstance(state, dict) else None
+        candidates = [
+            "book/direction.md",
+            "book/settings.md",
+            "book/outline.md",
+            "book/constraints.json",
+            "book/state.json",
+        ]
+        locator = _bind_committed_evidence_locator(
+            context.project_path,
+            candidates,
+            [
+                request.evidence_hint or "",
+                request.contract_concern or "",
+                request.impossibility_reason or "",
+            ],
+        )
+    if not isinstance(revision, int) or isinstance(revision, bool):
+        raise ToolHandlerError(
+            "cross_loop_contract_unavailable",
+            "Harness cannot read the current upper-contract revision.",
+            recoverable=False,
+        )
+    if request.upper_scope == "story_arc_contract":
+        locator = _bind_committed_evidence_locator(
+            context.project_path,
+            candidates,
+            [
+                request.evidence_hint or "",
+                request.contract_concern or "",
+                request.impossibility_reason or "",
+            ],
+        )
+    return {
+        **base,
+        "target_owner": owner,
+        "contract_field": request.contract_concern,
+        "contract_revision": revision,
+        "committed_evidence_locator": locator,
+        "impossibility_reason": request.impossibility_reason,
+    }
+
+
+def _bind_committed_evidence_locator(
+    project_path: Path,
+    candidates: list[str],
+    hints: list[str],
+) -> str:
+    matched: list[str] = []
+    for locator in candidates:
+        path = project_path / locator
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8-sig")
+        if resolve_semantic_evidence_quote(text, hints) is not None:
+            matched.append(locator)
+    if len(matched) != 1:
+        raise ToolHandlerError(
+            "cross_loop_evidence_unresolved",
+            "Harness could not bind the semantic blocker to one committed evidence source.",
+            recoverable=True,
+            content={"candidate_source_count": len(candidates)},
+            allowed_actions=["retry:report_blocker"],
+        )
+    return matched[0]
 
 
 def _pack_sources(project_path: Path, pack: ContextPackName) -> list[Path]:
@@ -366,6 +420,33 @@ def _excluded_context_sources(pack: ContextPackName) -> list[str]:
     if pack == "book_discussion":
         excluded.append("future story arc and chapter plans")
     return excluded
+
+
+def _semantic_source_text(path: Path, text: str) -> str:
+    if path.suffix.casefold() == ".json":
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return "[invalid structured context omitted]"
+        return json.dumps(
+            semantic_model_value(payload),
+            ensure_ascii=False,
+            indent=2,
+        )
+    if path.suffix.casefold() == ".jsonl":
+        semantic_lines: list[str] = []
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            semantic_lines.append(
+                json.dumps(semantic_model_value(payload), ensure_ascii=False)
+            )
+        return "\n".join(semantic_lines)
+    return text
 
 
 def _audit_relative(context: ToolExecutionContext, prefix: str) -> str:

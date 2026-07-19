@@ -47,7 +47,7 @@ def test_story_arc_repair_preserves_unmodified_components(tmp_path: Path) -> Non
         _call(
             "replace",
             "replace_candidate_text",
-            {"component": "plan", "content": "# Arc\n\nRepaired plan."},
+            {"content_kind": "arc_plan", "content": "# Arc\n\nRepaired plan."},
         ),
     )
     finalized = registry.execute(
@@ -60,7 +60,7 @@ def test_story_arc_repair_preserves_unmodified_components(tmp_path: Path) -> Non
     )
 
     assert changed.status == "ok"
-    assert finalized.status == "ok"
+    assert finalized.status == "ok", finalized.model_dump(mode="json")
     assert finalized.terminal is True
     candidate = read_json(tmp_path / finalized.artifact_paths[0])
     assert candidate["plan_markdown"] == "# Arc\n\nRepaired plan."
@@ -86,18 +86,15 @@ def test_book_repair_cannot_delete_below_required_title_minimum(
     )
     registry = build_default_tool_registry()
     opened = registry.execute(context, _call("open", "open_candidate_repair", {}))
-    title_items = [
-        item
-        for item in opened.content["structured_items"]
-        if item["component"] == "recommended_titles"
-    ]
+    assert "structured_items" not in opened.content
+    assert "workspace_id" not in opened.content
 
     first_delete = registry.execute(
         _next_context(context, "delete-1"),
         _call(
             "delete-1",
             "delete_candidate_repair_item",
-            {"item_id": title_items[0]["item_id"]},
+            {"semantic_area": "comparison_title", "current_meaning": "Title 1"},
         ),
     )
     rejected_delete = registry.execute(
@@ -105,7 +102,7 @@ def test_book_repair_cannot_delete_below_required_title_minimum(
         _call(
             "delete-2",
             "delete_candidate_repair_item",
-            {"item_id": title_items[1]["item_id"]},
+            {"semantic_area": "comparison_title", "current_meaning": "Title 2"},
         ),
     )
     finalized = registry.execute(
@@ -122,7 +119,7 @@ def test_book_repair_cannot_delete_below_required_title_minimum(
     assert rejected_delete.error_code == "repair_collection_minimum_violation"
     assert rejected_delete.content["minimum_items"] == 3
     assert rejected_delete.recoverable is True
-    assert finalized.status == "ok"
+    assert finalized.status == "ok", finalized.model_dump(mode="json")
     candidate = read_json(tmp_path / finalized.artifact_paths[0])
     assert len(candidate["recommended_titles"]) == 3
 
@@ -193,25 +190,23 @@ def test_chapter_state_patch_repair_preserves_observation_semantics(
         _next_context(context, "reopen"),
         _call("reopen", "open_candidate_repair", {}),
     )
-    patch_item = next(
-        item
-        for item in opened.content["structured_items"]
-        if item["component"] == "state_patch"
-    )
-    assert "expected_version" not in patch_item["value"]
+    patch_value = opened.content["current_candidate"]["state_patch"]["operations"][0]
+    assert "expected_version" not in patch_value
+    assert "target_file" not in patch_value
+    assert "target_id" not in patch_value
     updated = registry.execute(
         _next_context(context, "update"),
         _call(
             "update",
             "update_state_patch_operation_repair",
             {
-                "item_id": patch_item["item_id"],
+                "current_meaning": "The bell is audible in the chapter.",
                 "operation": {
-                    "op": "upsert",
-                    "target_file": "canon/world_facts.json",
-                    "target_id": "bell",
-                    "value_fields": [{"key": "heard", "json_value": "true"}],
-                    "evidence_quotes": ["The harbor bell rang once."],
+                    "change_kind": "establish",
+                    "entity_kind": "world_fact",
+                    "entity_name": "bell",
+                    "resulting_state": "The bell has been heard across the harbor.",
+                    "evidence_hint": "The harbor bell rang once.",
                     "rationale": "The sentence directly establishes the audible bell.",
                 },
             },
@@ -228,26 +223,31 @@ def test_chapter_state_patch_repair_preserves_observation_semantics(
 
     assert opened.status == "ok"
     assert reopened.status == "ok"
-    assert reopened.content["workspace_id"] == opened.content["workspace_id"]
-    assert reopened.content["structured_items"] == opened.content["structured_items"]
+    assert reopened.content == opened.content
     assert updated.status == "ok"
-    assert finalized.status == "ok"
+    assert finalized.status == "ok", finalized.model_dump(mode="json")
     candidate = read_json(tmp_path / finalized.artifact_paths[0])
     source_payload = read_json(tmp_path / source_artifact)
-    expected_observations = {
-        **source_payload["observations"],
-        "based_on": str(Path(finalized.artifact_paths[0]).parent / "draft.md").replace(
-            "\\", "/"
-        ),
-    }
-    assert candidate["observations"] == expected_observations
+    expected_draft_path = str(
+        Path(finalized.artifact_paths[0]).parent / "draft.md"
+    ).replace("\\", "/")
+    assert candidate["observations"]["based_on"] == expected_draft_path
+    assert candidate["observations"]["events"][0]["summary"] == (
+        source_payload["observations"]["events"][0]["summary"]
+    )
+    assert candidate["observations"]["events"][0]["evidence_quote"] in (
+        tmp_path / Path(finalized.artifact_paths[0]).parent / "draft.md"
+    ).read_text(encoding="utf-8")
     assert candidate["plan_revision"] == 1
     assert candidate["draft_revision"] == 1
     assert candidate["candidate_revision"] == 2
     operation = candidate["state_patch"]["operations"][0]
-    assert operation["id"] == patch_item["item_id"]
+    assert operation["id"].startswith("item-")
+    assert operation["target_id"] == "bell"
     assert operation["expected_version"] == 1
-    assert operation["evidence"][0]["quote"] == "The harbor bell rang once."
+    assert operation["evidence"][0]["quote"] in (
+        tmp_path / Path(finalized.artifact_paths[0]).parent / "draft.md"
+    ).read_text(encoding="utf-8")
     assert source_payload["observations"]["events"][0]["evidence_quote"].endswith(
         "},{"
     )
@@ -284,12 +284,9 @@ def test_chapter_state_patch_repair_preserves_observation_semantics(
         next_context,
         _call("open-next", "open_candidate_repair", {}),
     )
-    next_patch_item = next(
-        item
-        for item in opened_next.content["structured_items"]
-        if item["component"] == "state_patch"
-    )
-    assert next_patch_item["item_id"] == patch_item["item_id"]
+    next_patch = opened_next.content["current_candidate"]["state_patch"]["operations"][0]
+    assert "id" not in next_patch
+    assert "target_id" not in next_patch
 
 
 def test_chapter_full_draft_repair_does_not_regenerate_derived_artifacts(
@@ -314,7 +311,7 @@ def test_chapter_full_draft_repair_does_not_regenerate_derived_artifacts(
             "replace",
             "replace_candidate_text",
             {
-                "component": "draft",
+                    "content_kind": "chapter_draft",
                 "content": (
                     "The harbor bell rang once. Everyone faced the door. "
                     "Mara checked the sealed clock before speaking."
@@ -332,16 +329,21 @@ def test_chapter_full_draft_repair_does_not_regenerate_derived_artifacts(
     )
 
     assert replaced.status == "ok"
-    assert finalized.status == "ok"
+    assert finalized.status == "ok", finalized.model_dump(mode="json")
     candidate = read_json(tmp_path / finalized.artifact_paths[0])
     source_payload = read_json(tmp_path / source_artifact)
-    assert candidate["observations"] == {
-        **source_payload["observations"],
-        "based_on": str(Path(finalized.artifact_paths[0]).parent / "draft.md").replace(
-            "\\", "/"
-        ),
-    }
-    assert candidate["state_patch"] == source_payload["state_patch"]
+    candidate_draft = (
+        tmp_path / Path(finalized.artifact_paths[0]).parent / "draft.md"
+    ).read_text(encoding="utf-8")
+    assert candidate["observations"]["events"][0]["summary"] == (
+        source_payload["observations"]["events"][0]["summary"]
+    )
+    assert candidate["observations"]["events"][0]["evidence_quote"] in candidate_draft
+    candidate_operation = candidate["state_patch"]["operations"][0]
+    source_operation = source_payload["state_patch"]["operations"][0]
+    for key in ("op", "target_file", "target_id", "value", "rationale"):
+        assert candidate_operation[key] == source_operation[key]
+    assert candidate_operation["evidence"][0]["quote"] in candidate_draft
     assert candidate["draft_revision"] == 2
     assert candidate["plan_revision"] == 1
 
@@ -366,20 +368,18 @@ def test_chapter_repair_rebinds_observation_provenance_to_candidate_draft(
         context,
         _call("open", "open_candidate_repair", {}),
     )
-    observation = next(
-        item
-        for item in opened.content["structured_items"]
-        if item["component"] == "observations"
-    )
+    observation = opened.content["current_candidate"]["observations"]["events"][0]
+    assert "id" not in observation
+    assert "evidence_quote" not in observation
     updated = registry.execute(
         _next_context(context, "update"),
         _call(
             "update",
             "update_chapter_observation_repair",
             {
-                "item_id": observation["item_id"],
-                "summary": "The bell audibly announces an arrival.",
-                "evidence_quote": "The harbor bell rang once.",
+                "observation_kind": "event",
+                "current_meaning": "The bell announces an arrival.",
+                "summary": "The harbor bell rang once.",
             },
         ),
     )
@@ -393,7 +393,7 @@ def test_chapter_repair_rebinds_observation_provenance_to_candidate_draft(
     )
 
     assert updated.status == "ok"
-    assert finalized.status == "ok"
+    assert finalized.status == "ok", finalized.model_dump(mode="json")
     manifest_path = tmp_path / finalized.artifact_paths[0]
     candidate = read_json(manifest_path)
     expected_draft = str(manifest_path.relative_to(tmp_path).parent / "draft.md").replace(

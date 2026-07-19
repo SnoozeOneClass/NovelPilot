@@ -1,44 +1,87 @@
 from pathlib import Path
 
 from app.harness.agents.domain_tools import build_default_tool_registry
-from app.harness.agents.models import (
-    AgentIdentity,
-    RepairContract,
-    StoryArcCandidateSnapshot,
-)
-from app.harness.agents.rubrics import component_fingerprints
+from app.harness.agents.models import AgentIdentity
 from app.harness.agents.registry import ToolExecutionContext
 from app.llm.gateway import ToolCall
 from app.storage.json_files import read_json, write_json
 
 
-def test_provider_strict_tool_schemas_require_defaulted_properties() -> None:
+FORBIDDEN_PROVIDER_CONTROL_FIELDS = {
+    "id",
+    "chapter_id",
+    "arc_id",
+    "expected_revision",
+    "candidate_revision",
+    "plan_revision",
+    "draft_revision",
+    "next_draft_revision",
+    "expected_version",
+    "operation_index",
+    "target_file",
+    "target_id",
+    "evidence_quote",
+    "evidence_quotes",
+    "candidate_locator",
+    "evidence_locator",
+    "committed_evidence_locator",
+    "contract_revision",
+    "workspace_id",
+    "item_id",
+    "collection",
+    "secondary",
+    "candidate_evidence",
+    "op",
+    "key",
+    "json_value",
+    "value_fields",
+    "fingerprint",
+    "max_characters",
+    "start_character",
+}
+
+
+def test_registered_provider_tool_schemas_contain_no_harness_control_fields() -> None:
     registry = build_default_tool_registry()
-    context_schema = registry.definitions(
-        role="book",
-        phase="discussion",
-        names=["get_loop_context"],
-    )[0].input_schema
-    discussion_schema = registry.definitions(
-        role="book",
-        phase="discussion",
-        names=["submit_book_discussion_update"],
-    )[0].input_schema
+    definitions = []
+    for name in registry.registered_names():
+        found = False
+        for role in ("book", "story_arc", "chapter"):
+            for phase in ("discussion", "direction", "planning", "revision", "chapter"):
+                try:
+                    resolved = registry.definitions(role=role, phase=phase, names=[name])
+                except ValueError:
+                    continue
+                definitions.extend(resolved)
+                found = True
+                break
+            if found:
+                break
+        assert found, f"No provider activation exposes registered Tool {name}."
 
-    assert context_schema["required"] == ["pack", "max_characters"]
-    assert "default" not in context_schema["properties"]["max_characters"]
-    suggestion_schema = discussion_schema["$defs"]["SetupSuggestion"]
-    assert suggestion_schema["required"] == [
-        "id",
-        "label",
-        "message",
-        "rationale",
-        "recommended",
-    ]
-    assert "default" not in suggestion_schema["properties"]["recommended"]
+    property_names: set[str] = set()
+
+    def collect(value: object) -> None:
+        if isinstance(value, dict):
+            properties = value.get("properties")
+            if isinstance(properties, dict):
+                property_names.update(properties)
+            for child in value.values():
+                collect(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child)
+
+    for definition in definitions:
+        collect(definition.input_schema)
+
+    assert not (property_names & FORBIDDEN_PROVIDER_CONTROL_FIELDS)
+    assert "constraints.must_avoid" not in str(definitions)
+    assert "constraints.creative_freedoms" not in str(definitions)
+    assert "candidate_evidence" not in str(definitions)
 
 
-def test_chapter_submission_tool_schemas_contain_no_open_json_objects() -> None:
+def test_chapter_provider_schemas_are_closed_semantic_objects() -> None:
     schemas = build_default_tool_registry().definitions(
         role="chapter",
         phase="chapter",
@@ -61,694 +104,269 @@ def test_chapter_submission_tool_schemas_contain_no_open_json_objects() -> None:
 
     for definition in schemas:
         assert_closed(definition.input_schema)
-    patch_operation_schema = schemas[1].input_schema["$defs"][
-        "ChapterPatchOperationInput"
-    ]
-    assert "expected_version" not in patch_operation_schema["properties"]
-    assert "expected_version" not in patch_operation_schema["required"]
 
 
-def test_book_direction_submission_is_candidate_only_and_revision_guarded(
+def test_book_direction_submission_binds_authority_and_revisions_in_harness(
     tmp_path: Path,
 ) -> None:
-    registry = build_default_tool_registry()
     arguments = {
-        "expected_revision": 4,
-        "candidate_revision": 2,
-        "direction_markdown": "# 方向\n\n候选方向。",
+        "direction_markdown": "# Direction\n\nTwo linked arcs expose one buried betrayal.",
         "constraints": {
-            "confirmed": ["双故事弧"],
-            "must_preserve": [],
-            "must_avoid": [],
-            "creative_freedoms": [],
+            "must_avoid": ["No supernatural solution."],
+            "creative_freedoms": ["The culprit may be chosen during arc planning."],
             "open_decisions": [],
         },
-        "confirmed_decision_coverage": [
-            {"decision": "双故事弧", "candidate_evidence": "方向第一节"}
+        "comparison_titles": [
+            {"title": "The Second Tide", "rationale": "Highlights recurrence."},
+            {"title": "Salt Ledger", "rationale": "Highlights the hidden record."},
         ],
-        "recommended_titles": [
-            {"title": "潮汐一", "rationale": "理由一"},
-            {"title": "潮汐二", "rationale": "理由二"},
-            {"title": "潮汐三", "rationale": "理由三"},
-        ],
-        "rolling_plan_markdown": "先规划第一故事弧。",
+        "rolling_plan_markdown": "Arc one exposes the clue; arc two resolves the betrayal.",
     }
-
-    stale = registry.execute(
-        _context(
-            tmp_path,
-            role="book",
-            phase="direction",
-            revision=3,
-            call_id="stale",
-            expected_candidate_revision=2,
-        ),
-        _call("stale", "submit_book_direction_candidate", arguments),
-    )
-    wrong_candidate_revision = registry.execute(
+    result = build_default_tool_registry().execute(
         _context(
             tmp_path,
             role="book",
             phase="direction",
             revision=4,
-            call_id="wrong-candidate-revision",
-            expected_candidate_revision=1,
+            call_id="book-direction",
+            expected_candidate_revision=7,
+            control_data={
+                "confirmed_decisions": ["Use exactly two linked story arcs."],
+                "selected_title": "Harbor of Echoes",
+            },
         ),
-        _call(
-            "wrong-candidate-revision",
-            "submit_book_direction_candidate",
-            arguments,
-        ),
-    )
-    missing_candidate_target = registry.execute(
-        _context(
-            tmp_path,
-            role="book",
-            phase="direction",
-            revision=4,
-            call_id="missing-candidate-target",
-        ),
-        _call(
-            "missing-candidate-target",
-            "submit_book_direction_candidate",
-            arguments,
-        ),
+        _call("book-direction", "submit_book_direction_candidate", arguments),
     )
 
-    candidate_path = (
-        tmp_path / "book" / "agent" / "a" / "activation-1" / "c" / "book-direction.json"
-    )
-    assert not candidate_path.exists()
-    accepted = registry.execute(
-        _context(
-            tmp_path,
-            role="book",
-            phase="direction",
-            revision=4,
-            call_id="ok",
-            expected_candidate_revision=2,
-        ),
-        _call("ok", "submit_book_direction_candidate", arguments),
-    )
+    assert result.status == "ok"
+    payload = read_json(tmp_path / result.artifact_paths[0])
+    assert payload["expected_revision"] == 4
+    assert payload["candidate_revision"] == 7
+    assert payload["constraints"]["confirmed"] == [
+        "Use exactly two linked story arcs."
+    ]
+    assert payload["constraints"]["must_preserve"] == [
+        "Use exactly two linked story arcs."
+    ]
+    assert payload["recommended_titles"][0]["title"] == "Harbor of Echoes"
 
-    assert stale.status == "error"
-    assert stale.error_code == "stale_candidate_revision"
-    assert stale.recoverable is True
-    assert stale.content == {"expected_revision": 3, "received_revision": 4}
-    assert wrong_candidate_revision.status == "error"
-    assert wrong_candidate_revision.error_code == "stale_candidate_revision"
-    assert wrong_candidate_revision.recoverable is True
-    assert wrong_candidate_revision.content == {
-        "expected_candidate_revision": 1,
-        "received_candidate_revision": 2,
+
+def test_same_story_arc_semantics_bind_to_different_internal_control_envelopes(
+    tmp_path: Path,
+) -> None:
+    arguments = {
+        "plan_markdown": "The team follows the false manifest to the flooded archive.",
+        "target_chapter_count": 2,
+        "change_summary": "Plan the next bounded arc.",
     }
-    assert missing_candidate_target.status == "error"
-    assert missing_candidate_target.error_code == "missing_expected_candidate_revision"
-    assert missing_candidate_target.recoverable is False
-    assert accepted.status == "ok"
-    assert accepted.terminal is True
-    assert accepted.content["promotable"] is False
-    assert not (tmp_path / "book" / "direction.md").exists()
-    payload = read_json(tmp_path / accepted.artifact_paths[0])
-    assert payload["candidate_revision"] == 2
-
-
-def test_book_discussion_tool_rejects_delegated_topic_selection() -> None:
     registry = build_default_tool_registry()
-    result = registry.execute(
+    first = registry.execute(
         _context(
-            Path("."),
+            tmp_path / "first",
+            role="story_arc",
+            scope_id="arc-alpha",
+            phase="planning",
+            revision=1,
+            call_id="first",
+        ),
+        _call("first", "submit_story_arc_candidate", arguments),
+    )
+    second = registry.execute(
+        _context(
+            tmp_path / "second",
+            role="story_arc",
+            scope_id="arc-beta",
+            phase="revision",
+            revision=8,
+            call_id="second",
+        ),
+        _call("second", "submit_story_arc_candidate", arguments),
+    )
+
+    first_payload = read_json(tmp_path / "first" / first.artifact_paths[0])
+    second_payload = read_json(tmp_path / "second" / second.artifact_paths[0])
+    for key in ("plan_markdown", "target_chapter_count", "change_summary"):
+        assert first_payload[key] == second_payload[key]
+    assert (first_payload["arc_id"], first_payload["expected_revision"]) == (
+        "arc-alpha",
+        1,
+    )
+    assert (second_payload["arc_id"], second_payload["expected_revision"]) == (
+        "arc-beta",
+        8,
+    )
+    assert first_payload["intent"] == "create"
+    assert second_payload["intent"] == "revise"
+
+
+def test_book_discussion_assigns_suggestion_ids_and_preserves_prior_state(
+    tmp_path: Path,
+) -> None:
+    arguments = {
+        "reply": "The six-person cast still needs a boundary.",
+        "direction_draft": "# Direction\n\nA fair closed-circle mystery.",
+        "discussion_summary": "The user wants fair clues and a bounded cast.",
+        "newly_confirmed_decisions": ["Use six principal suspects."],
+        "superseded_decisions": [],
+        "unresolved_questions": ["Which witness is outside the suspect group?"],
+        "assumptions": [],
+        "contradictions": [],
+        "newly_selected_title": None,
+        "question": "Which witness should remain outside the suspect group",
+        "suggestions": [
+            {
+                "label": "Harbor master",
+                "message": "Keep the harbor master outside the group.",
+                "rationale": "Preserves an external information source.",
+                "recommended": True,
+            },
+            {
+                "label": "Doctor",
+                "message": "Keep the doctor outside the group.",
+                "rationale": "Preserves medical evidence independence.",
+                "recommended": False,
+            },
+        ],
+        "readiness": {"status": "continue", "reason": "One boundary remains."},
+    }
+    result = build_default_tool_registry().execute(
+        _context(
+            tmp_path,
             role="book",
             phase="discussion",
-            revision=0,
+            revision=3,
             call_id="discussion",
-        ),
-        _call(
-            "discussion",
-            "submit_book_discussion_update",
-            {
-                "expected_revision": 0,
-                "reply": "The cast boundary is unresolved.",
-                "direction_draft": "# Direction\n\nA bounded mystery direction.",
-                "discussion_summary": "The user wants a fair mystery.",
-                "confirmed_decisions": ["Clues remain fair."],
+            control_data={
+                "confirmed_decisions": ["All clues must be fair."],
                 "superseded_decisions": [],
-                "unresolved_questions": ["Who belongs to the six-person cast?"],
-                "assumptions": [],
-                "contradictions": [],
-                "question": "Which issue should we discuss first?",
-                "suggestions": [
-                    {
-                        "id": "cast",
-                        "label": "Clarify cast",
-                        "message": "Clarify who counts among the six.",
-                        "rationale": "This blocks downstream relationships.",
-                        "recommended": True,
-                    },
-                    {
-                        "id": "motive",
-                        "label": "Choose motive",
-                        "message": "Choose the old-case motive first.",
-                        "rationale": "This establishes the investigation pressure.",
-                        "recommended": False,
-                    },
-                ],
-                "readiness": {
-                    "status": "continue",
-                    "reason": "A foundational ambiguity remains.",
-                },
+                "selected_title": None,
+                "turn": 4,
             },
         ),
+        _call("discussion", "submit_book_discussion_update", arguments),
     )
 
-    assert result.status == "error"
-    assert result.error_code == "invalid_tool_arguments"
-    assert "choose the next concrete decision" in str(result.content["issues"])
-    serialized = result.model_dump_json()
-    assert "ValueError" not in serialized
+    assert result.status == "ok"
+    payload = read_json(tmp_path / result.artifact_paths[0])
+    assert payload["expected_revision"] == 3
+    assert payload["confirmed_decisions"] == [
+        "All clues must be fair.",
+        "Use six principal suspects.",
+    ]
+    assert payload["question"].endswith("？")
+    assert all(item["id"].startswith("suggestion-") for item in payload["suggestions"])
 
 
-def test_story_arc_tool_enforces_agent_ownership(tmp_path: Path) -> None:
-    registry = build_default_tool_registry()
-    result = registry.execute(
-        _context(
-            tmp_path,
-            role="story_arc",
-            scope_id="arc-0001",
-            phase="planning",
-            revision=0,
-            call_id="arc-call",
-        ),
-        _call(
-            "arc-call",
-            "submit_story_arc_candidate",
-            {
-                "expected_revision": 0,
-                "intent": "create",
-                "arc_id": "arc-0002",
-                "plan_markdown": "# 错误归属",
-                "target_chapter_count": 10,
-                "change_summary": "新建故事弧。",
-            },
-        ),
-    )
-
-    assert result.status == "error"
-    assert result.error_code == "arc_ownership_mismatch"
-
-
-def test_story_arc_repair_rejects_changes_outside_authorized_components(
-    tmp_path: Path,
-) -> None:
-    source = StoryArcCandidateSnapshot(
-        plan="# Arc\n\nOriginal plan.",
-        target_chapter_count=10,
-        change_summary="Create the arc.",
-    )
-    contract = RepairContract(
-        evaluation_id="evaluation-1",
-        source_activation_id="source-activation",
-        source_candidate_artifact_id="arcs/arc-0001/source.json",
-        source_candidate_revision=1,
-        next_candidate_revision=2,
-        open_issue_ids=["issue-1"],
-        repair_brief="Repair only the plan.",
-        allowed_components=["plan"],
-        source_component_fingerprints=component_fingerprints(source),
-    )
-    result = build_default_tool_registry().execute(
-        _context(
-            tmp_path,
-            role="story_arc",
-            scope_id="arc-0001",
-            phase="planning",
-            revision=0,
-            call_id="repair-scope",
-            repair_contract=contract,
-        ),
-        _call(
-            "repair-scope",
-            "submit_story_arc_candidate",
-            {
-                "expected_revision": 0,
-                "intent": "create",
-                "arc_id": "arc-0001",
-                "plan_markdown": "# Arc\n\nRepaired plan.",
-                "target_chapter_count": 11,
-                "change_summary": "Create the arc.",
-            },
-        ),
-    )
-
-    assert result.status == "error"
-    assert result.error_code == "candidate_repair_scope_violation"
-    assert result.recoverable is True
-    assert result.content["unexpected_components"] == ["target_chapter_count"]
-
-
-def test_runtime_allowlist_rejects_role_valid_but_unexposed_tool(
-    tmp_path: Path,
-) -> None:
-    context = _context(
-        tmp_path,
-        role="story_arc",
-        scope_id="arc-0001",
-        phase="planning",
-        revision=0,
-        call_id="old-terminal",
-    )
-    context = context.__class__(
-        **{
-            **context.__dict__,
-            "allowed_tools": frozenset({"replace_candidate_text"}),
-        }
-    )
-    result = build_default_tool_registry().execute(
-        context,
-        _call(
-            "old-terminal",
-            "submit_story_arc_candidate",
-            {
-                "expected_revision": 0,
-                "intent": "create",
-                "arc_id": "arc-0001",
-                "plan_markdown": "# Old complete-candidate protocol",
-                "target_chapter_count": 2,
-                "change_summary": "Should not be written.",
-            },
-        ),
-    )
-
-    assert result.status == "error"
-    assert result.error_code == "tool_not_exposed"
-    assert result.recoverable is True
-    assert not any(tmp_path.rglob("story-arc.json"))
-
-
-def test_chapter_tools_build_quarantined_candidate_and_never_promote(
+def test_chapter_semantics_are_assembled_with_harness_ids_versions_and_evidence(
     tmp_path: Path,
 ) -> None:
     registry = build_default_tool_registry()
-    context = _context(
+    base = _context(
         tmp_path,
         role="chapter",
         scope_id="chapter-0001",
         phase="chapter",
-        revision=0,
+        revision=5,
         call_id="plan",
     )
-    write_json(
-        tmp_path / "canon" / "world_facts.json",
-        {"schema_version": 1, "version": 2, "items": {}},
-    )
     plan = registry.execute(
-        context,
+        base,
         _call(
             "plan",
             "plan_chapter_candidate",
-            {
-                "chapter_id": "chapter-0001",
-                "expected_revision": 0,
-                "plan_revision": 1,
-                "plan_markdown": "# 第一章计划",
-            },
+            {"plan_markdown": "Reveal that the harbor bell marks a secret arrival."},
         ),
     )
     draft = registry.execute(
-        context.__class__(**{**context.__dict__, "tool_call_id": "draft"}),
+        _with_call(base, "draft"),
         _call(
             "draft",
             "write_chapter_draft",
-            {
-                "chapter_id": "chapter-0001",
-                "expected_revision": 0,
-                "plan_revision": 1,
-                "draft_revision": 1,
-                "mode": "write",
-                "content": "钟声响起。所有人都看向门口。",
-            },
+            {"content": "The harbor bell rang once. Everyone faced the door."},
         ),
     )
     inspect = registry.execute(
-        context.__class__(**{**context.__dict__, "tool_call_id": "inspect"}),
-        _call(
-            "inspect",
-            "inspect_chapter_consistency",
-            {
-                "chapter_id": "chapter-0001",
-                "expected_revision": 0,
-                "draft_revision": 1,
-            },
-        ),
+        _with_call(base, "inspect"),
+        _call("inspect", "inspect_chapter_consistency", {}),
     )
     observations = registry.execute(
-        context.__class__(**{**context.__dict__, "tool_call_id": "observations"}),
+        _with_call(base, "observations"),
         _call(
             "observations",
             "write_chapter_observations",
             {
-                "chapter_id": "chapter-0001",
-                "expected_revision": 0,
-                "draft_revision": 1,
                 "observations": {
-                    "events": [
-                        {
-                            "summary": "The bell exposes the arrival.",
-                            "evidence_quote": "The bell",
-                        }
-                    ],
+                    "events": [{"summary": "The harbor bell rang once."}],
                     "character_changes": [],
                     "relationship_changes": [],
                     "world_fact_candidates": [],
                     "foreshadowing_candidates": [],
-                    "requires_commit": True,
-                },
+                }
             },
         ),
     )
     patch = registry.execute(
-        context.__class__(**{**context.__dict__, "tool_call_id": "patch"}),
+        _with_call(base, "patch"),
         _call(
             "patch",
             "write_chapter_state_patch",
             {
-                "chapter_id": "chapter-0001",
-                "expected_revision": 0,
-                "draft_revision": 1,
                 "state_patch": {
                     "operations": [
                         {
-                            "op": "upsert",
-                            "target_file": "canon/world_facts.json",
-                            "target_id": "bell-arrival",
-                            "value_fields": [
-                                {"key": "visible", "json_value": "true"},
-                                {"key": "name", "json_value": "harbor bell"},
-                            ],
-                            "evidence_quotes": ["钟声响起"],
-                            "rationale": "The draft makes the bell audible.",
+                            "change_kind": "establish",
+                            "entity_kind": "world_fact",
+                            "entity_name": "harbor bell arrival signal",
+                            "resulting_state": (
+                                "The harbor bell signals a secret arrival."
+                            ),
+                            "evidence_hint": "The harbor bell rang once.",
+                            "rationale": "The bell announces a secret arrival.",
                         }
-                    ],
-                },
+                    ]
+                }
             },
         ),
     )
     submit = registry.execute(
-        context.__class__(**{**context.__dict__, "tool_call_id": "submit"}),
+        _with_call(base, "submit"),
         _call(
             "submit",
             "submit_chapter_candidate",
-            {
-                "chapter_id": "chapter-0001",
-                "expected_revision": 0,
-                "candidate_revision": 1,
-                "plan_revision": 1,
-                "draft_revision": 1,
-                "summary": "第一章候选。",
-            },
+            {"summary": "The bell reveals the arrival signal."},
         ),
     )
 
-    assert plan.status == "ok"
-    assert draft.status == "ok"
-    assert inspect.status == "ok"
-    assert inspect.content["semantic_verdict"] is None
-    assert observations.status == "ok"
-    assert patch.status == "ok"
+    assert all(item.status == "ok" for item in (plan, draft, inspect, observations, patch))
     assert submit.status == "ok"
-    assert submit.terminal is True
-    assert submit.content["promotable"] is False
-    assert not (tmp_path / "chapters" / "chapter-0001" / "final.md").exists()
     manifest_path = next(
-        path for path in submit.artifact_paths if path.endswith("manifest.json")
+        item for item in submit.artifact_paths if item.endswith("manifest.json")
     )
     manifest = read_json(tmp_path / manifest_path)
-    assert manifest["promotable"] is False
-    assert manifest["state_patch"]["operations"][0]["value"] == {
-        "visible": True,
-        "name": "harbor bell",
-    }
-    assert manifest["state_patch"]["operations"][0]["expected_version"] == 2
-    assert manifest["canon_versions"]["canon/world_facts.json"] == 2
+    operation = manifest["state_patch"]["operations"][0]
+    assert manifest["chapter_id"] == "chapter-0001"
+    assert manifest["expected_revision"] == 5
+    assert manifest["plan_revision"] == 1
+    assert manifest["draft_revision"] == 1
+    assert manifest["observations"]["events"][0]["id"].startswith("item-")
+    assert manifest["observations"]["events"][0]["evidence_quote"] in (
+        tmp_path / submit.artifact_paths[2]
+    ).read_text(encoding="utf-8")
+    assert operation["target_file"] == "canon/world_facts.json"
+    assert operation["target_id"].startswith("canon-")
+    assert operation["expected_version"] == 1
+    assert operation["evidence"][0]["quote"] in (
+        tmp_path / submit.artifact_paths[2]
+    ).read_text(encoding="utf-8")
+    assert not (tmp_path / "chapters" / "chapter-0001" / "final.md").exists()
 
 
-def test_chapter_submission_rejects_non_verbatim_patch_evidence_before_checkpoint(
-    tmp_path: Path,
-) -> None:
-    registry = build_default_tool_registry()
-    context = _context(
-        tmp_path,
-        role="chapter",
-        scope_id="chapter-0001",
-        phase="chapter",
-        revision=0,
-        call_id="plan",
-    )
-    registry.execute(
-        context,
-        _call(
-            "plan",
-            "plan_chapter_candidate",
-            {
-                "chapter_id": "chapter-0001",
-                "expected_revision": 0,
-                "plan_revision": 1,
-                "plan_markdown": "# Chapter plan",
-            },
-        ),
-    )
-    registry.execute(
-        context.__class__(**{**context.__dict__, "tool_call_id": "draft"}),
-        _call(
-            "draft",
-            "write_chapter_draft",
-            {
-                "chapter_id": "chapter-0001",
-                "expected_revision": 0,
-                "plan_revision": 1,
-                "draft_revision": 1,
-                "mode": "write",
-                "content": "The harbor bell rang once. Everyone faced the door.",
-            },
-        ),
-    )
-    registry.execute(
-        context.__class__(**{**context.__dict__, "tool_call_id": "observations"}),
-        _call(
-            "observations",
-            "write_chapter_observations",
-            {
-                "chapter_id": "chapter-0001",
-                "expected_revision": 0,
-                "draft_revision": 1,
-                "observations": {
-                    "events": [],
-                    "character_changes": [],
-                    "relationship_changes": [],
-                    "world_fact_candidates": [],
-                    "foreshadowing_candidates": [],
-                    "requires_commit": True,
-                },
-            },
-        ),
-    )
-    registry.execute(
-        context.__class__(**{**context.__dict__, "tool_call_id": "patch"}),
-        _call(
-            "patch",
-            "write_chapter_state_patch",
-            {
-                "chapter_id": "chapter-0001",
-                "expected_revision": 0,
-                "draft_revision": 1,
-                "state_patch": {
-                    "operations": [
-                        {
-                            "op": "upsert",
-                            "target_file": "canon/world_facts.json",
-                            "target_id": "harbor-bell",
-                            "value_fields": [
-                                {"key": "heard", "json_value": "true"}
-                            ],
-                            "evidence_quotes": [
-                                "“The harbor bell rang once.”",
-                                "Everyone looked toward the entrance.",
-                            ],
-                            "rationale": "The draft establishes the bell.",
-                        }
-                    ],
-                },
-            },
-        ),
-    )
-
-    submit = registry.execute(
-        context.__class__(**{**context.__dict__, "tool_call_id": "submit"}),
-        _call(
-            "submit",
-            "submit_chapter_candidate",
-            {
-                "chapter_id": "chapter-0001",
-                "expected_revision": 0,
-                "candidate_revision": 1,
-                "plan_revision": 1,
-                "draft_revision": 1,
-                "summary": "The bell marks an arrival.",
-            },
-        ),
-    )
-
-    assert submit.status == "error"
-    assert submit.recoverable is True
-    assert submit.error_code == "candidate_patch_evidence_not_verbatim"
-    assert submit.content["rejected_evidence"] == [
-        {"operation_index": 0, "evidence_indexes": [1]}
-    ]
-    assert submit.allowed_actions == ["write_chapter_state_patch"]
-    assert not any(tmp_path.rglob("manifest.json"))
-
-
-def test_targeted_chapter_edit_requires_a_unique_anchor(tmp_path: Path) -> None:
-    registry = build_default_tool_registry()
-    context = _context(
-        tmp_path,
-        role="chapter",
-        scope_id="chapter-0001",
-        phase="chapter",
-        revision=0,
-        call_id="plan",
-    )
-    registry.execute(
-        context,
-        _call(
-            "plan",
-            "plan_chapter_candidate",
-            {
-                "chapter_id": "chapter-0001",
-                "expected_revision": 0,
-                "plan_revision": 1,
-                "plan_markdown": "计划",
-            },
-        ),
-    )
-    registry.execute(
-        context.__class__(**{**context.__dict__, "tool_call_id": "draft"}),
-        _call(
-            "draft",
-            "write_chapter_draft",
-            {
-                "chapter_id": "chapter-0001",
-                "expected_revision": 0,
-                "plan_revision": 1,
-                "draft_revision": 1,
-                "content": "重复。重复。",
-            },
-        ),
-    )
-    edit = registry.execute(
-        context.__class__(**{**context.__dict__, "tool_call_id": "edit"}),
-        _call(
-            "edit",
-            "edit_chapter_draft",
-            {
-                "chapter_id": "chapter-0001",
-                "expected_revision": 0,
-                "draft_revision": 1,
-                "next_draft_revision": 2,
-                "anchor": "重复",
-                "replacement": "唯一",
-            },
-        ),
-    )
-
-    assert edit.status == "error"
-    assert edit.error_code == "edit_anchor_not_unique"
-
-
-def test_chapter_patch_evidence_repair_changes_only_rejected_quotes(
-    tmp_path: Path,
-) -> None:
-    chapter_path = tmp_path / "chapters" / "chapter-0001"
-    chapter_path.mkdir(parents=True)
-    (chapter_path / "final.md").write_text(
-        "The protagonist trusts companions after the trial.\n",
-        encoding="utf-8",
-    )
-    write_json(
-        chapter_path / "candidate_state_patch.json",
-        {
-            "schema_version": 1,
-            "status": "candidate",
-            "based_on": {
-                "chapter_final": "chapters/chapter-0001/final.md",
-                "observations": "chapters/chapter-0001/observations.json",
-            },
-            "operations": [
-                {
-                    "op": "upsert",
-                    "target_file": "canon/characters.json",
-                    "target_id": "protagonist",
-                    "expected_version": 1,
-                    "value": {"belief": "trusts companions"},
-                    "evidence": [
-                        {
-                            "file": "chapters/chapter-0001/final.md",
-                            "quote": "paraphrased trust",
-                        }
-                    ],
-                    "rationale": "The chapter changes the protagonist's belief.",
-                }
-            ],
-        },
-    )
-    write_json(
-        chapter_path / "state_patch_rejection.json",
-        {
-            "schema": "passed",
-            "versions": "passed",
-            "evidence": "failed",
-            "conflicts": "passed",
-            "reasons": [
-                "Operation 0 evidence 0 quote is not present in chapter_final."
-            ],
-        },
-    )
-
-    result = build_default_tool_registry().execute(
-        _context(
-            tmp_path,
-            role="chapter",
-            scope_id="chapter-0001",
-            phase="state_patch_repair",
-            revision=0,
-            call_id="repair",
-        ),
-        _call(
-            "repair",
-            "submit_chapter_patch_evidence_repair",
-            {
-                "chapter_id": "chapter-0001",
-                "expected_revision": 0,
-                "repairs": [
-                    {
-                        "operation_index": 0,
-                        "evidence_quotes": ["trusts companions"],
-                    }
-                ],
-            },
-        ),
-    )
-
-    assert result.status == "ok"
-    assert result.terminal is True
-    repaired = read_json(tmp_path / result.artifact_paths[0])
-    assert repaired["operations"][0]["value"] == {"belief": "trusts companions"}
-    assert repaired["operations"][0]["evidence"] == [
-        {
-            "file": "chapters/chapter-0001/final.md",
-            "quote": "trusts companions",
-        }
-    ]
+def test_removed_exact_control_tools_are_not_registered() -> None:
+    names = build_default_tool_registry().registered_names()
+    assert "edit_chapter_draft" not in names
+    assert "edit_candidate_text" not in names
+    assert "read_chapter_evidence" not in names
+    assert "submit_chapter_patch_evidence_repair" not in names
 
 
 def _context(
@@ -759,8 +377,8 @@ def _context(
     revision: int,
     call_id: str,
     scope_id: str | None = None,
-    repair_contract: RepairContract | None = None,
     expected_candidate_revision: int | None = None,
+    control_data: dict[str, object] | None = None,
 ) -> ToolExecutionContext:
     if role != "book" and scope_id is None:
         scope_id = "scope-1"
@@ -773,10 +391,7 @@ def _context(
         ):
             path = project_path / relative
             if not path.is_file():
-                write_json(
-                    path,
-                    {"schema_version": 1, "version": 1, "items": {}},
-                )
+                write_json(path, {"schema_version": 1, "version": 1, "items": {}})
     return ToolExecutionContext(
         project_path=project_path,
         identity=AgentIdentity(
@@ -790,8 +405,12 @@ def _context(
         phase=phase,
         expected_revision=revision,
         expected_candidate_revision=expected_candidate_revision,
-        repair_contract=repair_contract,
+        control_data=control_data or {},
     )
+
+
+def _with_call(context: ToolExecutionContext, call_id: str) -> ToolExecutionContext:
+    return context.__class__(**{**context.__dict__, "tool_call_id": call_id})
 
 
 def _call(call_id: str, name: str, arguments: dict[str, object]) -> ToolCall:

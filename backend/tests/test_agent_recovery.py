@@ -182,52 +182,28 @@ def _next_chapter_tool(
 ) -> tuple[str, dict[str, object]]:
     if "plan_chapter_candidate" not in prior_calls:
         return "plan_chapter_candidate", {
-            "chapter_id": "chapter-001",
-            "expected_revision": 0,
-            "plan_revision": 1,
             "plan_markdown": "# Chapter goal\n\nReveal one fair clue.",
         }
     if "write_chapter_draft" not in prior_calls:
         return "write_chapter_draft", {
-            "chapter_id": "chapter-001",
-            "expected_revision": 0,
-            "plan_revision": 1,
-            "draft_revision": 1,
-            "mode": "write",
             "content": "The witness places the wet key on the table.",
         }
     if "inspect_chapter_consistency" not in prior_calls:
-        return "inspect_chapter_consistency", {
-            "chapter_id": "chapter-001",
-            "expected_revision": 0,
-            "draft_revision": 1,
-        }
+        return "inspect_chapter_consistency", {}
     if "write_chapter_observations" not in prior_calls:
         return "write_chapter_observations", {
-            "chapter_id": "chapter-001",
-            "expected_revision": 0,
-            "draft_revision": 1,
             "observations": {
                 "events": [],
                 "character_changes": [],
                 "relationship_changes": [],
                 "world_fact_candidates": [],
                 "foreshadowing_candidates": [],
-                "requires_commit": False,
             },
         }
     if "write_chapter_state_patch" not in prior_calls:
         return "write_chapter_state_patch", {
-            "chapter_id": "chapter-001",
-            "expected_revision": 0,
-            "draft_revision": 1,
             "state_patch": {"operations": []},
         }
     return "submit_chapter_candidate", {
-        "chapter_id": "chapter-001",
-        "expected_revision": 0,
-        "candidate_revision": 1,
-        "plan_revision": 1,
-        "draft_revision": 1,
         "summary": "The first fair clue is visible.",
     }

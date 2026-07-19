@@ -27,6 +27,7 @@ from app.harness.agents.persistence import (
 )
 from app.harness.agents.policy import ResolvedAgentPolicy
 from app.harness.agents.registry import ToolExecutionContext, ToolRegistry
+from app.harness.agents.semantic_boundary import semantic_model_value
 from app.llm.gateway import (
     ChatMessage,
     ChatRequest,
@@ -65,6 +66,7 @@ class AgentActivation:
     on_tool_event: Callable[[Any], None] | None = None
     experiment_strategy: ExperimentHookStrategy | None = None
     repair_contract: RepairContract | None = None
+    control_data: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -258,6 +260,7 @@ class AgentRuntime:
                     expected_revision=activation.expected_revision,
                     expected_candidate_revision=activation.expected_candidate_revision,
                     repair_contract=activation.repair_contract,
+                    control_data=activation.control_data,
                     experiment_strategy=activation.experiment_strategy,
                     allowed_tools=frozenset(activation.allowed_tools),
                 )
@@ -580,7 +583,9 @@ class AgentRuntime:
                 on_retry=on_retry,
             )
         except Exception as exc:
-            message = redact_profile_secrets(str(exc), activation.policy.profile)
+            message = redact_profile_secrets(str(exc), activation.policy.profile).strip()
+            if not message:
+                message = "Provider response failed local validation."
             provider_failure = is_retryable_provider_error(exc)
             return self._failure(
                 activation,
@@ -717,6 +722,7 @@ class AgentRuntime:
                     if activation.repair_contract is not None
                     else None
                 ),
+                "control_data": activation.control_data,
             },
         )
 
@@ -939,11 +945,10 @@ def _reset_activation_usage(budgets: AgentBudgets) -> None:
 def _tool_result_content(result: ToolExecutionResult) -> dict[str, Any]:
     return {
         "status": result.status,
-        "content": result.content,
+        "content": semantic_model_value(result.content),
         "recoverable": result.recoverable,
         "error_code": result.error_code,
         "message": result.message,
-        "checkpoint_id": result.checkpoint_id,
         "allowed_actions": result.allowed_actions,
     }
 
@@ -959,9 +964,6 @@ def _context_characters(result: ToolExecutionResult) -> int:
             if isinstance(item, dict)
             and isinstance(item.get("included_characters"), int)
         )
-    if result.tool_name == "read_chapter_evidence":
-        content = result.content.get("content")
-        return len(content) if isinstance(content, str) else 0
     return 0
 
 
