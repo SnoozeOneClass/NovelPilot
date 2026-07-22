@@ -69,6 +69,17 @@ def continue_setup_discussion(request: SetupTurnRequest) -> SetupStateDocument:
             raise HTTPException(status_code=409, detail="Book direction is already approved.")
         profile = _active_profile_or_409()
         safe_message = redact_profile_secrets(request.message, profile)
+        try:
+            selected_suggestion = setup_storage.resolve_setup_suggestion(
+                state,
+                suggestion_id=request.suggestion_id,
+                submitted_message=request.message,
+            )
+            selected_title = setup_storage.title_from_setup_suggestion(
+                selected_suggestion,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         assembly = assemble_discussion_context(state, safe_message)
         snapshot = {
@@ -122,6 +133,7 @@ def continue_setup_discussion(request: SetupTurnRequest) -> SetupStateDocument:
                     action="continue_book_discussion",
                 ),
                 on_tool_event=stream_callback,
+                selected_title=selected_title,
             )
         except AgentControlCheckpoint as checkpoint:
             _raise_setup_control_checkpoint(
@@ -153,6 +165,8 @@ def continue_setup_discussion(request: SetupTurnRequest) -> SetupStateDocument:
                 result=result,
                 context_snapshot_path=context_path,
                 profile_id=profile.id,
+                selected_suggestion_id=request.suggestion_id,
+                selected_title=selected_title,
             )
         except setup_storage.SetupRevisionConflict as exc:
             _append_event(

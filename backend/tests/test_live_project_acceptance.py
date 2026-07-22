@@ -14,7 +14,9 @@ from app.schemas.setup import (
     SetupStateDocument,
     SetupSuggestion,
 )
+from app.schemas.events import HarnessEvent
 from scripts import live_project_acceptance as live_acceptance
+from app.storage.events import append_event
 from app.storage.json_files import write_json
 
 
@@ -29,6 +31,22 @@ def test_live_acceptance_case_has_a_stable_prompt_hash() -> None:
     assert "0417" in prompt
     assert "林澈" in prompt
     assert "许青" in prompt
+
+
+def test_natural_arc_case_reuses_the_real_benchmark_mother_prompt() -> None:
+    path = (
+        live_acceptance.ROOT_DIR
+        / "scripts"
+        / "live_acceptance_cases"
+        / "benchmark_mother_natural_arc.json"
+    )
+    case, prompt = live_acceptance._load_case(path)
+
+    assert case["case_id"] == "benchmark-mother-natural-first-arc-v1"
+    assert case["first_arc"]["minimum_target_chapter_count"] == 6
+    assert "《退潮前的十一分钟》" in prompt
+    assert "预计写4～5万字、18～22章" in prompt
+    assert "封站清点的第一晚" in prompt
 
 
 def test_stable_fact_check_accepts_equivalent_time_notation() -> None:
@@ -496,7 +514,11 @@ def test_live_series_requires_fixed_inputs_and_writes_aggregate(
         }
 
     monkeypatch.setattr(live_acceptance, "run_live_project_acceptance", fake_run)
-    monkeypatch.setattr(live_acceptance, "_behavior_fingerprint", lambda: "code-hash")
+    monkeypatch.setattr(
+        live_acceptance,
+        "_behavior_fingerprint",
+        lambda *_args: "code-hash",
+    )
     monkeypatch.setattr(live_acceptance, "OUTPUT_DIR", tmp_path)
     aggregate = live_acceptance.run_live_project_acceptance_series(
         live_acceptance.LiveProjectAcceptanceOptions(profile_id="main"),
@@ -507,6 +529,52 @@ def test_live_series_requires_fixed_inputs_and_writes_aggregate(
     assert aggregate["token_totals"]["total_tokens"] == 360
     assert aggregate["recovery_counts"]["semantic_revision"] == 3
     assert Path(aggregate["aggregate_report_path"]).is_file()
+
+
+def test_live_acceptance_json_output_is_safe_for_legacy_windows_console(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        live_acceptance,
+        "run_live_project_acceptance",
+        lambda _options: {
+            "status": "passed",
+            "diagnostic": "t_reported−delta",
+        },
+    )
+
+    assert live_acceptance.main(["--profile-id", "test-profile", "--json"]) == 0
+    output = capsys.readouterr().out
+    assert "\\u2212" in output
+    assert "−" not in output
+
+
+def test_bug_ledger_records_harness_issue_and_terminal_failure(tmp_path: Path) -> None:
+    append_event(
+        tmp_path,
+        HarnessEvent(
+            project_id="project-diagnostic",
+            kind="agent_transport_retry",
+            loop_layer="book",
+            atomic_action="continue_book_discussion",
+            status="requested",
+            message="Provider connection will be retried.",
+            payload={"category": "transport_provider", "retry": 1, "limit": 3},
+        ),
+    )
+
+    ledger = live_acceptance._build_bug_ledger(
+        tmp_path,
+        failure="Book state did not advance.",
+    )
+
+    assert ledger["entry_count"] == 2
+    assert ledger["counts_by_reason"] == {
+        "transport_provider": 1,
+        "run_exception": 1,
+    }
+    assert ledger["entries"][0]["model_reinvocation_expected"] is True
 
 
 def _reviewed_candidate() -> BookDirectionCandidate:

@@ -1,6 +1,7 @@
 from pydantic import SecretStr
 
 from app.llm.gateway import ChatMessage, ChatRequest, ChatResult
+from app.llm.provider_errors import ProviderCallError
 from app.llm.retry import call_llm_with_transport_retries
 from app.schemas.profiles import LlmProfile
 
@@ -153,6 +154,38 @@ def test_transport_budget_is_fresh_for_each_independent_request() -> None:
     assert run("first").content == "ok"
     assert run("second").content == "ok"
     assert attempts_by_request == {"first": 2, "second": 2}
+
+
+def test_transport_retry_prefers_provider_retry_after_with_a_local_cap() -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    def fake_call(_profile: LlmProfile, _request: ChatRequest) -> ChatResult:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ProviderCallError(
+                protocol="openai-compatible",
+                kind="rate_limit",
+                stage="request",
+                detail="slow down",
+                retryable=True,
+                status_code=429,
+                retry_after_seconds=120,
+            )
+        return _result()
+
+    result = call_llm_with_transport_retries(
+        _profile(),
+        _request(),
+        retry_limit=3,
+        llm_call=fake_call,
+        sleep_call=delays.append,
+    )
+
+    assert result.content == "ok"
+    assert attempts == 2
+    assert delays == [30.0]
 
 
 def _profile() -> LlmProfile:

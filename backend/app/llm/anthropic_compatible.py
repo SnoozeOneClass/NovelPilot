@@ -1,9 +1,16 @@
 import json
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, cast
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
+from anthropic import Stream
+from anthropic.types import Message, RawMessageStreamEvent
+
+from app.llm.provider_clients import get_anthropic_client
+from app.llm.provider_errors import (
+    ProviderCallError,
+    is_retryable_provider_error_message,
+    translate_sdk_error,
+)
 from app.llm.request_options import merge_request_options
 from app.schemas.profiles import LlmProfile
 
@@ -14,9 +21,10 @@ if TYPE_CHECKING:
 def call_anthropic_compatible(profile: LlmProfile, chat_request: "ChatRequest") -> "ChatResult":
     from app.llm.gateway import ChatResult
 
-    url = str(profile.base_url).rstrip("/") + "/messages"
     payload = _anthropic_payload(profile, chat_request, stream=False)
-    response = _post_json(url, profile.api_key.get_secret_value(), payload)
+    response = _sdk_response_dict(
+        _create_anthropic_response(profile, payload, stream=False)
+    )
     content, tool_calls = _response_output(response)
     return ChatResult(
         content=content,
@@ -34,7 +42,6 @@ def stream_anthropic_compatible(
 ) -> Iterator["ChatChunk"]:
     from app.llm.gateway import ChatChunk
 
-    url = str(profile.base_url).rstrip("/") + "/messages"
     payload = _anthropic_payload(profile, chat_request, stream=True)
     latest_model = profile.model
     latest_usage: dict[str, Any] = {}
@@ -43,31 +50,77 @@ def stream_anthropic_compatible(
     builders: dict[int, dict[str, Any]] = {}
     completed: set[int] = set()
 
-    for event in _stream_json_events(url, profile.api_key.get_secret_value(), payload):
-        _raise_stream_error(event)
-        latest_event = event
-        latest_model = _string_value(event.get("model"), latest_model)
-        event_type = _string_value(event.get("type"), "")
-        if event_type == "message_start":
-            message = event.get("message")
-            if isinstance(message, dict):
-                latest_model = _string_value(message.get("model"), latest_model)
-                latest_usage.update(_dict_value(message.get("usage")))
-            continue
-        if event_type == "message_delta":
-            latest_usage.update(_dict_value(event.get("usage")))
-            delta = event.get("delta")
-            if isinstance(delta, dict):
-                latest_finish_reason = _normalize_finish_reason(delta.get("stop_reason"))
-            continue
-        if event_type == "content_block_start":
-            index = _event_index(event)
-            block = event.get("content_block")
-            if not isinstance(block, dict):
+    sdk_stream = _create_anthropic_response(profile, payload, stream=True)
+    try:
+        for sdk_event in sdk_stream:
+            event = _sdk_response_dict(sdk_event)
+            _raise_stream_error(event)
+            latest_event = event
+            latest_model = _string_value(event.get("model"), latest_model)
+            event_type = _string_value(event.get("type"), "")
+            if event_type == "message_start":
+                message = event.get("message")
+                if isinstance(message, dict):
+                    latest_model = _string_value(message.get("model"), latest_model)
+                    latest_usage.update(_dict_value(message.get("usage")))
                 continue
-            block_type = block.get("type")
-            if block_type == "text":
-                text_delta = _string_value(block.get("text"), "")
+            if event_type == "message_delta":
+                latest_usage.update(_dict_value(event.get("usage")))
+                delta = event.get("delta")
+                if isinstance(delta, dict):
+                    latest_finish_reason = _normalize_finish_reason(
+                        delta.get("stop_reason")
+                    )
+                continue
+            if event_type == "content_block_start":
+                index = _event_index(event)
+                block = event.get("content_block")
+                if not isinstance(block, dict):
+                    continue
+                block_type = block.get("type")
+                if block_type == "text":
+                    text_delta = _string_value(block.get("text"), "")
+                    if text_delta:
+                        yield ChatChunk(
+                            text_delta=text_delta,
+                            provider_snapshot="anthropic-compatible",
+                            model_snapshot=latest_model,
+                            raw_provider_metadata=event,
+                        )
+                    continue
+                if block_type != "tool_use":
+                    continue
+                call_id = block.get("id")
+                name = block.get("name")
+                if not isinstance(call_id, str) or not call_id:
+                    raise RuntimeError("Anthropic-compatible Tool use is missing an ID.")
+                if not isinstance(name, str) or not name:
+                    raise RuntimeError("Anthropic-compatible Tool use is missing a name.")
+                initial_input = block.get("input")
+                raw_arguments = ""
+                if isinstance(initial_input, dict) and initial_input:
+                    raw_arguments = json.dumps(initial_input, ensure_ascii=False)
+                builders[index] = {
+                    "id": call_id,
+                    "name": name,
+                    "arguments": raw_arguments,
+                    "index": index,
+                }
+                yield ChatChunk(
+                    event_type="tool_call_start",
+                    tool_call_id=call_id,
+                    tool_name=name,
+                    tool_index=index,
+                    provider_snapshot="anthropic-compatible",
+                    model_snapshot=latest_model,
+                    raw_provider_metadata=event,
+                )
+                continue
+            if event_type == "content_block_delta":
+                delta = event.get("delta")
+                if not isinstance(delta, dict):
+                    continue
+                text_delta = _string_value(delta.get("text"), "")
                 if text_delta:
                     yield ChatChunk(
                         text_delta=text_delta,
@@ -75,84 +128,56 @@ def stream_anthropic_compatible(
                         model_snapshot=latest_model,
                         raw_provider_metadata=event,
                     )
+                arguments_delta = _string_value(delta.get("partial_json"), "")
+                if arguments_delta:
+                    index = _event_index(event)
+                    builder = builders.get(index)
+                    if builder is None:
+                        raise RuntimeError(
+                            "Anthropic-compatible stream sent Tool arguments before Tool start."
+                        )
+                    builder["arguments"] += arguments_delta
+                    yield ChatChunk(
+                        event_type="tool_argument_delta",
+                        tool_call_id=builder["id"],
+                        tool_name=builder["name"],
+                        tool_index=index,
+                        arguments_delta=arguments_delta,
+                        provider_snapshot="anthropic-compatible",
+                        model_snapshot=latest_model,
+                        raw_provider_metadata=event,
+                    )
                 continue
-            if block_type != "tool_use":
-                continue
-            call_id = block.get("id")
-            name = block.get("name")
-            if not isinstance(call_id, str) or not call_id:
-                raise RuntimeError("Anthropic-compatible Tool use is missing an ID.")
-            if not isinstance(name, str) or not name:
-                raise RuntimeError("Anthropic-compatible Tool use is missing a name.")
-            initial_input = block.get("input")
-            raw_arguments = ""
-            if isinstance(initial_input, dict) and initial_input:
-                raw_arguments = json.dumps(initial_input, ensure_ascii=False)
-            builders[index] = {
-                "id": call_id,
-                "name": name,
-                "arguments": raw_arguments,
-                "index": index,
-            }
-            yield ChatChunk(
-                event_type="tool_call_start",
-                tool_call_id=call_id,
-                tool_name=name,
-                tool_index=index,
-                provider_snapshot="anthropic-compatible",
-                model_snapshot=latest_model,
-                raw_provider_metadata=event,
-            )
-            continue
-        if event_type == "content_block_delta":
-            delta = event.get("delta")
-            if not isinstance(delta, dict):
-                continue
-            text_delta = _string_value(delta.get("text"), "")
-            if text_delta:
-                yield ChatChunk(
-                    text_delta=text_delta,
-                    provider_snapshot="anthropic-compatible",
-                    model_snapshot=latest_model,
-                    raw_provider_metadata=event,
-                )
-            arguments_delta = _string_value(delta.get("partial_json"), "")
-            if arguments_delta:
+            if event_type == "content_block_stop":
                 index = _event_index(event)
                 builder = builders.get(index)
                 if builder is None:
-                    raise RuntimeError(
-                        "Anthropic-compatible stream sent Tool arguments before Tool start."
-                    )
-                builder["arguments"] += arguments_delta
+                    continue
+                tool_call = _tool_call_from_builder(builder)
+                completed.add(index)
                 yield ChatChunk(
-                    event_type="tool_argument_delta",
-                    tool_call_id=builder["id"],
-                    tool_name=builder["name"],
+                    event_type="tool_call_stop",
+                    tool_call_id=tool_call.id,
+                    tool_name=tool_call.name,
                     tool_index=index,
-                    arguments_delta=arguments_delta,
+                    tool_call=tool_call,
                     provider_snapshot="anthropic-compatible",
                     model_snapshot=latest_model,
                     raw_provider_metadata=event,
                 )
-            continue
-        if event_type == "content_block_stop":
-            index = _event_index(event)
-            builder = builders.get(index)
-            if builder is None:
-                continue
-            tool_call = _tool_call_from_builder(builder)
-            completed.add(index)
-            yield ChatChunk(
-                event_type="tool_call_stop",
-                tool_call_id=tool_call.id,
-                tool_name=tool_call.name,
-                tool_index=index,
-                tool_call=tool_call,
-                provider_snapshot="anthropic-compatible",
-                model_snapshot=latest_model,
-                raw_provider_metadata=event,
-            )
+    except Exception as exc:
+        translated = translate_sdk_error(
+            "anthropic-compatible",
+            exc,
+            stage="stream",
+        )
+        if translated is not None:
+            raise translated from exc
+        raise
+    finally:
+        close = getattr(sdk_stream, "close", None)
+        if callable(close):
+            close()
 
     for index in sorted(set(builders) - completed):
         tool_call = _tool_call_from_builder(builders[index])
@@ -200,6 +225,7 @@ def _anthropic_payload(
                 "name": tool.name,
                 "description": tool.description,
                 "input_schema": tool.input_schema,
+                "strict": tool.strict,
             }
             for tool in chat_request.tools
         ]
@@ -316,71 +342,52 @@ def _build_tool_call(call_id: Any, name: Any, raw_arguments: str, index: int) ->
     )
 
 
-def _post_json(url: str, api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
-    request = Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urlopen(request) as response:
-            parsed = json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Anthropic-compatible provider returned {exc.code}: {detail}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"Anthropic-compatible provider request failed: {exc}") from exc
-    if not isinstance(parsed, dict):
-        raise RuntimeError("Anthropic-compatible provider returned a non-object response.")
-    return cast(dict[str, Any], parsed)
-
-
-def _stream_json_events(
-    url: str,
-    api_key: str,
+def _create_anthropic_response(
+    profile: LlmProfile,
     payload: dict[str, Any],
-) -> Iterator[dict[str, Any]]:
-    request = Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-        },
-        method="POST",
-    )
+    *,
+    stream: bool,
+) -> Any:
+    body = dict(payload)
+    max_tokens = body.get("max_tokens")
+    if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens < 1:
+        raise RuntimeError(
+            "Anthropic-compatible profile request_options.max_tokens must be a positive integer."
+        )
+    body["stream"] = stream
     try:
-        with urlopen(request) as response:
-            for event in _iter_sse_json_events(response):
-                yield event
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Anthropic-compatible provider returned {exc.code}: {detail}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"Anthropic-compatible provider request failed: {exc}") from exc
+        # The existing Profile contract treats ``base_url`` as the versioned API
+        # prefix and appends ``/messages``.  Using the SDK's public low-level call
+        # preserves that endpoint contract while still delegating HTTP, SSE,
+        # connection pooling, error types, and response parsing to the SDK.
+        return get_anthropic_client(profile).post(
+            "/messages",
+            body=body,
+            cast_to=Message,
+            stream=stream,
+            stream_cls=Stream[RawMessageStreamEvent],
+        )
+    except Exception as exc:
+        translated = translate_sdk_error(
+            "anthropic-compatible",
+            exc,
+            stage="request",
+        )
+        if translated is not None:
+            raise translated from exc
+        raise
 
 
-def _iter_sse_json_events(lines: Iterator[bytes]) -> Iterator[dict[str, Any]]:
-    for raw_line in lines:
-        line = raw_line.decode("utf-8", errors="replace").strip()
-        data = line.removeprefix("data:").strip() if line.startswith("data:") else line
-        if not data.startswith("{"):
-            continue
-        if not data:
-            continue
-        try:
-            event = json.loads(data)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(event, dict):
-            yield cast(dict[str, Any], event)
+def _sdk_response_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return cast(dict[str, Any], value)
+    model_dump = getattr(value, "model_dump", None)
+    if not callable(model_dump):
+        raise RuntimeError("Anthropic-compatible SDK returned an unsupported response type.")
+    payload = model_dump(mode="json", exclude_none=True)
+    if not isinstance(payload, dict):
+        raise RuntimeError("Anthropic-compatible SDK returned a non-object response.")
+    return cast(dict[str, Any], payload)
 
 
 def _event_index(event: dict[str, Any]) -> int:
@@ -422,4 +429,11 @@ def _raise_stream_error(event: dict[str, Any]) -> None:
         return
     message = error.get("message")
     detail = message if isinstance(message, str) else json.dumps(error, ensure_ascii=False)
-    raise RuntimeError(f"Anthropic-compatible provider stream failed: {detail}")
+    retryable = is_retryable_provider_error_message(detail)
+    raise ProviderCallError(
+        protocol="anthropic-compatible",
+        kind="connection" if retryable else "response",
+        stage="stream",
+        detail=detail,
+        retryable=retryable,
+    )

@@ -5,7 +5,7 @@ import { Button } from "../../components/ui/Button";
 import { IconButton } from "../../components/ui/IconButton";
 import { OptionCard } from "../../components/ui/OptionCard";
 import { Textarea } from "../../components/ui/Textarea";
-import type { SetupStateDocument } from "../../types/domain";
+import type { SetupStateDocument, SetupSuggestion } from "../../types/domain";
 import { ConversationTranscript } from "./ConversationTranscript";
 import type { BusyAction, Notice } from "./setup-types";
 import styles from "./SetupDiscussion.module.css";
@@ -18,7 +18,7 @@ interface SetupDiscussionProps {
   canSend: boolean;
   canReview: boolean;
   onInputChange: (value: string) => void;
-  onUseSuggestion: (value: string) => void;
+  onUseSuggestion: (suggestion: SetupSuggestion) => void;
   onSend: () => void;
   onReview: () => void;
 }
@@ -38,8 +38,8 @@ export function SetupDiscussion({
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const question = state.question;
 
-  function populateComposer(value: string) {
-    onUseSuggestion(value);
+  function populateComposer(suggestion: SetupSuggestion) {
+    onUseSuggestion(suggestion);
     requestAnimationFrame(() => inputRef.current?.focus());
   }
 
@@ -78,7 +78,7 @@ export function SetupDiscussion({
                       detail={suggestion.message}
                       selected={input === suggestion.message}
                       recommended={suggestion.recommended === true}
-                      onClick={() => populateComposer(suggestion.message)}
+                      onClick={() => populateComposer(suggestion)}
                     />
                   ))}
                   <OptionCard

@@ -255,6 +255,9 @@ class ChapterDraftStreamProjector:
                 self._discard(stream, "public_projection_invalid_json")
 
     def observe_agent_event(self, event: dict[str, Any]) -> None:
+        if event.get("kind") == "agent_transport_retry":
+            self.discard_open("provider_stream_retry")
+            return
         if (
             event.get("kind") != "agent_tool_result"
             or event.get("tool_name") != "write_chapter_draft"
@@ -314,7 +317,8 @@ class ChapterDraftStreamProjector:
         call_id = chunk.tool_call_id or (
             f"tool-index-{chunk.tool_index}" if chunk.tool_index is not None else uuid4().hex
         )
-        if call_id in self._by_call_id:
+        existing = self._by_call_id.get(call_id)
+        if existing is not None and not existing.resolved:
             return
         stream = _DraftToolStream(
             chapter_id=self._chapter_id,

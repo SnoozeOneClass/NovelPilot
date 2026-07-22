@@ -89,7 +89,7 @@ def run_live_project_acceptance_series(
 ) -> dict[str, object]:
     if runs < 1:
         raise ValueError("Live acceptance series requires at least one run.")
-    behavior_fingerprint = _behavior_fingerprint()
+    behavior_fingerprint = _behavior_fingerprint(options.case_path)
     reports: list[dict[str, object]] = []
     for index in range(runs):
         report = run_live_project_acceptance(options)
@@ -98,7 +98,7 @@ def run_live_project_acceptance_series(
                 f"Live acceptance series run {index + 1} did not pass."
             )
         reports.append(report)
-        if _behavior_fingerprint() != behavior_fingerprint:
+        if _behavior_fingerprint(options.case_path) != behavior_fingerprint:
             raise LiveProjectAcceptanceError(
                 "Behavior-affecting acceptance sources changed between consecutive runs."
             )
@@ -308,7 +308,7 @@ def run_live_project_acceptance(
             timeout_seconds=options.timeout_seconds,
             poll_interval_seconds=options.poll_interval_seconds,
         )
-        chapter_contract_evidence = _assert_two_chapter_contract(project_path, case)
+        chapter_contract_evidence = _assert_case_contract(project_path, case)
         secret_audit = audit_path_for_profile_secrets(project_path, [profile])
         if secret_audit.findings:
             raise LiveProjectAcceptanceError(
@@ -456,7 +456,10 @@ def _complete_book_setup(
             state = _call_user_action(
                 "answer the Book question with its unique recommendation",
                 lambda: setup_api.continue_setup_discussion(
-                    SetupTurnRequest(message=selection.message)
+                    SetupTurnRequest(
+                        message=selection.message,
+                        suggestion_id=selection.id,
+                    )
                 ),
                 redaction_values,
             )
@@ -525,8 +528,15 @@ def _drive_normal_user_gates(
     poll_interval_seconds: float,
 ) -> dict[str, object]:
     deadline = time.monotonic() + timeout_seconds
-    expected_target = _required_int(
-        _nested(case, "first_arc", "expected_target_chapter_count")
+    expected_target = _optional_case_int(
+        case,
+        "first_arc",
+        "expected_target_chapter_count",
+    )
+    minimum_target = _optional_case_int(
+        case,
+        "first_arc",
+        "minimum_target_chapter_count",
     )
     first_arc_approved = False
 
@@ -568,11 +578,17 @@ def _drive_normal_user_gates(
             if current_arc.arc_id == "arc-002" and not first_arc_approved:
                 raise LiveProjectAcceptanceError("Arc 2 appeared before Arc 1 approval.")
             recommended = current_arc.recommended_target_chapter_count
-            if current_arc.arc_id == "arc-001" and recommended != expected_target:
-                raise LiveProjectAcceptanceError(
-                    "The model recommendation did not honor the two-Chapter case: "
-                    f"recommended={recommended}, expected={expected_target}."
-                )
+            if current_arc.arc_id == "arc-001":
+                if expected_target is not None and recommended != expected_target:
+                    raise LiveProjectAcceptanceError(
+                        "The model recommendation did not honor the fixed Chapter case: "
+                        f"recommended={recommended}, expected={expected_target}."
+                    )
+                if minimum_target is not None and recommended < minimum_target:
+                    raise LiveProjectAcceptanceError(
+                        "The natural first Story Arc is too short for the diagnostic case: "
+                        f"recommended={recommended}, minimum={minimum_target}."
+                    )
             actor.record_arc_approval(
                 arc_id=current_arc.arc_id,
                 recommended_target_chapter_count=recommended,
@@ -666,6 +682,103 @@ def _missing_stable_facts(
     ]
 
 
+def _assert_case_contract(
+    project_path: Path,
+    case: dict[str, object],
+) -> dict[str, object]:
+    expected_target = _optional_case_int(
+        case,
+        "first_arc",
+        "expected_target_chapter_count",
+    )
+    if expected_target == 2:
+        return _assert_two_chapter_contract(project_path, case)
+    return _assert_natural_first_arc_contract(project_path, case)
+
+
+def _assert_natural_first_arc_contract(
+    project_path: Path,
+    case: dict[str, object],
+) -> dict[str, object]:
+    metadata = project_storage.read_project_metadata(project_path)
+    if (
+        metadata.project_kind != "benchmark_mother"
+        or metadata.benchmark_fixture is None
+        or metadata.benchmark_fixture.status != "frozen"
+    ):
+        raise LiveProjectAcceptanceError(
+            "The natural-Arc acceptance did not finish as a frozen benchmark mother."
+        )
+    first_arc = arc_storage.read_arc_state(project_path, "arc-001")
+    if first_arc is None or first_arc.status != "completed":
+        raise LiveProjectAcceptanceError("The first Story Arc did not complete.")
+    chapter_ids = list(first_arc.completed_chapter_ids)
+    if len(chapter_ids) != first_arc.target_chapter_count:
+        raise LiveProjectAcceptanceError(
+            "The first Story Arc Chapter ledger does not match its approved target: "
+            f"completed={len(chapter_ids)}, target={first_arc.target_chapter_count}."
+        )
+    minimum_target = _optional_case_int(
+        case,
+        "first_arc",
+        "minimum_target_chapter_count",
+    )
+    if minimum_target is not None and len(chapter_ids) < minimum_target:
+        raise LiveProjectAcceptanceError(
+            "The completed first Story Arc is below the diagnostic minimum: "
+            f"completed={len(chapter_ids)}, minimum={minimum_target}."
+        )
+
+    required = [
+        "book/direction.md",
+        "book/constraints.json",
+        "arcs/arc-001/plan.md",
+        "arcs/arc-002/plan.md",
+    ]
+    for chapter_id in chapter_ids:
+        required.extend(
+            [
+                f"chapters/{chapter_id}/context_snapshot.json",
+                f"chapters/{chapter_id}/final.md",
+                f"chapters/{chapter_id}/verification.json",
+                f"chapters/{chapter_id}/committed_state_patch.json",
+            ]
+        )
+    missing = [path for path in required if not (project_path / path).is_file()]
+    if missing:
+        raise LiveProjectAcceptanceError(
+            f"The natural-Arc flow is missing required artifacts: {missing}."
+        )
+
+    context_continuity: dict[str, bool] = {}
+    for previous_id, chapter_id in zip(chapter_ids, chapter_ids[1:], strict=False):
+        context = read_json(
+            project_path / "chapters" / chapter_id / "context_snapshot.json"
+        )
+        cites_previous = previous_id in json.dumps(context, ensure_ascii=False)
+        context_continuity[chapter_id] = cites_previous
+        if not cites_previous:
+            raise LiveProjectAcceptanceError(
+                f"{chapter_id} context does not cite committed {previous_id} evidence."
+            )
+
+    chapter_events, budget_evidence = _chapter_normal_path_evidence(
+        project_path,
+        chapter_ids,
+    )
+    return {
+        "mode": "natural_first_arc",
+        "completed_chapter_ids": chapter_ids,
+        "completed_chapter_count": len(chapter_ids),
+        "approved_target_chapter_count": first_arc.target_chapter_count,
+        "normal_path_event_sequences": chapter_events,
+        "initial_action_local_budgets": budget_evidence,
+        "context_cites_previous_chapter": context_continuity,
+        "benchmark_fixture_status": metadata.benchmark_fixture.status,
+        "benchmark_fixture_id": metadata.benchmark_fixture.fixture_id,
+    }
+
+
 def _assert_two_chapter_contract(
     project_path: Path,
     case: dict[str, object],
@@ -728,10 +841,29 @@ def _assert_two_chapter_contract(
     if _required_int(_nested(case, "first_arc", "expected_target_chapter_count")) != 2:
         raise LiveProjectAcceptanceError("The live case no longer specifies two Chapters.")
 
+    chapter_events, budget_evidence = _chapter_normal_path_evidence(
+        project_path,
+        ["chapter-001", "chapter-002"],
+    )
+
+    return {
+        "mode": "fixed_two_chapter",
+        "normal_path_event_sequences": chapter_events,
+        "initial_action_local_budgets": budget_evidence,
+        "chapter_2_context_cites_chapter_1": True,
+        "benchmark_fixture_status": metadata.benchmark_fixture.status,
+        "benchmark_fixture_id": metadata.benchmark_fixture.fixture_id,
+    }
+
+
+def _chapter_normal_path_evidence(
+    project_path: Path,
+    chapter_ids: Sequence[str],
+) -> tuple[dict[str, dict[str, int]], dict[str, dict[str, object]]]:
     events = read_events(project_path)
     chapter_events: dict[str, dict[str, int]] = {}
     budget_evidence: dict[str, dict[str, object]] = {}
-    for chapter_id in ("chapter-001", "chapter-002"):
+    for chapter_id in chapter_ids:
         expected_events = {
             "draft_stream_started": next(
                 (
@@ -799,13 +931,7 @@ def _assert_two_chapter_contract(
             chapter_id,
         )
 
-    return {
-        "normal_path_event_sequences": chapter_events,
-        "initial_action_local_budgets": budget_evidence,
-        "chapter_2_context_cites_chapter_1": True,
-        "benchmark_fixture_status": metadata.benchmark_fixture.status,
-        "benchmark_fixture_id": metadata.benchmark_fixture.fixture_id,
-    }
+    return chapter_events, budget_evidence
 
 
 def _initial_chapter_budget_evidence(
@@ -1387,6 +1513,7 @@ def _build_report(
         checkpoints=checkpoints,
         profile_test=profile_test,
     )
+    bug_ledger = _build_bug_ledger(project_path, failure=failure)
     run_state = read_run_control_state(project_path)
     readiness = readiness_api.get_readiness()
     first_arc = arc_storage.read_arc_state(project_path, "arc-001")
@@ -1397,7 +1524,7 @@ def _build_report(
         if path.is_file() and not path.name.endswith(".tmp")
     ]
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "status": status,
         "created_at": datetime.now(UTC).isoformat(),
         "case": {
@@ -1419,6 +1546,7 @@ def _build_report(
         },
         "token_usage": token_usage,
         "reset_recovery_ledger": recovery_ledger,
+        "bug_ledger": bug_ledger,
         "automated_human_gate_decisions": actor.decisions,
         "start_receipt": start_receipt,
         "terminal": terminal,
@@ -1462,6 +1590,88 @@ def _build_report(
     }
 
 
+def _build_bug_ledger(
+    project_path: Path,
+    *,
+    failure: str | None,
+) -> dict[str, object]:
+    entries: list[dict[str, object]] = []
+    counts: dict[str, int] = {}
+    markers = ("fail", "error", "retry", "reset", "recovery")
+    for event in read_events(project_path):
+        if event.status != "failed" and not any(
+            marker in event.kind for marker in markers
+        ):
+            continue
+        payload = event.payload
+        reason_code = next(
+            (
+                str(payload[key])
+                for key in ("cause_code", "error_code", "code", "category", "reason")
+                if payload.get(key) not in (None, "")
+            ),
+            event.kind,
+        )
+        counts[reason_code] = counts.get(reason_code, 0) + 1
+        entries.append(
+            {
+                "bug_id": f"event-{event.seq}",
+                "source": "harness_event",
+                "event_seq": event.seq,
+                "timestamp": event.timestamp.isoformat(),
+                "loop_layer": event.loop_layer,
+                "atomic_action": event.atomic_action,
+                "event_kind": event.kind,
+                "status": event.status,
+                "reason_code": reason_code,
+                "message": event.message,
+                "artifact_path": event.artifact_path,
+                "routing_decision": event.routing_decision,
+                "activation_id": payload.get("activation_id"),
+                "candidate_run_id": payload.get("candidate_run_id"),
+                "checkpoint_id": payload.get("checkpoint_id"),
+                "retry": payload.get("retry"),
+                "retry_limit": payload.get("limit"),
+                "model_reinvocation_expected": (
+                    "retry" in event.kind
+                    or event.kind in {"agent_validation_repair", "agent_activation_restarted"}
+                ),
+                "additional_token_usage": payload.get("usage"),
+            }
+        )
+    if failure is not None:
+        counts["run_exception"] = counts.get("run_exception", 0) + 1
+        entries.append(
+            {
+                "bug_id": "run-exception",
+                "source": "acceptance_driver",
+                "event_seq": None,
+                "timestamp": datetime.now(UTC).isoformat(),
+                "loop_layer": None,
+                "atomic_action": None,
+                "event_kind": "run_exception",
+                "status": "failed",
+                "reason_code": "run_exception",
+                "message": failure,
+                "artifact_path": None,
+                "routing_decision": None,
+                "activation_id": None,
+                "candidate_run_id": None,
+                "checkpoint_id": None,
+                "retry": None,
+                "retry_limit": None,
+                "model_reinvocation_expected": False,
+                "additional_token_usage": None,
+            }
+        )
+    return {
+        "schema_version": 1,
+        "entry_count": len(entries),
+        "counts_by_reason": counts,
+        "entries": entries,
+    }
+
+
 def _load_case(case_path: Path) -> tuple[dict[str, object], str]:
     resolved = case_path.resolve()
     payload = json.loads(resolved.read_text(encoding="utf-8"))
@@ -1494,6 +1704,22 @@ def _nested(payload: dict[str, object], first: str, second: str) -> object:
             f"Live acceptance case is missing {first}.{second}."
         )
     return nested[second]
+
+
+def _optional_case_int(
+    payload: dict[str, object],
+    first: str,
+    second: str,
+) -> int | None:
+    nested = payload.get(first)
+    if not isinstance(nested, dict):
+        raise LiveProjectAcceptanceError(
+            f"Live acceptance case is missing {first}."
+        )
+    value = nested.get(second)
+    if value is None:
+        return None
+    return _required_int(value)
 
 
 def _failure_diagnostic(
@@ -1531,13 +1757,14 @@ def _redact_json(value: object, redaction_values: Sequence[str]) -> str:
     )
 
 
-def _behavior_fingerprint() -> str:
+def _behavior_fingerprint(case_path: Path = DEFAULT_CASE_PATH) -> str:
+    resolved_case_path = case_path.resolve()
     paths = [
         *sorted((BACKEND_DIR / "app").rglob("*.py")),
         Path(__file__).resolve(),
-        DEFAULT_CASE_PATH,
+        resolved_case_path,
     ]
-    case = json.loads(DEFAULT_CASE_PATH.read_text(encoding="utf-8"))
+    case = json.loads(resolved_case_path.read_text(encoding="utf-8"))
     prompt_path = ROOT_DIR / str(case.get("prompt_path", ""))
     if prompt_path.is_file():
         paths.append(prompt_path)
@@ -1594,7 +1821,7 @@ def _single_project_path(report: dict[str, object]) -> str:
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the opt-in normal two-Chapter full-project acceptance with a real model."
+            "Run an opt-in versioned full-project acceptance case with a real model."
         )
     )
     parser.add_argument("--profile-id", help="Configured real LLM profile id.")
@@ -1639,7 +1866,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(
                 json.dumps(
                     {"status": "failed", "message": str(exc)},
-                    ensure_ascii=False,
+                    ensure_ascii=True,
                     indent=2,
                 )
             )
@@ -1648,7 +1875,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return exc.exit_code
 
     if args.json:
-        print(json.dumps(report, ensure_ascii=False, indent=2))
+        print(json.dumps(report, ensure_ascii=True, indent=2))
     else:
         if args.runs > 1:
             print(

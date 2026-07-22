@@ -18,7 +18,10 @@ from app.harness.agents.models import (
     RepairContract,
     StoryArcCandidateSnapshot,
 )
-from app.harness.agents.evidence_matching import resolve_semantic_evidence_quote
+from app.harness.agents.evidence_matching import (
+    materialize_semantic_evidence_quote,
+    resolve_verbatim_evidence_quote,
+)
 from app.harness.agents.persistence import activation_relative, json_document
 from app.harness.agents.registry import ToolExecutionContext, ToolHandlerError
 from app.harness.agents.rubrics import changed_components, component_fingerprints
@@ -549,8 +552,9 @@ def _bind_chapter_semantic_metadata(workspace: RepairWorkspace) -> RepairWorkspa
             if not isinstance(value, dict):
                 continue
             summary = value.get("summary")
-            quote = resolve_semantic_evidence_quote(
+            quote = _preserve_or_materialize_evidence_quote(
                 draft,
+                value.get("evidence_quote"),
                 [summary] if isinstance(summary, str) else [],
             )
             if quote is None:
@@ -578,7 +582,17 @@ def _bind_chapter_semantic_metadata(workspace: RepairWorkspace) -> RepairWorkspa
                     str(operation.get("target_id", "")),
                     json.dumps(operation.get("value", {}), ensure_ascii=False),
                 ]
-                quote = resolve_semantic_evidence_quote(draft, hints)
+                prior_evidence = operation.get("evidence")
+                prior_quote: object = None
+                if isinstance(prior_evidence, list) and prior_evidence:
+                    first = prior_evidence[0]
+                    if isinstance(first, dict):
+                        prior_quote = first.get("quote")
+                quote = _preserve_or_materialize_evidence_quote(
+                    draft,
+                    prior_quote,
+                    hints,
+                )
                 if quote is None:
                     raise ToolHandlerError(
                         "candidate_canon_fact_not_supported",
@@ -590,7 +604,6 @@ def _bind_chapter_semantic_metadata(workspace: RepairWorkspace) -> RepairWorkspa
                             "replace_candidate_text",
                         ],
                     )
-                prior_evidence = operation.get("evidence")
                 evidence_file = ""
                 if isinstance(prior_evidence, list) and prior_evidence:
                     first = prior_evidence[0]
@@ -603,6 +616,20 @@ def _bind_chapter_semantic_metadata(workspace: RepairWorkspace) -> RepairWorkspa
     if isinstance(normalized_patch, dict):
         components["state_patch"] = normalized_patch
     return workspace.model_copy(update={"current_components": components})
+
+
+def _preserve_or_materialize_evidence_quote(
+    draft: str,
+    prior_quote: object,
+    hints: list[str],
+) -> str | None:
+    if isinstance(prior_quote, str) and prior_quote:
+        if prior_quote in draft:
+            return prior_quote
+        resolved = resolve_verbatim_evidence_quote(draft, prior_quote)
+        if resolved is not None:
+            return resolved
+    return materialize_semantic_evidence_quote(draft, hints)
 
 
 def _semantic_changed_components(

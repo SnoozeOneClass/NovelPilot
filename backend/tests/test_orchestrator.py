@@ -913,6 +913,8 @@ def test_orchestrator_plans_initial_arc_with_active_profile(tmp_path, monkeypatc
     assert arc_state["target_chapter_count"] == 9
     assert plan.startswith("# Arc 1")
     assert "Approved rolling story arc contract" in captured_prompts[-1]
+    assert "A Story Arc is a macro narrative unit" in captured_prompts[-1]
+    assert "not the same thing as one drafting round" in captured_prompts[-1]
     assert "该项目从旧版全书设定迁移而来" in captured_prompts[-1]
     assert any(
         event.kind == "llm_output_delta"
@@ -1295,12 +1297,20 @@ def test_context_snapshot_summarizes_prior_committed_chapters_only(
 
     snapshot = read_json(active_chapter / "context_snapshot.json")
     sources_by_id = {source["id"]: source for source in snapshot["sources"]}
-    prior_summary = sources_by_id["prior-committed-chapters"]["summary"]
+    prior_sources = [
+        source
+        for source_id, source in sources_by_id.items()
+        if source_id.startswith("prior-committed-chapter-")
+    ]
+    prior_summary = "; ".join(source["summary"] for source in prior_sources)
     excluded_sources = {item["source"] for item in snapshot["excluded"]}
 
-    assert "Prior chapter 1" in prior_summary
+    assert "chapter-001" in prior_summary
+    assert sources_by_id["prior-committed-chapter-001"]["path"] == (
+        "chapters/chapter-001/final.md"
+    )
     assert "First final" in prior_summary
-    assert "Prior chapter 0" in prior_summary
+    assert "chapter-000" in prior_summary
     assert "committed final without Markdown heading" in prior_summary
     assert "very long opening prose line" not in prior_summary
     assert "full committed body" not in prior_summary

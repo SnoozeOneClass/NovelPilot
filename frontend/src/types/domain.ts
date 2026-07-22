@@ -136,6 +136,8 @@ export interface SetupSuggestion {
   message: string;
   rationale?: string;
   recommended?: boolean;
+  action: "answer" | "select_title";
+  value: string | null;
 }
 
 export interface SetupReadinessSignal {

@@ -20,6 +20,7 @@ from app.api import (
 )
 from app.core.config import ensure_runtime_dirs
 from app.harness.run_host import get_run_host
+from app.llm.provider_clients import close_provider_clients
 from app.storage.projects import recover_all_project_transactions
 
 
@@ -31,6 +32,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         host.stop()
+        close_provider_clients()
 
 
 def create_app() -> FastAPI:

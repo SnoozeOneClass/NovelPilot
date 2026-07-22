@@ -9,6 +9,7 @@ SetupPhase = Literal["discussing", "review_ready", "review_blocked", "approved"]
 SetupReadinessStatus = Literal["continue", "ready"]
 SetupReviewSeverity = Literal["warning", "blocking"]
 TitleSelectionSource = Literal["recommended", "custom"]
+SetupSuggestionAction = Literal["answer", "select_title"]
 
 
 class SetupMessage(BaseModel):
@@ -28,6 +29,19 @@ class SetupSuggestion(BaseModel):
     message: str
     rationale: str = ""
     recommended: bool = False
+    action: SetupSuggestionAction = "answer"
+    value: str | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def validate_action_value(self) -> "SetupSuggestion":
+        if self.action == "select_title":
+            value = (self.value or "").strip()
+            if not value:
+                raise ValueError("A title-selection suggestion requires a title value.")
+            self.value = value
+        elif self.value is not None:
+            raise ValueError("An ordinary Book suggestion cannot carry a control value.")
+        return self
 
 
 class SetupReadinessSignal(BaseModel):
@@ -174,6 +188,7 @@ def missing_confirmed_decisions(
 
 class SetupTurnRequest(BaseModel):
     message: str = Field(min_length=1)
+    suggestion_id: str | None = Field(default=None, min_length=1, max_length=200)
 
     @field_validator("message")
     @classmethod

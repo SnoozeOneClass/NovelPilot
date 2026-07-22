@@ -90,6 +90,10 @@ def assemble_discussion_context(
     user_message: str,
 ) -> DiscussionContextAssembly:
     superseded_payload = _recent_superseded_payload(state)
+    initial_user_message = next(
+        (message for message in state.messages if message.role == "user"),
+        None,
+    )
     fixed_blocks = [
         ("discussion_summary", state.discussion_summary or "尚无摘要。"),
         ("current_direction_draft", state.direction_draft or "尚未形成草稿。"),
@@ -105,6 +109,8 @@ def assemble_discussion_context(
     recent_reversed: list[SetupMessage] = []
     recent_chars = 0
     for message in reversed(state.messages):
+        if initial_user_message is not None and message.id == initial_user_message.id:
+            continue
         if len(recent_reversed) >= RECENT_MESSAGE_LIMIT:
             break
         message_chars = len(message.content)
@@ -125,6 +131,15 @@ def assemble_discussion_context(
     prompt = "\n\n".join(
         [
             "下面是 Harness 为本轮全书共创装配的上下文。",
+            *(
+                [
+                    "初始创作委托（除非用户后续明确撤回或修改，否则始终有效；"
+                    "其中授权模型自行决定的局部创作不得重新拆成澄清问题）：\n"
+                    + initial_user_message.content
+                ]
+                if initial_user_message is not None
+                else []
+            ),
             f"讨论摘要：\n{state.discussion_summary or '尚无摘要。'}",
             f"当前完整 Book Direction 草稿：\n{state.direction_draft or '尚未形成草稿。'}",
             "已确认决定：\n" + _json_text(state.confirmed_decisions),
@@ -139,6 +154,8 @@ def assemble_discussion_context(
     )
     recent_chars = sum(len(message.content) for message in recent)
     recent_ids = {message.id for message in recent}
+    if initial_user_message is not None:
+        recent_ids.add(initial_user_message.id)
     older = [message for message in state.messages if message.id not in recent_ids]
     version_paths = _discussion_version_paths(state)
 
@@ -171,6 +188,18 @@ def assemble_discussion_context(
                     "contradictions",
                     "selected_title",
                 ],
+            },
+            {
+                "id": "initial-user-brief",
+                "path": "book/discussion/transcript.jsonl",
+                "resolved_version_path": version_paths["transcript"],
+                "version": state.turn_count,
+                "usage": "direct" if initial_user_message is not None else "absent",
+                "included_message_ids": (
+                    [initial_user_message.id]
+                    if initial_user_message is not None
+                    else []
+                ),
             },
             {
                 "id": "recent-book-discussion",
@@ -217,6 +246,18 @@ def assemble_discussion_context(
                 )
                 for content_id, content in fixed_blocks[2:8]
             ],
+            *(
+                [
+                    _injected_content_record(
+                        content_id="initial_user_brief",
+                        content=initial_user_message.content,
+                        source_path=version_paths["transcript"],
+                        version=state.turn_count,
+                    )
+                ]
+                if initial_user_message is not None
+                else []
+            ),
             _injected_content_record(
                 content_id="recent_raw_messages",
                 content=_json_text(recent_payload),
@@ -242,13 +283,19 @@ def assemble_discussion_context(
             "recent_message_limit": RECENT_MESSAGE_LIMIT,
             "recent_character_budget": RECENT_MESSAGE_CHARACTER_BUDGET,
             "recent_character_count": recent_chars,
+            "initial_brief_character_count": (
+                len(initial_user_message.content)
+                if initial_user_message is not None
+                else 0
+            ),
             "total_character_budget": None,
             "total_character_count": len(prompt),
         },
         "assembly_rationale": (
-            "Keep the complete candidate direction and compact discussion memory visible, add "
-            "only the most recent raw turns, and exclude older raw dialogue already represented "
-            "by the maintained summary. The complete transcript remains on disk for audit."
+            "Keep the initial creative delegation, complete candidate direction, and compact "
+            "discussion memory visible, add only the most recent raw turns, and exclude older "
+            "raw dialogue already represented by the maintained summary. The complete "
+            "transcript remains on disk for audit."
         ),
     }
     return DiscussionContextAssembly(prompt=prompt, snapshot=snapshot)
@@ -262,6 +309,7 @@ def continue_book_discussion(
     on_text_delta: Callable[[ChatChunk], None] | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
     on_tool_event: Callable[[ChatChunk], None] | None = None,
+    selected_title: str | None = None,
 ) -> BookDiscussionTurnResult:
     from app.harness.agents.loop_runners import run_book_discussion_agent
 
@@ -276,6 +324,7 @@ def continue_book_discussion(
         on_event=on_event,
         on_text_delta=on_text_delta,
         on_tool_event=on_tool_event,
+        selected_title=selected_title,
     )
 
 

@@ -2,6 +2,7 @@ import json
 from collections.abc import Callable
 from hashlib import sha256
 from pathlib import Path
+from typing import Literal
 
 from pydantic import ValidationError
 
@@ -609,6 +610,7 @@ def _bind_upstream_blocker(
     if blocker is None:
         return None
     role = evaluation_input.identity.role
+    owner: Literal["book", "story_arc"]
     if blocker.upper_scope == "story_arc_contract":
         if role != "chapter":
             raise EvaluationValidationError(
@@ -807,6 +809,13 @@ def _candidate_schema_invariants(
                 "plan": {"non_blank": True},
                 "change_summary": {"non_blank": True},
                 "target_chapter_count": {"minimum": 1, "maximum": 30},
+                "arc_scope": {
+                    "unit": "macro_narrative_arc",
+                    "must_reach_approved_turning_point": True,
+                    "drafting_rounds_are_substeps": True,
+                    "single_chapter_requires_explicit_upstream_support": True,
+                    "target_count_must_cover_numbered_chapter_rounds_before_stop": True,
+                },
             }
         )
     else:
@@ -814,8 +823,18 @@ def _candidate_schema_invariants(
             {
                 "plan": {"non_blank": True},
                 "draft": {"non_blank": True},
-                "observations": {"required": True},
-                "state_patch": {"required": True},
+                "observations": {
+                    "required": True,
+                    "every_semantic_claim_must_be_supported_by_draft": True,
+                },
+                "state_patch": {
+                    "required": True,
+                    "every_canon_change_must_be_supported_by_draft": True,
+                },
+                "evidence_binding": {
+                    "exact_quote_is_harness_materialized_locator_not_semantic_proof": True,
+                    "semantic_support_is_evaluator_owned": True,
+                },
             }
         )
     return common

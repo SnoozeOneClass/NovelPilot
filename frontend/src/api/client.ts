@@ -158,11 +158,11 @@ export const api = {
       method: "POST"
     }),
   setupState: () => request<SetupStateDocument>("/api/setup/state"),
-  continueSetupDiscussion: (message: string) =>
+  continueSetupDiscussion: (message: string, suggestion_id?: string) =>
     request<SetupStateDocument>("/api/setup/turn", {
       method: "POST",
       headers: jsonHeaders,
-      body: JSON.stringify({ message })
+      body: JSON.stringify({ message, suggestion_id })
     }),
   prepareSetupReview: () =>
     request<SetupStateDocument>("/api/setup/prepare-review", { method: "POST" }),

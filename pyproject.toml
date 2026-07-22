@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Local three-layer Agent Loop Harness for long-form AI novel writing."
 requires-python = ">=3.13"
 dependencies = [
+  "anthropic>=0.117.0,<1.0.0",
   "fastapi>=0.139.0",
+  "openai>=2.46.0,<3.0.0",
   "pydantic>=2.13.0",
   "uvicorn>=0.38.0",
 ]

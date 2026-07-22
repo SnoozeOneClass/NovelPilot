@@ -198,7 +198,7 @@ Profile 支持：
 - `openai-compatible`
 - `anthropic-compatible`
 
-Gateway 的核心请求只负责模型、已装配消息和流式开关。所有正式调用默认流式读取，应用层不设置总超时，也不统一强制温度、输出 token 上限或 `response_format`。Profile 可以保存任意 JSON `request_options` 并合并进 Provider 请求体；调用级参数可以覆盖 profile 扩展参数，但不能替换 profile 选择的 `model`、Harness 已装配的 `messages/system` 或关闭 `stream`。因此不同模型可以自行配置推理强度、采样、上限和私有扩展，Anthropic 所需的 `max_tokens` 也由对应 profile 显式声明。
+Gateway 的核心请求只负责模型、已装配消息和流式开关。OpenAI-compatible 与 Anthropic-compatible Adapter 分别使用官方同步 SDK 管理连接池、HTTP 与 SSE；SDK 隐藏重试固定为 0，Harness 保留唯一的单请求重试预算并记录每次重试。正式调用默认流式读取并使用 SDK 支持的默认超时行为，不统一强制温度、输出 token 上限或 `response_format`。Profile 可以保存任意 JSON `request_options` 并合并进 Provider 请求体；调用级参数可以覆盖 profile 扩展参数，但不能替换 profile 选择的 `model`、Harness 已装配的 `messages/system` 或关闭 `stream`。因此不同模型可以自行配置推理强度、采样、上限和私有扩展，Anthropic 所需的正整数 `max_tokens` 也由对应 profile 显式声明。
 
 结构化 Harness 动作仍通过 prompt、解析器和候选产物 schema 约束结果，但这些属于业务契约，不再通过所有 Provider 都未必兼容的传输字段强制实现。自由文本动作可以把增量作为模型可见输出；全书讨论和故事弧计划等结构化动作只发布累计接收字符数，解析成功后再展示正式产物，避免把半截 JSON 当成小说内容。Provider 扩展参数会返回本地设置界面，不应承载额外秘密。
 

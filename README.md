@@ -90,7 +90,7 @@ config/llm-profiles.local.json
 
 这个文件会被 git 忽略。小说输出目录只保存脱敏后的 profile/model 快照，不保存 API key。
 
-正式模型调用默认使用流式响应，Novelpilot 不设置应用级总超时，也不再强制写入 `temperature`、`max_tokens` 或 `response_format`。需要的采样参数、推理强度、输出上限或 Provider 私有字段，可以在设置页的“额外请求参数（JSON）”中按 profile 配置；`model`、`messages/system` 和 `stream` 由 Novelpilot 管理，避免扩展字段替换选中的模型、覆盖已经装配的上下文或关闭流式传输。Anthropic 兼容端如果要求 `max_tokens`，请在这里显式配置。扩展参数会通过本地 profile API 返回给设置界面，不要在其中放密钥。
+正式模型调用默认使用流式响应，连接、SSE 解析和受支持的默认超时由 OpenAI / Anthropic 官方 SDK 管理。SDK 内建重试已关闭，所有可见重试仍由 NovelPilot 的单请求三次预算统一记录；相同 Profile 会复用连接池。NovelPilot 不强制写入 `temperature`、`max_tokens` 或 `response_format`。需要的采样参数、推理强度、输出上限或 Provider 私有字段，可以在设置页的“额外请求参数（JSON）”中按 profile 配置；`model`、`messages/system` 和 `stream` 由 NovelPilot 管理，避免扩展字段替换选中的模型、覆盖已经装配的上下文或关闭流式传输。Anthropic 兼容端要求在这里显式配置正整数 `max_tokens`。扩展参数会通过本地 profile API 返回给设置界面，不要在其中放密钥。
 
 保存 profile 后，可以用 profile 行里的测试按钮先做一次小型 provider smoke test，再启动 harness。
 

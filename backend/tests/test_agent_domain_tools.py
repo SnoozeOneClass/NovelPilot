@@ -214,18 +214,20 @@ def test_book_discussion_assigns_suggestion_ids_and_preserves_prior_state(
         "newly_selected_title": None,
         "question": "Which witness should remain outside the suspect group",
         "suggestions": [
-            {
-                "label": "Harbor master",
-                "message": "Keep the harbor master outside the group.",
-                "rationale": "Preserves an external information source.",
-                "recommended": True,
-            },
-            {
-                "label": "Doctor",
-                "message": "Keep the doctor outside the group.",
-                "rationale": "Preserves medical evidence independence.",
-                "recommended": False,
-            },
+                {
+                    "label": "Harbor master",
+                    "message": "Keep the harbor master outside the group.",
+                    "rationale": "Preserves an external information source.",
+                    "recommended": True,
+                    "formal_title": None,
+                },
+                {
+                    "label": "Doctor",
+                    "message": "Keep the doctor outside the group.",
+                    "rationale": "Preserves medical evidence independence.",
+                    "recommended": False,
+                    "formal_title": None,
+                },
         ],
         "readiness": {"status": "continue", "reason": "One boundary remains."},
     }
@@ -255,6 +257,286 @@ def test_book_discussion_assigns_suggestion_ids_and_preserves_prior_state(
     ]
     assert payload["question"].endswith("？")
     assert all(item["id"].startswith("suggestion-") for item in payload["suggestions"])
+    assert all(item["action"] == "answer" for item in payload["suggestions"])
+    assert all(item["value"] is None for item in payload["suggestions"])
+
+
+def test_book_discussion_harness_replaces_semantic_prior_without_exact_copy(
+    tmp_path: Path,
+) -> None:
+    result = build_default_tool_registry().execute(
+        _context(
+            tmp_path,
+            role="book",
+            phase="discussion",
+            revision=5,
+            call_id="discussion-replace-decision",
+            control_data={
+                "confirmed_decisions": [
+                    "Every clue shown to the reader must remain fair.",
+                    "The ending should remain hopeful.",
+                ],
+                "superseded_decisions": [
+                    {
+                        "turn": 2,
+                        "decision": "Use a single viewpoint.",
+                        "replacement": "Alternate between two viewpoints.",
+                        "reason": "The user expanded the structure.",
+                        "user_evidence": "Use both investigators.",
+                    }
+                ],
+                "selected_title": None,
+                "turn": 6,
+            },
+        ),
+        _call(
+            "discussion-replace-decision",
+            "submit_book_discussion_update",
+            {
+                "reply": "The clue rule now allows motivated misdirection.",
+                "direction_draft": "# Direction\n\nA fair mystery with motivated lies.",
+                "discussion_summary": "The user relaxed the clue rule.",
+                "newly_confirmed_decisions": [],
+                "superseded_decisions": [
+                    {
+                        "prior_meaning": "the earlier fair-clue requirement",
+                        "replacement": (
+                            "Clues may mislead when character motive supports them."
+                        ),
+                        "reason": "The user explicitly relaxed the rule.",
+                        "user_evidence": "Allow motivated misdirection.",
+                    }
+                ],
+                "unresolved_questions": ["Which relationship bears the final cost?"],
+                "assumptions": [],
+                "contradictions": [],
+                "newly_selected_title": None,
+                "question": "Which relationship should bear the final cost",
+                "suggestions": [
+                    {
+                        "label": "Mentor",
+                        "message": "Let the mentor relationship bear the cost.",
+                        "rationale": "It completes the trust arc.",
+                        "recommended": True,
+                        "formal_title": None,
+                    },
+                    {
+                        "label": "Sibling",
+                        "message": "Let the sibling relationship bear the cost.",
+                        "rationale": "It makes the cost personal.",
+                        "recommended": False,
+                        "formal_title": None,
+                    },
+                ],
+                "readiness": {"status": "continue", "reason": "One choice remains."},
+            },
+        ),
+    )
+
+    assert result.status == "ok"
+    payload = read_json(tmp_path / result.artifact_paths[0])
+    replacement = "Clues may mislead when character motive supports them."
+    assert payload["confirmed_decisions"] == [
+        replacement,
+        "The ending should remain hopeful.",
+    ]
+    assert payload["superseded_decisions"] == [
+        {
+            "turn": 6,
+            "decision": "Every clue shown to the reader must remain fair.",
+            "replacement": replacement,
+            "reason": "The user explicitly relaxed the rule.",
+            "user_evidence": "Allow motivated misdirection.",
+        }
+    ]
+
+
+def test_book_discussion_binds_title_action_without_question_text_matching(
+    tmp_path: Path,
+) -> None:
+    arguments = {
+        "reply": "The remaining decision is the formal title.",
+        "direction_draft": "# Direction\n\nA fair closed-circle mystery.",
+        "discussion_summary": "The story direction has converged.",
+        "newly_confirmed_decisions": [],
+        "superseded_decisions": [],
+        "unresolved_questions": ["Choose the formal title."],
+        "assumptions": [],
+        "contradictions": [],
+        "newly_selected_title": None,
+        "question": "书名如果进入定稿，你更倾向下列哪一个作为正式书名",
+        "suggestions": [
+            {
+                "label": "保留工作名",
+                "message": "保留现有工作名作为正式书名。",
+                "rationale": "It best matches the core mechanism.",
+                "recommended": True,
+                "formal_title": "退潮前的十一分钟",
+            },
+            {
+                "label": "改用地点意象",
+                "message": "改用更冷峻的地点意象书名。",
+                "rationale": "It emphasizes the closed setting.",
+                "recommended": False,
+                "formal_title": "缺失的潮窗",
+            },
+        ],
+        "readiness": {"status": "continue", "reason": "A title is still open."},
+    }
+    result = build_default_tool_registry().execute(
+        _context(
+            tmp_path,
+            role="book",
+            phase="discussion",
+            revision=3,
+            call_id="discussion-title-options",
+            control_data={
+                "confirmed_decisions": [],
+                "superseded_decisions": [],
+                "selected_title": None,
+                "turn": 4,
+            },
+        ),
+        _call(
+            "discussion-title-options",
+            "submit_book_discussion_update",
+            arguments,
+        ),
+    )
+
+    assert result.status == "ok"
+    payload = read_json(tmp_path / result.artifact_paths[0])
+    assert [item["action"] for item in payload["suggestions"]] == [
+        "select_title",
+        "select_title",
+    ]
+    assert [item["value"] for item in payload["suggestions"]] == [
+        "退潮前的十一分钟",
+        "缺失的潮窗",
+    ]
+
+
+def test_book_discussion_uses_harness_bound_title_over_model_repetition(
+    tmp_path: Path,
+) -> None:
+    result = build_default_tool_registry().execute(
+        _context(
+            tmp_path,
+            role="book",
+            phase="discussion",
+            revision=3,
+            call_id="discussion-title",
+            control_data={
+                "confirmed_decisions": [],
+                "superseded_decisions": [],
+                "selected_title": "退潮前的十一分钟",
+                "turn": 4,
+            },
+        ),
+        _call(
+            "discussion-title",
+            "submit_book_discussion_update",
+            {
+                "reply": "The title decision is complete.",
+                "direction_draft": "# Direction\n\nA fair closed-circle mystery.",
+                "discussion_summary": "The direction and title are complete.",
+                "newly_confirmed_decisions": [],
+                "superseded_decisions": [],
+                "unresolved_questions": [],
+                "assumptions": [],
+                "contradictions": [],
+                "newly_selected_title": "模型不需要精确复述",
+                "question": "",
+                "suggestions": [],
+                "readiness": {"status": "ready", "reason": "Ready for review."},
+            },
+        ),
+    )
+
+    assert result.status == "ok"
+    payload = read_json(tmp_path / result.artifact_paths[0])
+    assert payload["selected_title"] == "退潮前的十一分钟"
+    assert payload["question"] is None
+
+
+def test_book_discussion_converges_to_evaluation_after_ten_persisted_turns(
+    tmp_path: Path,
+) -> None:
+    result = build_default_tool_registry().execute(
+        _context(
+            tmp_path,
+            role="book",
+            phase="discussion",
+            revision=10,
+                call_id="discussion-convergence-bound",
+                control_data={
+                    "confirmed_decisions": [
+                        "Use first-person courtroom narration.",
+                        "Use third-person courtroom narration.",
+                    ],
+                "superseded_decisions": [],
+                "selected_title": "Harbor of Trust",
+                "turn": 10,
+            },
+        ),
+        _call(
+            "discussion-convergence-bound",
+            "submit_book_discussion_update",
+            {
+                "reply": "The remaining implementation detail can go to evaluation.",
+                "direction_draft": "# Direction\n\nA fair harbor mystery.",
+                "discussion_summary": "The Book contract is ready for evaluation.",
+                "newly_confirmed_decisions": [],
+                "superseded_decisions": [
+                    {
+                        "prior_meaning": "Use person-based courtroom narration.",
+                        "replacement": "Open the courtroom sequence with evidence.",
+                        "reason": "The user selected the evidence-first option.",
+                        "user_evidence": "Open with evidence.",
+                    }
+                ],
+                "unresolved_questions": ["Which exact courtroom beat comes first?"],
+                "assumptions": [],
+                "contradictions": [],
+                "newly_selected_title": None,
+                "question": "Which exact courtroom beat should come first",
+                "suggestions": [
+                    {
+                        "label": "Evidence",
+                        "message": "Open with evidence.",
+                        "rationale": "It is direct.",
+                        "recommended": True,
+                        "formal_title": None,
+                    },
+                    {
+                        "label": "Procedure",
+                        "message": "Open with procedure.",
+                        "rationale": "It is orderly.",
+                        "recommended": False,
+                        "formal_title": None,
+                    },
+                ],
+                "readiness": {
+                    "status": "continue",
+                    "reason": "One local beat remains.",
+                },
+            },
+        ),
+    )
+
+    assert result.status == "ok"
+    payload = read_json(tmp_path / result.artifact_paths[0])
+    assert payload["readiness"]["status"] == "ready"
+    assert "ten persisted turns" in payload["readiness"]["reason"]
+    assert payload["question"] is None
+    assert payload["suggestions"] == []
+    assert "Open the courtroom sequence with evidence." in payload[
+        "confirmed_decisions"
+    ]
+    assert any(
+        "could not be bound uniquely" in item
+        for item in payload["contradictions"]
+    )
 
 
 def test_chapter_semantics_are_assembled_with_harness_ids_versions_and_evidence(
@@ -282,7 +564,12 @@ def test_chapter_semantics_are_assembled_with_harness_ids_versions_and_evidence(
         _call(
             "draft",
             "write_chapter_draft",
-            {"content": "The harbor bell rang once. Everyone faced the door."},
+            {
+                "content": (
+                    "The harbor bell rang once. The harbor bell rang twice. "
+                    "Everyone faced the door."
+                )
+            },
         ),
     )
     inspect = registry.execute(
@@ -296,7 +583,10 @@ def test_chapter_semantics_are_assembled_with_harness_ids_versions_and_evidence(
             "write_chapter_observations",
             {
                 "observations": {
-                    "events": [{"summary": "The harbor bell rang once."}],
+                    "events": [
+                        {"summary": "The harbor bell rang once."},
+                        {"summary": "潜艇上浮。"},
+                    ],
                     "character_changes": [],
                     "relationship_changes": [],
                     "world_fact_candidates": [],
@@ -352,6 +642,13 @@ def test_chapter_semantics_are_assembled_with_harness_ids_versions_and_evidence(
     assert manifest["observations"]["events"][0]["evidence_quote"] in (
         tmp_path / submit.artifact_paths[2]
     ).read_text(encoding="utf-8")
+    assert len(manifest["observations"]["events"]) == 1
+    assert manifest["normalization"] == {
+        "submitted_observation_count": 2,
+        "retained_observation_count": 1,
+        "dropped_unbound_observation_count": 1,
+    }
+    assert submit.content["dropped_unbound_observation_count"] == 1
     assert operation["target_file"] == "canon/world_facts.json"
     assert operation["target_id"].startswith("canon-")
     assert operation["expected_version"] == 1

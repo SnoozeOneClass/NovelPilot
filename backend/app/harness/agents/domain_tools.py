@@ -1,5 +1,6 @@
 import json
 import re
+from collections.abc import Iterable
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal, TypeVar, cast
@@ -8,6 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.harness.agents.persistence import activation_relative, json_document
 from app.harness.agents.repair_workspace import (
+    BookCollection,
+    ObservationCollection,
     add_book_item,
     add_chapter_observation,
     add_state_patch_operation,
@@ -26,11 +29,13 @@ from app.harness.agents.repair_workspace import (
 from app.harness.agents.models import (
     AgentRole,
     BookCandidateSnapshot,
+    CandidateComponentName,
     CandidateSnapshot,
     ChapterCandidateSnapshot,
     StoryArcCandidateSnapshot,
 )
 from app.harness.agents.evidence_matching import (
+    materialize_semantic_evidence_quote,
     resolve_semantic_choice,
     resolve_semantic_evidence_quote,
 )
@@ -70,6 +75,7 @@ _META_PRIORITY_QUESTION_FRAGMENTS = (
     "先确认哪个",
     "先聊哪个",
 )
+_MAX_BOOK_DISCUSSION_TURNS = 10
 
 
 class SemanticSetupSuggestion(BaseModel):
@@ -79,6 +85,7 @@ class SemanticSetupSuggestion(BaseModel):
     message: str = Field(min_length=1, max_length=4_000)
     rationale: str = Field(default="", max_length=2_000)
     recommended: bool = False
+    formal_title: str | None = Field(default=None, max_length=200)
 
 
 class BookDiscussionUpdateInput(BaseModel):
@@ -99,12 +106,17 @@ class BookDiscussionUpdateInput(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def validate_raw_suggestion_types(cls, value: Any) -> Any:
+    def normalize_and_validate_raw_fields(cls, value: Any) -> Any:
         if not isinstance(value, dict):
             return value
-        suggestions = value.get("suggestions")
+        normalized = dict(value)
+        question = normalized.get("question")
+        if isinstance(question, str) and not question.strip():
+            normalized["question"] = None
+
+        suggestions = normalized.get("suggestions")
         if not isinstance(suggestions, list):
-            return value
+            return normalized
         for suggestion in suggestions:
             if not isinstance(suggestion, dict):
                 continue
@@ -112,7 +124,7 @@ class BookDiscussionUpdateInput(BaseModel):
                 suggestion.get("recommended"), bool
             ):
                 raise ValueError("Book discussion suggestion.recommended must be a boolean.")
-        return value
+        return normalized
 
     @model_validator(mode="after")
     def validate_next_decision(self) -> "BookDiscussionUpdateInput":
@@ -139,6 +151,17 @@ class BookDiscussionUpdateInput(BaseModel):
             messages = [item.message.strip().casefold() for item in self.suggestions]
             if len(labels) != len(set(labels)) or len(messages) != len(set(messages)):
                 raise ValueError("Book discussion suggestions must be unique.")
+            title_values = [
+                (item.formal_title or "").strip() for item in self.suggestions
+            ]
+            has_title_values = [bool(value) for value in title_values]
+            if any(has_title_values) and not all(has_title_values):
+                raise ValueError(
+                    "A Book question cannot mix title selections with ordinary answers."
+                )
+            normalized_titles = [value.casefold() for value in title_values if value]
+            if len(normalized_titles) != len(set(normalized_titles)):
+                raise ValueError("Book title suggestion values must be unique.")
         elif self.question is not None or self.suggestions:
             raise ValueError("A review-ready Book direction cannot ask another question.")
         return self
@@ -1134,43 +1157,57 @@ def _bind_book_discussion_update(
 ) -> dict[str, Any]:
     expected_revision = _required_expected_revision(context)
     confirmed = _control_string_list(context, "confirmed_decisions")
-    for decision in request.newly_confirmed_decisions:
-        stripped = decision.strip()
-        if stripped and stripped not in confirmed:
-            confirmed.append(stripped)
-
-    superseded_payload = context.control_data.get("superseded_decisions", [])
-    durable_superseded = [
-        SupersededDecision.model_validate(item)
-        for item in superseded_payload
-        if isinstance(item, dict)
-    ]
+    durable_superseded: list[SupersededDecision] = []
     turn = context.control_data.get("turn")
     durable_turn = turn if isinstance(turn, int) and not isinstance(turn, bool) else 1
+    selected_title = _optional_control_string(context, "selected_title")
+    force_convergence = (
+        bool(selected_title) and durable_turn >= _MAX_BOOK_DISCUSSION_TURNS
+    )
+    contradictions = list(request.contradictions)
     for item in request.superseded_decisions:
         resolved = resolve_semantic_choice(
             item.prior_meaning,
             {decision: [decision] for decision in confirmed},
         )
         if resolved is None:
+            if force_convergence:
+                replacement = (item.replacement or "").strip() or None
+                if replacement is not None and replacement not in confirmed:
+                    confirmed.append(replacement)
+                contradictions.append(
+                    "One late Book decision replacement could not be bound uniquely; "
+                    "candidate evaluation must reconcile the overlapping meanings."
+                )
+                continue
             raise ToolHandlerError(
                 "book_superseded_decision_unresolved",
                 "A superseded decision does not resolve uniquely to current Book meaning.",
                 recoverable=True,
                 allowed_actions=["retry:submit_book_discussion_update"],
             )
+        replacement = (item.replacement or "").strip() or None
+        resolved_index = confirmed.index(resolved)
+        if replacement is None:
+            confirmed.pop(resolved_index)
+        else:
+            confirmed[resolved_index] = replacement
+            confirmed = list(dict.fromkeys(confirmed))
         durable_superseded.append(
             SupersededDecision(
                 turn=max(durable_turn, 1),
                 decision=resolved,
-                replacement=item.replacement,
+                replacement=replacement,
                 reason=item.reason,
                 user_evidence=item.user_evidence,
             )
         )
+    for decision in request.newly_confirmed_decisions:
+        stripped = decision.strip()
+        if stripped and stripped not in confirmed:
+            confirmed.append(stripped)
 
-    selected_title = _optional_control_string(context, "selected_title")
-    if request.newly_selected_title and request.newly_selected_title.strip():
+    if selected_title is None and request.newly_selected_title and request.newly_selected_title.strip():
         selected_title = request.newly_selected_title.strip()
     if request.readiness.status == "ready" and not selected_title:
         raise ToolHandlerError(
@@ -1182,7 +1219,20 @@ def _bind_book_discussion_update(
 
     question = _normalize_question(request.question)
     suggestions = _bind_setup_suggestions(context, request.suggestions)
-    if request.readiness.status == "ready":
+    readiness = request.readiness
+    if (
+        readiness.status == "continue"
+        and selected_title
+        and durable_turn >= _MAX_BOOK_DISCUSSION_TURNS
+    ):
+        readiness = SetupReadinessSignal(
+            status="ready",
+            reason=(
+                "Harness bounded the Book discussion after ten persisted turns; "
+                "remaining semantic gaps belong to candidate evaluation."
+            ),
+        )
+    if readiness.status == "ready":
         question = None
         suggestions = []
     bound = BoundBookDiscussionUpdate(
@@ -1194,11 +1244,11 @@ def _bind_book_discussion_update(
         superseded_decisions=durable_superseded,
         unresolved_questions=request.unresolved_questions,
         assumptions=request.assumptions,
-        contradictions=request.contradictions,
+        contradictions=contradictions,
         selected_title=selected_title,
         question=question,
         suggestions=suggestions,
-        readiness=request.readiness,
+        readiness=readiness,
     )
     return bound.model_dump(mode="json")
 
@@ -1233,12 +1283,14 @@ def _bind_setup_suggestions(
             message=item.message,
             rationale=item.rationale,
             recommended=index == first_recommended,
+            action="select_title" if item.formal_title else "answer",
+            value=item.formal_title.strip() if item.formal_title else None,
         )
         for index, item in enumerate(suggestions)
     ]
 
 
-def _book_collection_component_name(collection: str) -> str:
+def _book_collection_component_name(collection: BookCollection) -> CandidateComponentName:
     if collection.startswith("constraints."):
         return "constraints"
     if collection == "confirmed_decision_coverage":
@@ -1249,7 +1301,7 @@ def _book_collection_component_name(collection: str) -> str:
 def _repair_text_component(
     context: ToolExecutionContext,
     content_kind: str,
-) -> str:
+) -> CandidateComponentName:
     role_and_component = {
         "book_direction": ("book", "direction"),
         "rolling_plan": ("book", "rolling_plan"),
@@ -1266,27 +1318,27 @@ def _repair_text_component(
             recoverable=True,
             allowed_actions=["open_candidate_repair"],
         )
-    return component
+    return cast(CandidateComponentName, component)
 
 
-def _book_collection(content_kind: str) -> str:
-    return {
+def _book_collection(content_kind: str) -> BookCollection:
+    return cast(BookCollection, {
         "avoidance": "constraints.must_avoid",
         "creative_freedom": "constraints.creative_freedoms",
         "open_question": "constraints.open_decisions",
         "confirmed_decision": "confirmed_decision_coverage",
         "comparison_title": "recommended_titles",
-    }[content_kind]
+    }[content_kind])
 
 
-def _observation_collection(observation_kind: str) -> str:
-    return {
+def _observation_collection(observation_kind: str) -> ObservationCollection:
+    return cast(ObservationCollection, {
         "event": "events",
         "character_change": "character_changes",
         "relationship_change": "relationship_changes",
         "world_fact": "world_fact_candidates",
         "foreshadowing": "foreshadowing_candidates",
-    }[observation_kind]
+    }[observation_kind])
 
 
 def _repair_item_location(semantic_area: str) -> tuple[str, str]:
@@ -1318,7 +1370,7 @@ def _resolve_workspace_item_id(
     collection: str,
     semantic_hint: str,
 ) -> str:
-    choices: dict[str, list[str]] = {}
+    choices: dict[str, Iterable[str]] = {}
     for handle in workspace.item_handles:
         if handle.component != component or handle.collection != collection:
             continue
@@ -1770,6 +1822,21 @@ def _submit_chapter_candidate(
         plan_revision=plan_revision,
         draft_revision=draft_revision,
     )
+    submitted_observations = ChapterCandidateObservationsInput.model_validate(
+        _read_required_json_object(
+            context.project_path / root / "observations-input.json",
+            code="candidate_observations_missing",
+        )
+    )
+    submitted_observation_count = _chapter_observation_count(
+        submitted_observations
+    )
+    retained_observation_count = _chapter_observation_count(
+        request.observations
+    )
+    dropped_observation_count = (
+        submitted_observation_count - retained_observation_count
+    )
     plan_path = root / "plan.md"
     draft_path = root / "draft.md"
     plan = _read_required_text(
@@ -1809,6 +1876,11 @@ def _submit_chapter_candidate(
         "draft_sha256": sha256(draft.encode("utf-8")).hexdigest(),
         "observations_path": observations_path.as_posix(),
         "state_patch_path": patch_path.as_posix(),
+        "normalization": {
+            "submitted_observation_count": submitted_observation_count,
+            "retained_observation_count": retained_observation_count,
+            "dropped_unbound_observation_count": dropped_observation_count,
+        },
         "promotable": False,
     }
     return ToolExecutionPlan(
@@ -1816,6 +1888,7 @@ def _submit_chapter_candidate(
             "summary": "Chapter candidate submitted for evaluation.",
             "candidate_revision": request.candidate_revision,
             "manifest_path": manifest_path.as_posix(),
+            "dropped_unbound_observation_count": dropped_observation_count,
             "promotable": False,
         },
         files={
@@ -1905,16 +1978,7 @@ def _normalize_chapter_submission(
         for index, item in enumerate(values):
             quote = resolve_semantic_evidence_quote(draft, [item.summary])
             if quote is None:
-                raise ToolHandlerError(
-                    "candidate_observation_not_supported",
-                    "A semantic observation has no uniquely bindable support in the draft.",
-                    recoverable=True,
-                    content={"collection": collection, "semantic_index": index},
-                    allowed_actions=[
-                        "write_chapter_observations",
-                        "write_chapter_draft",
-                    ],
-                )
+                continue
             normalized.append(
                 {
                     "id": _candidate_item_id(
@@ -1980,6 +2044,21 @@ def _normalize_chapter_submission(
     )
 
 
+def _chapter_observation_count(
+    observations: ChapterCandidateObservationsInput | CandidateObservations,
+) -> int:
+    return sum(
+        len(getattr(observations, collection))
+        for collection in (
+            "events",
+            "character_changes",
+            "relationship_changes",
+            "world_fact_candidates",
+            "foreshadowing_candidates",
+        )
+    )
+
+
 def _normalize_patch_operation(
     context: ToolExecutionContext,
     operation: ChapterPatchOperationInput,
@@ -2030,7 +2109,7 @@ def _semantic_patch_operation(
                 "semantic_state": operation.resulting_state.strip(),
             }
         )
-    evidence_quote = resolve_semantic_evidence_quote(
+    evidence_quote = materialize_semantic_evidence_quote(
         draft,
         [
             operation.evidence_hint,
@@ -2042,7 +2121,7 @@ def _semantic_patch_operation(
     if evidence_quote is None:
         raise ToolHandlerError(
             "candidate_canon_fact_not_supported",
-            "A proposed canon change has no uniquely bindable support in the draft.",
+            "A proposed canon change cannot be bound because the draft has no usable text.",
             recoverable=True,
             content={
                 "entity_kind": operation.entity_kind,
@@ -2081,7 +2160,7 @@ def _resolve_canon_target_id(
 ) -> str:
     payload = read_json(project_path / target_file, default=None)
     items = payload.get("items") if isinstance(payload, dict) else None
-    choices: dict[str, list[str]] = {}
+    choices: dict[str, Iterable[str]] = {}
     if isinstance(items, dict):
         for key, value in items.items():
             if isinstance(key, str):

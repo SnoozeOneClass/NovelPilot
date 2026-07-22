@@ -113,15 +113,18 @@ def test_discussion_context_uses_summary_and_recent_raw_messages_only() -> None:
         f"message-{index:02d}" for index in range(4, 14)
     ]
     assert assembly.snapshot["summarized"] == [
-        f"message-{index:02d}" for index in range(4)
+        f"message-{index:02d}" for index in range(1, 4)
     ]
-    assert "raw-message-00" not in assembly.prompt
+    assert "raw-message-00" in assembly.prompt
     assert "raw-message-13" in assembly.prompt
     assert "The older discussion is represented here." in assembly.prompt
     assert "Make the ending bittersweet." in assembly.prompt
     assert assembly.snapshot["budget"]["total_character_budget"] is None
     assert assembly.snapshot["budget"]["total_character_count"] == len(assembly.prompt)
     injected = {item["id"]: item for item in assembly.snapshot["injected"]}
+    assert injected["initial_user_brief"]["source_path"] == (
+        "book/discussion/transcript.jsonl"
+    )
     assert injected["current_direction_draft"]["source_path"] == (
         "book/direction_draft.md"
     )
@@ -134,9 +137,15 @@ def test_discussion_context_excludes_raw_message_that_exceeds_recent_budget() ->
         turn_count=1,
         messages=[
             SetupMessage(
-                id="oversized-message",
+                id="initial-message",
                 turn=1,
                 role="user",
+                content="Choose local creative details within the approved constraints.",
+            ),
+            SetupMessage(
+                id="oversized-message",
+                turn=1,
+                role="assistant",
                 content="x" * (book_loop.RECENT_MESSAGE_CHARACTER_BUDGET + 1),
             )
         ],
@@ -154,6 +163,7 @@ def test_discussion_context_excludes_raw_message_that_exceeds_recent_budget() ->
     assert recent_source["included_message_ids"] == []
     assert assembly.snapshot["summarized"] == ["oversized-message"]
     assert "x" * 100 not in assembly.prompt
+    assert "Choose local creative details" in assembly.prompt
     assert "The oversized input is represented" in assembly.prompt
 
 
@@ -193,24 +203,22 @@ def test_review_context_records_versioned_sources_hashes_and_total_budget() -> N
 def test_book_discussion_tool_accepts_one_question_and_answer_options() -> None:
     result = BookDiscussionUpdateInput.model_validate(
         {
-            "expected_revision": 0,
             "reply": "The emotional cost is now clear.",
             "direction_draft": _long_direction(),
             "discussion_summary": "A fair mystery with a costly hopeful ending.",
-            "confirmed_decisions": ["Fair clues", "Costly hopeful ending"],
+            "newly_confirmed_decisions": ["Costly hopeful ending"],
             "superseded_decisions": [],
             "unresolved_questions": ["The final relationship outcome"],
             "assumptions": ["The city remains politically stable"],
             "contradictions": [],
+            "newly_selected_title": None,
             "question": "Which relationship must carry the emotional cost?",
             "suggestions": [
                 {
-                    "id": "leave-open",
                     "label": "Leave it open",
                     "message": "Keep that relationship open.",
                 },
                 {
-                    "id": "reconcile",
                     "label": "Reconcile",
                     "message": "Let them reconcile at a cost.",
                     "recommended": True,
@@ -225,30 +233,52 @@ def test_book_discussion_tool_accepts_one_question_and_answer_options() -> None:
     assert result.suggestions[1].recommended is True
 
 
-def test_book_discussion_tool_requires_confirmed_title_before_review_ready() -> None:
+@pytest.mark.parametrize("question", [None, "", " \t\n"])
+def test_book_discussion_provider_schema_normalizes_blank_ready_question(
+    question: str | None,
+) -> None:
     payload = {
-        "expected_revision": 2,
         "reply": "The full-book direction is ready for review.",
         "direction_draft": _long_direction(),
         "discussion_summary": "A converged fair-play mystery direction.",
-        "confirmed_decisions": ["Fair clues"],
+        "newly_confirmed_decisions": [],
         "superseded_decisions": [],
         "unresolved_questions": [],
         "assumptions": [],
         "contradictions": [],
-        "question": None,
+        "newly_selected_title": None,
+        "question": question,
         "suggestions": [],
         "readiness": {"status": "ready", "reason": "All decisions are confirmed."},
     }
 
-    with pytest.raises(ValidationError, match="user-confirmed formal title"):
-        BookDiscussionUpdateInput.model_validate(payload)
-
-    result = BookDiscussionUpdateInput.model_validate(
-        {**payload, "selected_title": "Harbor of Trust"}
-    )
+    result = BookDiscussionUpdateInput.model_validate(payload)
     assert result.readiness.status == "ready"
-    assert result.selected_title == "Harbor of Trust"
+    assert result.newly_selected_title is None
+    assert result.question is None
+
+
+def test_book_discussion_provider_schema_rejects_blank_continuing_question() -> None:
+    with pytest.raises(ValidationError, match="requires one next question"):
+        BookDiscussionUpdateInput.model_validate(
+            {
+                "reply": "One Book-level decision remains.",
+                "direction_draft": _long_direction(),
+                "discussion_summary": "The direction still needs one decision.",
+                "newly_confirmed_decisions": [],
+                "superseded_decisions": [],
+                "unresolved_questions": ["The final relationship outcome"],
+                "assumptions": [],
+                "contradictions": [],
+                "newly_selected_title": None,
+                "question": " \t\n",
+                "suggestions": [],
+                "readiness": {
+                    "status": "continue",
+                    "reason": "One decision remains.",
+                },
+            }
+        )
 
 
 def test_setup_suggestion_keeps_legacy_payloads_readable() -> None:
@@ -258,6 +288,8 @@ def test_setup_suggestion_keeps_legacy_payloads_readable() -> None:
 
     assert suggestion.rationale == ""
     assert suggestion.recommended is False
+    assert suggestion.action == "answer"
+    assert suggestion.value is None
 
 
 def test_book_discussion_tool_rejects_model_attempt_to_approve() -> None:
@@ -1332,6 +1364,107 @@ def test_setup_api_runs_discussion_review_and_explicit_approval(
         )
     assert duplicate_approval.value.status_code == 409
     assert len(read_events(project_path)) == len(event_kinds)
+
+
+def test_setup_api_binds_title_from_selected_suggestion_without_quote_copy(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_path = _make_project(tmp_path)
+    state = initialize_setup_state(project_path)
+    state.question = "书名如果进入定稿，你更倾向下列哪一个作为正式书名？"
+    state.suggestions = [
+        SetupSuggestion(
+            id="title-1",
+            label="保留工作名",
+            message="保留现有工作名作为正式书名。",
+            recommended=True,
+            action="select_title",
+            value="退潮前的十一分钟",
+        ),
+        SetupSuggestion(
+            id="title-2",
+            label="更冷峻的名称",
+            message="改用更冷峻的地点意象书名。",
+            action="select_title",
+            value="缺失的潮窗",
+        ),
+    ]
+    write_json(project_path / "book" / "setup.json", state.model_dump(mode="json"))
+    profile = _profile()
+    captured_title: list[str | None] = []
+    monkeypatch.setattr(setup_api, "get_active_project_path", lambda: project_path)
+    monkeypatch.setattr(setup_api, "get_active_profile", lambda: profile)
+
+    def fake_discussion(
+        _profile,
+        _state,
+        _message,
+        _assembly,
+        _on_text_delta,
+        *,
+        selected_title=None,
+        **_kwargs,
+    ):
+        captured_title.append(selected_title)
+        return replace(
+            _turn_result(),
+            selected_title="模型不需要复述这个值",
+            unresolved_questions=[],
+            question=None,
+            suggestions=[],
+            readiness=SetupReadinessSignal(
+                status="ready",
+                reason="The direction and formal title are ready for review.",
+            ),
+        )
+
+    monkeypatch.setattr(setup_api, "continue_book_discussion", fake_discussion)
+
+    updated = setup_api.continue_setup_discussion(
+        SetupTurnRequest(
+            message="保留现有工作名作为正式书名。",
+            suggestion_id="title-1",
+        )
+    )
+
+    assert captured_title == ["退潮前的十一分钟"]
+    assert updated.selected_title == "退潮前的十一分钟"
+    assert updated.title_selection_source == "recommended"
+    assert updated.readiness.status == "ready"
+
+
+def test_setup_api_rejects_edited_message_with_stale_suggestion_identity(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_path = _make_project(tmp_path)
+    state = initialize_setup_state(project_path)
+    state.question = "以下哪个书名最适合作为正式书名？"
+    state.suggestions = [
+        SetupSuggestion(
+            id="title-1",
+            label="《退潮前的十一分钟》",
+            message="保留现有工作名作为正式书名。",
+            recommended=True,
+            action="select_title",
+            value="退潮前的十一分钟",
+        )
+    ]
+    write_json(project_path / "book" / "setup.json", state.model_dump(mode="json"))
+    monkeypatch.setattr(setup_api, "get_active_project_path", lambda: project_path)
+    monkeypatch.setattr(setup_api, "get_active_profile", lambda: _profile())
+
+    with pytest.raises(HTTPException) as exc:
+        setup_api.continue_setup_discussion(
+            SetupTurnRequest(
+                message="我改成另一个自定义答案。",
+                suggestion_id="title-1",
+            )
+        )
+
+    assert exc.value.status_code == 409
+    assert "custom answer" in str(exc.value.detail)
 
 
 def test_setup_api_rejects_title_containing_configured_profile_secret(

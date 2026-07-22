@@ -61,8 +61,8 @@ function setupState(withCandidate = false): SetupStateDocument {
     contradictions: [],
     question: withCandidate ? null : "退休档案员是否计入六名核心人物？",
     suggestions: withCandidate ? [] : [
-      { id: "s1", label: "计入六人", message: "退休档案员计入六名核心人物，岛上共有六名旧案相关者。", rationale: "人物规模更紧凑，也更容易维持群像辨识度。", recommended: true },
-      { id: "s2", label: "六人之外", message: "退休档案员不计入六名核心人物，岛上共有七名旧案相关者。", rationale: "关系网更复杂，但会增加前期认知负担。", recommended: false }
+      { id: "s1", label: "计入六人", message: "退休档案员计入六名核心人物，岛上共有六名旧案相关者。", rationale: "人物规模更紧凑，也更容易维持群像辨识度。", recommended: true, action: "answer", value: null },
+      { id: "s2", label: "六人之外", message: "退休档案员不计入六名核心人物，岛上共有七名旧案相关者。", rationale: "关系网更复杂，但会增加前期认知负担。", recommended: false, action: "answer", value: null }
     ],
     readiness: withCandidate
       ? { status: "ready", reason: "方向已经足够具体。" }
@@ -119,8 +119,8 @@ describe("SetupConversation", () => {
     titleQuestion.selected_title = null;
     titleQuestion.question = "以下哪个书名最适合作为正式书名？";
     titleQuestion.suggestions = [
-      { id: "title-1", label: "退潮前的十一分钟", message: "采用《退潮前的十一分钟》作为正式书名。", rationale: "对应核心倒计时意象。", recommended: true },
-      { id: "title-2", label: "缺失的潮窗", message: "采用《缺失的潮窗》作为正式书名。", rationale: "突出封闭空间与证据缺口。", recommended: false }
+      { id: "title-1", label: "《退潮前的十一分钟》", message: "保留现有工作名作为正式书名。", rationale: "对应核心倒计时意象。", recommended: true, action: "select_title", value: "退潮前的十一分钟" },
+      { id: "title-2", label: "缺失的潮窗", message: "采用《缺失的潮窗》作为正式书名。", rationale: "突出封闭空间与证据缺口。", recommended: false, action: "select_title", value: "缺失的潮窗" }
     ];
     const readyState: SetupStateDocument = {
       ...titleQuestion,
@@ -135,10 +135,10 @@ describe("SetupConversation", () => {
 
     expect(await screen.findByRole("heading", { name: titleQuestion.question ?? "" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /退潮前的十一分钟/ }));
-    expect(screen.getByLabelText("你的意见")).toHaveValue("采用《退潮前的十一分钟》作为正式书名。");
+    expect(screen.getByLabelText("你的意见")).toHaveValue("保留现有工作名作为正式书名。");
     await user.click(screen.getByRole("button", { name: "发送本轮讨论" }));
 
-    await waitFor(() => expect(turnSpy).toHaveBeenCalledWith("采用《退潮前的十一分钟》作为正式书名。"));
+    await waitFor(() => expect(turnSpy).toHaveBeenCalledWith("保留现有工作名作为正式书名。", "title-1"));
     expect(await screen.findByRole("button", { name: "准备审阅" })).toBeEnabled();
   });
 

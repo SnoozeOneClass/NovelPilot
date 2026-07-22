@@ -318,6 +318,11 @@ class HarnessOrchestrator:
                 [
                     "Create the first rolling story arc plan for this novel.",
                     "Do not plan the full book. Plan only the current arc from committed state.",
+                    "A Story Arc is a macro narrative unit that reaches one approved turning "
+                    "point; it is not the same thing as one drafting round, milestone, or next "
+                    "chapter. Treat numbered chapter rounds in the approved rolling contract as "
+                    "successive parts of the current arc until its macro stop condition, unless "
+                    "the approved Book contract explicitly defines a one-chapter arc.",
                     "Submit the complete plan with the Story Arc candidate Tool. "
                     "The Markdown plan must include arc goal, conflicts, "
                     "chapter direction, pacing signal, foreshadowing movement, and stop "
@@ -1033,7 +1038,7 @@ class HarnessOrchestrator:
         if not chapters_path.exists():
             return []
 
-        summaries: list[str] = []
+        sources: list[ContextSource] = []
         for chapter_path in sorted(chapters_path.iterdir(), key=lambda path: path.name):
             if not chapter_path.is_dir():
                 continue
@@ -1046,19 +1051,28 @@ class HarnessOrchestrator:
             final_text = read_text_file(final_path)
             heading = _markdown_heading(final_text)
             summary = heading if heading else "committed final without Markdown heading"
-            summaries.append(f"Prior chapter {prior_number}: {summary}")
-
-        if not summaries:
-            return []
-        return [
-            ContextSource(
-                id="prior-committed-chapters",
-                path="chapters/*/final.md",
-                usage="summary",
-                included_fields=["chapter_id", "final_path", "heading", "character_count"],
-                summary="; ".join(summaries[-8:]),
+            chapter_id_value = chapter_path.name
+            relative_final_path = f"chapters/{chapter_id_value}/final.md"
+            sources.append(
+                ContextSource(
+                    id=f"prior-committed-{chapter_id_value}",
+                    path=relative_final_path,
+                    usage="summary",
+                    included_fields=[
+                        "chapter_id",
+                        "final_path",
+                        "heading",
+                        "character_count",
+                    ],
+                    summary=(
+                        f"Committed {chapter_id_value} (ordinal {prior_number}) from "
+                        f"{relative_final_path}: {summary}; "
+                        f"character_count={len(final_text)}"
+                    ),
+                )
             )
-        ]
+
+        return sources[-8:]
 
     def _assembled_context_block(self, snapshot_path: Path) -> str:
         payload = read_json(snapshot_path, default={})

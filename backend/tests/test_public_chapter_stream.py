@@ -204,3 +204,67 @@ def test_projector_reconciles_success_and_discards_failed_tool(tmp_path: Path) -
     discarded = next(payload for kind, payload in events if kind.endswith("discarded"))
     assert discarded["error_code"] == "stale_draft_revision"
     assert "草稿" not in repr(committed)
+
+
+def test_projector_discards_interrupted_stream_before_retry_reuses_call_id() -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+    projector = ChapterDraftStreamProjector(
+        chapter_id="chapter-001",
+        emit=lambda kind, payload: events.append((kind, payload)),
+        minimum_emit_chars=1,
+    )
+
+    def write_attempt(content: str) -> None:
+        projector.observe(
+            _chunk(
+                "tool_call_start",
+                tool_call_id="call-reused",
+                tool_name="write_chapter_draft",
+                tool_index=0,
+            )
+        )
+        projector.observe(
+            _chunk(
+                "tool_argument_delta",
+                tool_call_id="call-reused",
+                tool_name="write_chapter_draft",
+                tool_index=0,
+                arguments_delta=f'{{"content":"{content}"}}',
+            )
+        )
+        projector.observe(
+            _chunk(
+                "tool_call_stop",
+                tool_call_id="call-reused",
+                tool_name="write_chapter_draft",
+                tool_index=0,
+            )
+        )
+
+    write_attempt("中断草稿")
+    projector.observe_agent_event({"kind": "agent_transport_retry"})
+    write_attempt("重试草稿")
+    projector.observe_agent_event(
+        {
+            "kind": "agent_tool_result",
+            "tool_name": "write_chapter_draft",
+            "tool_call_id": "call-reused",
+            "status": "ok",
+            "artifact_paths": ["chapters/chapter-001/agent/run/draft.md"],
+        }
+    )
+
+    starts = [payload for kind, payload in events if kind.endswith("started")]
+    discarded = [payload for kind, payload in events if kind.endswith("discarded")]
+    committed = [payload for kind, payload in events if kind.endswith("committed")]
+    assert len(starts) == 2
+    assert starts[0]["stream_id"] != starts[1]["stream_id"]
+    assert discarded == [
+        {
+            "chapter_id": "chapter-001",
+            "stream_id": starts[0]["stream_id"],
+            "tool_call_id": "call-reused",
+            "error_code": "provider_stream_retry",
+        }
+    ]
+    assert committed[0]["stream_id"] == starts[1]["stream_id"]

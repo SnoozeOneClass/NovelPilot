@@ -6,7 +6,7 @@ import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
 import { Sheet } from "../../components/ui/Sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../../components/ui/Tabs";
-import type { HarnessEvent, SetupStateDocument } from "../../types/domain";
+import type { HarnessEvent, SetupStateDocument, SetupSuggestion } from "../../types/domain";
 import { BookDirectionDocument } from "./BookDirectionDocument";
 import { ConversationTranscript } from "./ConversationTranscript";
 import { DirectionLedger } from "./DirectionInspector";
@@ -48,6 +48,7 @@ export function SetupConversation({ projectId, events = [], onApproved, onExit, 
   const draftStorageKey = `novelpilot:book-direction-input:${projectId}`;
   const [state, setState] = useState<SetupStateDocument | null>(null);
   const [input, setInput] = useState(() => readLocalDraft(draftStorageKey));
+  const [selectedSuggestionId, setSelectedSuggestionId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -108,13 +109,17 @@ export function SetupConversation({ projectId, events = [], onApproved, onExit, 
     const message = input.trim();
     if (!message || !canSend || !state) return;
     const previousState = state;
+    const submittedSuggestionId = selectedSuggestionId;
     setStreamStartIndex(events.length);
     setBusyAction("turn");
     setNotice(null);
     setInput("");
+    setSelectedSuggestionId(null);
     writeLocalDraft(draftStorageKey, "");
     try {
-      const nextState = await api.continueSetupDiscussion(message);
+      const nextState = submittedSuggestionId
+        ? await api.continueSetupDiscussion(message, submittedSuggestionId)
+        : await api.continueSetupDiscussion(message);
       setChangeSummary(summarizeSetupChanges(previousState, nextState));
       await applyState(nextState);
       setActiveView("conversation");
@@ -124,10 +129,26 @@ export function SetupConversation({ projectId, events = [], onApproved, onExit, 
       if (!currentDraft.trim()) {
         writeLocalDraft(draftStorageKey, message);
         setInput(message);
+        setSelectedSuggestionId(submittedSuggestionId);
       }
       setNotice({ kind: "error", text: `${formatSetupError(error)} 当前输入尚未提交，可以直接重试。` });
     } finally {
       setBusyAction(null);
+    }
+  }
+
+  function useSuggestion(suggestion: SetupSuggestion) {
+    setInput(suggestion.message);
+    setSelectedSuggestionId(suggestion.id);
+  }
+
+  function changeInput(value: string) {
+    setInput(value);
+    const selected = state?.suggestions.find(
+      (suggestion) => suggestion.id === selectedSuggestionId,
+    );
+    if (selected && selected.message !== value) {
+      setSelectedSuggestionId(null);
     }
   }
 
@@ -252,8 +273,8 @@ export function SetupConversation({ projectId, events = [], onApproved, onExit, 
               notice={notice}
               canSend={canSend}
               canReview={canReview}
-              onInputChange={setInput}
-              onUseSuggestion={setInput}
+              onInputChange={changeInput}
+              onUseSuggestion={useSuggestion}
               onSend={() => void sendMessage()}
               onReview={() => void prepareReview()}
             />

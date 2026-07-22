@@ -114,7 +114,7 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
                 (
                     "test_explicit_approval_requires_latest_revision",
                     "test_explicit_approval_rejects_title_not_confirmed_in_discussion",
-                    "test_book_discussion_tool_requires_confirmed_title_before_review_ready",
+                    "test_setup_api_binds_title_from_selected_suggestion_without_quote_copy",
                     "test_approval_transaction_rolls_back_partial_formal_artifacts",
                     "test_review_blocks_candidate_without_confirmed_decision_coverage",
                     "test_setup_api_failure_is_fail_closed",

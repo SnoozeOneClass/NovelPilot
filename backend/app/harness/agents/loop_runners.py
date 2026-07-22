@@ -16,7 +16,7 @@ from app.harness.agents.domain_tools import (
     build_default_tool_registry,
 )
 from app.harness.agents.evaluator import evaluate_candidate, evaluation_input_fingerprint
-from app.harness.agents.evidence_matching import resolve_semantic_evidence_quote
+from app.harness.agents.evidence_matching import materialize_semantic_evidence_quote
 from app.harness.agents.models import (
     AgentIdentity,
     AgentRunResult,
@@ -144,6 +144,7 @@ def run_book_discussion_agent(
     on_text_delta: Callable[[ChatChunk], None] | None = None,
     on_tool_event: Callable[[ChatChunk], None] | None = None,
     runtime: AgentRuntime | None = None,
+    selected_title: str | None = None,
 ) -> BookDiscussionTurnResult:
     _require_policy_capabilities(policy)
     identity = AgentIdentity(project_id=metadata.project_id, role="book")
@@ -175,7 +176,7 @@ def run_book_discussion_agent(
                     item.model_dump(mode="json")
                     for item in state.superseded_decisions
                 ],
-                "selected_title": state.selected_title,
+                "selected_title": selected_title or state.selected_title,
                 "turn": state.turn_count + 1,
             },
             initial_checkpoint_id=f"book-discussion:{state.revision}",
@@ -1127,7 +1128,7 @@ def bind_chapter_patch_evidence(
     final_text = final_path.read_text(encoding="utf-8-sig")
     operations = []
     for index, operation in enumerate(patch.operations):
-        quote = resolve_semantic_evidence_quote(
+        quote = materialize_semantic_evidence_quote(
             final_text,
             [
                 operation.rationale,
@@ -1137,7 +1138,8 @@ def bind_chapter_patch_evidence(
         )
         if quote is None:
             raise AgentCandidateError(
-                "Harness could not bind semantic evidence for state-patch operation "
+                "Harness could not materialize evidence from an empty Chapter draft for "
+                "state-patch operation "
                 f"{index}."
             )
         evidence_file = f"chapters/{chapter_id}/final.md"
@@ -2062,16 +2064,28 @@ def _book_discussion_agent_prompt() -> str:
         "When the user explicitly delegates local creative choices, resolve those choices inside "
         "the stated constraints instead of turning each one into a clarification question. Ask "
         "only when missing human intent would materially change the Book contract and cannot be "
-        "resolved by an expressed preference or delegation. "
+        "resolved by an expressed preference or delegation. The initial creative delegation "
+        "remains authoritative across later suggestion clicks unless the user explicitly revokes "
+        "it. A click on one recommended answer never authorizes a new chain of chapter-level "
+        "questions. Injury choreography, exact evidence ordering, chapter placement, procedural "
+        "wording, dialogue beats, and similar implementation details are local creative choices, "
+        "not missing Book-level intent. "
         "Submit only newly confirmed decisions from the latest human message; the Harness "
         "preserves all earlier decisions and assigns every internal identity. Add a new "
         "confirmed decision only when the "
         "latest human message explicitly confirms it; review feedback and repair guidance are "
-        "not new user-confirmed decisions. When clarification is needed, call "
+        "not new user-confirmed decisions. When the latest human message changes an earlier "
+        "decision, describe its meaning in superseded_decisions.prior_meaning and provide the "
+        "semantic replacement there. Do not copy exact stored wording and do not duplicate the "
+        "replacement in newly_confirmed_decisions; the Harness resolves and updates the durable "
+        "decision list. When clarification is needed, call "
         "submit_book_discussion_update with exactly one question "
         "and two or three actionable suggestions. After every substantive story decision has "
         "converged, if no title is selected, ask one concrete title-selection question and "
-        "offer two or three meaningful title choices. Set newly_selected_title "
+        "offer two or three meaningful title choices. For every title choice, set its "
+        "formal_title to the plain title value; leave formal_title null on every ordinary "
+        "answer. The Harness binds a clicked title suggestion without relying on the question "
+        "wording, label formatting, or a later model repetition. Set newly_selected_title "
         "only when the latest human message explicitly chooses or supplies that title. Do not "
         "mark readiness=ready until a title is selected. When the direction and title "
         "are genuinely ready, submit readiness=ready with no question or suggestions. Never "
@@ -2121,6 +2135,11 @@ def _story_arc_agent_prompt() -> str:
         "You are the persistent logical Story Arc Agent inside NovelPilot's deterministic "
         "Harness. Use only exposed Tools and never activate another Agent. Read bounded context "
         "as needed, plan only the current rolling arc, and preserve committed evidence. "
+        "A Story Arc is a macro narrative unit ending at an approved turning point, not one "
+        "drafting round, milestone, or next chapter. If the Book rolling contract lists several "
+        "numbered chapter rounds that advance the same goal before that turning point, include "
+        "those rounds in this arc and choose a target count that covers them. Use one chapter "
+        "only when the approved Book contract explicitly defines a complete one-chapter arc. "
         "Resolve local creative choices yourself within the approved Book contract; no "
         "user-decision Tool is available. Human participation happens only when the submitted "
         "Story Arc plan is reviewed. "
@@ -2143,6 +2162,8 @@ def _chapter_agent_prompt() -> str:
         "plan_chapter_candidate, write the complete visible prose through write_chapter_draft, "
         "and call inspect_chapter_consistency. Then write semantic observations "
         "with write_chapter_observations and the canon delta with write_chapter_state_patch. "
+        "Observations are semantic candidates: submit them once, and let the Harness retain "
+        "only those it can bind to draft evidence instead of repeatedly paraphrasing them. "
         "Describe each canon change by semantic change kind, entity kind/name, resulting state, "
         "and an evidence hint; never provide storage operations, field keys, JSON encodings, a "
         "target file, canonical ID, version, locator, or exact quote. Finally call "

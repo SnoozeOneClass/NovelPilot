@@ -403,6 +403,62 @@ def test_chapter_repair_rebinds_observation_provenance_to_candidate_draft(
     assert read_json(manifest_path.parent / "obs.json")["based_on"] == expected_draft
 
 
+def test_chapter_draft_repair_preserves_still_valid_harness_evidence(
+    tmp_path: Path,
+) -> None:
+    source_artifact, source = _write_chapter_source(tmp_path)
+    source_payload = read_json(tmp_path / source_artifact)
+    operation = source_payload["state_patch"]["operations"][0]
+    operation["value"] = {
+        "semantic_state": "第一层闭合状态仍需经过外部复核后确认。"
+    }
+    operation["rationale"] = "第一层闭合与外部复核之间存在程序关系。"
+    write_json(tmp_path / source_artifact, source_payload)
+    source = source.model_copy(update={"state_patch": source_payload["state_patch"]})
+    context = _context(
+        tmp_path,
+        role="chapter",
+        scope_id="chapter-002",
+        phase="chapter",
+        contract=_contract(
+            source_artifact,
+            component_fingerprints(source),
+            ["draft"],
+        ),
+    )
+    registry = build_default_tool_registry()
+
+    replaced = registry.execute(
+        context,
+        _call(
+            "replace",
+            "replace_candidate_text",
+            {
+                "content_kind": "chapter_draft",
+                "content": (
+                    "The harbor bell rang once. Everyone faced the door. "
+                    "Mara checked the sealed clock before speaking."
+                ),
+            },
+        ),
+    )
+    finalized = registry.execute(
+        _next_context(context, "finalize"),
+        _call(
+            "finalize",
+            "submit_candidate_repair",
+            {"summary": "Clarify the complete draft without changing canon meaning."},
+        ),
+    )
+
+    assert replaced.status == "ok"
+    assert finalized.status == "ok", finalized.model_dump(mode="json")
+    candidate = read_json(tmp_path / finalized.artifact_paths[0])
+    assert candidate["state_patch"]["operations"][0]["evidence"][0]["quote"] == (
+        "The harbor bell rang once."
+    )
+
+
 def _write_book_source(
     project_path: Path,
 ) -> tuple[str, BookCandidateSnapshot]:

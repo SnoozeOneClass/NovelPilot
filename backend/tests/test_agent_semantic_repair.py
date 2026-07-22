@@ -8,6 +8,7 @@ from app.harness.agents import loop_runners
 from app.harness.agents.domain_tools import build_default_tool_registry
 from app.harness.agents.loop_runners import (
     AgentControlCheckpoint,
+    bind_chapter_patch_evidence,
     run_book_direction_agent,
     run_chapter_agent,
     run_story_arc_agent,
@@ -33,6 +34,52 @@ from app.storage.json_files import read_json, write_json
 def test_user_decision_tool_is_not_exposed_to_downstream_agents() -> None:
     assert "request_user_decision" not in loop_runners.STORY_ARC_AGENT_TOOLS
     assert "request_user_decision" not in loop_runners.CHAPTER_AGENT_TOOLS
+
+
+def test_model_free_patch_evidence_binding_materializes_ambiguous_span(
+    tmp_path: Path,
+) -> None:
+    chapter_path = tmp_path / "chapters" / "chapter-001"
+    chapter_path.mkdir(parents=True)
+    (chapter_path / "final.md").write_text(
+        "钟响了一次。钟响了两次。\n",
+        encoding="utf-8",
+    )
+    write_json(
+        chapter_path / "candidate_state_patch.json",
+        {
+            "schema_version": 1,
+            "status": "candidate",
+            "based_on": {
+                "chapter_final": "chapters/chapter-001/final.md",
+                "observations": "chapters/chapter-001/observations.json",
+            },
+            "operations": [
+                {
+                    "op": "upsert",
+                    "target_file": "canon/world_facts.json",
+                    "target_id": "bell-state",
+                    "expected_version": 1,
+                    "value": {"semantic_state": "钟声宣告程序节点。"},
+                    "evidence": [],
+                    "rationale": "钟声宣告程序节点。",
+                }
+            ],
+        },
+    )
+
+    result = bind_chapter_patch_evidence(
+        tmp_path,
+        ProjectMetadata(project_id="project-1"),
+        chapter_id="chapter-001",
+        expected_revision=0,
+    )
+
+    assert result.patch.operations[0].evidence[0].quote == "钟响了一次。"
+    assert result.run_result.turns_used == 0
+    assert result.run_result.terminal_result.tool_name == (
+        "harness_bind_state_patch_evidence"
+    )
 
 
 def test_story_arc_agent_repairs_local_semantic_failure_with_candidate_budget(

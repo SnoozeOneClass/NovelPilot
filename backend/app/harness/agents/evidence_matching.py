@@ -102,6 +102,39 @@ def resolve_semantic_evidence_quote(
     return best_span
 
 
+def materialize_semantic_evidence_quote(
+    draft: str,
+    hints: Iterable[str],
+) -> str | None:
+    """Materialize one exact span without treating lexical ambiguity as semantics.
+
+    Candidate meaning is reviewed by the Evaluator.  This helper only performs the
+    Harness-owned mechanical step of choosing a stable verbatim span, so a tie or a
+    weak lexical score must not send the writing model into a prose-rewrite loop.
+    """
+
+    semantic_hints = [item.strip() for item in hints if item and item.strip()]
+    if not draft.strip() or not semantic_hints:
+        return None
+    spans = _evidence_spans(draft)
+    if not spans:
+        return None
+
+    for hint in semantic_hints:
+        if hint in draft:
+            containing = [span for span in spans if hint in span]
+            if containing:
+                return min(containing, key=len)
+
+    return max(
+        enumerate(spans),
+        key=lambda item: (
+            max(_semantic_similarity(hint, item[1]) for hint in semantic_hints),
+            -item[0],
+        ),
+    )[1]
+
+
 def resolve_semantic_choice(
     hint: str,
     choices: dict[str, Iterable[str]],
@@ -123,10 +156,19 @@ def resolve_semantic_choice(
             (max(_semantic_similarity(query, item) for item in candidates), key)
         )
     ranked.sort(key=lambda item: (-item[0], item[1]))
-    if ranked[0][0] < 0.35:
+    best_score = ranked[0][0]
+    if best_score < 0.12:
         return None
-    if len(ranked) > 1 and abs(ranked[0][0] - ranked[1][0]) < 0.03:
-        return None
+    if len(ranked) > 1:
+        second_score = ranked[1][0]
+        gap = best_score - second_score
+        if gap < 0.03:
+            return None
+        if best_score < 0.35 and not (
+            gap >= 0.08
+            and (second_score == 0 or best_score >= second_score * 2)
+        ):
+            return None
     return ranked[0][1]
 
 

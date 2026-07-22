@@ -2,6 +2,8 @@ from typing import Any
 
 
 PROTECTED_REQUEST_FIELDS = {
+    "input",
+    "instructions",
     "model",
     "messages",
     "system",
@@ -9,6 +11,7 @@ PROTECTED_REQUEST_FIELDS = {
     "tools",
     "tool_choice",
     "response_format",
+    "text",
     "output_config",
 }
 

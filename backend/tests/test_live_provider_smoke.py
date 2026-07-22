@@ -152,7 +152,11 @@ def test_live_provider_smoke_failure_reports_harness_context(
 ) -> None:
     _isolate_runtime_paths(tmp_path, monkeypatch)
     monkeypatch.setattr(profiles_api, "call_llm", _capability_fixture_call_llm)
-    monkeypatch.setattr(agent_runtime, "call_llm", _fixture_call_llm_with_bad_patch)
+    monkeypatch.setattr(
+        agent_runtime,
+        "call_llm",
+        _fixture_call_llm_with_chapter_transport_failure,
+    )
     monkeypatch.setattr(agent_evaluator, "call_llm", _fixture_agent_call_llm)
     profile_storage.upsert_profile(
         LlmProfileUpsert(
@@ -176,13 +180,11 @@ def test_live_provider_smoke_failure_reports_harness_context(
     assert "missing=" in message
     assert "Inspect project:" in message
     assert "Last harness event: run_failed" in message
-    assert "no uniquely bindable support" in message
+    assert "fixture chapter transport failure" in message
     assert report["status"] == "failed"
     assert report["failure"]["last_event"]["kind"] == "run_failed"
     assert report["failure"]["last_event"]["artifact_path"] is None
-    assert "no uniquely bindable support" in (
-        report["failure"]["last_event"]["message"]
-    )
+    assert "fixture chapter transport failure" in report["failure"]["last_event"]["message"]
     report_payload = json.dumps(report, ensure_ascii=False)
     assert "secret-key" not in report_payload
     assert "https://api.example.com/v1" not in report_payload
@@ -285,31 +287,13 @@ def _capability_fixture_call_llm(
     return _fixture_agent_call_llm(_profile, request)
 
 
-def _fixture_call_llm_with_bad_patch(_profile: object, request: ChatRequest) -> ChatResult:
-    result = _live_fixture_agent_call_llm(_profile, request)
-    if result.tool_calls and result.tool_calls[0].name == "write_chapter_state_patch":
-        call = result.tool_calls[0]
-        arguments = dict(call.arguments)
-        state_patch = dict(arguments["state_patch"])
-        operations = [dict(item) for item in state_patch["operations"]]
-        operations[0] = {
-            "change_kind": "establish",
-            "entity_kind": "world_fact",
-            "entity_name": "月球补给站",
-            "resulting_state": "月球补给站已经永久关闭。",
-            "evidence_hint": "月球补给站在陨石雨中永久关闭。",
-            "rationale": "陨石雨摧毁了月球补给站。",
-        }
-        state_patch["operations"] = operations
-        arguments["state_patch"] = state_patch
-        bad_call = call.model_copy(
-            update={
-                "arguments": arguments,
-                "raw_arguments": json.dumps(arguments),
-            }
-        )
-        return result.model_copy(update={"tool_calls": [bad_call]})
-    return result
+def _fixture_call_llm_with_chapter_transport_failure(
+    _profile: object,
+    request: ChatRequest,
+) -> ChatResult:
+    if any(tool.name == "plan_chapter_candidate" for tool in request.tools):
+        raise RuntimeError("fixture chapter transport failure")
+    return _live_fixture_agent_call_llm(_profile, request)
 
 
 def _live_fixture_agent_call_llm(

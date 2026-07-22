@@ -115,6 +115,8 @@ def record_discussion_turn(
     result: BookDiscussionTurnResult,
     context_snapshot_path: str,
     profile_id: str,
+    selected_suggestion_id: str | None = None,
+    selected_title: str | None = None,
 ) -> SetupStateDocument:
     with _setup_project_lock(project_path):
         recover_file_transactions(project_path)
@@ -151,11 +153,13 @@ def record_discussion_turn(
             state,
             result,
             user_message=user_message,
+            selected_title=selected_title,
         )
         updated.title_selection_source = _title_selection_source(
             state,
             updated.selected_title,
             user_message=user_message,
+            selected_suggestion_id=selected_suggestion_id,
         )
         updated.confirmed_decisions = _merge_title_decision(
             updated.confirmed_decisions,
@@ -612,7 +616,10 @@ def _validated_selected_title(
     result: BookDiscussionTurnResult,
     *,
     user_message: str,
+    selected_title: str | None = None,
 ) -> str | None:
+    if selected_title is not None:
+        return selected_title
     selected = (result.selected_title or "").strip() or None
     if selected == state.selected_title:
         return selected
@@ -632,12 +639,47 @@ def _title_selection_source(
     selected_title: str | None,
     *,
     user_message: str,
+    selected_suggestion_id: str | None = None,
 ) -> TitleSelectionSource | None:
     if selected_title == state.selected_title:
         return state.title_selection_source
-    if any(suggestion.message == user_message for suggestion in state.suggestions):
+    if selected_suggestion_id is not None or any(
+        suggestion.message == user_message for suggestion in state.suggestions
+    ):
         return "recommended"
     return "custom"
+
+
+def resolve_setup_suggestion(
+    state: SetupStateDocument,
+    *,
+    suggestion_id: str | None,
+    submitted_message: str,
+) -> SetupSuggestion | None:
+    if suggestion_id is None:
+        return None
+    selected = next(
+        (suggestion for suggestion in state.suggestions if suggestion.id == suggestion_id),
+        None,
+    )
+    if selected is None:
+        raise ValueError("The selected Book suggestion is no longer current.")
+    if selected.message.strip() != submitted_message.strip():
+        raise ValueError(
+            "An edited Book suggestion must be submitted as a custom answer."
+        )
+    return selected
+
+
+def title_from_setup_suggestion(
+    suggestion: SetupSuggestion | None,
+) -> str | None:
+    if suggestion is None or suggestion.action != "select_title":
+        return None
+    title = (suggestion.value or "").strip()
+    if not title:
+        raise ValueError("The selected Book title suggestion is empty.")
+    return title
 
 
 def _merge_title_decision(decisions: list[str], selected_title: str | None) -> list[str]:
