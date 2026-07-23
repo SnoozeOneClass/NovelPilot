@@ -350,6 +350,9 @@ def test_complete_result_is_not_replayed_and_failed_task_requires_retry_command(
                     http_status=429,
                     error_ref_id=error.id,
                     diagnostic_ref_id=None,
+                    input_tokens=None,
+                    output_tokens=None,
+                    usage_ref_id=None,
                     finished_at_ms=170,
                 )
             report = await ReconcileService(

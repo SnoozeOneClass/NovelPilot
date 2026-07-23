@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from typing import Literal
 
 from app.agents.contracts import (
+    BookDiscussionContinue,
     BookDiscussionResult,
     BookDiscussionSuggestion,
     BookSupersededDecisionProposal,
@@ -103,7 +104,6 @@ def bind_agent_result(
             proposal=proposal,
             latest_user_message=latest_user_message,
             turn=turn,
-            allow_ambiguous=converges_at_boundary,
         )
         superseded.append(record)
         if contradiction is not None:
@@ -129,11 +129,11 @@ def bind_agent_result(
             else result.readiness.reason
         )
     else:
-        assert result.question is not None
-        question = result.question.strip()
+        assert isinstance(result.readiness, BookDiscussionContinue)
+        question = result.readiness.question.strip()
         suggestions = [
             _bind_suggestion(book_id=book_id, turn=turn, index=index, suggestion=suggestion)
-            for index, suggestion in enumerate(result.suggestions, start=1)
+            for index, suggestion in enumerate(result.readiness.suggestions, start=1)
         ]
         readiness_reason = result.readiness.reason
 
@@ -221,12 +221,7 @@ def _apply_supersession(
     proposal: BookSupersededDecisionProposal,
     latest_user_message: str,
     turn: int,
-    allow_ambiguous: bool,
 ) -> tuple[list[str], BookSupersededDecision, str | None]:
-    if _normalized_text(proposal.user_evidence) not in _normalized_text(latest_user_message):
-        raise BookDiscussionBindingError(
-            "A superseded Book decision is not evidenced by the latest human message."
-        )
     matches = _matching_decision_indexes(confirmed, proposal.prior_meaning)
     replacement = _optional_text(proposal.replacement)
     if len(matches) == 1:
@@ -244,27 +239,22 @@ def _apply_supersession(
                 decision=decision,
                 replacement=replacement,
                 reason=proposal.reason,
-                user_evidence=proposal.user_evidence,
+                user_evidence=latest_user_message,
             ),
             None,
         )
-    if not allow_ambiguous:
-        raise BookDiscussionBindingError("Book superseded decision could not be resolved uniquely.")
-    updated = list(confirmed)
-    if replacement is not None:
-        updated.append(replacement)
     contradiction = (
-        "Evaluator reconciliation required for late supersession: "
+        "Evaluator reconciliation required for unbound supersession: "
         f"{proposal.prior_meaning} -> {replacement or '[removed]'}"
     )
     return (
-        _deduplicate(updated),
+        list(confirmed),
         BookSupersededDecision(
             turn=turn,
             decision=proposal.prior_meaning,
             replacement=replacement,
             reason=proposal.reason,
-            user_evidence=proposal.user_evidence,
+            user_evidence=latest_user_message,
         ),
         contradiction,
     )

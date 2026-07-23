@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 from alembic import command
@@ -10,11 +11,12 @@ from sqlalchemy import select
 
 from app.agents.binding import ProfileCredential, ResolvedModelBinding
 from app.agents.contracts import ProfileCapabilities, ProfileSnapshot
-from app.agents.executor import AgentExecutor, AgentLiveEvent
+from app.agents.executor import AgentExecutionResult, AgentExecutor, AgentLiveEvent
 from app.agents.registry import DEFAULT_TASK_REGISTRY
 from app.agents.transport import ActivationRequestBudget, RequestCountingModel
 from app.db.engine import create_sqlite_async_engine
 from app.db.maintenance import alembic_config
+from app.db.uow import UnitOfWork
 from app.db.schema import agent_evidence_items, agent_task_attempts, agent_tasks
 from app.domain.projects import CreateProjectRequest, ProjectCommandService
 from app.store.agent_tasks import AgentTaskStore
@@ -57,6 +59,42 @@ class FunctionBindingResolver:
 
         model = RequestCountingModel(FunctionModel(response), budget=budget)
         return ResolvedModelBinding(model=model, budget=budget, adapter_key="function-test")
+
+
+class InvalidBookBindingResolver:
+    def resolve(
+        self,
+        *,
+        profile: object,
+        expected_profile_fingerprint: str,
+        required_capabilities: object,
+        model_request_limit: int,
+        credential: ProfileCredential,
+    ) -> ResolvedModelBinding:
+        del profile, expected_profile_fingerprint, required_capabilities, credential
+        budget = ActivationRequestBudget(model_request_limit=model_request_limit)
+
+        def response(_messages: list[object], info: AgentInfo) -> ModelResponse:
+            assert info.model_request_parameters.output_mode == "native"
+            return ModelResponse(
+                parts=[
+                    TextPart(
+                        '{"reply":"not-persisted-secret","direction_draft":"A memory mystery.",'
+                        '"discussion_summary":"One creator decision remains.",'
+                        '"newly_confirmed_decisions":[],"superseded_decisions":[],'
+                        '"unresolved_questions":["protagonist"],"assumptions":[],'
+                        '"contradictions":[],"newly_selected_title":null,'
+                        '"readiness":{"status":"continue","reason":"The protagonist is open.",'
+                        '"question":"Who carries the investigation",'
+                        '"suggestions":[{"label":"Witness","message":"Use the witness.",'
+                        '"rationale":"","recommended":true,"formal_title":null}]}}'
+                    )
+                ],
+                usage=RequestUsage(input_tokens=13, output_tokens=7),
+            )
+
+        model = RequestCountingModel(FunctionModel(response), budget=budget)
+        return ResolvedModelBinding(model=model, budget=budget, adapter_key="invalid-book-test")
 
 
 def test_executor_persists_complete_task_evidence_without_token_deltas(tmp_path: Path) -> None:
@@ -194,3 +232,168 @@ def test_executor_persists_complete_task_evidence_without_token_deltas(tmp_path:
     assert len(summaries[0].profile_fingerprint) == 64
     assert summaries[0].model_id == "opaque-test-model"
     assert summaries[0].harness_policy_id == "novelpilot-domain-harness"
+
+
+def test_executor_persists_failed_typed_output_messages_and_exact_validation(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "agent-executor-invalid.sqlite3"
+    command.upgrade(alembic_config(database), "head")
+
+    async def exercise() -> tuple[
+        AgentExecutionResult,
+        list[str],
+        str,
+        str,
+        list[str],
+        tuple[object, ...],
+    ]:
+        engine = create_sqlite_async_engine(database)
+        try:
+            created = await ProjectCommandService(CommandBus(engine)).create_project(
+                CreateProjectRequest(
+                    project_id="project-invalid-book",
+                    creator_brief="A mystery about edited testimony.",
+                    operation_mode="full_auto",
+                ),
+                idempotency_key="create-project-invalid-book",
+            )
+            profile = ProfileSnapshot.create(
+                profile_id="invalid-book-profile",
+                display_name="Invalid Book test profile",
+                api_family="openai_responses",
+                base_url="https://provider.example/v1",
+                model_id="opaque-test-model",
+                capabilities=ProfileCapabilities(
+                    text_streaming=True,
+                    native_json_schema=True,
+                ),
+            )
+            plan = DEFAULT_TASK_REGISTRY.freeze_plan(
+                task_id="book-discussion-invalid-task",
+                project_id="project-invalid-book",
+                run_id=created.result.generation_run_id,
+                task_key="book.discuss:workspace:1",
+                action_key="book.discuss",
+                role="book_strategist",
+                task_kind="book.discuss",
+                contract_version=1,
+                book_id=created.result.book_id,
+                canon_baseline_id=created.result.canon_baseline_id,
+                semantic_goal="Advance one Book discussion decision.",
+                prompt="Advance the supplied Book discussion.",
+                context_manifest={"creator_brief": "A mystery about edited testimony."},
+                profile_snapshot=profile,
+                workspace_lock_version=1,
+            )
+            await AgentTaskStore(engine).create_initial(
+                plan=plan,
+                attempt_id="book-discussion-invalid-attempt",
+                created_at_ms=20,
+            )
+            live = RecordingLivePublisher()
+            result = await AgentExecutor(
+                engine,
+                registry=DEFAULT_TASK_REGISTRY,
+                resolver=InvalidBookBindingResolver(),
+                live_publisher=live,
+                now_ms=lambda: 100,
+            ).execute(
+                project_id="project-invalid-book",
+                task_id=plan.task_id,
+                attempt_id="book-discussion-invalid-attempt",
+                owner_instance_id="test-engine",
+                lease_token="lease-invalid",
+                credential=ProfileCredential.from_plaintext("not-persisted-secret"),
+            )
+
+            async with engine.connect() as connection:
+                attempt_row = (
+                    await connection.execute(
+                        select(
+                            agent_task_attempts.c.status,
+                            agent_task_attempts.c.error_code,
+                            agent_task_attempts.c.error_category,
+                            agent_task_attempts.c.input_tokens,
+                            agent_task_attempts.c.output_tokens,
+                            agent_task_attempts.c.total_tokens,
+                            agent_task_attempts.c.usage_ref_id,
+                            agent_task_attempts.c.diagnostic_ref_id,
+                        ).where(
+                            agent_task_attempts.c.id
+                            == "book-discussion-invalid-attempt"
+                        )
+                    )
+                ).one()
+                evidence_rows = list(
+                    (
+                        await connection.execute(
+                            select(
+                                agent_evidence_items.c.item_kind,
+                                agent_evidence_items.c.content_ref_id,
+                            )
+                            .where(
+                                agent_evidence_items.c.attempt_id
+                                == "book-discussion-invalid-attempt"
+                            )
+                            .order_by(agent_evidence_items.c.sequence_number)
+                        )
+                    ).all()
+                )
+
+            refs = {kind: ref_id for kind, ref_id in evidence_rows if ref_id is not None}
+            async with UnitOfWork(engine) as store:
+                messages = (
+                    await store.content.get_packed(
+                        project_id="project-invalid-book",
+                        ref_id=refs["completion_message"],
+                    )
+                ).unpack_and_verify().decode("utf-8")
+                diagnostic = (
+                    await store.content.get_packed(
+                        project_id="project-invalid-book",
+                        ref_id=refs["diagnostic_attachment"],
+                    )
+                ).unpack_and_verify().decode("utf-8")
+
+            return (
+                result,
+                [event.kind for event in live.events],
+                messages,
+                diagnostic,
+                [kind for kind, _ref_id in evidence_rows],
+                tuple(attempt_row),
+            )
+        finally:
+            await engine.dispose()
+
+    result, live_kinds, messages, diagnostic, evidence, attempt_row = asyncio.run(exercise())
+
+    assert result.status == "failed"
+    assert result.error_code == "typed_output_invalid"
+    assert result.input_tokens == 26
+    assert result.output_tokens == 14
+    assert live_kinds == ["task_started", "task_failed"]
+    assert evidence[:3] == [
+        "completion_message",
+        "validation",
+        "diagnostic_attachment",
+    ]
+    assert attempt_row[:6] == (
+        "failed",
+        "typed_output_invalid",
+        "output_validation",
+        26,
+        14,
+        40,
+    )
+    assert attempt_row[6] is not None
+    assert attempt_row[7] is not None
+
+    assert "not-persisted-secret" not in messages
+    assert "not-persisted-secret" not in diagnostic
+    assert "[REDACTED]" in messages
+    assert "thinking" not in messages
+    validation_errors = json.loads(diagnostic)["validation_errors"]
+    assert "suggestions" in json.dumps(validation_errors)
+    assert "at least 2 items" in json.dumps(validation_errors)

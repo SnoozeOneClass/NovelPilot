@@ -4,7 +4,8 @@ import pytest
 from pydantic import ValidationError
 
 from app.agents.contracts import (
-    BookDiscussionReadiness,
+    BookDiscussionContinue,
+    BookDiscussionReady,
     BookDiscussionResult,
     BookDiscussionSuggestion,
     BookSupersededDecisionProposal,
@@ -45,21 +46,21 @@ def _continue_result(
         discussion_summary="The story is a memory mystery centered on one witness.",
         newly_confirmed_decisions=["The witness drives the investigation."],
         newly_selected_title=selected_title,
-        question=question,
-        suggestions=[
-            BookDiscussionSuggestion(
-                label="She knows",
-                message="She knows from the opening that her memory was changed.",
-                recommended=True,
-            ),
-            BookDiscussionSuggestion(
-                label="She discovers it",
-                message="She discovers the memory edit at the first major reversal.",
-            ),
-        ],
-        readiness=BookDiscussionReadiness(
+        readiness=BookDiscussionContinue(
             status="continue",
             reason="The witness knowledge boundary is unresolved.",
+            question=question,
+            suggestions=[
+                BookDiscussionSuggestion(
+                    label="She knows",
+                    message="She knows from the opening that her memory was changed.",
+                    recommended=True,
+                ),
+                BookDiscussionSuggestion(
+                    label="She discovers it",
+                    message="She discovers the memory edit at the first major reversal.",
+                ),
+            ],
         ),
     )
 
@@ -91,22 +92,22 @@ def test_continuing_turn_binds_stable_suggestion_ids_and_retains_creator_brief()
     assert first_transcript.messages[-1].content.endswith(first_state.question or "")
 
 
-@pytest.mark.parametrize(
-    ("question", "suggestion_count"),
-    [
-        ("Choose one", 2),
-        ("One question? And another?", 2),
-        ("Which topic should we discuss first?", 2),
-        ("Is she aware?", 1),
-    ],
-)
-def test_agent_contract_rejects_invalid_question_boundaries(
-    question: str,
-    suggestion_count: int,
-) -> None:
+def test_model_contract_does_not_turn_punctuation_or_option_kind_into_control_protocol() -> None:
     payload = _continue_result().model_dump(mode="json")
-    payload["question"] = question
-    payload["suggestions"] = payload["suggestions"][:suggestion_count]
+    payload["reply"] = "Could this reveal strengthen the midpoint? It can, if foreshadowed."
+    payload["readiness"]["question"] = "Choose the strongest midpoint reveal"
+    payload["readiness"]["suggestions"][0]["formal_title"] = "Echo Testimony"
+    result = BookDiscussionResult.model_validate(payload)
+
+    assert isinstance(result.readiness, BookDiscussionContinue)
+    assert result.readiness.question == "Choose the strongest midpoint reveal"
+    assert result.readiness.suggestions[0].formal_title == "Echo Testimony"
+    assert result.readiness.suggestions[1].formal_title is None
+
+
+def test_continue_shape_exposes_the_actual_minimum_option_count() -> None:
+    payload = _continue_result().model_dump(mode="json")
+    payload["readiness"]["suggestions"] = payload["readiness"]["suggestions"][:1]
     with pytest.raises(ValidationError):
         BookDiscussionResult.model_validate(payload)
 
@@ -142,21 +143,24 @@ def test_title_suggestion_is_control_bound_and_model_omission_cannot_clear_it() 
         reply="The whole-book direction is now coherent; only the formal title remains.",
         direction_draft="A witness investigates the editing of her own memory.",
         discussion_summary="The Book direction has converged.",
-        question="Which formal title should this novel use?",
-        suggestions=[
-            BookDiscussionSuggestion(
-                label="Echo Testimony",
-                message="Use Echo Testimony as the formal title.",
-                formal_title="Echo Testimony",
-                recommended=True,
-            ),
-            BookDiscussionSuggestion(
-                label="The Second Memory",
-                message="Use The Second Memory as the formal title.",
-                formal_title="The Second Memory",
-            ),
-        ],
-        readiness=BookDiscussionReadiness(status="continue", reason="A title is required."),
+        readiness=BookDiscussionContinue(
+            status="continue",
+            reason="A title is required.",
+            question="Which formal title should this novel use?",
+            suggestions=[
+                BookDiscussionSuggestion(
+                    label="Echo Testimony",
+                    message="Use Echo Testimony as the formal title.",
+                    formal_title="Echo Testimony",
+                    recommended=True,
+                ),
+                BookDiscussionSuggestion(
+                    label="The Second Memory",
+                    message="Use The Second Memory as the formal title.",
+                    formal_title="The Second Memory",
+                ),
+            ],
+        ),
     )
     state, transcript = bind_agent_result(
         book_id="book-a",
@@ -179,7 +183,7 @@ def test_title_suggestion_is_control_bound_and_model_omission_cannot_clear_it() 
         direction_draft="A witness investigates the editing of her own memory.",
         discussion_summary="The Book direction and title are confirmed.",
         newly_selected_title=None,
-        readiness=BookDiscussionReadiness(status="ready", reason="All Book decisions converged."),
+        readiness=BookDiscussionReady(status="ready", reason="All Book decisions converged."),
     )
     state, _ = bind_agent_result(
         book_id="book-a",
@@ -218,7 +222,6 @@ def test_turn_ten_converges_and_sends_ambiguous_supersession_to_evaluator() -> N
                     prior_meaning="The witness hides",
                     replacement="The witness reveals the archive.",
                     reason="The latest answer changes her strategy.",
-                    user_evidence="reveal it",
                 )
             ]
         }
@@ -241,7 +244,7 @@ def test_ready_result_without_any_confirmed_title_is_rejected() -> None:
         reply="The direction is ready.",
         direction_draft="A complete direction.",
         discussion_summary="All direction decisions converged.",
-        readiness=BookDiscussionReadiness(status="ready", reason="Direction converged."),
+        readiness=BookDiscussionReady(status="ready", reason="Direction converged."),
     )
     with pytest.raises(BookDiscussionBindingError, match="selected title"):
         bind_agent_result(

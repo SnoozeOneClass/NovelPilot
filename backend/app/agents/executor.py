@@ -12,7 +12,9 @@ from typing import Any, Literal, Protocol
 import httpx
 from openai import APIStatusError, AuthenticationError, BadRequestError, RateLimitError
 from pydantic import BaseModel
-from pydantic_ai.exceptions import UnexpectedModelBehavior, UserError
+from pydantic_ai import capture_run_messages
+from pydantic_ai.exceptions import ToolRetryError, UnexpectedModelBehavior, UserError
+from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter, ModelResponse
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.agents.binding import (
@@ -192,6 +194,8 @@ class AgentExecutor:
         )
         binding: ResolvedModelBinding | None = None
         fallback_budget = ActivationRequestBudget(model_request_limit=plan.model_request_limit)
+        captured_messages: list[ModelMessage] = []
+        secret = credential.api_key.get_secret_value()
         try:
             binding = self._resolver.resolve(
                 profile=plan.profile_snapshot,
@@ -202,19 +206,20 @@ class AgentExecutor:
             )
             async with binding:
                 agent = build_agent(model=binding.model, definition=definition)
-                async with self._deadline_factory(plan.activation_timeout_ms / 1000):
-                    output, message_bytes, usage = await self._run_agent(
-                        plan=plan,
-                        attempt_id=attempt_id,
-                        definition=definition,
-                        agent=agent,
-                    )
+                with capture_run_messages() as captured_messages:
+                    async with self._deadline_factory(plan.activation_timeout_ms / 1000):
+                        output, usage = await self._run_agent(
+                            plan=plan,
+                            attempt_id=attempt_id,
+                            definition=definition,
+                            agent=agent,
+                        )
             binding.budget.assert_terminal_invariants()
             result = await self._persist_success(
                 plan=plan,
                 attempt_id=attempt_id,
                 output=output,
-                message_bytes=message_bytes,
+                messages=_sanitize_messages(captured_messages, secret=secret),
                 usage=usage,
                 budget=binding.budget,
             )
@@ -232,12 +237,18 @@ class AgentExecutor:
                 raise
             budget = binding.budget if binding is not None else fallback_budget
             budget.assert_terminal_invariants()
-            classified = classify_execution_error(exc, secret=credential.api_key.get_secret_value())
+            classified = classify_execution_error(exc, secret=secret)
             result = await self._persist_failure(
                 plan=plan,
                 attempt_id=attempt_id,
                 error=classified,
                 budget=budget,
+                messages=(
+                    _sanitize_messages(captured_messages, secret=secret)
+                    if captured_messages
+                    else None
+                ),
+                usage=_usage_from_messages(captured_messages),
             )
             if plan.output_mode == "text_streaming":
                 await self._publish(
@@ -320,12 +331,12 @@ class AgentExecutor:
         attempt_id: str,
         definition: Any,
         agent: Any,
-    ) -> tuple[BaseModel, bytes, Any]:
+    ) -> tuple[BaseModel, Any]:
         if plan.output_mode == "native_json_schema":
             result = await agent.run(plan.prompt)
             if not isinstance(result.output, definition.output_model):
                 raise UnexpectedModelBehavior("Framework returned the wrong typed output model.")
-            return result.output, result.all_messages_json(), result.usage
+            return result.output, result.usage
 
         chunks: list[str] = []
         async with agent.run_stream(plan.prompt) as streamed:
@@ -347,7 +358,6 @@ class AgentExecutor:
             if finalizer is None:  # pragma: no cover - registry construction rejects this.
                 raise RuntimeError("Text task has no deterministic finalizer.")
             output = finalizer(completed)
-            messages = streamed.all_messages_json()
             usage = streamed.usage
         await self._publish(
             AgentLiveEvent(
@@ -357,7 +367,7 @@ class AgentExecutor:
                 attempt_id=attempt_id,
             )
         )
-        return output, messages, usage
+        return output, usage
 
     async def _persist_success(
         self,
@@ -365,13 +375,13 @@ class AgentExecutor:
         plan: AgentTaskPlan,
         attempt_id: str,
         output: BaseModel,
-        message_bytes: bytes,
+        messages: object,
         usage: Any,
         budget: ActivationRequestBudget,
     ) -> AgentExecutionResult:
         timestamp = self._now_ms()
         prepared_result = prepare_canonical_json(output)
-        prepared_messages = prepare_canonical_json(json.loads(message_bytes))
+        prepared_messages = prepare_canonical_json(messages)
         usage_payload = {
             "requests": int(usage.requests),
             "input_tokens": int(usage.input_tokens),
@@ -428,7 +438,9 @@ class AgentExecutor:
                 EvidenceItemDraft(
                     item_kind="completion_message",
                     content_ref_id=message_ref.id,
-                    metadata_json=_canonical_metadata({"normalized": True}),
+                    metadata_json=_canonical_metadata(
+                        {"normalized": True, "thinking_removed": True}
+                    ),
                 ),
                 EvidenceItemDraft(
                     item_kind="validation",
@@ -471,8 +483,11 @@ class AgentExecutor:
         attempt_id: str,
         error: ClassifiedExecutionError,
         budget: ActivationRequestBudget,
+        messages: object | None,
+        usage: tuple[int, int, int],
     ) -> AgentExecutionResult:
         timestamp = self._now_ms()
+        requests, input_tokens, output_tokens = usage
         prepared_error = prepare_canonical_json(
             {
                 "code": error.code,
@@ -488,6 +503,21 @@ class AgentExecutor:
             separators=(",", ":"),
         ).encode("utf-8")
         prepared_diagnostic = prepare_redacted_bytes(diagnostic_bytes)
+        prepared_messages = prepare_canonical_json(messages) if messages is not None else None
+        prepared_usage = (
+            prepare_canonical_json(
+                {
+                    "requests": requests,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "provider_request_count": budget.provider_request_count,
+                    "transport_retry_count": budget.transport_retry_count,
+                    "model_request_count": budget.model_request_count,
+                }
+            )
+            if requests
+            else None
+        )
         async with UnitOfWork(self._engine, begin_mode="IMMEDIATE") as store:
             error_ref = await store.content.put(
                 project_id=plan.project_id,
@@ -507,6 +537,32 @@ class AgentExecutor:
                 schema_version=1,
                 created_at_ms=timestamp,
             )
+            message_ref = (
+                await store.content.put(
+                    project_id=plan.project_id,
+                    prepared=prepared_messages,
+                    semantic_kind="agent.completion_messages",
+                    media_type="application/json",
+                    schema_id="pydantic-ai-messages",
+                    schema_version=1,
+                    created_at_ms=timestamp,
+                )
+                if prepared_messages is not None
+                else None
+            )
+            usage_ref = (
+                await store.content.put(
+                    project_id=plan.project_id,
+                    prepared=prepared_usage,
+                    semantic_kind="agent.usage",
+                    media_type="application/json",
+                    schema_id="agent-usage",
+                    schema_version=1,
+                    created_at_ms=timestamp,
+                )
+                if prepared_usage is not None
+                else None
+            )
             completed = await store.execution.complete_attempt_failure(
                 project_id=plan.project_id,
                 task_id=plan.task_id,
@@ -519,11 +575,43 @@ class AgentExecutor:
                 http_status=error.http_status,
                 error_ref_id=error_ref.id,
                 diagnostic_ref_id=diagnostic_ref.id,
+                input_tokens=input_tokens if prepared_usage is not None else None,
+                output_tokens=output_tokens if prepared_usage is not None else None,
+                usage_ref_id=usage_ref.id if usage_ref is not None else None,
                 finished_at_ms=timestamp,
             )
             if not completed:
                 raise AgentActivationConflictError("Attempt terminal failure CAS failed.")
-            evidence = [
+            evidence = []
+            if message_ref is not None:
+                evidence.append(
+                    EvidenceItemDraft(
+                        item_kind="completion_message",
+                        content_ref_id=message_ref.id,
+                        metadata_json=_canonical_metadata(
+                            {
+                                "normalized": True,
+                                "attempt_status": "failed",
+                                "thinking_removed": True,
+                            }
+                        ),
+                    )
+                )
+            if error.category == "output_validation":
+                evidence.append(
+                    EvidenceItemDraft(
+                        item_kind="validation",
+                        metadata_json=_canonical_metadata(
+                            {
+                                "output_schema_id": plan.output_schema_id,
+                                "output_schema_version": plan.output_schema_version,
+                                "output_schema_fingerprint": plan.output_schema_fingerprint,
+                                "status": "failed",
+                            }
+                        ),
+                    )
+                )
+            evidence.append(
                 EvidenceItemDraft(
                     item_kind="diagnostic_attachment",
                     content_ref_id=diagnostic_ref.id,
@@ -531,7 +619,7 @@ class AgentExecutor:
                         {"schema_id": "provider-diagnostic-redacted", "redacted": True}
                     ),
                 )
-            ]
+            )
             evidence.extend(_retry_evidence(budget))
             await store.execution.insert_evidence_items(
                 project_id=plan.project_id,
@@ -550,8 +638,8 @@ class AgentExecutor:
             provider_request_count=budget.provider_request_count,
             transport_retry_count=budget.transport_retry_count,
             model_request_count=budget.model_request_count,
-            input_tokens=0,
-            output_tokens=0,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
         )
 
 
@@ -588,6 +676,61 @@ def _assert_registry_matches_plan(plan: AgentTaskPlan, definition: Any) -> None:
 
 def _canonical_metadata(value: object) -> str:
     return prepare_canonical_json(value).canonical_bytes.decode("utf-8")
+
+
+def _sanitize_messages(messages: list[ModelMessage], *, secret: str) -> object:
+    """Keep complete visible run messages while removing secrets and hidden reasoning."""
+
+    payload = ModelMessagesTypeAdapter.dump_python(messages, mode="json")
+    return _sanitize_evidence_value(payload, secret=secret)
+
+
+def _sanitize_evidence_value(value: object, *, secret: str) -> object:
+    if isinstance(value, list):
+        return [
+            _sanitize_evidence_value(item, secret=secret)
+            for item in value
+            if not (
+                isinstance(item, dict)
+                and item.get("part_kind") == "thinking"
+            )
+        ]
+    if isinstance(value, dict):
+        result: dict[str, object] = {}
+        for key, item in value.items():
+            normalized_key = re.sub(r"[^a-z0-9]", "", str(key).casefold())
+            if normalized_key in {
+                "authorization",
+                "cookie",
+                "setcookie",
+                "apikey",
+                "xapikey",
+                "accesstoken",
+                "refreshtoken",
+                "clientsecret",
+                "password",
+            }:
+                result[str(key)] = "[REDACTED]"
+            else:
+                result[str(key)] = _sanitize_evidence_value(item, secret=secret)
+        return result
+    if isinstance(value, str):
+        return _redact(value, secret=secret)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _redact(str(value), secret=secret)
+
+
+def _usage_from_messages(messages: list[ModelMessage]) -> tuple[int, int, int]:
+    requests = 0
+    input_tokens = 0
+    output_tokens = 0
+    for message in messages:
+        if isinstance(message, ModelResponse):
+            requests += 1
+            input_tokens += int(message.usage.input_tokens)
+            output_tokens += int(message.usage.output_tokens)
+    return requests, input_tokens, output_tokens
 
 
 def _retry_evidence(budget: ActivationRequestBudget) -> list[EvidenceItemDraft]:
@@ -670,6 +813,9 @@ def classify_execution_error(exc: BaseException, *, secret: str = "") -> Classif
     response_body = _provider_response_body(exc)
     if response_body is not None:
         diagnostic["provider_response"] = _redact(response_body, secret=secret)
+    validation_errors = _validation_error_payload(exc, secret=secret)
+    if validation_errors is not None:
+        diagnostic["validation_errors"] = validation_errors
     return ClassifiedExecutionError(
         code=code,
         category=category,
@@ -690,12 +836,20 @@ def _provider_response_body(exc: BaseException) -> str | None:
     return None
 
 
+def _validation_error_payload(exc: BaseException, *, secret: str) -> object | None:
+    cause = exc.__cause__
+    if not isinstance(cause, ToolRetryError):
+        return None
+    return _sanitize_evidence_value(cause.tool_retry.content, secret=secret)
+
+
 def _redact(value: str, *, secret: str) -> str:
     result = value.replace(secret, "[REDACTED]") if secret else value
     patterns = (
         r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;]+",
         r"(?i)(api[-_ ]?key\s*[:=]\s*)[^\s,;]+",
         r"(?i)(cookie\s*[:=]\s*)[^\r\n]+",
+        r"(?i)([?&](?:access_token|api_key|key|signature|sig|token)=)[^&\s\"']+",
     )
     for pattern in patterns:
         result = re.sub(pattern, r"\1[REDACTED]", result)

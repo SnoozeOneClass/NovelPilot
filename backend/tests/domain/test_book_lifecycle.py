@@ -9,7 +9,8 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.agents.contracts import (
-    BookDiscussionReadiness,
+    BookDiscussionContinue,
+    BookDiscussionReady,
     BookDiscussionResult,
     BookDiscussionSuggestion,
 )
@@ -375,23 +376,23 @@ def test_task_driven_book_loop_reaches_baseline_only_after_explicit_approval(
                 reply="The direction is sufficiently constrained; the formal title remains.",
                 direction_draft="An unreliable witness investigates who edited her memory.",
                 discussion_summary="The witness and central memory conflict are fixed.",
-                question="Which formal title should this novel use?",
-                suggestions=[
-                    BookDiscussionSuggestion(
-                        label="Echo Testimony",
-                        message="Use Echo Testimony as the formal title.",
-                        formal_title="Echo Testimony",
-                        recommended=True,
-                    ),
-                    BookDiscussionSuggestion(
-                        label="The Second Memory",
-                        message="Use The Second Memory as the formal title.",
-                        formal_title="The Second Memory",
-                    ),
-                ],
-                readiness=BookDiscussionReadiness(
+                readiness=BookDiscussionContinue(
                     status="continue",
                     reason="The formal title must be confirmed.",
+                    question="Which formal title should this novel use?",
+                    suggestions=[
+                        BookDiscussionSuggestion(
+                            label="Echo Testimony",
+                            message="Use Echo Testimony as the formal title.",
+                            formal_title="Echo Testimony",
+                            recommended=True,
+                        ),
+                        BookDiscussionSuggestion(
+                            label="The Second Memory",
+                            message="Use The Second Memory as the formal title.",
+                            formal_title="The Second Memory",
+                        ),
+                    ],
                 ),
             )
             await insert_successful_task(
@@ -452,7 +453,7 @@ def test_task_driven_book_loop_reaches_baseline_only_after_explicit_approval(
                 reply="The direction and formal title are ready for synthesis.",
                 direction_draft="An unreliable witness investigates who edited her memory.",
                 discussion_summary="The Book direction and title are confirmed.",
-                readiness=BookDiscussionReadiness(
+                readiness=BookDiscussionReady(
                     status="ready",
                     reason="All Book-level decisions converged.",
                 ),
@@ -601,18 +602,21 @@ def test_late_book_discussion_result_is_discarded_without_overwriting_user_input
                 reply="The protagonist boundary controls the investigation structure.",
                 direction_draft="A detective investigates a memory conspiracy.",
                 discussion_summary="The mystery needs one protagonist boundary.",
-                question="Is the detective also the altered-memory witness?",
-                suggestions=[
-                    BookDiscussionSuggestion(
-                        label="Same person",
-                        message="The detective is the altered-memory witness.",
-                    ),
-                    BookDiscussionSuggestion(
-                        label="Separate witness",
-                        message="The detective protects a separate altered-memory witness.",
-                    ),
-                ],
-                readiness=BookDiscussionReadiness(status="continue", reason="Identity is open."),
+                readiness=BookDiscussionContinue(
+                    status="continue",
+                    reason="Identity is open.",
+                    question="Is the detective also the altered-memory witness?",
+                    suggestions=[
+                        BookDiscussionSuggestion(
+                            label="Same person",
+                            message="The detective is the altered-memory witness.",
+                        ),
+                        BookDiscussionSuggestion(
+                            label="Separate witness",
+                            message="The detective protects a separate altered-memory witness.",
+                        ),
+                    ],
+                ),
             )
             await insert_successful_task(
                 engine,
@@ -700,7 +704,7 @@ def test_book_local_repair_is_scope_bounded_and_sixth_cycle_failure_pauses_run(
                 direction_draft="A witness investigates the deliberate editing of her memory.",
                 discussion_summary="The Book direction and formal title are explicit.",
                 newly_selected_title="Echo Testimony",
-                readiness=BookDiscussionReadiness(
+                readiness=BookDiscussionReady(
                     status="ready",
                     reason="The creator brief directly resolves the Book contract.",
                 ),

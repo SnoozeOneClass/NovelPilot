@@ -28,6 +28,39 @@ from app.domain.book.contracts import BookCandidatePack, BookEvaluation
 
 TextFinalizer = Callable[[str], BaseModel]
 
+BOOK_DISCUSSION_INSTRUCTIONS = (
+    "Advance exactly one high-value whole-book design decision while preserving the "
+    "cumulative working direction. Answer and explain the current creator input in reply. "
+    "If another creator decision is needed, return readiness.status='continue' and place "
+    "one concrete question plus two or three actionable answers inside readiness; natural "
+    "punctuation is not a control protocol. Each suggestion independently may be an ordinary "
+    "answer or a formal-title choice, with formal_title set only for the latter. Return "
+    "readiness.status='ready' only when the whole-book direction and a formal title are "
+    "already settled. Set newly_selected_title only when the latest creator message directly "
+    "selected or stated that exact title; put unselected title proposals in suggestions. "
+    "Describe superseded decisions semantically. Do not copy storage IDs, locators, exact "
+    "evidence strings, or other Harness-owned metadata."
+)
+BOOK_CANDIDATE_CONTRACT = (
+    "Return semantic Book content only. Keep maximum_chapter_count greater than or equal "
+    "to minimum_chapter_count. Do not invent storage IDs, approval state, routes, or commands."
+)
+BOOK_EVALUATION_CONTRACT = (
+    "Use decision='local_repair' exactly when a non-null bounded repair_contract is needed; "
+    "for pass or needs_user, repair_contract must be null. Report semantic findings only; "
+    "the Harness owns approval, routing, IDs, and state changes."
+)
+ARC_EVALUATION_CONTRACT = (
+    "Use decision='local_repair' exactly when repair_scope contains at least one bounded Arc "
+    "component; otherwise repair_scope must be empty. Use escalate_to_book only for a Book-level "
+    "semantic conflict. The Harness owns approval, routing, IDs, and state changes."
+)
+CHAPTER_EVALUATION_CONTRACT = (
+    "Use decision='local_repair' exactly when repair_scope is non-empty. Use "
+    "cross_loop_escalation exactly when escalation_target is arc or book; otherwise "
+    "escalation_target must be null. The Harness owns approval, routing, IDs, and state changes."
+)
+
 
 class UnknownTaskContractError(LookupError):
     """The Harness requested a role/task/version not in the finite registry."""
@@ -216,7 +249,7 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             "book",
             BookDiscussionResult,
             context_policy_id="book-discussion-context-v1",
-            instructions="Respond to the current high-value design question and ask at most one next question.",
+            instructions=BOOK_DISCUSSION_INSTRUCTIONS,
         ),
         _native(
             "book_strategist",
@@ -224,7 +257,10 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             "book",
             BookCandidatePack,
             context_policy_id="book-synthesis-context-v1",
-            instructions="Synthesize the frozen creator brief and discussion into one coherent Book candidate.",
+            instructions=(
+                "Synthesize the frozen creator brief and discussion into one coherent Book "
+                f"candidate. {BOOK_CANDIDATE_CONTRACT}"
+            ),
         ),
         _native(
             "book_strategist",
@@ -232,7 +268,10 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             "book",
             BookCandidatePack,
             context_policy_id="book-revision-context-v1",
-            instructions="Revise only the Book-level intent authorized by the frozen change request.",
+            instructions=(
+                "Revise only the Book-level intent authorized by the frozen change request. "
+                f"{BOOK_CANDIDATE_CONTRACT}"
+            ),
         ),
         _native(
             "book_strategist",
@@ -240,7 +279,10 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             "book",
             BookCandidatePack,
             context_policy_id="book-repair-context-v1",
-            instructions="Apply only the evaluator-authorized Book repair scope; preserve all other decisions.",
+            instructions=(
+                "Apply only the evaluator-authorized Book repair scope; preserve all other "
+                f"decisions. {BOOK_CANDIDATE_CONTRACT}"
+            ),
         ),
         _native(
             "book_strategist",
@@ -248,7 +290,11 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             "book",
             BookProgressAssessment,
             context_policy_id="book-completion-context-v1",
-            instructions="Assess whether the approved completion contract is met at this safe Arc boundary.",
+            instructions=(
+                "Assess whether the approved completion contract is met at this safe Arc "
+                "boundary. Return only the semantic next-step decision, rationale, and still "
+                "unresolved requirements; do not route or mutate the Run."
+            ),
         ),
         *[
             _native(
@@ -332,7 +378,10 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             "book",
             BookEvaluation,
             context_policy_id="book-evaluator-context-v1",
-            instructions="Evaluate the frozen Book candidate against the versioned Book rubric. Never rewrite it.",
+            instructions=(
+                "Evaluate the frozen Book candidate against the versioned Book rubric. Never "
+                f"rewrite it. {BOOK_EVALUATION_CONTRACT}"
+            ),
             rubric_id="book-rubric-v1",
         ),
         _native(
@@ -341,7 +390,10 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             "arc",
             ArcEvaluation,
             context_policy_id="arc-evaluator-context-v1",
-            instructions="Evaluate the frozen Arc candidate against the approved Book and committed Canon.",
+            instructions=(
+                "Evaluate the frozen Arc candidate against the approved Book and committed "
+                f"Canon. {ARC_EVALUATION_CONTRACT}"
+            ),
             rubric_id="arc-rubric-v1",
         ),
         _native(
@@ -350,7 +402,10 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             "chapter",
             LayerEvaluationResult,
             context_policy_id="chapter-evaluator-context-v1",
-            instructions="Evaluate the frozen chapter candidate and evidence without producing replacement prose.",
+            instructions=(
+                "Evaluate the frozen chapter candidate and evidence without producing "
+                f"replacement prose. {CHAPTER_EVALUATION_CONTRACT}"
+            ),
             rubric_id="chapter-rubric-v1",
         ),
         *[
@@ -364,7 +419,19 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
                     else ArcEvaluation if layer == "arc" else LayerEvaluationResult
                 ),
                 context_policy_id=f"{layer}-repair-verification-context-v1",
-                instructions=f"Verify only the repaired {layer} candidate against the original frozen findings.",
+                instructions=(
+                    f"Verify only the repaired {layer} candidate against the original frozen "
+                    "findings. "
+                    + (
+                        BOOK_EVALUATION_CONTRACT
+                        if layer == "book"
+                        else (
+                            ARC_EVALUATION_CONTRACT
+                            if layer == "arc"
+                            else CHAPTER_EVALUATION_CONTRACT
+                        )
+                    )
+                ),
                 rubric_id=f"{layer}-rubric-v1",
             )
             for layer in ("book", "arc", "chapter")

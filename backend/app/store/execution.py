@@ -992,6 +992,9 @@ class ExecutionRepository:
         http_status: int | None,
         error_ref_id: str,
         diagnostic_ref_id: str | None,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        usage_ref_id: str | None,
         finished_at_ms: int,
     ) -> bool:
         result = await self._connection.execute(
@@ -1011,6 +1014,14 @@ class ExecutionRepository:
                 provider_request_count=provider_request_count,
                 transport_retry_count=transport_retry_count,
                 model_request_count=model_request_count,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=(
+                    input_tokens + output_tokens
+                    if input_tokens is not None and output_tokens is not None
+                    else None
+                ),
+                usage_ref_id=usage_ref_id,
                 error_code=error_code,
                 error_category=error_category,
                 http_status=http_status,

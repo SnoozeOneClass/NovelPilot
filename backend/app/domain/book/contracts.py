@@ -160,9 +160,18 @@ class ApplyBookCandidateTaskResult(BaseModel):
 class CompletionContract(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    minimum_chapter_count: int = Field(ge=1)
-    maximum_chapter_count: int = Field(ge=1)
-    completion_requirements: list[str] = Field(default_factory=list)
+    minimum_chapter_count: int = Field(
+        ge=1,
+        description="Minimum chapter count permitted by the Book completion contract.",
+    )
+    maximum_chapter_count: int = Field(
+        ge=1,
+        description="Maximum chapter count; it must be at least minimum_chapter_count.",
+    )
+    completion_requirements: list[str] = Field(
+        default_factory=list,
+        description="Semantic conditions that must be satisfied before the novel can complete.",
+    )
 
     @model_validator(mode="after")
     def _ordered_range(self) -> CompletionContract:
@@ -174,25 +183,21 @@ class CompletionContract(BaseModel):
 class BookCandidatePack(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    direction: str
-    constraints: dict[str, object]
-    selected_title: str
-    rolling_plan: dict[str, object]
+    direction: str = Field(
+        min_length=1,
+        description="Coherent whole-book direction synthesized from the frozen creator evidence.",
+    )
+    constraints: dict[str, object] = Field(
+        description="Explicit creative constraints for downstream Story Arc planning.",
+    )
+    selected_title: str = Field(
+        min_length=1,
+        description="Formal title already selected in the frozen Book discussion.",
+    )
+    rolling_plan: dict[str, object] = Field(
+        description="Whole-book rolling-plan strategy without pre-writing every chapter.",
+    )
     completion_contract: CompletionContract
-
-    @field_validator("direction")
-    @classmethod
-    def _direction_non_blank(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("Book direction must be non-blank")
-        return value
-
-    @field_validator("selected_title")
-    @classmethod
-    def _title_non_blank(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("Book selected title must be non-blank")
-        return value.strip()
 
 
 BookRepairComponent = Literal[
@@ -206,41 +211,32 @@ BookRepairComponent = Literal[
 class BookRepairContract(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    authorized_components: list[BookRepairComponent] = Field(min_length=1)
-    issue_summary: str
-
-    @field_validator("authorized_components")
-    @classmethod
-    def _unique_components(
-        cls,
-        value: list[BookRepairComponent],
-    ) -> list[BookRepairComponent]:
-        if len(value) != len(set(value)):
-            raise ValueError("Book repair components must be unique")
-        return value
-
-    @field_validator("issue_summary")
-    @classmethod
-    def _issue_non_blank(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("Book repair issue summary must be non-blank")
-        return value
+    authorized_components: list[BookRepairComponent] = Field(
+        min_length=1,
+        description="Bounded Book components allowed to change during local repair.",
+    )
+    issue_summary: str = Field(
+        min_length=1,
+        description="Why these Book components require local repair.",
+    )
 
 
 class BookEvaluation(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    decision: Literal["pass", "local_repair", "needs_user"]
-    summary: str
+    decision: Literal["pass", "local_repair", "needs_user"] = Field(
+        description=(
+            "Use local_repair only when a bounded repair_contract can resolve the findings."
+        ),
+    )
+    summary: str = Field(min_length=1, description="Evidence-based Book rubric assessment.")
     findings: list[dict[str, object]] = Field(default_factory=list)
-    repair_contract: BookRepairContract | None = None
-
-    @field_validator("summary")
-    @classmethod
-    def _summary_non_blank(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("Evaluation summary must be non-blank")
-        return value
+    repair_contract: BookRepairContract | None = Field(
+        default=None,
+        description=(
+            "Required when decision is local_repair and forbidden for pass or needs_user."
+        ),
+    )
 
     @model_validator(mode="after")
     def _repair_shape(self) -> BookEvaluation:

@@ -108,24 +108,27 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
                 "assumptions": [],
                 "contradictions": [],
                 "newly_selected_title": None,
-                "question": "这部小说使用哪个正式书名？",
-                "suggestions": [
-                    {
-                        "label": "回声证词",
-                        "message": "使用《回声证词》作为正式书名。",
-                        "rationale": "同时指向证词与记忆回响。",
-                        "recommended": True,
-                        "formal_title": "《回声证词》",
-                    },
-                    {
-                        "label": "被改写的人",
-                        "message": "使用《被改写的人》作为正式书名。",
-                        "rationale": "强调人物身份危机。",
-                        "recommended": False,
-                        "formal_title": "《被改写的人》",
-                    },
-                ],
-                "readiness": {"status": "continue", "reason": "正式书名必须由创作者选择。"},
+                "readiness": {
+                    "status": "continue",
+                    "reason": "正式书名必须由创作者选择。",
+                    "question": "这部小说使用哪个正式书名？",
+                    "suggestions": [
+                        {
+                            "label": "回声证词",
+                            "message": "使用《回声证词》作为正式书名。",
+                            "rationale": "同时指向证词与记忆回响。",
+                            "recommended": True,
+                            "formal_title": "《回声证词》",
+                        },
+                        {
+                            "label": "被改写的人",
+                            "message": "使用《被改写的人》作为正式书名。",
+                            "rationale": "强调人物身份危机。",
+                            "recommended": False,
+                            "formal_title": "《被改写的人》",
+                        },
+                    ],
+                },
             }
         return {
             "reply": "创作方向已经足够明确，可以形成全书规划。",
@@ -137,8 +140,6 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
             "assumptions": [],
             "contradictions": [],
             "newly_selected_title": None,
-            "question": None,
-            "suggestions": [],
             "readiness": {"status": "ready", "reason": "全书方向已经闭合。"},
         }
     if task_kind in {"book.synthesize", "book.revise", "book.repair"}:

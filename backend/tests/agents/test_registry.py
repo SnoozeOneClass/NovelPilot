@@ -7,6 +7,11 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from app.agents.contracts import (
     ACTIVATION_TIMEOUT_MS,
+    BookDiscussionContinue,
+    BookDiscussionReady,
+    BookDiscussionResult,
+    BookDiscussionSuggestion,
+    BookSupersededDecisionProposal,
     CONNECT_TIMEOUT_MS,
     POOL_TIMEOUT_MS,
     READ_TIMEOUT_MS,
@@ -118,3 +123,84 @@ def test_role_agent_has_no_function_tools_and_no_shared_history() -> None:
     asyncio.run(second.run("Second frozen candidate."))
 
     assert seen_message_counts == [1, 1]
+
+
+def test_book_discussion_control_shape_and_semantics_are_model_visible() -> None:
+    definition = DEFAULT_TASK_REGISTRY.get(
+        role="book_strategist",
+        task_kind="book.discuss",
+        contract_version=1,
+    )
+    properties = definition.output_schema["properties"]
+    readiness = properties["readiness"]
+    continue_schema = definition.output_schema["$defs"]["BookDiscussionContinue"]
+
+    assert "question" not in properties
+    assert "suggestions" not in properties
+    assert readiness["discriminator"]["propertyName"] == "status"
+    assert set(readiness["discriminator"]["mapping"]) == {"continue", "ready"}
+    assert continue_schema["properties"]["suggestions"]["minItems"] == 2
+    assert continue_schema["properties"]["suggestions"]["maxItems"] == 3
+    assert "Natural punctuation is allowed" in (
+        continue_schema["properties"]["question"]["description"]
+    )
+    assert "punctuation is not a control protocol" in definition.task_instructions
+    assert "Do not copy storage IDs" in definition.task_instructions
+
+    model_facing_types = (
+        BookDiscussionResult,
+        BookDiscussionContinue,
+        BookDiscussionReady,
+        BookDiscussionSuggestion,
+        BookSupersededDecisionProposal,
+    )
+    assert all(
+        not model.__pydantic_decorators__.field_validators
+        and not model.__pydantic_decorators__.model_validators
+        for model in model_facing_types
+    )
+
+
+def test_cross_field_semantic_rules_are_present_in_model_visible_contracts() -> None:
+    book_candidate = DEFAULT_TASK_REGISTRY.get(
+        role="book_strategist",
+        task_kind="book.synthesize",
+        contract_version=1,
+    )
+    book_evaluation = DEFAULT_TASK_REGISTRY.get(
+        role="evaluator",
+        task_kind="evaluate.book",
+        contract_version=1,
+    )
+    arc_evaluation = DEFAULT_TASK_REGISTRY.get(
+        role="evaluator",
+        task_kind="evaluate.arc",
+        contract_version=1,
+    )
+    chapter_evaluation = DEFAULT_TASK_REGISTRY.get(
+        role="evaluator",
+        task_kind="evaluate.chapter",
+        contract_version=1,
+    )
+
+    completion = book_candidate.output_schema["$defs"]["CompletionContract"]["properties"]
+    assert "at least minimum_chapter_count" in completion["maximum_chapter_count"]["description"]
+    assert "greater than or equal" in book_candidate.task_instructions
+
+    book_properties = book_evaluation.output_schema["properties"]
+    assert "Required when decision is local_repair" in (
+        book_properties["repair_contract"]["description"]
+    )
+    assert "local_repair" in book_evaluation.task_instructions
+
+    arc_properties = arc_evaluation.output_schema["properties"]
+    assert "only when decision is local_repair" in (
+        arc_properties["repair_scope"]["description"]
+    )
+    assert "repair_scope contains at least one" in arc_evaluation.task_instructions
+
+    chapter_properties = chapter_evaluation.output_schema["properties"]
+    assert "only when decision is cross_loop_escalation" in (
+        chapter_properties["escalation_target"]["description"]
+    )
+    assert "cross_loop_escalation exactly when" in chapter_evaluation.task_instructions

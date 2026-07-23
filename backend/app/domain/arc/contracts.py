@@ -20,24 +20,25 @@ ArcReviewDecision = Literal["pass", "local_repair", "escalate_to_book", "needs_u
 class ArcEvaluation(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    decision: ArcReviewDecision
-    summary: str
+    decision: ArcReviewDecision = Field(
+        description=(
+            "Use local_repair only for a bounded Arc repair; use escalate_to_book when "
+            "the approved Book direction itself must change."
+        ),
+    )
+    summary: str = Field(min_length=1, description="Evidence-based Story Arc assessment.")
     issues: list[EvaluationIssue] = Field(default_factory=list)
-    repair_scope: list[ArcRepairComponent] = Field(default_factory=list)
-
-    @field_validator("summary")
-    @classmethod
-    def _summary_non_blank(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("Arc evaluation summary must be non-blank.")
-        return value
+    repair_scope: list[ArcRepairComponent] = Field(
+        default_factory=list,
+        description=(
+            "Required and non-empty only when decision is local_repair; otherwise empty."
+        ),
+    )
 
     @model_validator(mode="after")
     def _decision_boundary(self) -> ArcEvaluation:
         if (self.decision == "local_repair") != bool(self.repair_scope):
             raise ValueError("Exactly local_repair requires a bounded Arc repair scope.")
-        if len(self.repair_scope) != len(set(self.repair_scope)):
-            raise ValueError("Arc repair scope must contain unique components.")
         return self
 
 

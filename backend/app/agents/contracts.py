@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -301,157 +301,226 @@ class ChapterDraftResult(BaseModel):
 class BookDiscussionSuggestion(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    label: str = Field(min_length=1, max_length=100)
-    message: str = Field(min_length=1, max_length=4_000)
-    rationale: str = Field(default="", max_length=2_000)
-    recommended: bool = False
-    formal_title: str | None = Field(default=None, max_length=200)
+    label: str = Field(
+        min_length=1,
+        max_length=100,
+        description="Short creator-facing label for this actionable option.",
+    )
+    message: str = Field(
+        min_length=1,
+        max_length=4_000,
+        description="The complete answer that selecting this option submits.",
+    )
+    rationale: str = Field(
+        default="",
+        max_length=2_000,
+        description="Why this option helps the whole-book design.",
+    )
+    recommended: bool = Field(
+        default=False,
+        description="Whether this is the Book Strategist's preferred option.",
+    )
+    formal_title: str | None = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "The exact formal title selected by this option, or null when this is an "
+            "ordinary design answer. Each option is typed independently, so a question "
+            "may contain both title and ordinary options."
+        ),
+    )
 
 
-class BookDiscussionReadiness(BaseModel):
+class BookDiscussionContinue(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    status: Literal["continue", "ready"]
-    reason: str
+    status: Literal["continue"]
+    reason: str = Field(
+        min_length=1,
+        max_length=4_000,
+        description="Why one more creator decision is still needed.",
+    )
+    question: str = Field(
+        min_length=1,
+        max_length=600,
+        description=(
+            "One concrete, high-value creator decision. Natural punctuation is allowed; "
+            "do not pack multiple independent decisions into this field."
+        ),
+    )
+    suggestions: list[BookDiscussionSuggestion] = Field(
+        min_length=2,
+        max_length=3,
+        description="Two or three actionable answers to the one creator question.",
+    )
+
+
+class BookDiscussionReady(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: Literal["ready"]
+    reason: str = Field(
+        min_length=1,
+        max_length=4_000,
+        description=(
+            "Why the whole-book direction and formal title are ready for synthesis. "
+            "Use ready only when the context already contains a selected title or the "
+            "latest creator message explicitly selected newly_selected_title."
+        ),
+    )
+
+
+BookDiscussionReadiness = Annotated[
+    BookDiscussionContinue | BookDiscussionReady,
+    Field(discriminator="status"),
+]
 
 
 class BookSupersededDecisionProposal(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    prior_meaning: str = Field(min_length=1, max_length=4_000)
-    replacement: str | None = Field(default=None, max_length=4_000)
-    reason: str = Field(min_length=1, max_length=4_000)
-    user_evidence: str = Field(min_length=1, max_length=4_000)
+    prior_meaning: str = Field(
+        min_length=1,
+        max_length=4_000,
+        description=(
+            "Semantic meaning of the earlier confirmed decision affected by the latest "
+            "creator message. Do not copy an opaque ID or exact stored string."
+        ),
+    )
+    replacement: str | None = Field(
+        default=None,
+        max_length=4_000,
+        description="Replacement decision, or null when the prior decision is withdrawn.",
+    )
+    reason: str = Field(
+        min_length=1,
+        max_length=4_000,
+        description="Semantic explanation of how the latest creator message changes it.",
+    )
 
 
 class BookDiscussionResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    reply: str = Field(min_length=1, max_length=20_000)
-    direction_draft: str = Field(min_length=1, max_length=100_000)
-    discussion_summary: str = Field(min_length=1, max_length=20_000)
-    newly_confirmed_decisions: list[str] = Field(default_factory=list, max_length=50)
+    reply: str = Field(
+        min_length=1,
+        max_length=20_000,
+        description=(
+            "Creator-facing explanation for this turn. When continuing, put the single "
+            "next decision in readiness.question rather than relying on reply formatting."
+        ),
+    )
+    direction_draft: str = Field(
+        min_length=1,
+        max_length=100_000,
+        description="Complete updated whole-book direction working draft.",
+    )
+    discussion_summary: str = Field(
+        min_length=1,
+        max_length=20_000,
+        description="Compact cumulative summary of the Book discussion so far.",
+    )
+    newly_confirmed_decisions: list[str] = Field(
+        default_factory=list,
+        max_length=50,
+        description="Semantic decisions established by the latest creator turn.",
+    )
     superseded_decisions: list[BookSupersededDecisionProposal] = Field(
         default_factory=list,
         max_length=50,
+        description=(
+            "Semantic changes to earlier confirmed decisions. The Harness binds the "
+            "latest creator message as provenance; do not reproduce evidence locators."
+        ),
     )
-    unresolved_questions: list[str] = Field(default_factory=list, max_length=100)
-    assumptions: list[str] = Field(default_factory=list, max_length=100)
-    contradictions: list[str] = Field(default_factory=list, max_length=100)
-    newly_selected_title: str | None = Field(default=None, max_length=200)
-    question: str | None = Field(default=None, max_length=600)
-    suggestions: list[BookDiscussionSuggestion] = Field(default_factory=list, max_length=3)
-    readiness: BookDiscussionReadiness
-
-    @model_validator(mode="before")
-    @classmethod
-    def _normalize_blank_question(cls, value: object) -> object:
-        if isinstance(value, dict):
-            normalized = dict(value)
-            question = normalized.get("question")
-            if isinstance(question, str) and not question.strip():
-                normalized["question"] = None
-            return normalized
-        return value
-
-    @model_validator(mode="after")
-    def _discussion_boundary(self) -> BookDiscussionResult:
-        if any(mark in self.reply for mark in ("?", "？")):
-            raise ValueError("Book discussion reply cannot contain a second question.")
-        if self.readiness.status == "ready":
-            if self.question is not None or self.suggestions:
-                raise ValueError("A ready Book discussion cannot ask another question.")
-            return self
-        if self.question is None:
-            raise ValueError("A continuing Book discussion requires one direct question.")
-        question_marks = self.question.count("?") + self.question.count("？")
-        if question_marks != 1 or not self.question.rstrip().endswith(("?", "？")):
-            raise ValueError("Book discussion question must contain exactly one question mark.")
-        normalized_question = self.question.casefold()
-        forbidden = (
-            "which issue should we discuss",
-            "which topic should we discuss",
-            "what should we discuss first",
-            "先讨论哪个",
-            "先确认哪个",
-            "先聊哪个",
-        )
-        if any(fragment in normalized_question for fragment in forbidden):
-            raise ValueError("Book Agent must choose the next concrete decision itself.")
-        if not 2 <= len(self.suggestions) <= 3:
-            raise ValueError("A continuing Book discussion requires two or three suggestions.")
-        labels = [item.label.strip().casefold() for item in self.suggestions]
-        messages = [item.message.strip().casefold() for item in self.suggestions]
-        if len(labels) != len(set(labels)) or len(messages) != len(set(messages)):
-            raise ValueError("Book discussion suggestions must be unique.")
-        title_flags = [bool((item.formal_title or "").strip()) for item in self.suggestions]
-        if any(title_flags) and not all(title_flags):
-            raise ValueError("One Book question cannot mix title and ordinary suggestions.")
-        titles = [
-            item.formal_title.strip().casefold()
-            for item in self.suggestions
-            if item.formal_title is not None
-        ]
-        if len(titles) != len(set(titles)):
-            raise ValueError("Book title suggestions must be unique.")
-        return self
+    unresolved_questions: list[str] = Field(
+        default_factory=list,
+        max_length=100,
+        description="Whole-book questions that remain unresolved after this turn.",
+    )
+    assumptions: list[str] = Field(
+        default_factory=list,
+        max_length=100,
+        description="Assumptions currently used by the working direction.",
+    )
+    contradictions: list[str] = Field(
+        default_factory=list,
+        max_length=100,
+        description="Known semantic contradictions that later review must reconcile.",
+    )
+    newly_selected_title: str | None = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "Exact formal title only when the latest creator message explicitly selected "
+            "or stated it; otherwise null. Title proposals belong in suggestions."
+        ),
+    )
+    readiness: BookDiscussionReadiness = Field(
+        description=(
+            "Use the continue shape for one remaining creator decision and the ready "
+            "shape only when no further creator question is needed."
+        ),
+    )
 
 
 class BookProgressAssessment(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    decision: Literal["continue", "plan_final_arc", "complete", "needs_user"]
-    rationale: str
-    unresolved_requirements: list[str] = Field(default_factory=list)
-
-    @field_validator("rationale")
-    @classmethod
-    def _rationale_non_blank(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("Book progress rationale must be non-blank.")
-        return value
-
-    @field_validator("unresolved_requirements")
-    @classmethod
-    def _requirements_non_blank_unique(cls, value: list[str]) -> list[str]:
-        normalized = [item.strip() for item in value]
-        if any(not item for item in normalized) or len(normalized) != len(set(normalized)):
-            raise ValueError("Book progress requirements must be unique and non-blank.")
-        return normalized
+    decision: Literal["continue", "plan_final_arc", "complete", "needs_user"] = Field(
+        description="Semantic next step at the current safe Story Arc boundary.",
+    )
+    rationale: str = Field(
+        min_length=1,
+        description="Evidence-based explanation for the completion decision.",
+    )
+    unresolved_requirements: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Completion-contract requirements still unresolved. Repeated wording is "
+            "allowed and must not be used as a hidden control signal."
+        ),
+    )
 
 
 class ArcPlanProposal(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    title: str
-    purpose: str
-    beats: list[str] = Field(min_length=1)
+    title: str = Field(min_length=1, description="Creator-facing title for this Story Arc.")
+    purpose: str = Field(
+        min_length=1,
+        description="How this Story Arc advances the approved Book contract.",
+    )
+    beats: list[str] = Field(
+        min_length=1,
+        description=(
+            "Ordered semantic beats for this Story Arc. Similar or repeated wording is not "
+            "a protocol error; the Evaluator judges planning quality."
+        ),
+    )
     target_chapter_count: int = Field(ge=1, le=30)
-    completion_signals: list[str] = Field(min_length=1)
-
-    @field_validator("title", "purpose")
-    @classmethod
-    def _arc_text_non_blank(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("Arc title and purpose must be non-blank.")
-        return value.strip()
-
-    @field_validator("beats", "completion_signals")
-    @classmethod
-    def _arc_list_non_blank_unique(cls, value: list[str]) -> list[str]:
-        normalized = [item.strip() for item in value]
-        if any(not item for item in normalized) or len(normalized) != len(set(normalized)):
-            raise ValueError("Arc plan lists must contain unique non-blank values.")
-        return normalized
+    completion_signals: list[str] = Field(
+        min_length=1,
+        description="Observable semantic conditions that mean this Story Arc is complete.",
+    )
 
 
 class ChapterPlanProposal(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    title: str
-    purpose: str
-    scene_beats: list[str] = Field(min_length=1)
-    required_continuity: list[str] = Field(default_factory=list)
+    title: str = Field(min_length=1, description="Working title for this chapter.")
+    purpose: str = Field(
+        min_length=1,
+        description="How this chapter advances the approved Story Arc.",
+    )
+    scene_beats: list[str] = Field(
+        min_length=1,
+        description="Ordered semantic scene beats for this chapter.",
+    )
+    required_continuity: list[str] = Field(
+        default_factory=list,
+        description="Frozen continuity facts that the prose must preserve.",
+    )
 
 
 class SemanticCanonProposal(BaseModel):
@@ -459,43 +528,75 @@ class SemanticCanonProposal(BaseModel):
 
     category: Literal["characters", "relationships", "world_facts", "foreshadowing"]
     operation: Literal["add", "update", "resolve"]
-    subject: str
-    semantic_change: str
-    evidence_hint: str
-
-    @field_validator("subject", "semantic_change", "evidence_hint")
-    @classmethod
-    def _semantic_text_non_blank(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("Canon proposal text fields must be non-blank.")
-        return value
+    subject: str = Field(
+        min_length=1,
+        description="Semantic subject from the chapter; never an internal Canon ID.",
+    )
+    semantic_change: str = Field(
+        min_length=1,
+        description="Proposed Canon meaning, without committing or routing it.",
+    )
+    evidence_hint: str = Field(
+        min_length=1,
+        description="Human-readable location or fact in the frozen prose supporting the proposal.",
+    )
 
 
 class ChapterObservationResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    summary: str
-    continuity_observations: list[str] = Field(default_factory=list)
-    canon_proposals: list[SemanticCanonProposal] = Field(default_factory=list)
+    summary: str = Field(
+        min_length=1,
+        description="Semantic summary of what the frozen chapter establishes.",
+    )
+    continuity_observations: list[str] = Field(
+        default_factory=list,
+        description="Continuity facts observed in the chapter, not Harness commands.",
+    )
+    canon_proposals: list[SemanticCanonProposal] = Field(
+        default_factory=list,
+        description="Semantic proposals only; the Harness resolves IDs and commits accepted facts.",
+    )
 
 
 class EvaluationIssue(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    code: str
-    summary: str
-    evidence_hint: str | None = None
-    repair_component: str | None = None
+    code: str = Field(min_length=1, description="Stable semantic issue category.")
+    summary: str = Field(min_length=1, description="Clear explanation of the rubric failure.")
+    evidence_hint: str | None = Field(
+        default=None,
+        description="Human-readable evidence in the frozen candidate.",
+    )
+    repair_component: str | None = Field(
+        default=None,
+        description="Semantic candidate component that needs repair, never a storage locator.",
+    )
 
 
 class LayerEvaluationResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    decision: Literal["pass", "local_repair", "cross_loop_escalation", "needs_user"]
-    summary: str
+    decision: Literal["pass", "local_repair", "cross_loop_escalation", "needs_user"] = Field(
+        description=(
+            "Use local_repair only for a bounded chapter repair; use "
+            "cross_loop_escalation only when an upstream Arc or Book decision must change."
+        ),
+    )
+    summary: str = Field(min_length=1, description="Evidence-based evaluation summary.")
     issues: list[EvaluationIssue] = Field(default_factory=list)
-    repair_scope: list[str] = Field(default_factory=list)
-    escalation_target: Literal["arc", "book"] | None = None
+    repair_scope: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Required and non-empty only when decision is local_repair; otherwise empty."
+        ),
+    )
+    escalation_target: Literal["arc", "book"] | None = Field(
+        default=None,
+        description=(
+            "Required only when decision is cross_loop_escalation; otherwise null."
+        ),
+    )
 
     @model_validator(mode="after")
     def _decision_payload(self) -> LayerEvaluationResult:
