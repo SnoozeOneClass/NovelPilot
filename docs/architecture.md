@@ -62,7 +62,11 @@ Pydantic AI 接管通用能力：Provider/Model 调用、原生 JSON Schema、�
 | ChapterWriter | Chapter 计划、正文、观察与局部修订 |
 | Evaluator | 按 Book/Arc/Chapter rubric 只读评审 |
 
-计划、观察、评估使用原生结构化输出；章节正文使用文本流。Profile 不满足所需能力时在零 Provider 请求处失败，不静默降级。`api_family` 决定协议适配，`model_id` 只作为 opaque id；从 Grok 换到同协议 GPT 不改变 Agent、Route 或领域类型。
+计划、观察、评估使用原生结构化输出；章节正文使用文本流。结果格式与线协议相互独立：结构化任务由 Agent 保留一次原生输出修复，但每次底层 Provider 调用同样使用流式连接，完整 Pydantic 校验通过前不会形成结果或领域事实。
+
+Profile 不满足所需能力时在零 Provider 请求处持久化一次 failed attempt，随后 Run 进入 `failure_paused`，不会让 queued task 在 Run Engine 中形成热循环，也不会静默降级。`api_family` 只允许 `openai_responses` 与 `anthropic_messages`，并决定对应的 Pydantic AI Model/Provider 和官方 SDK；`model_id` 只作为 opaque id，从 Grok 换到同协议 GPT 不改变 Agent、Route 或领域类型。Responses 的 base URL 以 `/v1` 结尾，Messages 的 base URL 不包含末尾 `/v1`，避免 SDK 拼接出重复路径。
+
+Profile capability evidence 绑定完整的 `api_family + base_url + model_id + request_options`，并通过同一生产 Adapter 真实探测 structured output、text stream、usage 和声明需要的工具调用。配置变化后旧 evidence 自动失效。
 
 ## 4. LT1 生命周期与正式基线
 
@@ -132,11 +136,15 @@ FastAPI lifespan 创建并关闭唯一 `AsyncEngine`、Run Engine 和内存 live
 - 最多 6 个真实 Provider 请求；
 - 其中最多 5 次 transport retry；
 - structured output 最多额外一次 model repair，但与 transport retry 共用六次总预算；
+- OpenAI 与 Anthropic SDK 内建 retry 均关闭，每个物理请求都进入同一个计数器和证据链；
+- commit 前只重放同一个冻结 Task Plan，不从半截 JSON/正文构造 continuation；commit 后的 Domain delivery 不再调用 Provider；
 - T1：connect/pool 10 秒、write 60 秒、read 10 分钟、activation 30 分钟。
 
-连接错误、408/409/425/429/5xx 等按合同分类；鉴权、配置、能力和明确 invalid request 快速失败。失败 task 持久化类型化错误与已脱敏诊断，不在后台无限等待 Provider。
+连接、首事件超时、流空闲超时/中断、408/409/425/429/5xx 等按合同分类并指数退避；鉴权、额度、配置、能力、明确 invalid request、取消和输出截断快速失败。完整响应的 `length`/`max_tokens` 终止不会自动增大上限重跑。失败 task 持久化类型化错误与已脱敏诊断，Run 进入 `failure_paused` 等待显式 Retry，不会重新回到 pending。
 
-长期证据以完整任务为粒度：冻结的 Task Plan、输入 manifest、消息、完整工具过程、最终结果、usage、retry 链和错误附件。逐 token delta 不进入 SQLite，只发布到进程内 `LossyLiveFanout`；刷新和重启不回放旧 delta。
+NovelPilot 不按任务或领域层设置产品级输出 token 预算。Responses 在未配置时省略 `max_output_tokens`；Messages 因协议强制要求而使用冻结 Profile 中显式、经探测的大 `max_tokens`，不使用隐式 4096。
+
+长期证据以完整任务为粒度：冻结的 Task Plan、输入 manifest、消息、完整工具过程、最终结果、usage、retry 链和错误附件。每个物理请求记录协议、序号、起止时间、首/末事件时间、HTTP 状态、脱敏 request ID、错误、重试决定和延迟。逐 token delta 不进入 SQLite，只发布到进程内 `LossyLiveFanout`；刷新和重启不回放旧 delta，重放时前端以 `attempt_restarting` 清除被放弃的局部正文。
 
 ## 8. API 与前端状态模型
 

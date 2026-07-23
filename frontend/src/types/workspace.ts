@@ -1,4 +1,97 @@
 export type OperationMode = "full_auto" | "participatory";
+export type ApiFamily = "openai_responses" | "anthropic_messages";
+
+export type AgentLiveEventKind =
+  | "task_started"
+  | "attempt_restarting"
+  | "prose_delta"
+  | "prose_committed"
+  | "prose_discarded"
+  | "task_succeeded"
+  | "task_failed";
+
+export interface AgentLiveEvent {
+  kind: AgentLiveEventKind;
+  project_id: string;
+  task_id: string;
+  attempt_id: string;
+  delta: string | null;
+  provider_request_number: number | null;
+  provider_request_limit: number | null;
+  reason: string | null;
+  retry_delay_ms: number | null;
+}
+
+const agentLiveEventKinds = new Set<AgentLiveEventKind>([
+  "task_started",
+  "attempt_restarting",
+  "prose_delta",
+  "prose_committed",
+  "prose_discarded",
+  "task_succeeded",
+  "task_failed"
+]);
+
+function isAgentLiveEventKind(value: unknown): value is AgentLiveEventKind {
+  return (
+    typeof value === "string"
+    && agentLiveEventKinds.has(value as AgentLiveEventKind)
+  );
+}
+
+function isNullableNumber(value: unknown): value is number | null {
+  return value === null || typeof value === "number";
+}
+
+export function decodeAgentLiveEvent(data: string): AgentLiveEvent | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const value = parsed as Record<string, unknown>;
+  if (
+    !isAgentLiveEventKind(value.kind)
+    || typeof value.project_id !== "string"
+    || typeof value.task_id !== "string"
+    || typeof value.attempt_id !== "string"
+  ) {
+    return null;
+  }
+  if (value.delta !== null && typeof value.delta !== "string") return null;
+  if (!isNullableNumber(value.provider_request_number)) return null;
+  if (!isNullableNumber(value.provider_request_limit)) return null;
+  if (!isNullableNumber(value.retry_delay_ms)) return null;
+  if (value.reason !== null && typeof value.reason !== "string") return null;
+  return {
+    kind: value.kind,
+    project_id: value.project_id,
+    task_id: value.task_id,
+    attempt_id: value.attempt_id,
+    delta: value.delta,
+    provider_request_number: value.provider_request_number,
+    provider_request_limit: value.provider_request_limit,
+    reason: value.reason,
+    retry_delay_ms: value.retry_delay_ms
+  };
+}
+
+export function reduceLiveProse(current: string, event: AgentLiveEvent): string {
+  switch (event.kind) {
+    case "task_started":
+    case "attempt_restarting":
+    case "prose_discarded":
+    case "task_failed":
+      return "";
+    case "prose_delta":
+      return event.delta === null ? current : current + event.delta;
+    case "prose_committed":
+    case "task_succeeded":
+      return current;
+  }
+}
 
 export type CommandId =
   | "start_run"
@@ -199,7 +292,7 @@ export interface ProfileCapabilities {
 export interface PublicProfile {
   id: string;
   display_name: string;
-  api_family: string;
+  api_family: ApiFamily;
   base_url: string;
   model_id: string;
   request_options: Record<string, unknown>;

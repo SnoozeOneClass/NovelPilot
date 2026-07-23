@@ -24,6 +24,7 @@ import type {
   OperationMode,
   ProjectStateView
 } from "./types/workspace";
+import { decodeAgentLiveEvent, reduceLiveProse } from "./types/workspace";
 import styles from "./App.module.css";
 
 const projectsKey = ["workspace-v2", "projects"] as const;
@@ -91,17 +92,11 @@ export function App() {
     });
     source.addEventListener("agent_live", (rawEvent) => {
       const event = rawEvent as MessageEvent<string>;
-      try {
-        const value = JSON.parse(event.data) as { kind?: string; delta?: string | null };
-        if (value.kind === "task_started") setLiveProse("");
-        if (value.kind === "prose_delta" && typeof value.delta === "string") {
-          setLiveProse((current) => current + value.delta);
-        }
-        if (value.kind === "task_succeeded" || value.kind === "task_failed") {
-          void queryClient.invalidateQueries({ queryKey: projectKey(selectedProjectId) });
-        }
-      } catch {
-        // A malformed transient event is ignored; durable state remains authoritative.
+      const value = decodeAgentLiveEvent(event.data);
+      if (value === null || value.project_id !== selectedProjectId) return;
+      setLiveProse((current) => reduceLiveProse(current, value));
+      if (value.kind === "task_succeeded" || value.kind === "task_failed") {
+        void queryClient.invalidateQueries({ queryKey: projectKey(selectedProjectId) });
       }
     });
     return () => source.close();

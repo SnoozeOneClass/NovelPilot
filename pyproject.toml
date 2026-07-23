@@ -10,9 +10,8 @@ dependencies = [
   "httpx==0.28.1",
   "openai>=2.46.0,<3.0.0",
   "pydantic>=2.13.0",
-  "pydantic-ai-slim[openai,retries]==2.15.0",
+  "pydantic-ai-slim[anthropic,openai]==2.15.0",
   "sqlalchemy[asyncio]==2.0.51",
-  "tenacity==9.1.4",
   "uvicorn>=0.38.0",
 ]
 

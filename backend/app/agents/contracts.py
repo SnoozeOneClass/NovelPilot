@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections.abc import Mapping, Sequence
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
@@ -14,7 +15,7 @@ type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, J
 AgentRole = Literal["book_strategist", "arc_planner", "chapter_writer", "evaluator"]
 ScopeLayer = Literal["book", "arc", "chapter"]
 OutputMode = Literal["native_json_schema", "text_streaming"]
-ApiFamily = str
+ApiFamily = Literal["openai_responses", "anthropic_messages"]
 CapabilityName = Literal[
     "text_output",
     "text_streaming",
@@ -113,6 +114,8 @@ class ProfileSnapshot(BaseModel):
 
     @model_validator(mode="after")
     def _capability_identity(self) -> ProfileSnapshot:
+        validate_profile_base_url(self.api_family, self.base_url)
+        validate_profile_request_options(self.api_family, self.request_options)
         if self.capability_fingerprint != self.capabilities.fingerprint:
             raise ValueError("capability_fingerprint does not match the capability snapshot.")
         return self
@@ -123,7 +126,7 @@ class ProfileSnapshot(BaseModel):
         *,
         profile_id: str,
         display_name: str,
-        api_family: str,
+        api_family: ApiFamily,
         base_url: str,
         model_id: str,
         capabilities: ProfileCapabilities,
@@ -673,6 +676,93 @@ class LayerEvaluationResult(BaseModel):
 def finalize_chapter_prose(text: str) -> ChapterDraftResult:
     """Pure S1 finalizer: no ID generation, I/O, event, or storage mutation."""
     return ChapterDraftResult(prose=text)
+
+
+def validate_profile_request_options(
+    api_family: ApiFamily,
+    request_options: Mapping[str, JsonValue],
+) -> None:
+    """Validate protocol-owned options without inferring anything from ``model_id``."""
+
+    sensitive_path = _sensitive_request_option_path(request_options)
+    if sensitive_path is not None:
+        raise ValueError(
+            "Profile request_options cannot contain credentials or signed URL material: "
+            f"{sensitive_path}."
+        )
+    if "max_output_tokens" in request_options:
+        raise ValueError(
+            "Profile request_options use Pydantic AI's portable max_tokens key; "
+            "max_output_tokens is a wire-level field."
+        )
+    if "max_tokens" in request_options:
+        max_tokens = request_options["max_tokens"]
+        if type(max_tokens) is not int or max_tokens <= 0:
+            raise ValueError("Profile request_options.max_tokens must be a positive integer.")
+    elif api_family == "anthropic_messages":
+        raise ValueError(
+            "Anthropic Messages profiles require an explicit generous max_tokens value; "
+            "NovelPilot never uses Pydantic AI's implicit 4096 default."
+        )
+
+
+def validate_profile_base_url(api_family: ApiFamily, base_url: str) -> None:
+    """Keep SDK-relative endpoint joining explicit for the two supported protocols."""
+
+    path = urlsplit(base_url).path.rstrip("/")
+    if api_family == "openai_responses" and not path.endswith("/v1"):
+        raise ValueError(
+            "OpenAI Responses base_url must end in /v1; the Adapter appends /responses."
+        )
+    if api_family == "anthropic_messages" and path.endswith("/v1"):
+        raise ValueError(
+            "Anthropic Messages base_url must exclude the terminal /v1; "
+            "the Adapter appends /v1/messages."
+        )
+
+
+def _sensitive_request_option_path(
+    value: Mapping[str, JsonValue],
+    *,
+    prefix: str = "request_options",
+) -> str | None:
+    sensitive_keys = {
+        "authorization",
+        "cookie",
+        "setcookie",
+        "apikey",
+        "xapikey",
+        "accesstoken",
+        "refreshtoken",
+        "clientsecret",
+        "password",
+        "signature",
+        "signedurl",
+    }
+    for key, item in value.items():
+        path = f"{prefix}.{key}"
+        normalized = re.sub(r"[^a-z0-9]", "", key.casefold())
+        if normalized in sensitive_keys:
+            return path
+        if isinstance(item, dict):
+            nested = _sensitive_request_option_path(item, prefix=path)
+            if nested is not None:
+                return nested
+        elif isinstance(item, list):
+            for index, nested_item in enumerate(item):
+                if isinstance(nested_item, dict):
+                    nested = _sensitive_request_option_path(
+                        nested_item,
+                        prefix=f"{path}[{index}]",
+                    )
+                    if nested is not None:
+                        return nested
+        elif isinstance(item, str) and re.search(
+            r"(?i)[?&](?:access_token|api_key|key|signature|sig|token)=",
+            item,
+        ):
+            return path
+    return None
 
 
 def _fingerprint_parts(identity: str, version: int) -> str:

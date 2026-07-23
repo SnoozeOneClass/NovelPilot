@@ -1,34 +1,51 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
+import httpx
 import pytest
 from pydantic import ValidationError
+from pydantic_ai import Agent, models
+from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.models.openai import OpenAIResponsesModel
 
 from app.agents.binding import (
+    AnthropicMessagesAdapter,
     ModelBindingResolver,
+    OpenAIResponsesAdapter,
     ProfileCapabilityError,
     ProfileCredential,
     ProfileFingerprintError,
     UnknownApiFamilyError,
 )
-from app.agents.contracts import ProfileCapabilities, ProfileSnapshot
+from app.agents.contracts import ApiFamily, ProfileCapabilities, ProfileSnapshot
 
 
-def _profile(*, model_id: str, api_family: str = "openai_responses") -> ProfileSnapshot:
+def _profile(
+    *,
+    model_id: str,
+    api_family: ApiFamily = "openai_responses",
+) -> ProfileSnapshot:
     capabilities = ProfileCapabilities(
         text_streaming=True,
         native_json_schema=True,
         tool_calling=False,
     )
+    request_options = {"max_tokens": 65_536} if api_family == "anthropic_messages" else {}
     return ProfileSnapshot.create(
         profile_id=f"profile-{model_id}",
         display_name=model_id,
         api_family=api_family,
-        base_url="https://provider.example/v1",
+        base_url=(
+            "https://provider.example"
+            if api_family == "anthropic_messages"
+            else "https://provider.example/v1"
+        ),
         model_id=model_id,
         capabilities=capabilities,
+        request_options=request_options,
     )
 
 
@@ -63,6 +80,29 @@ def test_model_id_is_opaque_within_one_api_family() -> None:
         asyncio.run(gpt_binding.aclose())
 
 
+def test_anthropic_model_id_is_opaque_and_uses_messages_adapter() -> None:
+    resolver = ModelBindingResolver()
+    credential = ProfileCredential.from_plaintext("test-secret")
+    profile = _profile(
+        model_id="gpt-name-does-not-select-responses",
+        api_family="anthropic_messages",
+    )
+
+    binding = resolver.resolve(
+        profile=profile,
+        expected_profile_fingerprint=profile.fingerprint,
+        required_capabilities=("native_json_schema",),
+        model_request_limit=2,
+        credential=credential,
+    )
+    try:
+        assert binding.adapter_key == "anthropic_messages"
+        assert isinstance(binding.model.wrapped, AnthropicModel)
+        assert binding.model.model_name == "gpt-name-does-not-select-responses"
+    finally:
+        asyncio.run(binding.aclose())
+
+
 def test_binding_preflight_failures_make_zero_provider_requests() -> None:
     resolver = ModelBindingResolver()
     credential = ProfileCredential.from_plaintext("test-secret")
@@ -83,9 +123,10 @@ def test_binding_preflight_failures_make_zero_provider_requests() -> None:
             credential=credential,
         )
 
-    unknown = _profile(model_id="opaque-model", api_family="future_wire_protocol")
-    with pytest.raises(UnknownApiFamilyError, match="future_wire_protocol"):
-        resolver.resolve(
+    unknown = _profile(model_id="opaque-model", api_family="anthropic_messages")
+    openai_only = ModelBindingResolver(adapters=[OpenAIResponsesAdapter()])
+    with pytest.raises(UnknownApiFamilyError, match="anthropic_messages"):
+        openai_only.resolve(
             profile=unknown,
             expected_profile_fingerprint=unknown.fingerprint,
             required_capabilities=("native_json_schema",),
@@ -125,3 +166,139 @@ def test_profile_cannot_override_t1_or_embed_secrets_in_url() -> None:
             model_id="opaque-model",
             capabilities=capabilities,
         )
+
+
+def test_anthropic_profile_requires_explicit_positive_max_tokens() -> None:
+    capabilities = ProfileCapabilities(text_streaming=True, native_json_schema=True)
+    with pytest.raises(ValidationError, match="explicit generous max_tokens"):
+        ProfileSnapshot.create(
+            profile_id="anthropic-profile",
+            display_name="Anthropic profile",
+            api_family="anthropic_messages",
+            base_url="https://provider.example",
+            model_id="opaque-model",
+            capabilities=capabilities,
+        )
+    with pytest.raises(ValidationError, match="positive integer"):
+        ProfileSnapshot.create(
+            profile_id="anthropic-profile",
+            display_name="Anthropic profile",
+            api_family="anthropic_messages",
+            base_url="https://provider.example",
+            model_id="opaque-model",
+            capabilities=capabilities,
+            request_options={"max_tokens": True},
+        )
+
+
+def test_protocol_base_url_joining_and_nested_secrets_fail_closed() -> None:
+    capabilities = ProfileCapabilities(text_streaming=True, native_json_schema=True)
+    with pytest.raises(ValidationError, match="must end in /v1"):
+        ProfileSnapshot.create(
+            profile_id="responses-profile",
+            display_name="Responses profile",
+            api_family="openai_responses",
+            base_url="https://provider.example",
+            model_id="opaque-model",
+            capabilities=capabilities,
+        )
+    with pytest.raises(ValidationError, match="exclude the terminal /v1"):
+        ProfileSnapshot.create(
+            profile_id="anthropic-profile",
+            display_name="Anthropic profile",
+            api_family="anthropic_messages",
+            base_url="https://provider.example/v1",
+            model_id="opaque-model",
+            capabilities=capabilities,
+            request_options={"max_tokens": 65_536},
+        )
+    with pytest.raises(ValidationError, match="credentials or signed URL"):
+        ProfileSnapshot.create(
+            profile_id="responses-profile",
+            display_name="Responses profile",
+            api_family="openai_responses",
+            base_url="https://provider.example/v1",
+            model_id="opaque-model",
+            capabilities=capabilities,
+            request_options={
+                "extra_headers": {"Authorization": "Bearer must-not-enter-snapshot"}
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ("api_family", "expected_path"),
+    [
+        ("openai_responses", "/v1/responses"),
+        ("anthropic_messages", "/v1/messages"),
+    ],
+)
+def test_protocol_adapters_emit_only_their_declared_wire_contract(
+    api_family: ApiFamily,
+    expected_path: str,
+) -> None:
+    captured: list[tuple[str, dict[str, object], httpx.Headers]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(
+            (
+                request.url.path,
+                json.loads(request.content.decode("utf-8")),
+                request.headers,
+            )
+        )
+        return httpx.Response(
+            400,
+            request=request,
+            json={"error": {"type": "invalid_request_error", "message": "probe stop"}},
+        )
+
+    adapter = (
+        OpenAIResponsesAdapter(transport_factory=lambda: httpx.MockTransport(handler))
+        if api_family == "openai_responses"
+        else AnthropicMessagesAdapter(transport_factory=lambda: httpx.MockTransport(handler))
+    )
+    profile = ProfileSnapshot.create(
+        profile_id=f"{api_family}-capture",
+        display_name="Protocol capture",
+        api_family=api_family,
+        base_url=(
+            "https://provider.example/v1"
+            if api_family == "openai_responses"
+            else "https://provider.example"
+        ),
+        model_id="opaque-model",
+        capabilities=ProfileCapabilities(text_streaming=True, native_json_schema=True),
+        request_options=(
+            {"max_tokens": 65_536} if api_family == "anthropic_messages" else {}
+        ),
+    )
+    binding = ModelBindingResolver(adapters=[adapter]).resolve(
+        profile=profile,
+        expected_profile_fingerprint=profile.fingerprint,
+        required_capabilities=("text_streaming",),
+        model_request_limit=1,
+        credential=ProfileCredential.from_plaintext("test-secret"),
+    )
+
+    async def exercise() -> None:
+        binding.budget.begin_agent_run()
+        async with binding:
+            agent = Agent(binding.model, output_type=str)
+            with pytest.raises(ModelHTTPError):
+                async with agent.run_stream("hello"):
+                    pass
+
+    with models.override_allow_model_requests(True):
+        asyncio.run(exercise())
+
+    assert len(captured) == 1
+    path, payload, headers = captured[0]
+    assert path == expected_path
+    assert payload["stream"] is True
+    if api_family == "openai_responses":
+        assert "max_output_tokens" not in payload
+        assert "anthropic-version" not in headers
+    else:
+        assert payload["max_tokens"] == 65_536
+        assert headers["anthropic-version"]

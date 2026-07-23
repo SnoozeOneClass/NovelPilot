@@ -33,6 +33,12 @@ npm.cmd --prefix frontend install
 npm.cmd run backend:migrate
 ```
 
+Profile 只支持 `openai_responses` 与 `anthropic_messages` 两种显式协议。配置后通过同一生产 Adapter 写入能力证据：
+
+```powershell
+npm.cmd run profile:probe -- <profile-id>
+```
+
 分别启动：
 
 ```powershell

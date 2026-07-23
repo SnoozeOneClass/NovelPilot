@@ -1,31 +1,22 @@
 from __future__ import annotations
 
-import json
-from collections.abc import AsyncIterator, Awaitable, Callable
+import re
+import time
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal, cast
 
 import httpx
+from pydantic_ai import RunContext
+from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models import Model, ModelRequestParameters, StreamedResponse
 from pydantic_ai.models.wrapper import WrapperModel
-from pydantic_ai.retries import AsyncTenacityTransport, RetryConfig, wait_retry_after
 from pydantic_ai.settings import ModelSettings
-from pydantic_ai.messages import ModelMessage, ModelResponse
-from pydantic_ai import RunContext
-from tenacity import retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from app.agents.contracts import PROVIDER_REQUEST_LIMIT, TRANSPORT_RETRY_LIMIT
 
-RETRYABLE_STATUS_CODES = frozenset({408, 409, 425, 429, *range(500, 600)})
-_QUOTA_MARKERS = (
-    "insufficient_quota",
-    "billing_hard_limit_reached",
-    "billing_not_active",
-    "credit balance",
-    "credits exhausted",
-    "payment required",
-)
+RetryDecision = Literal["retry", "failed", "completed"]
 
 
 class ActivationRequestBudgetExhausted(RuntimeError):
@@ -36,81 +27,226 @@ class ModelRequestBudgetExhausted(RuntimeError):
     """Pydantic AI attempted more semantic requests than this task contract allows."""
 
 
-@dataclass(frozen=True, slots=True)
+class ProviderOutputTruncated(RuntimeError):
+    """The Provider ended a response at its output-token boundary."""
+
+
+class ProviderStreamIncomplete(RuntimeError):
+    """A streamed wire response ended without a protocol-complete terminal state."""
+
+
+def _wall_clock_ms() -> int:
+    return time.time_ns() // 1_000_000
+
+
+@dataclass(slots=True)
 class ProviderAttempt:
     sequence: int
+    protocol: str
     method: str
-    status_code: int | None
-    error_type: str | None
+    started_at_ms: int
+    headers_at_ms: int | None = None
+    first_event_at_ms: int | None = None
+    last_event_at_ms: int | None = None
+    finished_at_ms: int | None = None
+    status_code: int | None = None
+    provider_request_id: str | None = None
+    error_type: str | None = None
+    retry_decision: RetryDecision | None = None
+    retry_reason: str | None = None
+    retry_delay_ms: int | None = None
 
 
 @dataclass(slots=True)
 class ActivationRequestBudget:
-    """One counter shared by output repair and every HTTP transport retry."""
+    """One observable counter shared by semantic requests and full-task replays.
+
+    ``model_request_count`` is the highest semantic request ordinal reached by one
+    fresh Agent run (initial request, then at most one typed-output repair).
+    Replaying the frozen task resets that ordinal while every new HTTP request still
+    increments ``provider_request_count``. This keeps the persisted invariant:
+
+    ``provider requests = semantic requests + transport replays``.
+    """
 
     model_request_limit: int
+    protocol: str = "test"
     provider_request_limit: int = PROVIDER_REQUEST_LIMIT
+    now_ms: Callable[[], int] = _wall_clock_ms
     provider_request_count: int = 0
     model_request_count: int = 0
-    _model_call_attempts: int = 0
-    _active_model_call_has_request: bool = False
+    _current_model_ordinal: int = 0
+    _model_call_active: bool = False
     attempts: list[ProviderAttempt] = field(default_factory=list)
 
     @property
     def transport_retry_count(self) -> int:
         return self.provider_request_count - self.model_request_count
 
+    @property
+    def can_replay(self) -> bool:
+        return self.provider_request_count < self.provider_request_limit
+
+    @property
+    def latest_attempt(self) -> ProviderAttempt | None:
+        return self.attempts[-1] if self.attempts else None
+
+    def begin_agent_run(self) -> None:
+        if self._model_call_active:
+            raise RuntimeError("Cannot restart an Agent run while a model request is active.")
+        self._current_model_ordinal = 0
+
     def begin_model_call(self) -> None:
-        self._model_call_attempts += 1
-        if self._model_call_attempts > self.model_request_limit:
-            raise ModelRequestBudgetExhausted(
-                f"Task allows at most {self.model_request_limit} model request(s)."
-            )
-        if self._active_model_call_has_request:
+        if self._model_call_active:
             raise RuntimeError("Nested model requests are not supported by one task activation.")
-        self._active_model_call_has_request = False
+        self._current_model_ordinal += 1
+        if self._current_model_ordinal > self.model_request_limit:
+            raise ModelRequestBudgetExhausted(
+                f"Task allows at most {self.model_request_limit} semantic model request(s) "
+                "per frozen Agent run."
+            )
+        self._model_call_active = True
 
     def end_model_call(self) -> None:
-        self._active_model_call_has_request = False
+        self._model_call_active = False
 
     def begin_provider_request(self, request: httpx.Request) -> int:
         if self.provider_request_count >= self.provider_request_limit:
             raise ActivationRequestBudgetExhausted(
                 f"Task activation exhausted its {self.provider_request_limit} physical requests."
             )
+        # Direct transport tests and diagnostics may not use RequestCountingModel.
+        if self._current_model_ordinal == 0:
+            self._current_model_ordinal = 1
         self.provider_request_count += 1
-        if not self._active_model_call_has_request:
-            self.model_request_count += 1
-            self._active_model_call_has_request = True
-        return self.provider_request_count
-
-    def record_attempt(
-        self,
-        *,
-        sequence: int,
-        request: httpx.Request,
-        status_code: int | None = None,
-        error: BaseException | None = None,
-    ) -> None:
+        self.model_request_count = max(
+            self.model_request_count,
+            min(self._current_model_ordinal, self.model_request_limit),
+        )
+        sequence = self.provider_request_count
         self.attempts.append(
             ProviderAttempt(
                 sequence=sequence,
+                protocol=self.protocol,
                 method=request.method,
-                status_code=status_code,
-                error_type=type(error).__name__ if error is not None else None,
+                started_at_ms=self.now_ms(),
             )
+        )
+        return sequence
+
+    def record_response_headers(self, *, sequence: int, response: httpx.Response) -> None:
+        attempt = self._attempt(sequence)
+        attempt.headers_at_ms = self.now_ms()
+        attempt.status_code = response.status_code
+        attempt.provider_request_id = _provider_request_id(response.headers)
+
+    def record_stream_event(self, *, sequence: int) -> None:
+        attempt = self._attempt(sequence)
+        timestamp = self.now_ms()
+        if attempt.first_event_at_ms is None:
+            attempt.first_event_at_ms = timestamp
+        attempt.last_event_at_ms = timestamp
+
+    def finish_provider_request(
+        self,
+        *,
+        sequence: int,
+        error: BaseException | None = None,
+    ) -> None:
+        attempt = self._attempt(sequence)
+        if attempt.finished_at_ms is None:
+            attempt.finished_at_ms = self.now_ms()
+        if error is not None:
+            attempt.error_type = type(error).__name__
+        elif (
+            attempt.retry_decision is None
+            and attempt.status_code is not None
+            and attempt.status_code < 400
+        ):
+            attempt.retry_decision = "completed"
+
+    def record_retry_decision(
+        self,
+        *,
+        retry: bool,
+        reason: str,
+        delay_seconds: float | None = None,
+    ) -> None:
+        attempt = self.latest_attempt
+        if attempt is None:
+            return
+        attempt.retry_decision = "retry" if retry else "failed"
+        attempt.retry_reason = reason
+        attempt.retry_delay_ms = (
+            None if delay_seconds is None else max(0, round(delay_seconds * 1_000))
         )
 
     def assert_terminal_invariants(self) -> None:
         if self.provider_request_count > self.provider_request_limit:
             raise AssertionError("Physical Provider request budget was exceeded.")
+        if self.model_request_count > self.model_request_limit:
+            raise AssertionError("Semantic model request budget was exceeded.")
         if self.transport_retry_count > TRANSPORT_RETRY_LIMIT:
             raise AssertionError("Transport retry budget was exceeded.")
         if self.transport_retry_count < 0:
             raise AssertionError("Model request count cannot exceed physical requests.")
+        if len(self.attempts) != self.provider_request_count:
+            raise AssertionError("Every physical Provider request requires one evidence record.")
+        if [attempt.sequence for attempt in self.attempts] != list(
+            range(1, self.provider_request_count + 1)
+        ):
+            raise AssertionError("Provider request evidence sequence is not contiguous.")
+
+    def _attempt(self, sequence: int) -> ProviderAttempt:
+        try:
+            attempt = self.attempts[sequence - 1]
+        except IndexError as exc:  # pragma: no cover - internal invariant.
+            raise AssertionError(f"Unknown Provider attempt sequence {sequence}.") from exc
+        if attempt.sequence != sequence:  # pragma: no cover - internal invariant.
+            raise AssertionError("Provider attempt sequence drifted.")
+        return attempt
 
 
-class ActivationBudgetTransport(httpx.AsyncBaseTransport):
+class ObservedResponseStream(httpx.AsyncByteStream):
+    """Observe SSE/body consumption, including errors after HTTP 200 headers."""
+
+    def __init__(
+        self,
+        *,
+        wrapped: httpx.AsyncByteStream,
+        budget: ActivationRequestBudget,
+        sequence: int,
+    ) -> None:
+        self._wrapped = wrapped
+        self._budget = budget
+        self._sequence = sequence
+        self._finished = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        try:
+            async for chunk in self._wrapped:
+                self._budget.record_stream_event(sequence=self._sequence)
+                yield chunk
+        except BaseException as exc:
+            self._finished = True
+            self._budget.finish_provider_request(sequence=self._sequence, error=exc)
+            raise
+        else:
+            self._finished = True
+            self._budget.finish_provider_request(sequence=self._sequence)
+
+    async def aclose(self) -> None:
+        try:
+            await self._wrapped.aclose()
+        finally:
+            if not self._finished:
+                self._finished = True
+                self._budget.finish_provider_request(sequence=self._sequence)
+
+
+class ObservedTransport(httpx.AsyncBaseTransport):
+    """Count one physical call and wrap its response stream without retrying it."""
+
     def __init__(self, *, budget: ActivationRequestBudget, wrapped: httpx.AsyncBaseTransport) -> None:
         self._budget = budget
         self._wrapped = wrapped
@@ -120,12 +256,14 @@ class ActivationBudgetTransport(httpx.AsyncBaseTransport):
         try:
             response = await self._wrapped.handle_async_request(request)
         except BaseException as exc:
-            self._budget.record_attempt(sequence=sequence, request=request, error=exc)
+            self._budget.finish_provider_request(sequence=sequence, error=exc)
             raise
-        self._budget.record_attempt(
+        response.request = request
+        self._budget.record_response_headers(sequence=sequence, response=response)
+        response.stream = ObservedResponseStream(
+            wrapped=cast(httpx.AsyncByteStream, response.stream),
+            budget=self._budget,
             sequence=sequence,
-            request=request,
-            status_code=response.status_code,
         )
         return response
 
@@ -133,70 +271,19 @@ class ActivationBudgetTransport(httpx.AsyncBaseTransport):
         await self._wrapped.aclose()
 
 
-class RetryableResponseTransport(httpx.AsyncBaseTransport):
-    """Convert only the approved transient statuses into Tenacity retry signals."""
-
-    def __init__(self, wrapped: httpx.AsyncBaseTransport) -> None:
-        self._wrapped = wrapped
-
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        response = await self._wrapped.handle_async_request(request)
-        response.request = request
-        if response.status_code not in RETRYABLE_STATUS_CODES:
-            return response
-        if response.status_code == 429 and await _is_explicit_quota_failure(response):
-            return response
-        await response.aread()
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError:
-            await response.aclose()
-            raise
-        return response  # pragma: no cover - retryable status always raises.
-
-    async def aclose(self) -> None:
-        await self._wrapped.aclose()
-
-
-async def _is_explicit_quota_failure(response: httpx.Response) -> bool:
-    await response.aread()
-    body = response.content.decode("utf-8", errors="replace").casefold()
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError:
-        payload_text = body
-    else:
-        payload_text = json.dumps(payload, ensure_ascii=False, sort_keys=True).casefold()
-    return any(marker in payload_text for marker in _QUOTA_MARKERS)
-
-
-def build_retrying_transport(
+def build_observed_transport(
     *,
     budget: ActivationRequestBudget,
     wrapped: httpx.AsyncBaseTransport | None = None,
-    sleep: Callable[[float], Awaitable[None]] | None = None,
 ) -> httpx.AsyncBaseTransport:
-    physical = ActivationBudgetTransport(
+    return ObservedTransport(
         budget=budget,
         wrapped=wrapped or httpx.AsyncHTTPTransport(),
     )
-    classified = RetryableResponseTransport(physical)
-    config: RetryConfig = {
-        "retry": retry_if_exception_type((httpx.TransportError, httpx.HTTPStatusError)),
-        "wait": wait_retry_after(
-            fallback_strategy=wait_exponential(multiplier=1, max=60),
-            max_wait=300,
-        ),
-        "stop": stop_after_attempt(PROVIDER_REQUEST_LIMIT),
-        "reraise": True,
-    }
-    if sleep is not None:
-        config["sleep"] = sleep
-    return AsyncTenacityTransport(config, wrapped=classified)
 
 
 class RequestCountingModel(WrapperModel):
-    """Count framework model requests without changing the wrapped Adapter semantics."""
+    """Track semantic ordinals and force every Provider call onto streamed wire I/O."""
 
     def __init__(self, wrapped: Model, *, budget: ActivationRequestBudget) -> None:
         super().__init__(wrapped)
@@ -210,7 +297,16 @@ class RequestCountingModel(WrapperModel):
     ) -> ModelResponse:
         self._budget.begin_model_call()
         try:
-            return await self.wrapped.request(messages, model_settings, model_request_parameters)
+            async with self.wrapped.request_stream(
+                messages,
+                model_settings,
+                model_request_parameters,
+            ) as streamed:
+                async for _event in streamed:
+                    pass
+                response = streamed.get()
+            raise_for_incomplete_stream(response)
+            return response
         finally:
             self._budget.end_model_call()
 
@@ -233,3 +329,25 @@ class RequestCountingModel(WrapperModel):
                 yield response
         finally:
             self._budget.end_model_call()
+
+
+def _provider_request_id(headers: httpx.Headers) -> str | None:
+    for name in ("request-id", "x-request-id"):
+        value = headers.get(name)
+        if value:
+            sanitized = re.sub(r"[^A-Za-z0-9._:/-]", "_", value.strip())
+            return sanitized[:256] or None
+    return None
+
+
+def raise_for_incomplete_stream(response: ModelResponse) -> None:
+    """Reject truncation or an incomplete wire stream before semantic validation."""
+
+    if response.finish_reason == "length":
+        raise ProviderOutputTruncated(
+            "Provider stopped because its maximum output token boundary was reached."
+        )
+    if response.state != "complete":
+        raise ProviderStreamIncomplete(
+            f"Provider stream ended in state={response.state!r} without a complete result."
+        )

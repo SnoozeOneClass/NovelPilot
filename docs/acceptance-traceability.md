@@ -11,8 +11,9 @@
 | Book workspace/review/approval/baseline | `app.domain.book` | `test_book_discussion.py`、`test_book_lifecycle.py` |
 | Arc 滚动规划与双模式审批 | `app.domain.arc` | `test_arc_lifecycle.py`、整书 driver 参数化测试 |
 | Chapter/Canon 原子提交 | `app.domain.chapter` | `test_chapter_lifecycle.py`、`test_revisions.py` |
-| Pydantic AI typed/text 输出 | `app.agents` | `test_pydantic_ai_contract.py`、`backend/tests/agents` |
-| 5 次 transport retry、6 请求总预算、T1 | `agents.transport/contracts`、DB check | `test_transport.py`、schema tests |
+| Pydantic AI typed/text 输出与双流式线协议 | `app.agents.binding/transport` | `test_pydantic_ai_contract.py`、`test_binding.py`、`test_transport.py` |
+| Profile capability evidence 与无密钥快照 | `app.agents.probe`、`app.profiles` | `test_probe.py`、`test_profiles.py`、secret audit |
+| 5 次 transport retry、6 请求总预算、T1 | `agents.transport/contracts/executor`、DB check | `test_transport.py`、`test_executor.py`、schema tests |
 | 唯一 Run Engine、Pause/Retry/C1 | `app.runtime` | `backend/tests/runtime` |
 | 任务证据与 live delta 分离 | `agents.executor`、`runtime.live` | executor/live/routing tests |
 | 反馈、正式修订与跨层升级 | `domain.feedback/change_requests` | feedback/change/stale-rebase tests |

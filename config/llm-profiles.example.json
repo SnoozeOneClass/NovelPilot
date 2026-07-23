@@ -1,0 +1,30 @@
+{
+  "profiles": [
+    {
+      "api_family": "openai_responses",
+      "api_key": "replace-locally",
+      "base_url": "https://provider.example/v1",
+      "capability_test": null,
+      "display_name": "Responses example",
+      "enabled": false,
+      "id": "responses-example",
+      "model_id": "opaque-model-id",
+      "request_options": {}
+    },
+    {
+      "api_family": "anthropic_messages",
+      "api_key": "replace-locally",
+      "base_url": "https://provider.example",
+      "capability_test": null,
+      "display_name": "Messages example",
+      "enabled": false,
+      "id": "messages-example",
+      "model_id": "opaque-model-id",
+      "request_options": {
+        "max_tokens": 65536
+      }
+    }
+  ],
+  "schema_version": 2,
+  "selected_profile_id": null
+}

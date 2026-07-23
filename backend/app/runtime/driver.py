@@ -12,7 +12,7 @@ from typing import Literal, Protocol, cast
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.agents.binding import ProfileCredential
+from app.agents.binding import ModelBindingError, ProfileCredential
 from app.agents.contracts import AgentRole
 from app.agents.executor import AgentExecutionResult, AgentExecutor
 from app.agents.registry import DEFAULT_TASK_REGISTRY, TaskRegistry
@@ -46,7 +46,7 @@ from app.domain.chapter.contracts import (
 )
 from app.domain.completion import ApplyBookProgressRequest, CompletionCommandService
 from app.domain.commands import CommandPreconditionError
-from app.profiles import ProfileCatalog
+from app.profiles import ProfileCatalog, ProfileConfigurationError
 from app.runtime.context import HarnessContextBuilder
 from app.runtime.failures import DeliveryFailureService, NormalizedDeliveryFailure
 from app.store.agent_tasks import AgentTaskStore
@@ -112,6 +112,18 @@ class TaskExecutor(Protocol):
         owner_instance_id: str,
         lease_token: str,
         credential: ProfileCredential,
+    ) -> AgentExecutionResult: ...
+
+    async def fail_preflight(
+        self,
+        *,
+        project_id: str,
+        task_id: str,
+        attempt_id: str,
+        owner_instance_id: str,
+        lease_token: str,
+        credential: ProfileCredential,
+        error: ModelBindingError,
     ) -> AgentExecutionResult: ...
 
 
@@ -242,13 +254,30 @@ class DomainRunDriver:
             await self._apply_command(instruction)
 
     async def _execute_task(self, task: ActionableTaskRecord) -> None:
-        resolved = self._profiles.resolve(task.profile_id)
+        lease_token = uuid.uuid4().hex
+        try:
+            resolved = self._profiles.resolve(task.profile_id)
+        except ProfileConfigurationError as error:
+            failure = self._profiles.failure_material(
+                task.profile_id,
+                message=str(error),
+            )
+            await self._executor.fail_preflight(
+                project_id=task.project_id,
+                task_id=task.task_id,
+                attempt_id=task.attempt_id,
+                owner_instance_id=self._owner_instance_id,
+                lease_token=lease_token,
+                credential=failure.credential,
+                error=failure.error,
+            )
+            return
         await self._executor.execute(
             project_id=task.project_id,
             task_id=task.task_id,
             attempt_id=task.attempt_id,
             owner_instance_id=self._owner_instance_id,
-            lease_token=uuid.uuid4().hex,
+            lease_token=lease_token,
             credential=resolved.credential,
         )
 
@@ -266,7 +295,13 @@ class DomainRunDriver:
             raise HarnessInvariantError(
                 f"No Profile is selected for role {instruction.role!r}."
             )
-        profile = self._profiles.resolve(profile_id).snapshot
+        try:
+            profile = self._profiles.resolve(profile_id).snapshot
+        except ProfileConfigurationError as error:
+            profile = self._profiles.failure_material(
+                profile_id,
+                message=str(error),
+            ).snapshot
         semantic_goal = _SEMANTIC_GOALS[instruction.task_kind]
         context = await self._context.build(
             task_kind=instruction.task_kind,

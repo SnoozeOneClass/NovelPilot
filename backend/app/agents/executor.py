@@ -2,18 +2,33 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from email.utils import parsedate_to_datetime
+from typing import Any, Literal, Protocol, cast
 
 import httpx
-from openai import APIStatusError, AuthenticationError, BadRequestError, RateLimitError
+from anthropic import (
+    APIConnectionError as AnthropicAPIConnectionError,
+    APIStatusError as AnthropicAPIStatusError,
+)
+from openai import (
+    APIConnectionError as OpenAIAPIConnectionError,
+    APIStatusError as OpenAIAPIStatusError,
+)
 from pydantic import BaseModel
 from pydantic_ai import capture_run_messages
-from pydantic_ai.exceptions import ToolRetryError, UnexpectedModelBehavior, UserError
+from pydantic_ai.exceptions import (
+    ModelAPIError,
+    ModelHTTPError,
+    ToolRetryError,
+    UnexpectedModelBehavior,
+    UserError,
+)
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter, ModelResponse
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -31,14 +46,31 @@ from app.agents.transport import (
     ActivationRequestBudget,
     ActivationRequestBudgetExhausted,
     ModelRequestBudgetExhausted,
+    ProviderAttempt,
+    ProviderOutputTruncated,
+    ProviderStreamIncomplete,
+    raise_for_incomplete_stream,
 )
 from app.db.uow import UnitOfWork
 from app.store.agent_tasks import AgentTaskStore, framework_fingerprint
 from app.store.content import prepare_canonical_json, prepare_redacted_bytes
 from app.store.execution import AgentAttemptRecord, EvidenceItemDraft
 
+RETRYABLE_STATUS_CODES = frozenset({408, 409, 425, 429, *range(500, 600)})
+_QUOTA_MARKERS = (
+    "insufficient_quota",
+    "billing_hard_limit_reached",
+    "billing_not_active",
+    "credit balance",
+    "credits exhausted",
+    "payment required",
+)
+_PROVIDER_CONNECTION_ERRORS = (OpenAIAPIConnectionError, AnthropicAPIConnectionError)
+_PROVIDER_STATUS_ERRORS = (OpenAIAPIStatusError, AnthropicAPIStatusError)
+
 LiveEventKind = Literal[
     "task_started",
+    "attempt_restarting",
     "prose_delta",
     "prose_committed",
     "prose_discarded",
@@ -54,6 +86,10 @@ class AgentLiveEvent:
     task_id: str
     attempt_id: str
     delta: str | None = None
+    provider_request_number: int | None = None
+    provider_request_limit: int | None = None
+    reason: str | None = None
+    retry_delay_ms: int | None = None
 
 
 class LivePublisher(Protocol):
@@ -105,7 +141,22 @@ class AgentActivationConflictError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class ExecutionUsage:
+    requests: int
+    input_tokens: int
+    output_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
+class RetryableFailure:
+    reason: str
+    http_status: int | None
+    retry_after_seconds: float | None
+
+
 DeadlineFactory = Callable[[float], AbstractAsyncContextManager[None]]
+Sleep = Callable[[float], Awaitable[None]]
 
 
 class AgentExecutor:
@@ -120,6 +171,7 @@ class AgentExecutor:
         live_publisher: LivePublisher | None = None,
         now_ms: Callable[[], int] | None = None,
         deadline_factory: DeadlineFactory | None = None,
+        sleep: Sleep | None = None,
     ) -> None:
         self._engine = engine
         self._registry = registry
@@ -127,6 +179,7 @@ class AgentExecutor:
         self._live = live_publisher or NullLivePublisher()
         self._now_ms = now_ms or (lambda: time.time_ns() // 1_000_000)
         self._deadline_factory = deadline_factory or asyncio.timeout
+        self._sleep = sleep or asyncio.sleep
         self._tasks = AgentTaskStore(engine)
 
     async def execute(
@@ -157,21 +210,13 @@ class AgentExecutor:
             )
 
         started_at_ms = self._now_ms()
-        async with UnitOfWork(self._engine, begin_mode="IMMEDIATE") as store:
-            claimed = await store.execution.mark_attempt_running(
-                project_id=project_id,
-                task_id=task_id,
-                attempt_id=attempt_id,
-                owner_instance_id=owner_instance_id,
-                lease_token=lease_token,
-                lease_expires_at_ms=started_at_ms + 60_000,
-                activation_deadline_at_ms=started_at_ms + plan.activation_timeout_ms,
-                started_at_ms=started_at_ms,
-            )
-            if not claimed:
-                raise AgentActivationConflictError(
-                    f"Attempt {attempt_id!r} is not an unclaimed queued attempt."
-                )
+        await self._claim_attempt(
+            plan=plan,
+            attempt_id=attempt_id,
+            owner_instance_id=owner_instance_id,
+            lease_token=lease_token,
+            started_at_ms=started_at_ms,
+        )
 
         await self._publish(
             AgentLiveEvent(
@@ -193,7 +238,10 @@ class AgentExecutor:
             name=f"agent-attempt-heartbeat:{attempt_id}",
         )
         binding: ResolvedModelBinding | None = None
-        fallback_budget = ActivationRequestBudget(model_request_limit=plan.model_request_limit)
+        fallback_budget = ActivationRequestBudget(
+            model_request_limit=plan.model_request_limit,
+            protocol=plan.profile_snapshot.api_family,
+        )
         captured_messages: list[ModelMessage] = []
         secret = credential.api_key.get_secret_value()
         try:
@@ -206,14 +254,15 @@ class AgentExecutor:
             )
             async with binding:
                 agent = build_agent(model=binding.model, definition=definition)
-                with capture_run_messages() as captured_messages:
-                    async with self._deadline_factory(plan.activation_timeout_ms / 1000):
-                        output, usage = await self._run_agent(
-                            plan=plan,
-                            attempt_id=attempt_id,
-                            definition=definition,
-                            agent=agent,
-                        )
+                async with self._deadline_factory(plan.activation_timeout_ms / 1000):
+                    output, usage = await self._run_agent(
+                        plan=plan,
+                        attempt_id=attempt_id,
+                        definition=definition,
+                        agent=agent,
+                        budget=binding.budget,
+                        captured_messages=captured_messages,
+                    )
             binding.budget.assert_terminal_invariants()
             result = await self._persist_success(
                 plan=plan,
@@ -223,6 +272,15 @@ class AgentExecutor:
                 usage=usage,
                 budget=binding.budget,
             )
+            if plan.output_mode == "text_streaming":
+                await self._publish(
+                    AgentLiveEvent(
+                        kind="prose_committed",
+                        project_id=project_id,
+                        task_id=task_id,
+                        attempt_id=attempt_id,
+                    )
+                )
             await self._publish(
                 AgentLiveEvent(
                     kind="task_succeeded",
@@ -238,6 +296,14 @@ class AgentExecutor:
             budget = binding.budget if binding is not None else fallback_budget
             budget.assert_terminal_invariants()
             classified = classify_execution_error(exc, secret=secret)
+            if budget.latest_attempt is not None and (
+                budget.latest_attempt.retry_decision is None
+                or isinstance(exc, TimeoutError)
+            ):
+                budget.record_retry_decision(
+                    retry=False,
+                    reason=classified.code,
+                )
             result = await self._persist_failure(
                 plan=plan,
                 attempt_id=attempt_id,
@@ -274,6 +340,102 @@ class AgentExecutor:
                 await heartbeat_task
             except asyncio.CancelledError:
                 pass
+
+    async def fail_preflight(
+        self,
+        *,
+        project_id: str,
+        task_id: str,
+        attempt_id: str,
+        owner_instance_id: str,
+        lease_token: str,
+        credential: ProfileCredential,
+        error: ModelBindingError,
+    ) -> AgentExecutionResult:
+        """Terminalize a local Profile/Adapter failure without a Provider request."""
+
+        plan = await self._tasks.load_plan(project_id=project_id, task_id=task_id)
+        definition = self._registry.get(
+            role=plan.role,
+            task_kind=plan.task_kind,
+            contract_version=plan.contract_version,
+        )
+        _assert_registry_matches_plan(plan, definition)
+        attempt = await self._load_attempt(
+            project_id=project_id,
+            task_id=task_id,
+            attempt_id=attempt_id,
+        )
+        if attempt.framework_fingerprint != framework_fingerprint():
+            raise AgentActivationConflictError(
+                "Frozen attempt framework fingerprint differs from the running backend."
+            )
+        started_at_ms = self._now_ms()
+        await self._claim_attempt(
+            plan=plan,
+            attempt_id=attempt_id,
+            owner_instance_id=owner_instance_id,
+            lease_token=lease_token,
+            started_at_ms=started_at_ms,
+        )
+        await self._publish(
+            AgentLiveEvent(
+                kind="task_started",
+                project_id=project_id,
+                task_id=task_id,
+                attempt_id=attempt_id,
+            )
+        )
+        budget = ActivationRequestBudget(
+            model_request_limit=plan.model_request_limit,
+            protocol=plan.profile_snapshot.api_family,
+        )
+        classified = classify_execution_error(
+            error,
+            secret=credential.api_key.get_secret_value(),
+        )
+        result = await self._persist_failure(
+            plan=plan,
+            attempt_id=attempt_id,
+            error=classified,
+            budget=budget,
+            messages=None,
+            usage=ExecutionUsage(requests=0, input_tokens=0, output_tokens=0),
+        )
+        await self._publish(
+            AgentLiveEvent(
+                kind="task_failed",
+                project_id=project_id,
+                task_id=task_id,
+                attempt_id=attempt_id,
+            )
+        )
+        return result
+
+    async def _claim_attempt(
+        self,
+        *,
+        plan: AgentTaskPlan,
+        attempt_id: str,
+        owner_instance_id: str,
+        lease_token: str,
+        started_at_ms: int,
+    ) -> None:
+        async with UnitOfWork(self._engine, begin_mode="IMMEDIATE") as store:
+            claimed = await store.execution.mark_attempt_running(
+                project_id=plan.project_id,
+                task_id=plan.task_id,
+                attempt_id=attempt_id,
+                owner_instance_id=owner_instance_id,
+                lease_token=lease_token,
+                lease_expires_at_ms=started_at_ms + 60_000,
+                activation_deadline_at_ms=started_at_ms + plan.activation_timeout_ms,
+                started_at_ms=started_at_ms,
+            )
+            if not claimed:
+                raise AgentActivationConflictError(
+                    f"Attempt {attempt_id!r} is not an unclaimed queued attempt."
+                )
 
     async def _publish(self, event: AgentLiveEvent) -> None:
         """Live fan-out is deliberately lossy and cannot change task state."""
@@ -331,43 +493,112 @@ class AgentExecutor:
         attempt_id: str,
         definition: Any,
         agent: Any,
-    ) -> tuple[BaseModel, Any]:
-        if plan.output_mode == "native_json_schema":
-            result = await agent.run(plan.prompt)
-            if not isinstance(result.output, definition.output_model):
-                raise UnexpectedModelBehavior("Framework returned the wrong typed output model.")
-            return result.output, result.usage
-
-        chunks: list[str] = []
-        async with agent.run_stream(plan.prompt) as streamed:
-            async for delta in streamed.stream_text(delta=True, debounce_by=None):
-                chunks.append(delta)
+        budget: ActivationRequestBudget,
+        captured_messages: list[ModelMessage],
+    ) -> tuple[BaseModel, ExecutionUsage]:
+        while True:
+            budget.begin_agent_run()
+            provider_count_before = budget.provider_request_count
+            run_messages: list[ModelMessage] = []
+            try:
+                with capture_run_messages() as run_messages:
+                    output = await self._run_agent_once(
+                        plan=plan,
+                        attempt_id=attempt_id,
+                        definition=definition,
+                        agent=agent,
+                    )
+            except BaseException as exc:
+                captured_messages.extend(run_messages)
+                retryable = retryable_provider_failure(
+                    exc,
+                    attempt=budget.latest_attempt,
+                )
+                consumed_request = budget.provider_request_count > provider_count_before
+                if retryable is None or not consumed_request or not budget.can_replay:
+                    if retryable is not None:
+                        budget.record_retry_decision(
+                            retry=False,
+                            reason=retryable.reason,
+                        )
+                    raise
+                delay = _retry_delay_seconds(
+                    budget=budget,
+                    retry_after_seconds=retryable.retry_after_seconds,
+                )
+                budget.record_retry_decision(
+                    retry=True,
+                    reason=retryable.reason,
+                    delay_seconds=delay,
+                )
+                if plan.output_mode == "text_streaming":
+                    await self._publish(
+                        AgentLiveEvent(
+                            kind="prose_discarded",
+                            project_id=plan.project_id,
+                            task_id=plan.task_id,
+                            attempt_id=attempt_id,
+                        )
+                    )
                 await self._publish(
                     AgentLiveEvent(
-                        kind="prose_delta",
+                        kind="attempt_restarting",
                         project_id=plan.project_id,
                         task_id=plan.task_id,
                         attempt_id=attempt_id,
-                        delta=delta,
+                        provider_request_number=budget.provider_request_count,
+                        provider_request_limit=budget.provider_request_limit,
+                        reason=retryable.reason,
+                        retry_delay_ms=round(delay * 1_000),
                     )
                 )
-            completed = await streamed.get_output()
+                await self._sleep(delay)
+                continue
+            captured_messages.extend(run_messages)
+            return output, _usage_from_messages(captured_messages)
+
+    async def _run_agent_once(
+        self,
+        *,
+        plan: AgentTaskPlan,
+        attempt_id: str,
+        definition: Any,
+        agent: Any,
+    ) -> BaseModel:
+        if plan.output_mode == "native_json_schema":
+            result = await agent.run(plan.prompt)
+            raise_for_incomplete_stream(result.response)
+            output = result.output
+            if not isinstance(output, definition.output_model):
+                raise UnexpectedModelBehavior("Framework returned the wrong typed output model.")
+            return cast(BaseModel, output)
+
+        chunks: list[str] = []
+        async with agent.run_stream(plan.prompt) as streamed:
+            try:
+                async for delta in streamed.stream_text(delta=True, debounce_by=None):
+                    chunks.append(delta)
+                    await self._publish(
+                        AgentLiveEvent(
+                            kind="prose_delta",
+                            project_id=plan.project_id,
+                            task_id=plan.task_id,
+                            attempt_id=attempt_id,
+                            delta=delta,
+                        )
+                    )
+                completed = await streamed.get_output()
+            except BaseException as exc:
+                _raise_stream_boundary_error(streamed.response, cause=exc)
+                raise
+            _raise_stream_boundary_error(streamed.response)
             if completed != "".join(chunks):
                 raise UnexpectedModelBehavior("Stream deltas do not match the completed text output.")
             finalizer = definition.text_finalizer
             if finalizer is None:  # pragma: no cover - registry construction rejects this.
                 raise RuntimeError("Text task has no deterministic finalizer.")
             output = finalizer(completed)
-            usage = streamed.usage
-        await self._publish(
-            AgentLiveEvent(
-                kind="prose_committed",
-                project_id=plan.project_id,
-                task_id=plan.task_id,
-                attempt_id=attempt_id,
-            )
-        )
-        return output, usage
+        return cast(BaseModel, output)
 
     async def _persist_success(
         self,
@@ -376,7 +607,7 @@ class AgentExecutor:
         attempt_id: str,
         output: BaseModel,
         messages: object,
-        usage: Any,
+        usage: ExecutionUsage,
         budget: ActivationRequestBudget,
     ) -> AgentExecutionResult:
         timestamp = self._now_ms()
@@ -484,10 +715,12 @@ class AgentExecutor:
         error: ClassifiedExecutionError,
         budget: ActivationRequestBudget,
         messages: object | None,
-        usage: tuple[int, int, int],
+        usage: ExecutionUsage,
     ) -> AgentExecutionResult:
         timestamp = self._now_ms()
-        requests, input_tokens, output_tokens = usage
+        requests = usage.requests
+        input_tokens = usage.input_tokens
+        output_tokens = usage.output_tokens
         prepared_error = prepare_canonical_json(
             {
                 "code": error.code,
@@ -721,7 +954,7 @@ def _sanitize_evidence_value(value: object, *, secret: str) -> object:
     return _redact(str(value), secret=secret)
 
 
-def _usage_from_messages(messages: list[ModelMessage]) -> tuple[int, int, int]:
+def _usage_from_messages(messages: list[ModelMessage]) -> ExecutionUsage:
     requests = 0
     input_tokens = 0
     output_tokens = 0
@@ -730,24 +963,45 @@ def _usage_from_messages(messages: list[ModelMessage]) -> tuple[int, int, int]:
             requests += 1
             input_tokens += int(message.usage.input_tokens)
             output_tokens += int(message.usage.output_tokens)
-    return requests, input_tokens, output_tokens
+    return ExecutionUsage(
+        requests=requests,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
 
 
 def _retry_evidence(budget: ActivationRequestBudget) -> list[EvidenceItemDraft]:
     items: list[EvidenceItemDraft] = []
-    if budget.transport_retry_count:
+    if budget.attempts:
         items.append(
             EvidenceItemDraft(
                 item_kind="transport_retry",
                 metadata_json=_canonical_metadata(
                     {
+                        "schema_id": "provider-request-attempts-v1",
+                        "provider_request_count": budget.provider_request_count,
                         "count": budget.transport_retry_count,
                         "attempts": [
                             {
                                 "sequence": attempt.sequence,
+                                "protocol": attempt.protocol,
                                 "method": attempt.method,
+                                "started_at_ms": attempt.started_at_ms,
+                                "headers_at_ms": attempt.headers_at_ms,
+                                "first_event_at_ms": attempt.first_event_at_ms,
+                                "last_event_at_ms": attempt.last_event_at_ms,
+                                "finished_at_ms": attempt.finished_at_ms,
+                                "time_to_first_event_ms": (
+                                    None
+                                    if attempt.first_event_at_ms is None
+                                    else attempt.first_event_at_ms - attempt.started_at_ms
+                                ),
                                 "status_code": attempt.status_code,
+                                "provider_request_id": attempt.provider_request_id,
                                 "error_type": attempt.error_type,
+                                "retry_decision": attempt.retry_decision,
+                                "retry_reason": attempt.retry_reason,
+                                "retry_delay_ms": attempt.retry_delay_ms,
                             }
                             for attempt in budget.attempts
                         ],
@@ -767,12 +1021,50 @@ def _retry_evidence(budget: ActivationRequestBudget) -> list[EvidenceItemDraft]:
     return items
 
 
+def retryable_provider_failure(
+    exc: BaseException,
+    *,
+    attempt: ProviderAttempt | None = None,
+) -> RetryableFailure | None:
+    """Return a replay decision only for explicit transient Provider failures."""
+
+    if isinstance(exc, ProviderStreamIncomplete):
+        return RetryableFailure(
+            reason="provider_stream_incomplete",
+            http_status=_http_status(exc),
+            retry_after_seconds=_retry_after_seconds(exc),
+        )
+    status = _http_status(exc)
+    if status is not None:
+        if status not in RETRYABLE_STATUS_CODES:
+            return None
+        if status == 429 and _contains_quota_failure(_provider_response_body(exc)):
+            return None
+        return RetryableFailure(
+            reason=f"provider_http_{status}",
+            http_status=status,
+            retry_after_seconds=_retry_after_seconds(exc),
+        )
+    if _has_connection_failure(exc):
+        return RetryableFailure(
+            reason=_transport_failure_reason(exc, attempt=attempt),
+            http_status=None,
+            retry_after_seconds=None,
+        )
+    return None
+
+
 def classify_execution_error(exc: BaseException, *, secret: str = "") -> ClassifiedExecutionError:
-    status: int | None = None
+    status = _http_status(exc)
     category = "execution"
     code = "agent_execution_failed"
+    response_body = _provider_response_body(exc)
     if isinstance(exc, TimeoutError):
         category, code = "timeout", "activation_deadline_exceeded"
+    elif isinstance(exc, ProviderOutputTruncated):
+        category, code = "output_truncation", "provider_output_truncated"
+    elif isinstance(exc, ProviderStreamIncomplete):
+        category, code = "transport", "provider_stream_retries_exhausted"
     elif isinstance(exc, ActivationRequestBudgetExhausted):
         category, code = "budget", "provider_request_budget_exhausted"
     elif isinstance(exc, ModelRequestBudgetExhausted):
@@ -781,24 +1073,25 @@ def classify_execution_error(exc: BaseException, *, secret: str = "") -> Classif
         category, code = "capability", "profile_capability_missing"
     elif isinstance(exc, ModelBindingError):
         category, code = "configuration", "model_binding_failed"
-    elif isinstance(exc, AuthenticationError):
+    elif status == 401:
         category, code = "authentication", "provider_authentication_failed"
-        status = exc.status_code
-    elif isinstance(exc, RateLimitError):
+    elif status == 403:
+        category, code = "permission", "provider_permission_denied"
+    elif status in {402, 429} and _contains_quota_failure(response_body):
         category, code = "quota", "provider_quota_exhausted"
-        status = exc.status_code
-    elif isinstance(exc, BadRequestError):
+    elif status in RETRYABLE_STATUS_CODES:
+        category, code = "transport", "provider_transient_retries_exhausted"
+    elif status is not None and 400 <= status < 500:
         category, code = "invalid_request", "provider_invalid_request"
-        status = exc.status_code
-    elif isinstance(exc, APIStatusError):
+    elif status is not None:
         category, code = "provider", "provider_http_error"
-        status = exc.status_code
-    elif isinstance(exc, httpx.HTTPStatusError):
-        category, code = "transport", "transport_retries_exhausted"
-        status = exc.response.status_code
-    elif isinstance(exc, httpx.TransportError):
-        category, code = "transport", "transport_retries_exhausted"
-    elif isinstance(exc, (UnexpectedModelBehavior, UserError)):
+    elif _has_connection_failure(exc):
+        category, code = "transport", _transport_exhaustion_code(exc)
+    elif isinstance(exc, ModelAPIError):
+        category, code = "provider", "provider_api_error"
+    elif isinstance(exc, UserError):
+        category, code = "configuration", "agent_configuration_invalid"
+    elif isinstance(exc, UnexpectedModelBehavior):
         category, code = "output_validation", "typed_output_invalid"
 
     message = _redact(str(exc), secret=secret)
@@ -810,7 +1103,6 @@ def classify_execution_error(exc: BaseException, *, secret: str = "") -> Classif
         "http_status": status,
         "redacted": True,
     }
-    response_body = _provider_response_body(exc)
     if response_body is not None:
         diagnostic["provider_response"] = _redact(response_body, secret=secret)
     validation_errors = _validation_error_payload(exc, secret=secret)
@@ -825,15 +1117,148 @@ def classify_execution_error(exc: BaseException, *, secret: str = "") -> Classif
     )
 
 
-def _provider_response_body(exc: BaseException) -> str | None:
-    if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.text
-    if isinstance(exc, APIStatusError):
-        try:
-            return json.dumps(exc.body, ensure_ascii=False, sort_keys=True, default=str)
-        except TypeError:  # pragma: no cover - default=str handles normal SDK bodies.
-            return str(exc.body)
+def _raise_stream_boundary_error(
+    response: ModelResponse,
+    *,
+    cause: BaseException | None = None,
+) -> None:
+    if isinstance(cause, (KeyboardInterrupt, SystemExit, asyncio.CancelledError)):
+        return
+    if cause is not None and _has_connection_failure(cause):
+        # Preserve the concrete connect/read/write error so retry evidence can
+        # distinguish first-event timeout from a dropped active stream.
+        return
+    try:
+        raise_for_incomplete_stream(response)
+    except (ProviderOutputTruncated, ProviderStreamIncomplete) as exc:
+        raise exc from cause
+    if (
+        isinstance(cause, UnexpectedModelBehavior)
+        and "streamed response ended without content or tool calls" in str(cause).casefold()
+    ):
+        raise ProviderStreamIncomplete(
+            "Provider stream ended without content or a protocol completion payload."
+        ) from cause
+
+
+def _retry_delay_seconds(
+    *,
+    budget: ActivationRequestBudget,
+    retry_after_seconds: float | None,
+) -> float:
+    if retry_after_seconds is not None:
+        return min(300.0, max(0.0, retry_after_seconds))
+    retry_number = budget.transport_retry_count + 1
+    base = min(60.0, float(2 ** max(0, retry_number - 1)))
+    return min(60.0, random.uniform(base * 0.5, base * 1.5))
+
+
+def _http_status(exc: BaseException) -> int | None:
+    for current in _exception_chain(exc):
+        if isinstance(current, ModelHTTPError):
+            return current.status_code
+        if isinstance(current, _PROVIDER_STATUS_ERRORS):
+            return int(current.status_code)
+        if isinstance(current, httpx.HTTPStatusError):
+            return current.response.status_code
     return None
+
+
+def _provider_response_body(exc: BaseException) -> str | None:
+    for current in _exception_chain(exc):
+        if isinstance(current, ModelHTTPError):
+            return json.dumps(current.body, ensure_ascii=False, sort_keys=True, default=str)
+        if isinstance(current, _PROVIDER_STATUS_ERRORS):
+            return json.dumps(current.body, ensure_ascii=False, sort_keys=True, default=str)
+        if isinstance(current, httpx.HTTPStatusError):
+            return current.response.text
+    return None
+
+
+def _has_connection_failure(exc: BaseException) -> bool:
+    return any(
+        isinstance(current, (httpx.TransportError, *_PROVIDER_CONNECTION_ERRORS))
+        for current in _exception_chain(exc)
+    )
+
+
+def _transport_failure_reason(
+    exc: BaseException,
+    *,
+    attempt: ProviderAttempt | None,
+) -> str:
+    chain = _exception_chain(exc)
+    if any(isinstance(current, httpx.ConnectTimeout | httpx.ConnectError) for current in chain):
+        return "provider_connect_failed"
+    if any(isinstance(current, httpx.PoolTimeout) for current in chain):
+        return "provider_pool_timeout"
+    if any(isinstance(current, httpx.WriteTimeout | httpx.WriteError) for current in chain):
+        return "provider_write_failed"
+    if any(isinstance(current, httpx.ReadTimeout) for current in chain):
+        return (
+            "provider_stream_idle_timeout"
+            if attempt is not None and attempt.first_event_at_ms is not None
+            else "provider_first_event_timeout"
+        )
+    if any(
+        isinstance(current, httpx.ReadError | httpx.RemoteProtocolError)
+        for current in chain
+    ):
+        return (
+            "provider_stream_interrupted"
+            if attempt is not None and attempt.first_event_at_ms is not None
+            else "provider_response_interrupted"
+        )
+    return "provider_connection_interrupted"
+
+
+def _transport_exhaustion_code(exc: BaseException) -> str:
+    reason = _transport_failure_reason(exc, attempt=None)
+    return {
+        "provider_connect_failed": "provider_connect_retries_exhausted",
+        "provider_pool_timeout": "provider_pool_retries_exhausted",
+        "provider_write_failed": "provider_write_retries_exhausted",
+        "provider_first_event_timeout": "provider_read_timeout_retries_exhausted",
+        "provider_response_interrupted": "provider_connection_retries_exhausted",
+        "provider_connection_interrupted": "provider_connection_retries_exhausted",
+    }[reason]
+
+
+def _contains_quota_failure(body: str | None) -> bool:
+    if body is None:
+        return False
+    normalized = body.casefold()
+    return any(marker in normalized for marker in _QUOTA_MARKERS)
+
+
+def _retry_after_seconds(exc: BaseException) -> float | None:
+    for current in _exception_chain(exc):
+        response = getattr(current, "response", None)
+        if not isinstance(response, httpx.Response):
+            continue
+        value = response.headers.get("retry-after")
+        if value is None:
+            continue
+        try:
+            return max(0.0, float(value))
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(value)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            return max(0.0, retry_at.timestamp() - time.time())
+    return None
+
+
+def _exception_chain(exc: BaseException) -> list[BaseException]:
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    return chain
 
 
 def _validation_error_payload(exc: BaseException, *, secret: str) -> object | None:

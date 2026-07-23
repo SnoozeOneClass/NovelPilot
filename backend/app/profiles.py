@@ -1,14 +1,26 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
-from app.agents.binding import ProfileCredential
-from app.agents.contracts import ProfileCapabilities, ProfileSnapshot
+from app.agents.binding import (
+    ModelBindingError,
+    ProfileCapabilityError,
+    ProfileCredential,
+)
+from app.agents.contracts import (
+    ApiFamily,
+    JsonValue,
+    ProfileCapabilities,
+    ProfileSnapshot,
+    validate_profile_base_url,
+    validate_profile_request_options,
+)
 from app.store.content import prepare_canonical_json
 
 
@@ -30,11 +42,11 @@ class StoredProfile(BaseModel):
 
     id: str
     display_name: str
-    api_family: str
+    api_family: ApiFamily
     base_url: str
     api_key: SecretStr
     model_id: str
-    request_options: dict[str, Any] = Field(default_factory=dict)
+    request_options: dict[str, JsonValue] = Field(default_factory=dict)
     enabled: bool = True
     capability_test: CapabilityEvidence | None = None
 
@@ -44,6 +56,12 @@ class StoredProfile(BaseModel):
         if not value.strip():
             raise ValueError("Profile identity fields must be non-blank.")
         return value
+
+    @model_validator(mode="after")
+    def _protocol_request_options(self) -> StoredProfile:
+        validate_profile_base_url(self.api_family, self.base_url)
+        validate_profile_request_options(self.api_family, self.request_options)
+        return self
 
     @property
     def configuration_fingerprint(self) -> str:
@@ -68,10 +86,10 @@ class PublicProfile(BaseModel):
 
     id: str
     display_name: str
-    api_family: str
+    api_family: ApiFamily
     base_url: str
     model_id: str
-    request_options: dict[str, Any]
+    request_options: dict[str, JsonValue]
     enabled: bool
     has_api_key: bool
     capability_status: Literal["missing", "stale", "ready"]
@@ -84,6 +102,15 @@ class PublicProfile(BaseModel):
 class ResolvedProfile:
     snapshot: ProfileSnapshot
     credential: ProfileCredential
+
+
+@dataclass(frozen=True, slots=True)
+class ProfileFailureMaterial:
+    """Secret-safe material for persisting a zero-request Profile preflight failure."""
+
+    snapshot: ProfileSnapshot
+    credential: ProfileCredential
+    error: ModelBindingError
 
 
 class ProfileCatalog:
@@ -110,17 +137,59 @@ class ProfileCatalog:
         document = self.load()
         return document.selected_profile_id, [self._to_public(profile) for profile in document.profiles]
 
-    def resolve(self, profile_id: str) -> ResolvedProfile:
+    def get_stored(self, profile_id: str) -> StoredProfile:
         document = self.load()
         profile = next((item for item in document.profiles if item.id == profile_id), None)
         if profile is None:
             raise ProfileConfigurationError(f"Profile {profile_id!r} does not exist.")
+        return profile
+
+    def record_capability_evidence(
+        self,
+        *,
+        profile_id: str,
+        evidence: CapabilityEvidence,
+    ) -> None:
+        """Atomically replace one Profile's evidence while preserving local secrets."""
+
+        document = self.load()
+        updated_profiles: list[StoredProfile] = []
+        matched = False
+        for profile in document.profiles:
+            if profile.id != profile_id:
+                updated_profiles.append(profile)
+                continue
+            matched = True
+            if evidence.profile_fingerprint != profile.configuration_fingerprint:
+                raise ProfileConfigurationError(
+                    f"Capability evidence does not match Profile {profile_id!r}."
+                )
+            updated_profiles.append(profile.model_copy(update={"capability_test": evidence}))
+        if not matched:
+            raise ProfileConfigurationError(f"Profile {profile_id!r} does not exist.")
+
+        updated = document.model_copy(update={"profiles": updated_profiles})
+        encoded = encode_profiles_document(updated)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self._path.with_name(f".{self._path.name}.tmp")
+        try:
+            temporary.write_bytes(encoded)
+            os.replace(temporary, self._path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def resolve(self, profile_id: str) -> ResolvedProfile:
+        profile = self.get_stored(profile_id)
         if not profile.enabled:
             raise ProfileConfigurationError(f"Profile {profile_id!r} is disabled.")
         evidence = profile.capability_test
         if evidence is None:
             raise ProfileConfigurationError(
                 f"Profile {profile_id!r} has no capability evidence."
+            )
+        if evidence.source != "pydantic-ai-capability-v1":
+            raise ProfileConfigurationError(
+                f"Profile {profile_id!r} requires a current production Adapter capability probe."
             )
         if evidence.profile_fingerprint != profile.configuration_fingerprint:
             raise ProfileConfigurationError(
@@ -140,13 +209,78 @@ class ProfileCatalog:
             credential=ProfileCredential.from_plaintext(profile.api_key.get_secret_value()),
         )
 
+    def failure_material(
+        self,
+        profile_id: str,
+        *,
+        message: str,
+    ) -> ProfileFailureMaterial:
+        """Build a non-runnable snapshot used only to terminalize a failed preflight.
+
+        The returned error is handed to ``AgentExecutor.fail_preflight``; that
+        path never resolves an Adapter. A placeholder credential is used only
+        when the local Profile document itself cannot be read, and is never sent
+        or persisted.
+        """
+
+        capabilities = ProfileCapabilities()
+        try:
+            profile = self.get_stored(profile_id)
+        except ProfileConfigurationError:
+            snapshot = ProfileSnapshot.create(
+                profile_id=profile_id,
+                display_name="Unavailable local Profile",
+                api_family="openai_responses",
+                base_url="https://profile-unavailable.invalid/v1",
+                model_id="unavailable",
+                capabilities=capabilities,
+            )
+            return ProfileFailureMaterial(
+                snapshot=snapshot,
+                credential=ProfileCredential.from_plaintext("unavailable-local-credential"),
+                error=ModelBindingError(message),
+            )
+
+        if profile.capability_test is not None:
+            # Preserve the last declared task contract so a successful current
+            # probe followed by explicit Retry can reuse the frozen semantic plan.
+            # ProfileCatalog.resolve still blocks every Provider call while this
+            # evidence is missing, stale, or migration-only.
+            capabilities = profile.capability_test.capabilities
+        credential_value = profile.api_key.get_secret_value()
+        credential = ProfileCredential.from_plaintext(
+            credential_value or "unavailable-local-credential"
+        )
+        snapshot = ProfileSnapshot.create(
+            profile_id=profile.id,
+            display_name=profile.display_name,
+            api_family=profile.api_family,
+            base_url=profile.base_url,
+            model_id=profile.model_id,
+            capabilities=capabilities,
+            request_options=profile.request_options,
+        )
+        error: ModelBindingError
+        if profile.enabled:
+            error = ProfileCapabilityError(message)
+        else:
+            error = ModelBindingError(message)
+        return ProfileFailureMaterial(
+            snapshot=snapshot,
+            credential=credential,
+            error=error,
+        )
+
     @staticmethod
     def _to_public(profile: StoredProfile) -> PublicProfile:
         evidence = profile.capability_test
         if evidence is None:
             status: Literal["missing", "stale", "ready"] = "missing"
             capabilities = None
-        elif evidence.profile_fingerprint != profile.configuration_fingerprint:
+        elif (
+            evidence.source != "pydantic-ai-capability-v1"
+            or evidence.profile_fingerprint != profile.configuration_fingerprint
+        ):
             status = "stale"
             capabilities = evidence.capabilities
         else:
@@ -172,10 +306,10 @@ class ProfileCatalog:
 
 def profile_configuration_fingerprint(
     *,
-    api_family: str,
+    api_family: ApiFamily,
     base_url: str,
     model_id: str,
-    request_options: dict[str, Any],
+    request_options: dict[str, JsonValue],
 ) -> str:
     return prepare_canonical_json(
         {
@@ -243,11 +377,33 @@ def migrate_legacy_profiles(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def encode_profiles_document(value: dict[str, Any]) -> bytes:
+def encode_profiles_document(value: dict[str, Any] | ProfilesDocument) -> bytes:
     validated = ProfilesDocument.model_validate(value)
+    payload = {
+        "schema_version": validated.schema_version,
+        "selected_profile_id": validated.selected_profile_id,
+        "profiles": [
+            {
+                "id": profile.id,
+                "display_name": profile.display_name,
+                "api_family": profile.api_family,
+                "base_url": profile.base_url,
+                "api_key": profile.api_key.get_secret_value(),
+                "model_id": profile.model_id,
+                "request_options": profile.request_options,
+                "enabled": profile.enabled,
+                "capability_test": (
+                    None
+                    if profile.capability_test is None
+                    else profile.capability_test.model_dump(mode="json")
+                ),
+            }
+            for profile in validated.profiles
+        ],
+    }
     return (
         json.dumps(
-            validated.model_dump(mode="json"),
+            payload,
             ensure_ascii=False,
             indent=2,
             sort_keys=True,

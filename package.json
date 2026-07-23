@@ -20,6 +20,7 @@
     "frontend:typecheck": "npm.cmd --prefix frontend run typecheck",
     "acceptance": "scripts\\python.cmd scripts/acceptance_report.py",
     "profile:migrate": "scripts\\python.cmd scripts/migrate_profile_config.py",
+    "profile:probe": "scripts\\python.cmd scripts/probe_profile.py",
     "audit:secrets": "scripts\\python.cmd scripts/audit_runtime_secrets.py",
     "observe:live-book-series": "scripts\\python.cmd scripts/live_book_observation_series.py",
     "lint": "npm.cmd run backend:lint && npm.cmd run frontend:lint",

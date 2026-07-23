@@ -40,7 +40,27 @@ Profile 与 API key 位于 git ignored 的：
 config/llm-profiles.local.json
 ```
 
+可从不含真实凭据的 `config/llm-profiles.example.json` 复制字段结构；只把 API key 写入 `.local.json`。
+
 运行时只接受 schema version 2，并要求 capability evidence 与当前配置 fingerprint 一致。项目可为 Book、Arc、Chapter、Evaluator 分别选择 Profile；未指定时使用 default Profile。`model_id` 不参与领域分支，同一 `api_family` 下切换模型不改变 Harness 结构。
+
+目前只支持两个显式协议，协议由 Profile 选择，不能根据模型名推断或静默切换：
+
+- `openai_responses`：`base_url` 必须以 `/v1` 结尾，Adapter 再拼接 `/responses`。未配置 `request_options.max_tokens` 时，请求不会发送 `max_output_tokens`。
+- `anthropic_messages`：`base_url` 必须是 `/v1/messages` 之前的服务根地址，不能以 `/v1` 结尾；Adapter 会拼接 `/v1/messages`。该协议必须显式设置一个经真实探测确认的较大 `request_options.max_tokens`，例如 `65536`，不会采用 Pydantic AI 的隐式 `4096`。
+
+`request_options` 属于 Profile fingerprint，不能包含 API key、Authorization、Cookie 或签名 URL。完整响应若以 `length`/`max_tokens` 截断会明确失败并进入失败暂停，不会提交半截 JSON 或正文。
+
+创建或修改 Profile 后，用同一个生产 Adapter 探测结构化输出、文本流、usage，以及需要时的工具调用：
+
+```powershell
+npm.cmd run profile:probe -- grok-4.5
+npm.cmd run profile:probe -- tool-profile --require-tools
+```
+
+所有探测通过后才会原子更新 capability evidence；`--no-write` 只执行探测。任何 `api_family + base_url + model_id + request_options` 变化都会使旧 evidence 失效，旧迁移标记也只显示为 stale，不能替代当前 Adapter 探测。命令不会打印 API key。
+
+运行中的项目若在领取下一任务时发现 Profile 缺失、disabled 或 capability stale，会用零 Provider 请求写入一次明确失败并进入 `failure_paused`，不会让 queued task 被后台反复领取。修好配置并重新探测后，仍需用户显式 Retry。
 
 从旧本地配置一次性迁移：
 

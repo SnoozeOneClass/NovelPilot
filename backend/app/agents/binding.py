@@ -2,22 +2,32 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 import httpx
+from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
+from pydantic import SecretStr
 from pydantic_ai import ModelProfile
 from pydantic_ai.models import Model
+from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.models.openai import OpenAIResponsesModel
+from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.settings import ModelSettings
-from pydantic import SecretStr
 
-from app.agents.contracts import CapabilityName, ProfileSnapshot
+from app.agents.contracts import (
+    CONNECT_TIMEOUT_MS,
+    POOL_TIMEOUT_MS,
+    READ_TIMEOUT_MS,
+    WRITE_TIMEOUT_MS,
+    CapabilityName,
+    ProfileSnapshot,
+)
 from app.agents.transport import (
     ActivationRequestBudget,
     RequestCountingModel,
-    build_retrying_transport,
+    build_observed_transport,
 )
 
 
@@ -83,10 +93,13 @@ class Adapter(Protocol):
     ) -> ResolvedModelBinding: ...
 
 
+TransportFactory = Callable[[], httpx.AsyncBaseTransport]
+
+
 @dataclass(slots=True)
 class OpenAIResponsesAdapter:
     key: str = "openai_responses"
-    transport_factory: Callable[[ActivationRequestBudget], httpx.AsyncBaseTransport] | None = None
+    transport_factory: TransportFactory | None = None
 
     def build(
         self,
@@ -95,14 +108,14 @@ class OpenAIResponsesAdapter:
         credential: ProfileCredential,
         model_request_limit: int,
     ) -> ResolvedModelBinding:
-        budget = ActivationRequestBudget(model_request_limit=model_request_limit)
-        transport = (
-            self.transport_factory(budget)
-            if self.transport_factory is not None
-            else build_retrying_transport(budget=budget)
+        budget = ActivationRequestBudget(
+            model_request_limit=model_request_limit,
+            protocol=self.key,
         )
-        timeout = httpx.Timeout(connect=10.0, pool=10.0, write=60.0, read=600.0)
-        http_client = httpx.AsyncClient(transport=transport, timeout=timeout)
+        http_client = _build_http_client(
+            budget=budget,
+            transport_factory=self.transport_factory,
+        )
         client = AsyncOpenAI(
             api_key=credential.api_key.get_secret_value(),
             base_url=profile.base_url,
@@ -110,14 +123,53 @@ class OpenAIResponsesAdapter:
             max_retries=0,
         )
         provider = OpenAIProvider(openai_client=client)
-        framework_profile = ModelProfile(
-            supports_tools=profile.capabilities.tool_calling,
-            supports_json_schema_output=profile.capabilities.native_json_schema,
-            default_structured_output_mode="native",
-        )
+        framework_profile = _framework_profile(profile)
         settings = cast(ModelSettings, dict(profile.request_options))
         raw_model = OpenAIResponsesModel(
             profile.model_id,  # opaque endpoint identifier; never inspected here.
+            provider=provider,
+            profile=framework_profile,
+            settings=settings,
+        )
+        return ResolvedModelBinding(
+            model=RequestCountingModel(raw_model, budget=budget),
+            budget=budget,
+            adapter_key=self.key,
+            _http_client=http_client,
+        )
+
+
+@dataclass(slots=True)
+class AnthropicMessagesAdapter:
+    key: str = "anthropic_messages"
+    transport_factory: TransportFactory | None = None
+
+    def build(
+        self,
+        *,
+        profile: ProfileSnapshot,
+        credential: ProfileCredential,
+        model_request_limit: int,
+    ) -> ResolvedModelBinding:
+        budget = ActivationRequestBudget(
+            model_request_limit=model_request_limit,
+            protocol=self.key,
+        )
+        http_client = _build_http_client(
+            budget=budget,
+            transport_factory=self.transport_factory,
+        )
+        client = AsyncAnthropic(
+            api_key=credential.api_key.get_secret_value(),
+            base_url=profile.base_url,
+            http_client=http_client,
+            max_retries=0,
+        )
+        provider = AnthropicProvider(anthropic_client=client)
+        framework_profile = _framework_profile(profile)
+        settings = cast(ModelSettings, dict(profile.request_options))
+        raw_model = AnthropicModel(
+            cast(Any, profile.model_id),  # Opaque endpoint identifier; never inspected here.
             provider=provider,
             profile=framework_profile,
             settings=settings,
@@ -134,7 +186,7 @@ class ModelBindingResolver:
     """Resolve solely by api_family after validating the frozen Profile contract."""
 
     def __init__(self, adapters: list[Adapter] | None = None) -> None:
-        configured = adapters or [OpenAIResponsesAdapter()]
+        configured = adapters or [OpenAIResponsesAdapter(), AnthropicMessagesAdapter()]
         self._adapters = {adapter.key: adapter for adapter in configured}
         if len(self._adapters) != len(configured):
             raise ValueError("Duplicate ModelBinding adapter key.")
@@ -166,3 +218,29 @@ class ModelBindingResolver:
             credential=credential,
             model_request_limit=model_request_limit,
         )
+
+
+def _build_http_client(
+    *,
+    budget: ActivationRequestBudget,
+    transport_factory: TransportFactory | None,
+) -> httpx.AsyncClient:
+    wrapped = transport_factory() if transport_factory is not None else None
+    timeout = httpx.Timeout(
+        connect=CONNECT_TIMEOUT_MS / 1_000,
+        pool=POOL_TIMEOUT_MS / 1_000,
+        write=WRITE_TIMEOUT_MS / 1_000,
+        read=READ_TIMEOUT_MS / 1_000,
+    )
+    return httpx.AsyncClient(
+        transport=build_observed_transport(budget=budget, wrapped=wrapped),
+        timeout=timeout,
+    )
+
+
+def _framework_profile(profile: ProfileSnapshot) -> ModelProfile:
+    return ModelProfile(
+        supports_tools=profile.capabilities.tool_calling,
+        supports_json_schema_output=profile.capabilities.native_json_schema,
+        default_structured_output_mode="native",
+    )

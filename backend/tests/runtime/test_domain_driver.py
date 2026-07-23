@@ -14,7 +14,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from sqlalchemy import func, select
 
 from app.agents.binding import ProfileCredential, ResolvedModelBinding
-from app.agents.contracts import ProfileCapabilities
+from app.agents.contracts import CapabilityName, ProfileCapabilities, ProfileSnapshot
 from app.agents.executor import AgentExecutor
 from app.agents.registry import DEFAULT_TASK_REGISTRY
 from app.agents.transport import ActivationRequestBudget, RequestCountingModel
@@ -64,13 +64,17 @@ class DeterministicNovelResolver:
     def resolve(
         self,
         *,
-        profile: object,
+        profile: ProfileSnapshot,
         expected_profile_fingerprint: str,
-        required_capabilities: object,
+        required_capabilities: tuple[CapabilityName, ...],
         model_request_limit: int,
         credential: ProfileCredential,
     ) -> ResolvedModelBinding:
-        del profile, expected_profile_fingerprint, required_capabilities, credential
+        del expected_profile_fingerprint, credential
+        assert all(
+            profile.capabilities.supports(capability)
+            for capability in required_capabilities
+        )
         budget = ActivationRequestBudget(model_request_limit=model_request_limit)
 
         def response(messages: list[object], _info: AgentInfo) -> ModelResponse:
@@ -92,10 +96,10 @@ class DeterministicNovelResolver:
             task_kind = re.search(r"NovelPilot task: ([^\s]+)", prompt)
             assert task_kind is not None
             payload = _task_output(task_kind.group(1), prompt)
-            assert isinstance(payload, str)
-            midpoint = max(1, len(payload) // 2)
-            yield payload[:midpoint]
-            yield payload[midpoint:]
+            text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+            midpoint = max(1, len(text) // 2)
+            yield text[:midpoint]
+            yield text[midpoint:]
 
         model = RequestCountingModel(
             FunctionModel(response, stream_function=stream_response),
@@ -300,7 +304,11 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
     raise AssertionError(f"Unhandled offline task kind: {task_kind}")
 
 
-def _write_profile(path: Path) -> None:
+def _write_profile(
+    path: Path,
+    *,
+    capability_source: str = "pydantic-ai-capability-v1",
+) -> None:
     capabilities = ProfileCapabilities(text_streaming=True, native_json_schema=True)
     fingerprint = profile_configuration_fingerprint(
         api_family="openai_responses",
@@ -326,7 +334,7 @@ def _write_profile(path: Path) -> None:
                         "capability_test": {
                             "checked_at": "2026-07-23T00:00:00Z",
                             "profile_fingerprint": fingerprint,
-                            "source": "pydantic-ai-capability-v1",
+                            "source": capability_source,
                             "capabilities": capabilities.model_dump(mode="json"),
                         },
                     }
@@ -336,6 +344,186 @@ def _write_profile(path: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def test_stale_profile_preflight_fails_once_without_provider_request(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "stale-profile.sqlite3"
+    profile_path = tmp_path / "profiles.local.json"
+    command.upgrade(alembic_config(database), "head")
+    _write_profile(
+        profile_path,
+        capability_source="legacy-responses-capability-v1",
+    )
+
+    async def exercise() -> None:
+        engine = create_sqlite_async_engine(database)
+        try:
+            bus = CommandBus(engine)
+            created = await ProjectCommandService(bus).create_project(
+                CreateProjectRequest(
+                    project_id="project-stale-profile",
+                    creator_brief="A Profile preflight must fail without calling the Provider.",
+                    operation_mode="full_auto",
+                    default_profile_id="offline-profile",
+                ),
+                idempotency_key="create-stale-profile-project",
+            )
+            await RunControlService(bus).start(
+                RunControlRequest(
+                    project_id=created.result.project_id,
+                    run_id=created.result.generation_run_id,
+                    expected_lock_version=1,
+                ),
+                idempotency_key="start-stale-profile-run",
+            )
+            executor = AgentExecutor(
+                engine,
+                registry=DEFAULT_TASK_REGISTRY,
+                resolver=DeterministicNovelResolver(),
+            )
+            run_engine = RunEngine(
+                engine,
+                driver=DomainRunDriver(
+                    engine,
+                    profile_catalog=ProfileCatalog(profile_path),
+                    executor=executor,
+                    now_ms=lambda: 100,
+                ),
+                reconciler=ReconcileService(engine, bus, now_ms=lambda: 100),
+                instance_id="stale-profile-engine",
+                now_ms=lambda: 100,
+            )
+
+            assert await run_engine.run_once()  # Freeze a preflight diagnostic Task Plan.
+            assert await run_engine.run_once()  # Persist the zero-request failed attempt.
+            assert not await run_engine.run_once()  # Reconcile into failure_paused.
+            assert not await run_engine.run_once()  # No queued/pending retry loop remains.
+
+            async with engine.connect() as connection:
+                run = (
+                    await connection.execute(
+                        select(
+                            generation_runs.c.status,
+                            generation_runs.c.blocking_task_id,
+                            generation_runs.c.failure_code,
+                            generation_runs.c.lock_version,
+                        ).where(
+                            generation_runs.c.id == created.result.generation_run_id
+                        )
+                    )
+                ).one()
+                task = (
+                    await connection.execute(
+                        select(
+                            agent_tasks.c.id,
+                            agent_tasks.c.status,
+                            agent_tasks.c.delivery_state,
+                        ).where(
+                            agent_tasks.c.project_id == created.result.project_id
+                        )
+                    )
+                ).one()
+                attempt = (
+                    await connection.execute(
+                        select(
+                            agent_task_attempts.c.status,
+                            agent_task_attempts.c.provider_request_count,
+                            agent_task_attempts.c.transport_retry_count,
+                            agent_task_attempts.c.model_request_count,
+                            agent_task_attempts.c.error_code,
+                            agent_task_attempts.c.error_category,
+                        ).where(
+                            agent_task_attempts.c.project_id == created.result.project_id
+                        )
+                    )
+                ).one()
+                attempt_count = int(
+                    (
+                        await connection.execute(
+                            select(func.count()).select_from(agent_task_attempts).where(
+                                agent_task_attempts.c.project_id
+                                == created.result.project_id
+                            )
+                        )
+                    ).scalar_one()
+                )
+
+            assert tuple(run) == (
+                "failure_paused",
+                task.id,
+                "profile_capability_missing",
+                3,
+            )
+            assert (task.status, task.delivery_state) == ("failed", "not_ready")
+            assert tuple(attempt) == (
+                "failed",
+                0,
+                0,
+                0,
+                "profile_capability_missing",
+                "capability",
+            )
+            assert attempt_count == 1
+
+            profile_document = json.loads(profile_path.read_text(encoding="utf-8"))
+            profile_document["profiles"][0]["capability_test"]["source"] = (
+                "pydantic-ai-capability-v1"
+            )
+            profile_path.write_text(
+                json.dumps(profile_document, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            retried = await RunControlService(bus).retry_failed_task(
+                RetryFailedTaskRequest(
+                    project_id=created.result.project_id,
+                    run_id=created.result.generation_run_id,
+                    expected_lock_version=run.lock_version,
+                    task_id=task.id,
+                ),
+                idempotency_key="retry-stale-profile-task",
+            )
+            assert retried.result.status == "running"
+            assert await run_engine.run_once()
+            assert await run_engine.run_once()
+
+            async with engine.connect() as connection:
+                recovered_run = (
+                    await connection.execute(
+                        select(
+                            generation_runs.c.status,
+                            generation_runs.c.failure_code,
+                        ).where(
+                            generation_runs.c.id == created.result.generation_run_id
+                        )
+                    )
+                ).one()
+                attempts = (
+                    await connection.execute(
+                        select(
+                            agent_task_attempts.c.attempt_number,
+                            agent_task_attempts.c.retry_kind,
+                            agent_task_attempts.c.status,
+                            agent_task_attempts.c.error_code,
+                        )
+                        .where(
+                            agent_task_attempts.c.project_id
+                            == created.result.project_id
+                        )
+                        .order_by(agent_task_attempts.c.attempt_number)
+                    )
+                ).all()
+
+            assert tuple(recovered_run) == ("waiting_for_user", None)
+            assert [tuple(item) for item in attempts] == [
+                (1, "initial", "failed", "profile_capability_missing"),
+                (2, "user_retry", "succeeded", None),
+            ]
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
 
 
 def test_rejected_domain_delivery_failure_pauses_once_and_requires_explicit_retry(

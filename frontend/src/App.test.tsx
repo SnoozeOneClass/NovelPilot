@@ -26,18 +26,21 @@ import { App } from "./App";
 
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
-  listeners = new Map<string, () => void>();
+  listeners = new Map<string, (event: Event) => void>();
 
   constructor(_url: string) {
     FakeEventSource.instances.push(this);
   }
 
-  addEventListener(kind: string, listener: () => void) {
+  addEventListener(kind: string, listener: (event: Event) => void) {
     this.listeners.set(kind, listener);
   }
 
-  emit(kind: string) {
-    this.listeners.get(kind)?.();
+  emit(kind: string, data?: object) {
+    const event = data === undefined
+      ? new Event(kind)
+      : new MessageEvent(kind, { data: JSON.stringify(data) });
+    this.listeners.get(kind)?.(event);
   }
 
   close() {}
@@ -156,5 +159,43 @@ describe("App authoritative workspace", () => {
     FakeEventSource.instances[0]?.emit("domain_event");
     await waitFor(() => expect(api.getProject.mock.calls.length).toBeGreaterThan(1));
     expect(api.runControl).not.toHaveBeenCalled();
+  });
+
+  it("replaces abandoned live prose when a frozen task attempt restarts", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <ThemeProvider><App /></ThemeProvider>
+      </QueryClientProvider>
+    );
+    await screen.findByText("失败后暂停");
+    const source = FakeEventSource.instances[0];
+    const base = {
+      project_id: "project-a",
+      task_id: "chapter-draft",
+      attempt_id: "attempt-a",
+      delta: null,
+      provider_request_number: null,
+      provider_request_limit: null,
+      reason: null,
+      retry_delay_ms: null
+    };
+
+    source?.emit("agent_live", { ...base, kind: "task_started" });
+    source?.emit("agent_live", { ...base, kind: "prose_delta", delta: "abandoned prose" });
+    expect(await screen.findByText("abandoned prose")).toBeInTheDocument();
+
+    source?.emit("agent_live", {
+      ...base,
+      kind: "attempt_restarting",
+      provider_request_number: 1,
+      provider_request_limit: 6,
+      reason: "provider_stream_incomplete",
+      retry_delay_ms: 1000
+    });
+    await waitFor(() => expect(screen.queryByText("abandoned prose")).not.toBeInTheDocument());
+
+    source?.emit("agent_live", { ...base, kind: "prose_delta", delta: "replacement prose" });
+    expect(await screen.findByText("replacement prose")).toBeInTheDocument();
   });
 });
