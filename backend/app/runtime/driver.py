@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.agents.binding import ProfileCredential
@@ -42,17 +45,61 @@ from app.domain.chapter.contracts import (
     SubmitChapterRequest,
 )
 from app.domain.completion import ApplyBookProgressRequest, CompletionCommandService
+from app.domain.commands import CommandPreconditionError
 from app.profiles import ProfileCatalog
 from app.runtime.context import HarnessContextBuilder
+from app.runtime.failures import DeliveryFailureService, NormalizedDeliveryFailure
 from app.store.agent_tasks import AgentTaskStore
 from app.store.command_bus import CommandBus
 from app.store.content import prepare_canonical_json
 from app.store.execution import ActionableTaskRecord
 from app.store.runs import GenerationRunRecord
 
+LOGGER = logging.getLogger(__name__)
+
 
 class HarnessInvariantError(RuntimeError):
     """Authoritative facts do not describe one legal next Domain Harness action."""
+
+
+def _normalize_delivery_failure(error: Exception) -> NormalizedDeliveryFailure:
+    if isinstance(error, ValidationError):
+        details: dict[str, object] | None = {
+            "validation_errors": [
+                {
+                    "type": item["type"],
+                    "loc": list(item["loc"]),
+                    "message": item["msg"],
+                }
+                for item in error.errors(include_url=False, include_context=False, include_input=False)
+            ]
+        }
+        return NormalizedDeliveryFailure(
+            code="domain_delivery_contract_invalid",
+            message="The successful Agent result does not match its Domain delivery contract.",
+            exception_type=type(error).__name__,
+            details=details,
+        )
+    if isinstance(error, CommandPreconditionError):
+        return NormalizedDeliveryFailure(
+            code="domain_delivery_rejected",
+            message=str(error),
+            exception_type=type(error).__name__,
+        )
+    if isinstance(error, HarnessInvariantError):
+        return NormalizedDeliveryFailure(
+            code="harness_delivery_invariant",
+            message=str(error),
+            exception_type=type(error).__name__,
+        )
+    return NormalizedDeliveryFailure(
+        code="domain_delivery_unexpected",
+        message=(
+            "An unexpected implementation error prevented the successful Agent result "
+            "from being applied."
+        ),
+        exception_type=type(error).__name__,
+    )
 
 
 class TaskExecutor(Protocol):
@@ -160,6 +207,10 @@ class DomainRunDriver:
         self._chapters = ChapterCommandService(bus)
         self._changes = ChangeRequestCommandService(bus)
         self._completion = CompletionCommandService(bus)
+        self._delivery_failures = DeliveryFailureService(
+            bus,
+            now_ms=self._now_ms,
+        )
 
     async def drive_one(self, run: GenerationRunRecord) -> None:
         async with UnitOfWork(self._engine) as store:
@@ -168,7 +219,20 @@ class DomainRunDriver:
             if actionable.task_status == "queued":
                 await self._execute_task(actionable)
             else:
-                await self._deliver_task(actionable)
+                try:
+                    await self._deliver_task(actionable)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    LOGGER.exception(
+                        "Domain delivery failed for task %s attempt %s",
+                        actionable.task_id,
+                        actionable.attempt_id,
+                    )
+                    await self._delivery_failures.failure_pause(
+                        task=actionable,
+                        failure=_normalize_delivery_failure(error),
+                    )
             return
 
         instruction = await self._decide_next(run)

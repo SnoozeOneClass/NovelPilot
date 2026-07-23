@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -34,9 +35,12 @@ from app.domain.book.contracts import (
     ApplyBookDiscussionTaskRequest,
     ApproveBookRequest,
     BookCandidatePack,
+    BookConstraintsRepair,
+    BookDirectionRepair,
     BookDiscussionState,
     BookEvaluation,
     BookRepairContract,
+    BookRepairPatch,
     CompletionContract,
     RecordBookReviewRequest,
     RecordBookUserInputRequest,
@@ -813,8 +817,13 @@ def test_book_local_repair_is_scope_bounded_and_sixth_cycle_failure_pauses_run(
             )
             assert reviewed.result.decision == "local_repair"
 
-            unauthorized = original.model_copy(
-                update={"constraints": {"pov": "first-person"}}
+            unauthorized = BookRepairPatch(
+                changes=[
+                    BookConstraintsRepair(
+                        component="constraints",
+                        value={"pov": "first-person"},
+                    )
+                ]
             )
             await insert_successful_task(
                 engine,
@@ -842,13 +851,16 @@ def test_book_local_repair_is_scope_bounded_and_sixth_cycle_failure_pauses_run(
                     idempotency_key="reject-unauthorized-book-repair",
                 )
 
-            repaired_candidate = original.model_copy(
-                update={
-                    "direction": (
+            repaired_candidate = BookRepairPatch(
+                changes=[
+                    BookDirectionRepair(
+                        component="direction",
+                        value=(
                         "A witness detects a memory edit through an impossible timestamp, "
                         "then investigates who altered her testimony."
+                        ),
                     )
-                }
+                ]
             )
             await insert_successful_task(
                 engine,
@@ -876,14 +888,46 @@ def test_book_local_repair_is_scope_bounded_and_sixth_cycle_failure_pauses_run(
             )
             assert repaired.result.workspace_lock_version == 5
             async with engine.connect() as connection:
-                assert (
-                    await connection.scalar(
-                        select(book_workspaces.c.semantic_repair_count).where(
-                            book_workspaces.c.book_id == project.result.book_id
-                        )
+                workspace = (
+                    await connection.execute(
+                        select(
+                            book_workspaces.c.semantic_repair_count,
+                            book_workspaces.c.candidate_constraints_ref_id,
+                            book_workspaces.c.candidate_titles_ref_id,
+                            book_workspaces.c.candidate_rolling_plan_ref_id,
+                            book_workspaces.c.candidate_completion_contract_ref_id,
+                        ).where(book_workspaces.c.book_id == project.result.book_id)
                     )
-                    == 1
+                ).one()
+                assert workspace.semantic_repair_count == 1
+                repository = ContentRepository(connection)
+                assert workspace.candidate_titles_ref_id is not None
+                title_payload = json.loads(
+                    (
+                        await repository.get_packed(
+                            project_id="project-repair",
+                            ref_id=workspace.candidate_titles_ref_id,
+                        )
+                    ).unpack_and_verify()
                 )
+                preserved = []
+                for ref_id in (
+                    workspace.candidate_constraints_ref_id,
+                    workspace.candidate_rolling_plan_ref_id,
+                    workspace.candidate_completion_contract_ref_id,
+                ):
+                    assert ref_id is not None
+                    packed = await repository.get_packed(
+                        project_id="project-repair",
+                        ref_id=ref_id,
+                    )
+                    preserved.append(json.loads(packed.unpack_and_verify()))
+            assert preserved == [
+                original.constraints,
+                original.rolling_plan,
+                original.completion_contract.model_dump(mode="json"),
+            ]
+            assert title_payload["selected_title"] == original.selected_title
 
             exhausted_submission = await service.submit_for_review(
                 SubmitBookRequest(

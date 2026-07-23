@@ -6,13 +6,15 @@ from pathlib import Path
 
 import pytest
 from alembic import command
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.db.engine import create_sqlite_async_engine
 from app.db.maintenance import alembic_config
 from app.db.schema import (
+    agent_task_attempts,
+    agent_tasks,
     book_review_submissions,
     book_workspaces,
     books,
@@ -21,7 +23,12 @@ from app.db.schema import (
     projects,
     story_arcs,
 )
+from app.domain.book.contracts import BookEvaluation
+from app.domain.projects import CreateProjectRequest, ProjectCommandService
+from app.runtime.control import RunControlRequest, RunControlService
+from app.store.command_bus import CommandBus
 from app.store.content import ContentRepository, prepare_canonical_json, prepare_exact_text
+from tests.helpers.lifecycle_seed import insert_successful_task
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +261,71 @@ def test_partial_unique_indexes_reject_duplicate_pending_work(tmp_path: Path) ->
                                 updated_at_ms=ordinal,
                             )
                         )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+def test_delivery_failure_states_require_result_and_error_consistency(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "delivery-failure-constraints.sqlite3"
+    command.upgrade(alembic_config(database), "head")
+
+    async def exercise() -> None:
+        engine = create_sqlite_async_engine(database)
+        try:
+            bus = CommandBus(engine)
+            created = await ProjectCommandService(bus).create_project(
+                CreateProjectRequest(
+                    project_id="project-delivery-constraints",
+                    creator_brief="A schema constraint test.",
+                    operation_mode="full_auto",
+                ),
+                idempotency_key="create-delivery-constraints",
+            )
+            await RunControlService(bus).start(
+                RunControlRequest(
+                    project_id=created.result.project_id,
+                    run_id=created.result.generation_run_id,
+                    expected_lock_version=1,
+                ),
+                idempotency_key="start-delivery-constraints",
+            )
+            task_id, attempt_id = await insert_successful_task(
+                engine,
+                project_id=created.result.project_id,
+                run_id=created.result.generation_run_id,
+                task_id="task-delivery-constraints",
+                attempt_id="attempt-delivery-constraints",
+                role="evaluator",
+                task_kind="evaluate.book",
+                scope_layer="book",
+                book_id=created.result.book_id,
+                canon_baseline_id=created.result.canon_baseline_id,
+                workspace_lock_version=1,
+                result=BookEvaluation(
+                    decision="pass",
+                    summary="The candidate passes for this constraint fixture.",
+                ),
+            )
+
+            with pytest.raises(IntegrityError, match="CHECK constraint failed"):
+                async with engine.begin() as connection:
+                    await connection.execute(
+                        update(agent_task_attempts)
+                        .where(agent_task_attempts.c.id == attempt_id)
+                        .values(status="delivery_failed")
+                    )
+
+            with pytest.raises(IntegrityError, match="CHECK constraint failed"):
+                async with engine.begin() as connection:
+                    await connection.execute(
+                        update(agent_tasks)
+                        .where(agent_tasks.c.id == task_id)
+                        .values(delivery_state="failed")
+                    )
         finally:
             await engine.dispose()
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -15,6 +15,78 @@ ArcRepairComponent = Literal[
     "completion_signals",
 ]
 ArcReviewDecision = Literal["pass", "local_repair", "escalate_to_book", "needs_user"]
+
+
+class ArcTitleRepair(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    component: Literal["title"]
+    value: str = Field(min_length=1, description="Replacement Story Arc title.")
+
+
+class ArcPurposeRepair(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    component: Literal["purpose"]
+    value: str = Field(min_length=1, description="Replacement Story Arc purpose.")
+
+
+class ArcBeatsRepair(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    component: Literal["beats"]
+    value: list[str] = Field(min_length=1, description="Replacement ordered Story Arc beats.")
+
+
+class ArcTargetChapterCountRepair(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    component: Literal["target_chapter_count"]
+    value: int = Field(ge=1, le=30)
+
+
+class ArcCompletionSignalsRepair(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    component: Literal["completion_signals"]
+    value: list[str] = Field(
+        min_length=1,
+        description="Replacement observable Story Arc completion conditions.",
+    )
+
+
+ArcRepairChange = Annotated[
+    ArcTitleRepair
+    | ArcPurposeRepair
+    | ArcBeatsRepair
+    | ArcTargetChapterCountRepair
+    | ArcCompletionSignalsRepair,
+    Field(discriminator="component"),
+]
+
+
+class ArcRepairPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    changes: list[ArcRepairChange] = Field(
+        min_length=1,
+        max_length=5,
+        description=(
+            "Only Story Arc components authorized by the repair contract in frozen context. "
+            "Omitted components are preserved by the Harness and must not be repeated."
+        ),
+    )
+
+    @field_validator("changes")
+    @classmethod
+    def _unique_components(
+        cls,
+        value: list[ArcRepairChange],
+    ) -> list[ArcRepairChange]:
+        components = [change.component for change in value]
+        if len(components) != len(set(components)):
+            raise ValueError("An Arc repair patch may change each component at most once.")
+        return value
 
 
 class ArcEvaluation(BaseModel):

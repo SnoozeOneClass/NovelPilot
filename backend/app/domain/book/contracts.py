@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -206,6 +206,69 @@ BookRepairComponent = Literal[
     "rolling_plan",
     "completion_contract",
 ]
+
+
+class BookDirectionRepair(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    component: Literal["direction"]
+    value: str = Field(min_length=1, description="Replacement whole-book direction.")
+
+
+class BookConstraintsRepair(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    component: Literal["constraints"]
+    value: dict[str, object] = Field(
+        description="Replacement creative constraints for downstream planning."
+    )
+
+
+class BookRollingPlanRepair(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    component: Literal["rolling_plan"]
+    value: dict[str, object] = Field(description="Replacement rolling-plan strategy.")
+
+
+class BookCompletionContractRepair(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    component: Literal["completion_contract"]
+    value: CompletionContract
+
+
+BookRepairChange = Annotated[
+    BookDirectionRepair
+    | BookConstraintsRepair
+    | BookRollingPlanRepair
+    | BookCompletionContractRepair,
+    Field(discriminator="component"),
+]
+
+
+class BookRepairPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    changes: list[BookRepairChange] = Field(
+        min_length=1,
+        max_length=4,
+        description=(
+            "Only Book components authorized by the repair contract in frozen context. "
+            "Omitted components are preserved by the Harness and must not be repeated."
+        ),
+    )
+
+    @field_validator("changes")
+    @classmethod
+    def _unique_components(
+        cls,
+        value: list[BookRepairChange],
+    ) -> list[BookRepairChange]:
+        components = [change.component for change in value]
+        if len(components) != len(set(components)):
+            raise ValueError("A Book repair patch may change each component at most once.")
+        return value
 
 
 class BookRepairContract(BaseModel):

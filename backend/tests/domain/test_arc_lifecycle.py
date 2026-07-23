@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -26,7 +27,10 @@ from app.domain.arc.commands import ArcCommandService
 from app.domain.arc.contracts import (
     ApplyArcTaskRequest,
     ApproveArcRequest,
+    ArcBeatsRepair,
     ArcEvaluation,
+    ArcRepairPatch,
+    ArcTitleRepair,
     CommitArcAutoRequest,
     CreateStoryArcRequest,
     RecordArcReviewRequest,
@@ -51,6 +55,7 @@ from app.domain.projects import (
 )
 from app.runtime.control import RunControlRequest, RunControlService
 from app.store.command_bus import CommandBus
+from app.store.content import ContentRepository
 from tests.helpers.lifecycle_seed import insert_successful_task
 
 
@@ -682,12 +687,28 @@ def test_arc_local_repair_is_bounded_by_components_and_five_attempts(
                 ),
             )
             assert setup.review.next_action == "repair"
-            unauthorized = setup.plan.model_copy(
-                update={"title": "Unauthorized title", "beats": ["Repaired beat"]}
+            unauthorized = ArcRepairPatch(
+                changes=[
+                    ArcTitleRepair(component="title", value="Unauthorized title"),
+                    ArcBeatsRepair(component="beats", value=["Repaired beat"]),
+                ]
             )
-            authorized = setup.plan.model_copy(update={"beats": ["Repaired beat"]})
+            authorized = ArcRepairPatch(
+                changes=[
+                    ArcBeatsRepair(component="beats", value=["Repaired beat"]),
+                ]
+            )
+            no_op = ArcRepairPatch(
+                changes=[
+                    ArcBeatsRepair(component="beats", value=setup.plan.beats),
+                ]
+            )
             task_pairs: list[tuple[str, str]] = []
-            for suffix, result in (("unauthorized", unauthorized), ("authorized", authorized)):
+            for suffix, result in (
+                ("unauthorized", unauthorized),
+                ("no-op", no_op),
+                ("authorized", authorized),
+            ):
                 task_pairs.append(
                     await insert_successful_task(
                         engine,
@@ -719,31 +740,59 @@ def test_arc_local_repair_is_bounded_by_components_and_five_attempts(
                     ),
                     idempotency_key="repair:unauthorized",
                 )
+            with pytest.raises(CommandPreconditionError, match="no authorized change"):
+                await service.apply_task_result(
+                    ApplyArcTaskRequest(
+                        project_id=setup.book.project_id,
+                        book_id=setup.book.book_id,
+                        arc_id=setup.arc_id,
+                        task_id=task_pairs[1][0],
+                        attempt_id=task_pairs[1][1],
+                        expected_workspace_lock_version=setup.workspace_lock_version,
+                    ),
+                    idempotency_key="repair:no-op",
+                )
             repaired = await service.apply_task_result(
                 ApplyArcTaskRequest(
                     project_id=setup.book.project_id,
                     book_id=setup.book.book_id,
                     arc_id=setup.arc_id,
-                    task_id=task_pairs[1][0],
-                    attempt_id=task_pairs[1][1],
+                    task_id=task_pairs[2][0],
+                    attempt_id=task_pairs[2][1],
                     expected_workspace_lock_version=setup.workspace_lock_version,
                 ),
                 idempotency_key="repair:authorized",
             )
             assert repaired.result.delivery == "applied"
             async with engine.connect() as connection:
-                repair_count = await connection.scalar(
-                    select(arc_workspaces.c.semantic_repair_count).where(
-                        arc_workspaces.c.arc_id == setup.arc_id
+                workspace = (
+                    await connection.execute(
+                        select(
+                            arc_workspaces.c.semantic_repair_count,
+                            arc_workspaces.c.plan_ref_id,
+                        ).where(arc_workspaces.c.arc_id == setup.arc_id)
                     )
-                )
+                ).one()
                 unauthorized_state = await connection.scalar(
                     select(agent_tasks.c.delivery_state).where(
                         agent_tasks.c.id == task_pairs[0][0]
                     )
                 )
-                assert repair_count == 1
+                assert workspace.plan_ref_id is not None
+                packed = await ContentRepository(connection).get_packed(
+                    project_id=setup.book.project_id,
+                    ref_id=workspace.plan_ref_id,
+                )
+                merged_plan = ArcPlanProposal.model_validate(
+                    json.loads(packed.unpack_and_verify())
+                )
+                assert workspace.semantic_repair_count == 1
                 assert unauthorized_state == "pending"
+                assert merged_plan.beats == ["Repaired beat"]
+                assert merged_plan.purpose == setup.plan.purpose
+                assert merged_plan.title == setup.plan.title
+                assert merged_plan.target_chapter_count == setup.plan.target_chapter_count
+                assert merged_plan.completion_signals == setup.plan.completion_signals
 
             exhausted = await _prepare_reviewed_arc(
                 engine,

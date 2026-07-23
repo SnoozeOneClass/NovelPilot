@@ -1925,13 +1925,15 @@ agent_tasks = Table(
     _enum_ck(
         "delivery_state",
         "delivery_state",
-        ("not_ready", "pending", "applied", "discarded_stale"),
+        ("not_ready", "pending", "applied", "discarded_stale", "failed"),
     ),
     _ck(
         "success_delivery",
         "((status = 'succeeded' AND successful_attempt_id IS NOT NULL "
         "AND delivery_state IN ('pending', 'applied', 'discarded_stale')) "
-        "OR (status <> 'succeeded' AND successful_attempt_id IS NULL "
+        "OR (status = 'failed' AND successful_attempt_id IS NULL "
+        "AND delivery_state IN ('not_ready', 'failed')) "
+        "OR (status NOT IN ('succeeded', 'failed') AND successful_attempt_id IS NULL "
         "AND delivery_state = 'not_ready'))",
     ),
     _ck(
@@ -2048,7 +2050,11 @@ agent_task_attempts = Table(
     UniqueConstraint("project_id", "task_id", "id"),
     _ck("attempt_number_positive", "attempt_number >= 1"),
     _enum_ck("retry_kind", "retry_kind", ("initial", "crash_replay", "user_retry")),
-    _enum_ck("status", "status", ("queued", "running", "succeeded", "failed", "interrupted")),
+    _enum_ck(
+        "status",
+        "status",
+        ("queued", "running", "succeeded", "failed", "interrupted", "delivery_failed"),
+    ),
     _ck("framework_fingerprint", _sha_expression("framework_fingerprint")),
     _ck(
         "request_counters",
@@ -2088,6 +2094,14 @@ agent_task_attempts = Table(
         "failed_fields",
         "status <> 'failed' OR (result_ref_id IS NULL AND finished_at_ms IS NOT NULL "
         "AND error_code IS NOT NULL AND error_category IS NOT NULL AND error_ref_id IS NOT NULL)",
+    ),
+    _ck(
+        "delivery_failed_fields",
+        "status <> 'delivery_failed' OR (result_ref_id IS NOT NULL "
+        "AND finished_at_ms IS NOT NULL AND error_code IS NOT NULL "
+        "AND error_category = 'domain_delivery' AND error_ref_id IS NOT NULL "
+        "AND owner_instance_id IS NULL AND lease_token IS NULL "
+        "AND lease_expires_at_ms IS NULL AND heartbeat_at_ms IS NULL)",
     ),
     _ck(
         "interrupted_fields",

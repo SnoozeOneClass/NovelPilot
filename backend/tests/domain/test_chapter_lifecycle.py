@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,8 +12,11 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.agents.contracts import (
+    ChapterCanonRepair,
     ChapterDraftResult,
+    ChapterObservationRepairPatch,
     ChapterObservationResult,
+    ChapterObservationsRepair,
     ChapterPlanProposal,
     LayerEvaluationResult,
     SemanticCanonProposal,
@@ -41,8 +45,10 @@ from app.domain.chapter.contracts import (
     SubmitChapterRequest,
 )
 from app.domain.chapter.queries import ChapterQueryService
+from app.domain.commands import CommandPreconditionError
 from app.store.canon import CanonRepository
 from app.store.command_bus import CommandBus
+from app.store.content import ContentRepository
 from tests.helpers.lifecycle_seed import (
     ApprovedFoundation,
     insert_successful_task,
@@ -563,6 +569,264 @@ def test_local_repair_changes_only_authorized_component_and_consumes_one_budget(
             assert workspace.draft_ref_id is not None
             assert workspace.observations_ref_id is None
             assert workspace.candidate_canon_patch_ref_id is None
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+def test_observation_repair_patch_preserves_unauthorized_canon_component(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "chapter-observation-repair.sqlite3"
+    command.upgrade(alembic_config(database), "head")
+
+    async def exercise() -> None:
+        engine = create_sqlite_async_engine(database)
+        try:
+            ready = await _prepare_reviewed_chapter(
+                engine,
+                project_id="project-observation-repair",
+                target_chapter_count=2,
+                canon_change=True,
+                evaluation=LayerEvaluationResult(
+                    decision="local_repair",
+                    summary="The summary and continuity observation need clarification.",
+                    repair_scope=["observations"],
+                ),
+            )
+            service = ChapterCommandService(CommandBus(engine))
+            unauthorized = ChapterObservationRepairPatch(
+                changes=[
+                    ChapterCanonRepair(
+                        component="canon",
+                        canon_proposals=[],
+                    )
+                ]
+            )
+            unauthorized_task, unauthorized_attempt = await insert_successful_task(
+                engine,
+                project_id=ready.foundation.project_id,
+                run_id=ready.foundation.run_id,
+                task_id=f"{ready.chapter_id}:repair-unauthorized-canon",
+                attempt_id=f"{ready.chapter_id}:repair-unauthorized-canon:attempt",
+                role="chapter_writer",
+                task_kind="chapter.repair.observation",
+                scope_layer="chapter",
+                book_id=ready.foundation.book_id,
+                book_baseline_id=ready.foundation.book_baseline_id,
+                arc_id=ready.foundation.arc_id,
+                arc_baseline_id=ready.foundation.arc_baseline_id,
+                chapter_id=ready.chapter_id,
+                canon_baseline_id=ready.foundation.canon_baseline_id,
+                workspace_lock_version=ready.workspace_lock_version,
+                result=unauthorized,
+            )
+            with pytest.raises(CommandPreconditionError, match="unauthorized components"):
+                await service.apply_repair_result(
+                    ApplyChapterTaskRequest(
+                        project_id=ready.foundation.project_id,
+                        chapter_id=ready.chapter_id,
+                        task_id=unauthorized_task,
+                        attempt_id=unauthorized_attempt,
+                        expected_workspace_lock_version=ready.workspace_lock_version,
+                    ),
+                    idempotency_key=f"{ready.chapter_id}:reject-unauthorized-canon",
+                )
+
+            no_op = ChapterObservationRepairPatch(
+                changes=[
+                    ChapterObservationsRepair(
+                        component="observations",
+                        summary=(
+                            "Mara obtains physical evidence that memory edits affect documents."
+                        ),
+                        continuity_observations=[
+                            "Mara now has a reason to preserve analogue copies."
+                        ],
+                    )
+                ]
+            )
+            no_op_task, no_op_attempt = await insert_successful_task(
+                engine,
+                project_id=ready.foundation.project_id,
+                run_id=ready.foundation.run_id,
+                task_id=f"{ready.chapter_id}:repair-observations-no-op",
+                attempt_id=f"{ready.chapter_id}:repair-observations-no-op:attempt",
+                role="chapter_writer",
+                task_kind="chapter.repair.observation",
+                scope_layer="chapter",
+                book_id=ready.foundation.book_id,
+                book_baseline_id=ready.foundation.book_baseline_id,
+                arc_id=ready.foundation.arc_id,
+                arc_baseline_id=ready.foundation.arc_baseline_id,
+                chapter_id=ready.chapter_id,
+                canon_baseline_id=ready.foundation.canon_baseline_id,
+                workspace_lock_version=ready.workspace_lock_version,
+                result=no_op,
+            )
+            with pytest.raises(CommandPreconditionError, match="no authorized change"):
+                await service.apply_repair_result(
+                    ApplyChapterTaskRequest(
+                        project_id=ready.foundation.project_id,
+                        chapter_id=ready.chapter_id,
+                        task_id=no_op_task,
+                        attempt_id=no_op_attempt,
+                        expected_workspace_lock_version=ready.workspace_lock_version,
+                    ),
+                    idempotency_key=f"{ready.chapter_id}:reject-observation-no-op",
+                )
+
+            result = ChapterObservationRepairPatch(
+                changes=[
+                    ChapterObservationsRepair(
+                        component="observations",
+                        summary="Mara directly observes documentary evidence changing.",
+                        continuity_observations=[
+                            "Mara preserves analogue copies before continuing the investigation."
+                        ],
+                    )
+                ]
+            )
+            task_id, attempt_id = await insert_successful_task(
+                engine,
+                project_id=ready.foundation.project_id,
+                run_id=ready.foundation.run_id,
+                task_id=f"{ready.chapter_id}:repair-observations",
+                attempt_id=f"{ready.chapter_id}:repair-observations:attempt",
+                role="chapter_writer",
+                task_kind="chapter.repair.observation",
+                scope_layer="chapter",
+                book_id=ready.foundation.book_id,
+                book_baseline_id=ready.foundation.book_baseline_id,
+                arc_id=ready.foundation.arc_id,
+                arc_baseline_id=ready.foundation.arc_baseline_id,
+                chapter_id=ready.chapter_id,
+                canon_baseline_id=ready.foundation.canon_baseline_id,
+                workspace_lock_version=ready.workspace_lock_version,
+                result=result,
+            )
+            applied = await service.apply_repair_result(
+                ApplyChapterTaskRequest(
+                    project_id=ready.foundation.project_id,
+                    chapter_id=ready.chapter_id,
+                    task_id=task_id,
+                    attempt_id=attempt_id,
+                    expected_workspace_lock_version=ready.workspace_lock_version,
+                ),
+                idempotency_key=f"{ready.chapter_id}:apply-observation-repair",
+            )
+            assert applied.result.component == "repair_observations"
+            async with engine.connect() as connection:
+                observations_ref_id = await connection.scalar(
+                    select(chapter_workspaces.c.observations_ref_id).where(
+                        chapter_workspaces.c.chapter_id == ready.chapter_id
+                    )
+                )
+                assert observations_ref_id is not None
+                packed = await ContentRepository(connection).get_packed(
+                    project_id=ready.foundation.project_id,
+                    ref_id=observations_ref_id,
+                )
+                observations = ChapterObservationResult.model_validate(
+                    json.loads(packed.unpack_and_verify())
+                )
+            assert observations.summary == result.changes[0].summary
+            assert observations.continuity_observations == (
+                result.changes[0].continuity_observations
+            )
+            assert len(observations.canon_proposals) == 1
+            assert observations.canon_proposals[0].subject == "Mara"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+def test_canon_repair_patch_preserves_unauthorized_observation_components(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "chapter-canon-repair.sqlite3"
+    command.upgrade(alembic_config(database), "head")
+
+    async def exercise() -> None:
+        engine = create_sqlite_async_engine(database)
+        try:
+            ready = await _prepare_reviewed_chapter(
+                engine,
+                project_id="project-canon-repair",
+                target_chapter_count=2,
+                canon_change=True,
+                evaluation=LayerEvaluationResult(
+                    decision="local_repair",
+                    summary="Only the Canon proposal needs correction.",
+                    repair_scope=["canon"],
+                ),
+            )
+            replacement = SemanticCanonProposal(
+                category="world_facts",
+                operation="add",
+                subject="Mutable documentary evidence",
+                semantic_change="Written statements can change while a witness watches.",
+                evidence_hint="The blue ink changed while she watched",
+            )
+            result = ChapterObservationRepairPatch(
+                changes=[
+                    ChapterCanonRepair(
+                        component="canon",
+                        canon_proposals=[replacement],
+                    )
+                ]
+            )
+            task_id, attempt_id = await insert_successful_task(
+                engine,
+                project_id=ready.foundation.project_id,
+                run_id=ready.foundation.run_id,
+                task_id=f"{ready.chapter_id}:repair-canon",
+                attempt_id=f"{ready.chapter_id}:repair-canon:attempt",
+                role="chapter_writer",
+                task_kind="chapter.repair.observation",
+                scope_layer="chapter",
+                book_id=ready.foundation.book_id,
+                book_baseline_id=ready.foundation.book_baseline_id,
+                arc_id=ready.foundation.arc_id,
+                arc_baseline_id=ready.foundation.arc_baseline_id,
+                chapter_id=ready.chapter_id,
+                canon_baseline_id=ready.foundation.canon_baseline_id,
+                workspace_lock_version=ready.workspace_lock_version,
+                result=result,
+            )
+            await ChapterCommandService(CommandBus(engine)).apply_repair_result(
+                ApplyChapterTaskRequest(
+                    project_id=ready.foundation.project_id,
+                    chapter_id=ready.chapter_id,
+                    task_id=task_id,
+                    attempt_id=attempt_id,
+                    expected_workspace_lock_version=ready.workspace_lock_version,
+                ),
+                idempotency_key=f"{ready.chapter_id}:apply-canon-repair",
+            )
+            async with engine.connect() as connection:
+                observations_ref_id = await connection.scalar(
+                    select(chapter_workspaces.c.observations_ref_id).where(
+                        chapter_workspaces.c.chapter_id == ready.chapter_id
+                    )
+                )
+                assert observations_ref_id is not None
+                packed = await ContentRepository(connection).get_packed(
+                    project_id=ready.foundation.project_id,
+                    ref_id=observations_ref_id,
+                )
+                observations = ChapterObservationResult.model_validate_json(
+                    packed.unpack_and_verify()
+                )
+            assert observations.summary == (
+                "Mara obtains physical evidence that memory edits affect documents."
+            )
+            assert observations.continuity_observations == [
+                "Mara now has a reason to preserve analogue copies."
+            ]
+            assert observations.canon_proposals == [replacement]
         finally:
             await engine.dispose()
 

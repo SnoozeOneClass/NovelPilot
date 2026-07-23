@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from alembic import command
+from pydantic import ValidationError
 from pydantic_ai import ModelResponse, RequestUsage, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from sqlalchemy import func, select
@@ -20,23 +21,41 @@ from app.agents.transport import ActivationRequestBudget, RequestCountingModel
 from app.db.engine import create_sqlite_async_engine
 from app.db.maintenance import alembic_config
 from app.db.schema import (
+    agent_task_attempts,
+    agent_tasks,
     arc_approval_gates,
     book_approvals,
     chapter_baselines,
+    command_receipts,
+    domain_events,
     generation_runs,
     projects,
 )
 from app.db.uow import UnitOfWork
 from app.domain.arc.commands import ArcCommandService
-from app.domain.arc.contracts import ApproveArcRequest
+from app.domain.arc.contracts import ApproveArcRequest, ArcRepairPatch
 from app.domain.book.commands import BookCommandService
 from app.domain.book.contracts import ApproveBookRequest
-from app.domain.book.contracts import BookDiscussionState, RecordBookUserInputRequest
+from app.domain.book.contracts import (
+    BookCandidatePack,
+    BookDiscussionState,
+    CompletionContract,
+    RecordBookUserInputRequest,
+)
+from app.domain.commands import CommandPreconditionError
 from app.domain.projects import CreateProjectRequest, ProjectCommandService
 from app.profiles import ProfileCatalog, profile_configuration_fingerprint
-from app.runtime.control import RunControlRequest, RunControlService
-from app.runtime.driver import DomainRunDriver
+from app.runtime.control import (
+    RetryFailedTaskRequest,
+    RunControlRequest,
+    RunControlService,
+)
+from app.runtime.driver import DomainRunDriver, _normalize_delivery_failure
+from app.runtime.engine import RunEngine
+from app.runtime.reconcile import ReconcileService
 from app.store.command_bus import CommandBus
+from app.store.content import ContentRepository
+from tests.helpers.lifecycle_seed import insert_successful_task
 
 
 class DeterministicNovelResolver:
@@ -83,6 +102,28 @@ class DeterministicNovelResolver:
             budget=budget,
         )
         return ResolvedModelBinding(model=model, budget=budget, adapter_key="offline-function")
+
+
+def test_delivery_validation_failure_diagnostics_do_not_copy_model_input() -> None:
+    secret_model_input = "sk-must-not-enter-delivery-diagnostics"
+    with pytest.raises(ValidationError) as captured:
+        ArcRepairPatch.model_validate(
+            {
+                "changes": [
+                    {
+                        "component": "beats",
+                        "value": [],
+                        "untrusted_provider_value": secret_model_input,
+                    }
+                ]
+            }
+        )
+
+    normalized = _normalize_delivery_failure(captured.value)
+    assert normalized.code == "domain_delivery_contract_invalid"
+    serialized_details = json.dumps(normalized.details, ensure_ascii=False)
+    assert secret_model_input not in serialized_details
+    assert '"input"' not in serialized_details
 
 
 def _message_text(messages: list[object]) -> str:
@@ -142,7 +183,7 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
             "newly_selected_title": None,
             "readiness": {"status": "ready", "reason": "全书方向已经闭合。"},
         }
-    if task_kind in {"book.synthesize", "book.revise", "book.repair"}:
+    if task_kind in {"book.synthesize", "book.revise"}:
         return {
             "direction": "调查员逐步揭开城市记忆篡改系统，并为恢复真相付出私人代价。",
             "constraints": {
@@ -158,6 +199,15 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
                 "completion_requirements": ["揭示篡改源头", "主角承担最终选择的后果"],
             },
         }
+    if task_kind == "book.repair":
+        return {
+            "changes": [
+                {
+                    "component": "direction",
+                    "value": "调查员补强了证据链，并继续追查城市记忆篡改系统。",
+                }
+            ]
+        }
     if task_kind in {"evaluate.book", "verify_repair.book"}:
         return {
             "decision": "pass",
@@ -165,7 +215,7 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
             "findings": [],
             "repair_contract": None,
         }
-    if task_kind in {"arc.plan", "arc.revise", "arc.repair"}:
+    if task_kind in {"arc.plan", "arc.revise"}:
         arc_match = re.search(r'"arc_ordinal":(\d+)', prompt)
         ordinal = int(arc_match.group(1)) if arc_match else 1
         return {
@@ -174,6 +224,15 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
             "beats": ["发现矛盾证词", "验证物证", "确认下一层责任人"],
             "target_chapter_count": 2,
             "completion_signals": ["本弧核心证据得到解释"],
+        }
+    if task_kind == "arc.repair":
+        return {
+            "changes": [
+                {
+                    "component": "beats",
+                    "value": ["重新验证物证", "补全证词矛盾", "确认下一层责任人"],
+                }
+            ]
         }
     if task_kind in {"evaluate.arc", "verify_repair.arc"}:
         return {
@@ -200,15 +259,21 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
             "她因此确认这不是普通误记，而是有人刻意改写叙述。"
             "章末，她找到通往下一名责任人的线索，同时意识到自己的记忆也可能被动过。"
         )
-    if task_kind in {
-        "chapter.observe",
-        "chapter.revise.observe",
-        "chapter.repair.observation",
-    }:
+    if task_kind in {"chapter.observe", "chapter.revise.observe"}:
         return {
             "summary": "调查员通过不受记忆影响的物证确认了证词被篡改。",
             "continuity_observations": ["调查主线继续推进", "主角开始怀疑自身记忆"],
             "canon_proposals": [],
+        }
+    if task_kind == "chapter.repair.observation":
+        return {
+            "changes": [
+                {
+                    "component": "observations",
+                    "summary": "修正后的观察与冻结正文一致。",
+                    "continuity_observations": ["调查主线继续推进"],
+                }
+            ]
         }
     if task_kind in {"evaluate.chapter", "verify_repair.chapter"}:
         return {
@@ -271,6 +336,223 @@ def _write_profile(path: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def test_rejected_domain_delivery_failure_pauses_once_and_requires_explicit_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "delivery-failure.sqlite3"
+    profile_path = tmp_path / "profiles.local.json"
+    command.upgrade(alembic_config(database), "head")
+    _write_profile(profile_path)
+
+    async def exercise() -> None:
+        engine = create_sqlite_async_engine(database)
+        try:
+            bus = CommandBus(engine)
+            created = await ProjectCommandService(bus).create_project(
+                CreateProjectRequest(
+                    project_id="project-delivery-failure",
+                    creator_brief="A deterministic delivery failure test.",
+                    operation_mode="full_auto",
+                ),
+                idempotency_key="create-delivery-failure-project",
+            )
+            await RunControlService(bus).start(
+                RunControlRequest(
+                    project_id=created.result.project_id,
+                    run_id=created.result.generation_run_id,
+                    expected_lock_version=1,
+                ),
+                idempotency_key="start-delivery-failure-run",
+            )
+            task_id, attempt_id = await insert_successful_task(
+                engine,
+                project_id=created.result.project_id,
+                run_id=created.result.generation_run_id,
+                task_id="delivery-failure-task",
+                attempt_id="delivery-failure-attempt",
+                role="book_strategist",
+                task_kind="book.synthesize",
+                scope_layer="book",
+                book_id=created.result.book_id,
+                canon_baseline_id=created.result.canon_baseline_id,
+                workspace_lock_version=1,
+                result=BookCandidatePack(
+                    direction="A direction that will be rejected by the delivery stub.",
+                    constraints={},
+                    selected_title="Rejected Delivery",
+                    rolling_plan={},
+                    completion_contract=CompletionContract(
+                        minimum_chapter_count=1,
+                        maximum_chapter_count=2,
+                    ),
+                ),
+            )
+            driver = DomainRunDriver(
+                engine,
+                profile_catalog=ProfileCatalog(profile_path),
+                now_ms=lambda: 100,
+            )
+            delivery_calls = 0
+
+            async def reject_delivery(_task: object) -> None:
+                nonlocal delivery_calls
+                delivery_calls += 1
+                raise CommandPreconditionError(
+                    "Repair patch changed an unauthorized component."
+                )
+
+            monkeypatch.setattr(driver, "_deliver_task", reject_delivery)
+            run_engine = RunEngine(
+                engine,
+                driver=driver,
+                reconciler=ReconcileService(engine, bus, now_ms=lambda: 100),
+                instance_id="delivery-failure-engine",
+                now_ms=lambda: 100,
+            )
+
+            assert await run_engine.run_once()
+            assert not await run_engine.run_once()
+            assert delivery_calls == 1
+
+            async with engine.connect() as connection:
+                task = (
+                    await connection.execute(
+                        select(
+                            agent_tasks.c.status,
+                            agent_tasks.c.delivery_state,
+                            agent_tasks.c.successful_attempt_id,
+                        ).where(agent_tasks.c.id == task_id)
+                    )
+                ).one()
+                attempt = (
+                    await connection.execute(
+                        select(
+                            agent_task_attempts.c.status,
+                            agent_task_attempts.c.result_ref_id,
+                            agent_task_attempts.c.error_code,
+                            agent_task_attempts.c.error_category,
+                            agent_task_attempts.c.error_ref_id,
+                        ).where(agent_task_attempts.c.id == attempt_id)
+                    )
+                ).one()
+                run = (
+                    await connection.execute(
+                        select(
+                            generation_runs.c.status,
+                            generation_runs.c.blocking_task_id,
+                            generation_runs.c.failure_code,
+                            generation_runs.c.failure_ref_id,
+                            generation_runs.c.lock_version,
+                        ).where(generation_runs.c.id == created.result.generation_run_id)
+                    )
+                ).one()
+                receipt = (
+                    await connection.execute(
+                        select(
+                            command_receipts.c.command_kind,
+                            command_receipts.c.actor,
+                            command_receipts.c.source_task_id,
+                        ).where(
+                            command_receipts.c.idempotency_key
+                            == f"failure-pause-delivery:{attempt_id}"
+                        )
+                    )
+                ).one()
+                event = (
+                    await connection.execute(
+                        select(
+                            domain_events.c.event_type,
+                            domain_events.c.aggregate_id,
+                            domain_events.c.payload_json,
+                        ).where(
+                            domain_events.c.event_type == "run.failure_paused",
+                            domain_events.c.aggregate_id
+                            == created.result.generation_run_id,
+                        )
+                    )
+                ).one()
+
+            assert tuple(task) == ("failed", "failed", None)
+            assert attempt.status == "delivery_failed"
+            assert attempt.result_ref_id is not None
+            assert attempt.error_code == "domain_delivery_rejected"
+            assert attempt.error_category == "domain_delivery"
+            assert attempt.error_ref_id is not None
+            assert tuple(run[:3]) == (
+                "failure_paused",
+                task_id,
+                "domain_delivery_rejected",
+            )
+            assert run.failure_ref_id == attempt.error_ref_id
+            assert tuple(receipt) == (
+                "failure_pause_for_domain_delivery",
+                "system",
+                task_id,
+            )
+            assert json.loads(event.payload_json) == {
+                "attempt_id": attempt_id,
+                "failure_code": "domain_delivery_rejected",
+                "failure_kind": "domain_delivery",
+                "task_id": task_id,
+            }
+            async with engine.connect() as connection:
+                packed_failure = await ContentRepository(connection).get_packed(
+                    project_id=created.result.project_id,
+                    ref_id=attempt.error_ref_id,
+                )
+            failure_payload = json.loads(packed_failure.unpack_and_verify())
+            assert failure_payload == {
+                "attempt_id": attempt_id,
+                "code": "domain_delivery_rejected",
+                "details": None,
+                "exception_type": "CommandPreconditionError",
+                "message": "Repair patch changed an unauthorized component.",
+                "schema_id": "domain-delivery-failure-v1",
+                "task_id": task_id,
+                "task_kind": "book.synthesize",
+            }
+
+            retried = await RunControlService(bus).retry_failed_task(
+                RetryFailedTaskRequest(
+                    project_id=created.result.project_id,
+                    run_id=created.result.generation_run_id,
+                    expected_lock_version=run.lock_version,
+                    task_id=task_id,
+                ),
+                idempotency_key="retry-domain-delivery-failure",
+            )
+            assert retried.result.status == "running"
+            assert retried.result.attempt_id is not None
+            async with engine.connect() as connection:
+                reset_task = (
+                    await connection.execute(
+                        select(
+                            agent_tasks.c.status,
+                            agent_tasks.c.delivery_state,
+                        ).where(agent_tasks.c.id == task_id)
+                    )
+                ).one()
+                retry_attempt = (
+                    await connection.execute(
+                        select(
+                            agent_task_attempts.c.attempt_number,
+                            agent_task_attempts.c.retry_kind,
+                            agent_task_attempts.c.status,
+                            agent_task_attempts.c.predecessor_attempt_id,
+                        ).where(
+                            agent_task_attempts.c.id == retried.result.attempt_id
+                        )
+                    )
+                ).one()
+            assert tuple(reset_task) == ("queued", "not_ready")
+            assert tuple(retry_attempt) == (2, "user_retry", "queued", attempt_id)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
 
 
 @pytest.mark.parametrize("operation_mode", ["full_auto", "participatory"])

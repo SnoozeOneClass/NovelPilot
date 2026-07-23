@@ -16,6 +16,7 @@ from app.domain.arc.contracts import (
     ApproveArcRequest,
     ArcEvaluation,
     ArcRepairContract,
+    ArcRepairPatch,
     CommitArcAutoRequest,
     CommitArcResult,
     CreateStoryArcRequest,
@@ -75,6 +76,29 @@ def _task_matches_workspace(
         and task.canon_baseline_id == workspace.canon_baseline_id
         and workspace.state == "active"
     )
+
+
+def _merge_arc_repair(
+    *,
+    current: ArcPlanProposal,
+    patch: ArcRepairPatch,
+    contract: ArcRepairContract,
+) -> ArcPlanProposal:
+    authorized = set(contract.authorized_components)
+    requested = {change.component for change in patch.changes}
+    unauthorized = requested.difference(authorized)
+    if unauthorized:
+        raise CommandPreconditionError(
+            "Arc repair changed unauthorized components: "
+            + ", ".join(sorted(unauthorized))
+        )
+    merged = current.model_dump(mode="python")
+    for change in patch.changes:
+        merged[change.component] = change.value
+    proposal = ArcPlanProposal.model_validate(merged)
+    if proposal == current:
+        raise CommandPreconditionError("Arc repair result made no authorized change.")
+    return proposal
 
 
 class ArcCommandService:
@@ -381,8 +405,60 @@ class ArcCommandService:
             or task.arc_id != request.arc_id
         ):
             raise CommandPreconditionError("Task is not an authorized Arc planning task.")
-        proposal = ArcPlanProposal.model_validate_json(raw)
-        prepared_plan = prepare_canonical_json(proposal)
+        workspace_snapshot: ArcWorkspaceRecord | None = None
+        review_snapshot: ArcReviewRecord | None = None
+        if task.task_kind == "arc.repair":
+            patch = ArcRepairPatch.model_validate_json(raw)
+            proposal: ArcPlanProposal | None = None
+            async with self._command_bus.read_unit_of_work() as session:
+                workspace_snapshot = await session.arcs.get_workspace(
+                    project_id=request.project_id,
+                    arc_id=request.arc_id,
+                )
+                if workspace_snapshot is not None and _task_matches_workspace(
+                    task,
+                    workspace_snapshot,
+                    expected_lock_version=request.expected_workspace_lock_version,
+                ):
+                    review_snapshot = await session.arcs.get_latest_review(
+                        project_id=request.project_id,
+                        arc_id=request.arc_id,
+                    )
+                    if (
+                        review_snapshot is None
+                        or review_snapshot.decision != "local_repair"
+                        or review_snapshot.repair_contract_ref_id is None
+                        or workspace_snapshot.plan_ref_id is None
+                        or workspace_snapshot.semantic_repair_count
+                        >= workspace_snapshot.semantic_repair_limit
+                    ):
+                        raise CommandPreconditionError(
+                            "Arc has no active local repair budget."
+                        )
+                    repair_contract = ArcRepairContract.model_validate_json(
+                        (
+                            await session.content.get_packed(
+                                project_id=request.project_id,
+                                ref_id=review_snapshot.repair_contract_ref_id,
+                            )
+                        ).unpack_and_verify()
+                    )
+                    current_plan = ArcPlanProposal.model_validate_json(
+                        (
+                            await session.content.get_packed(
+                                project_id=request.project_id,
+                                ref_id=workspace_snapshot.plan_ref_id,
+                            )
+                        ).unpack_and_verify()
+                    )
+                    proposal = _merge_arc_repair(
+                        current=current_plan,
+                        patch=patch,
+                        contract=repair_contract,
+                    )
+        else:
+            proposal = ArcPlanProposal.model_validate_json(raw)
+        prepared_plan = None if proposal is None else prepare_canonical_json(proposal)
         timestamp = self._now_ms()
         plan_ref_id = self._id_factory()
         envelope = self._envelope(
@@ -438,6 +514,10 @@ class ArcCommandService:
                     ),
                 )
 
+            if proposal is None or prepared_plan is None:
+                raise CommandPreconditionError(
+                    "Current Arc task has no prepared result for this workspace."
+                )
             repair_increment = 0
             if task.task_kind == "arc.repair":
                 review = await session.arcs.get_latest_review(
@@ -445,39 +525,14 @@ class ArcCommandService:
                     arc_id=request.arc_id,
                 )
                 if (
-                    review is None
-                    or review.decision != "local_repair"
-                    or review.repair_contract_ref_id is None
-                    or workspace.plan_ref_id is None
+                    workspace_snapshot is None
+                    or workspace != workspace_snapshot
+                    or review_snapshot is None
+                    or review != review_snapshot
                     or workspace.semantic_repair_count >= workspace.semantic_repair_limit
                 ):
-                    raise CommandPreconditionError("Arc has no active local repair budget.")
-                repair_contract = ArcRepairContract.model_validate_json(
-                    (
-                        await session.content.get_packed(
-                            project_id=request.project_id,
-                            ref_id=review.repair_contract_ref_id,
-                        )
-                    ).unpack_and_verify()
-                )
-                current_plan = ArcPlanProposal.model_validate_json(
-                    (
-                        await session.content.get_packed(
-                            project_id=request.project_id,
-                            ref_id=workspace.plan_ref_id,
-                        )
-                    ).unpack_and_verify()
-                )
-                before = current_plan.model_dump(mode="json")
-                after = proposal.model_dump(mode="json")
-                changed = {key for key in before if before[key] != after[key]}
-                if not changed:
-                    raise CommandPreconditionError("Arc repair result made no authorized change.")
-                unauthorized = changed.difference(repair_contract.authorized_components)
-                if unauthorized:
                     raise CommandPreconditionError(
-                        "Arc repair changed unauthorized components: "
-                        + ", ".join(sorted(unauthorized))
+                        "Arc repair authorization changed before result delivery."
                     )
                 repair_increment = 1
 

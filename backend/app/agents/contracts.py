@@ -559,6 +559,63 @@ class ChapterObservationResult(BaseModel):
     )
 
 
+ChapterRepairComponent = Literal["prose", "observations", "canon"]
+
+
+class ChapterObservationsRepair(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    component: Literal["observations"]
+    summary: str = Field(
+        min_length=1,
+        description="Replacement semantic summary of what the frozen chapter establishes.",
+    )
+    continuity_observations: list[str] = Field(
+        default_factory=list,
+        description="Replacement continuity observations for the frozen chapter.",
+    )
+
+
+class ChapterCanonRepair(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    component: Literal["canon"]
+    canon_proposals: list[SemanticCanonProposal] = Field(
+        default_factory=list,
+        description="Replacement semantic Canon proposals for the frozen chapter.",
+    )
+
+
+ChapterObservationRepairChange = Annotated[
+    ChapterObservationsRepair | ChapterCanonRepair,
+    Field(discriminator="component"),
+]
+
+
+class ChapterObservationRepairPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    changes: list[ChapterObservationRepairChange] = Field(
+        min_length=1,
+        max_length=2,
+        description=(
+            "Only observation or Canon components authorized by the repair scope in frozen "
+            "context. Omitted components are preserved by the Harness and must not be repeated."
+        ),
+    )
+
+    @field_validator("changes")
+    @classmethod
+    def _unique_components(
+        cls,
+        value: list[ChapterObservationRepairChange],
+    ) -> list[ChapterObservationRepairChange]:
+        components = [change.component for change in value]
+        if len(components) != len(set(components)):
+            raise ValueError("A Chapter observation repair may change each component once.")
+        return value
+
+
 class EvaluationIssue(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -585,7 +642,7 @@ class LayerEvaluationResult(BaseModel):
     )
     summary: str = Field(min_length=1, description="Evidence-based evaluation summary.")
     issues: list[EvaluationIssue] = Field(default_factory=list)
-    repair_scope: list[str] = Field(
+    repair_scope: list[ChapterRepairComponent] = Field(
         default_factory=list,
         description=(
             "Required and non-empty only when decision is local_repair; otherwise empty."
@@ -604,6 +661,8 @@ class LayerEvaluationResult(BaseModel):
             raise ValueError("local_repair requires a bounded repair_scope.")
         if self.decision != "local_repair" and self.repair_scope:
             raise ValueError("Only local_repair can carry repair_scope.")
+        if len(self.repair_scope) != len(set(self.repair_scope)):
+            raise ValueError("Chapter repair_scope components must be unique.")
         if self.decision == "cross_loop_escalation" and self.escalation_target is None:
             raise ValueError("cross_loop_escalation requires escalation_target.")
         if self.decision != "cross_loop_escalation" and self.escalation_target is not None:

@@ -100,6 +100,7 @@ class RunEngine:
             self._heartbeat_slot(run.id, lease_token),
             name=f"novelpilot-slot-heartbeat:{run.id}",
         )
+        action_completed = True
         try:
             await self._driver.drive_one(run)
         except asyncio.CancelledError:
@@ -108,12 +109,13 @@ class RunEngine:
             # A driver must persist expected task failures. An unexpected implementation
             # error is logged, while the scheduler remains available for recovery/control.
             LOGGER.exception("Run action driver failed unexpectedly for run %s", run.id)
+            action_completed = False
         finally:
             heartbeat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await heartbeat
             await self._release_and_settle_pause(run.id, lease_token)
-        return True
+        return action_completed
 
     async def _run_loop(self) -> None:
         while not self._stop_event.is_set():

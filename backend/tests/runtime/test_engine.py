@@ -99,6 +99,43 @@ class PauseBoundaryDriver:
             assert await session.runs.complete(run_id=run.id, now_ms=100)
 
 
+class UnexpectedFailureDriver:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def drive_one(self, run: GenerationRunRecord) -> None:
+        del run
+        self.calls += 1
+        raise RuntimeError("unexpected driver failure")
+
+
+def test_unexpected_driver_failure_uses_idle_poll_instead_of_hot_loop(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "driver-failure-backoff.sqlite3"
+    command.upgrade(alembic_config(database), "head")
+
+    async def exercise() -> None:
+        engine = create_sqlite_async_engine(database)
+        try:
+            await _seed_running_project(engine, suffix="driver-failure-backoff")
+            driver = UnexpectedFailureDriver()
+            worker = RunEngine(
+                engine,
+                driver=driver,
+                reconciler=ReconcileService(engine, CommandBus(engine)),
+                idle_poll_seconds=0.2,
+            )
+            await worker.start()
+            await asyncio.sleep(0.05)
+            await worker.stop()
+            assert driver.calls == 1
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
 def test_background_engine_progresses_without_browser_or_sse(tmp_path: Path) -> None:
     database = tmp_path / "background.sqlite3"
     command.upgrade(alembic_config(database), "head")

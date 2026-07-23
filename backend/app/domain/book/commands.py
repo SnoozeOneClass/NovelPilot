@@ -24,6 +24,7 @@ from app.domain.book.contracts import (
     BookDiscussionState,
     BookEvaluation,
     BookRepairContract,
+    BookRepairPatch,
     BookTranscript,
     CompletionContract,
     RecordBookUserInputRequest,
@@ -77,6 +78,29 @@ def _task_matches_workspace(
         and task.canon_baseline_id == workspace.base_canon_baseline_id
         and workspace.state == "active"
     )
+
+
+def _merge_book_repair(
+    *,
+    current: BookCandidatePack,
+    patch: BookRepairPatch,
+    contract: BookRepairContract,
+) -> BookCandidatePack:
+    authorized = set(contract.authorized_components)
+    requested = {change.component for change in patch.changes}
+    unauthorized = requested.difference(authorized)
+    if unauthorized:
+        raise CommandPreconditionError(
+            "Book repair changed unauthorized components: "
+            + ", ".join(sorted(unauthorized))
+        )
+    merged = current.model_dump(mode="python")
+    for change in patch.changes:
+        merged[change.component] = change.value
+    candidate = BookCandidatePack.model_validate(merged)
+    if candidate == current:
+        raise CommandPreconditionError("Book repair result made no authorized change.")
+    return candidate
 
 
 class BookCommandService:
@@ -504,7 +528,125 @@ class BookCommandService:
             or task.book_id != request.book_id
         ):
             raise CommandPreconditionError("Task is not an authorized Book candidate task.")
-        candidate = BookCandidatePack.model_validate_json(raw)
+        workspace_snapshot: BookWorkspaceRecord | None = None
+        review_snapshot: BookReviewRecord | None = None
+        prepared_repair = None
+        if task.task_kind == "book.repair":
+            patch = BookRepairPatch.model_validate_json(raw)
+            candidate: BookCandidatePack | None = None
+            async with self._command_bus.read_unit_of_work() as session:
+                workspace_snapshot = await session.books.get_workspace(
+                    project_id=request.project_id,
+                    book_id=request.book_id,
+                )
+                if workspace_snapshot is not None and _task_matches_workspace(
+                    task,
+                    workspace_snapshot,
+                    expected_lock_version=request.expected_workspace_lock_version,
+                ):
+                    review_snapshot = await session.books.get_latest_review(
+                        project_id=request.project_id,
+                        book_id=request.book_id,
+                    )
+                    if (
+                        review_snapshot is None
+                        or review_snapshot.decision != "local_repair"
+                        or review_snapshot.repair_contract_ref_id is None
+                        or workspace_snapshot.semantic_repair_count
+                        >= workspace_snapshot.semantic_repair_limit
+                    ):
+                        raise CommandPreconditionError(
+                            "Book has no active local repair budget."
+                        )
+                    repair_contract = BookRepairContract.model_validate_json(
+                        (
+                            await session.content.get_packed(
+                                project_id=request.project_id,
+                                ref_id=review_snapshot.repair_contract_ref_id,
+                            )
+                        ).unpack_and_verify()
+                    )
+                    state = BookDiscussionState.model_validate_json(
+                        (
+                            await session.content.get_packed(
+                                project_id=request.project_id,
+                                ref_id=workspace_snapshot.discussion_state_ref_id,
+                            )
+                        ).unpack_and_verify()
+                    )
+                    component_refs = (
+                        workspace_snapshot.direction_draft_ref_id,
+                        workspace_snapshot.candidate_constraints_ref_id,
+                        workspace_snapshot.candidate_rolling_plan_ref_id,
+                        workspace_snapshot.candidate_completion_contract_ref_id,
+                    )
+                    if (
+                        state.selected_title is None
+                        or state.selected_title_source is None
+                        or workspace_snapshot.candidate_titles_ref_id is None
+                        or any(reference is None for reference in component_refs)
+                    ):
+                        raise CommandPreconditionError(
+                            "Book repair has no complete current candidate."
+                        )
+                    direction_ref, constraints_ref, rolling_ref, completion_ref = cast(
+                        tuple[str, str, str, str],
+                        component_refs,
+                    )
+                    current = BookCandidatePack(
+                        direction=(
+                            await session.content.get_packed(
+                                project_id=request.project_id,
+                                ref_id=direction_ref,
+                            )
+                        )
+                        .unpack_and_verify()
+                        .decode("utf-8"),
+                        constraints=json.loads(
+                            (
+                                await session.content.get_packed(
+                                    project_id=request.project_id,
+                                    ref_id=constraints_ref,
+                                )
+                            ).unpack_and_verify()
+                        ),
+                        selected_title=state.selected_title,
+                        rolling_plan=json.loads(
+                            (
+                                await session.content.get_packed(
+                                    project_id=request.project_id,
+                                    ref_id=rolling_ref,
+                                )
+                            ).unpack_and_verify()
+                        ),
+                        completion_contract=CompletionContract.model_validate_json(
+                            (
+                                await session.content.get_packed(
+                                    project_id=request.project_id,
+                                    ref_id=completion_ref,
+                                )
+                            ).unpack_and_verify()
+                        ),
+                    )
+                    candidate = _merge_book_repair(
+                        current=current,
+                        patch=patch,
+                        contract=repair_contract,
+                    )
+                    prepared_repair = (
+                        prepare_exact_text(candidate.direction),
+                        prepare_canonical_json(candidate.constraints),
+                        prepare_canonical_json(
+                            {
+                                "selected_title": candidate.selected_title,
+                                "title_source": state.selected_title_source,
+                            }
+                        ),
+                        prepare_canonical_json(candidate.rolling_plan),
+                        prepare_canonical_json(candidate.completion_contract),
+                    )
+        else:
+            candidate = BookCandidatePack.model_validate_json(raw)
         timestamp = self._now_ms()
         ref_ids = [self._id_factory() for _ in range(5)]
         envelope = self._envelope(
@@ -571,12 +713,13 @@ class BookCommandService:
                 state.readiness_status != "ready"
                 or state.selected_title is None
                 or state.selected_title_source is None
+                or candidate is None
                 or candidate.selected_title != state.selected_title
             ):
                 raise CommandPreconditionError(
                     "Book candidate does not preserve the approved discussion title."
                 )
-            prepared = (
+            prepared = prepared_repair or (
                 prepare_exact_text(candidate.direction),
                 prepare_canonical_json(candidate.constraints),
                 prepare_canonical_json(
@@ -595,52 +738,15 @@ class BookCommandService:
                     book_id=request.book_id,
                 )
                 if (
-                    review is None
-                    or review.decision != "local_repair"
-                    or review.repair_contract_ref_id is None
+                    workspace_snapshot is None
+                    or workspace != workspace_snapshot
+                    or review_snapshot is None
+                    or review != review_snapshot
+                    or prepared_repair is None
                     or workspace.semantic_repair_count >= workspace.semantic_repair_limit
                 ):
-                    raise CommandPreconditionError("Book has no active local repair budget.")
-                repair_contract = BookRepairContract.model_validate_json(
-                    (
-                        await session.content.get_packed(
-                            project_id=request.project_id,
-                            ref_id=review.repair_contract_ref_id,
-                        )
-                    ).unpack_and_verify()
-                )
-                current_component_refs = {
-                    "direction": workspace.direction_draft_ref_id,
-                    "constraints": workspace.candidate_constraints_ref_id,
-                    "rolling_plan": workspace.candidate_rolling_plan_ref_id,
-                    "completion_contract": workspace.candidate_completion_contract_ref_id,
-                }
-                if any(reference is None for reference in current_component_refs.values()):
-                    raise CommandPreconditionError("Book repair has no complete current candidate.")
-                candidate_by_component = {
-                    "direction": prepared[0],
-                    "constraints": prepared[1],
-                    "rolling_plan": prepared[3],
-                    "completion_contract": prepared[4],
-                }
-                changed_components: set[str] = set()
-                for component, reference in current_component_refs.items():
-                    assert reference is not None
-                    packed = await session.content.get_packed(
-                        project_id=request.project_id,
-                        ref_id=reference,
-                    )
-                    if packed.reference.blob_sha256 != candidate_by_component[component].sha256:
-                        changed_components.add(component)
-                if not changed_components:
-                    raise CommandPreconditionError("Book repair result made no authorized change.")
-                unauthorized = changed_components.difference(
-                    repair_contract.authorized_components
-                )
-                if unauthorized:
                     raise CommandPreconditionError(
-                        "Book repair changed unauthorized components: "
-                        + ", ".join(sorted(unauthorized))
+                        "Book repair authorization changed before result delivery."
                     )
                 repair_increment = 1
 

@@ -52,7 +52,14 @@ class AgentAttemptRecord:
     task_id: str
     attempt_number: int
     retry_kind: Literal["initial", "crash_replay", "user_retry"]
-    status: Literal["queued", "running", "succeeded", "failed", "interrupted"]
+    status: Literal[
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "interrupted",
+        "delivery_failed",
+    ]
     framework_fingerprint: str
 
 
@@ -636,7 +643,14 @@ class ExecutionRepository:
                 Literal["initial", "crash_replay", "user_retry"], row["retry_kind"]
             ),
             status=cast(
-                Literal["queued", "running", "succeeded", "failed", "interrupted"],
+                Literal[
+                    "queued",
+                    "running",
+                    "succeeded",
+                    "failed",
+                    "interrupted",
+                    "delivery_failed",
+                ],
                 row["status"],
             ),
             framework_fingerprint=cast(str, row["framework_fingerprint"]),
@@ -667,7 +681,14 @@ class ExecutionRepository:
                 Literal["initial", "crash_replay", "user_retry"], row["retry_kind"]
             ),
             status=cast(
-                Literal["queued", "running", "succeeded", "failed", "interrupted"],
+                Literal[
+                    "queued",
+                    "running",
+                    "succeeded",
+                    "failed",
+                    "interrupted",
+                    "delivery_failed",
+                ],
                 row["status"],
             ),
             framework_fingerprint=cast(str, row["framework_fingerprint"]),
@@ -865,9 +886,13 @@ class ExecutionRepository:
                 agent_tasks.c.id == task_id,
                 agent_tasks.c.status == "failed",
                 agent_tasks.c.successful_attempt_id.is_(None),
-                agent_tasks.c.delivery_state == "not_ready",
+                agent_tasks.c.delivery_state.in_(("not_ready", "failed")),
             )
-            .values(status="queued", updated_at_ms=updated_at_ms)
+            .values(
+                status="queued",
+                delivery_state="not_ready",
+                updated_at_ms=updated_at_ms,
+            )
         )
         return result.rowcount == 1
 
@@ -895,7 +920,7 @@ class ExecutionRepository:
                 )
                 .where(
                     agent_tasks.c.status == "failed",
-                    agent_task_attempts.c.status == "failed",
+                    agent_task_attempts.c.status.in_(("failed", "delivery_failed")),
                     generation_runs.c.status.in_(("running", "pause_requested", "paused")),
                 )
                 .order_by(
@@ -1040,6 +1065,55 @@ class ExecutionRepository:
                 agent_tasks.c.status == "running",
             )
             .values(status="failed", updated_at_ms=finished_at_ms)
+        )
+        return task_result.rowcount == 1
+
+    async def fail_pending_delivery(
+        self,
+        *,
+        project_id: str,
+        task_id: str,
+        attempt_id: str,
+        error_code: str,
+        error_ref_id: str,
+        diagnostic_ref_id: str | None,
+        updated_at_ms: int,
+    ) -> bool:
+        attempt_result = await self._connection.execute(
+            update(agent_task_attempts)
+            .where(
+                agent_task_attempts.c.project_id == project_id,
+                agent_task_attempts.c.task_id == task_id,
+                agent_task_attempts.c.id == attempt_id,
+                agent_task_attempts.c.status == "succeeded",
+                agent_task_attempts.c.result_ref_id.is_not(None),
+            )
+            .values(
+                status="delivery_failed",
+                error_code=error_code,
+                error_category="domain_delivery",
+                http_status=None,
+                error_ref_id=error_ref_id,
+                diagnostic_ref_id=diagnostic_ref_id,
+            )
+        )
+        if attempt_result.rowcount != 1:
+            return False
+        task_result = await self._connection.execute(
+            update(agent_tasks)
+            .where(
+                agent_tasks.c.project_id == project_id,
+                agent_tasks.c.id == task_id,
+                agent_tasks.c.status == "succeeded",
+                agent_tasks.c.successful_attempt_id == attempt_id,
+                agent_tasks.c.delivery_state == "pending",
+            )
+            .values(
+                status="failed",
+                successful_attempt_id=None,
+                delivery_state="failed",
+                updated_at_ms=updated_at_ms,
+            )
         )
         return task_result.rowcount == 1
 

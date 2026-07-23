@@ -11,6 +11,7 @@ from pydantic import BaseModel, TypeAdapter
 
 from app.agents.contracts import (
     ChapterDraftResult,
+    ChapterObservationRepairPatch,
     ChapterObservationResult,
     ChapterPlanProposal,
     LayerEvaluationResult,
@@ -83,6 +84,34 @@ class _PreparedCanonCommit:
     before: CanonBaselineRecord
     applied: AppliedCanonPatch
     prepared_categories: dict[CanonCategory, PreparedContent]
+
+
+def _merge_chapter_observation_repair(
+    *,
+    current: ChapterObservationResult,
+    patch: ChapterObservationRepairPatch,
+    allowed_scope: set[str],
+) -> ChapterObservationResult:
+    requested = {change.component for change in patch.changes}
+    unauthorized = requested.difference(allowed_scope)
+    if unauthorized:
+        raise CommandPreconditionError(
+            "Chapter observation repair changed unauthorized components: "
+            + ", ".join(sorted(unauthorized))
+        )
+    merged = current.model_dump(mode="python")
+    for change in patch.changes:
+        if change.component == "observations":
+            merged["summary"] = change.summary
+            merged["continuity_observations"] = change.continuity_observations
+        else:
+            merged["canon_proposals"] = change.canon_proposals
+    observations = ChapterObservationResult.model_validate(merged)
+    if observations == current:
+        raise CommandPreconditionError(
+            "Chapter observation repair result made no authorized change."
+        )
+    return observations
 
 
 class ChapterCommandService:
@@ -636,21 +665,45 @@ class ChapterCommandService:
                 )
             if workspace_snapshot.draft_ref_id is None:
                 raise CommandPreconditionError("Observation repair has no frozen prose.")
-            observations = ChapterObservationResult.model_validate_json(raw)
+            repair_patch = ChapterObservationRepairPatch.model_validate_json(raw)
             async with self._command_bus.read_unit_of_work() as session:
+                source_submission = await session.chapters.get_submission(
+                    project_id=request.project_id,
+                    submission_id=review_snapshot.submission_id,
+                )
+                if source_submission is None:
+                    raise CommandPreconditionError(
+                        "Observation repair has no reviewed source submission."
+                    )
                 prose = (
                     await session.content.get_packed(
                         project_id=request.project_id,
                         ref_id=workspace_snapshot.draft_ref_id,
                     )
                 ).unpack_and_verify().decode("utf-8")
-            patch = bind_canon_patch(
+                current_observations = ChapterObservationResult.model_validate_json(
+                    (
+                        await session.content.get_packed(
+                            project_id=request.project_id,
+                            ref_id=source_submission.observations_ref_id,
+                        )
+                    ).unpack_and_verify()
+                )
+            observations = _merge_chapter_observation_repair(
+                current=current_observations,
+                patch=repair_patch,
+                allowed_scope=allowed_scope,
+            )
+            bound_patch = bind_canon_patch(
                 chapter_id=request.chapter_id,
                 prose=prose,
                 observations=observations,
             )
             component = "repair_observations"
-            prepared = (prepare_canonical_json(observations), prepare_canonical_json(patch))
+            prepared = (
+                prepare_canonical_json(observations),
+                prepare_canonical_json(bound_patch),
+            )
             descriptors = (
                 (
                     "chapter.observations",

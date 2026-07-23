@@ -294,7 +294,7 @@ class ReconcileService:
             if (
                 latest is None
                 or latest.attempt_id != record.attempt_id
-                or latest.status != "failed"
+                or latest.status not in {"failed", "delivery_failed"}
             ):
                 raise CommandPreconditionError("Task no longer has the observed failed attempt.")
             if not await session.runs.failure_pause(

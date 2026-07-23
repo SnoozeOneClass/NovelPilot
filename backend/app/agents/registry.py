@@ -14,6 +14,7 @@ from app.agents.contracts import (
     BookProgressAssessment,
     CapabilityName,
     ChapterDraftResult,
+    ChapterObservationRepairPatch,
     ChapterObservationResult,
     ChapterPlanProposal,
     LayerEvaluationResult,
@@ -23,8 +24,8 @@ from app.agents.contracts import (
     ScopeLayer,
     finalize_chapter_prose,
 )
-from app.domain.arc.contracts import ArcEvaluation
-from app.domain.book.contracts import BookCandidatePack, BookEvaluation
+from app.domain.arc.contracts import ArcEvaluation, ArcRepairPatch
+from app.domain.book.contracts import BookCandidatePack, BookEvaluation, BookRepairPatch
 
 TextFinalizer = Callable[[str], BaseModel]
 
@@ -202,6 +203,7 @@ def _native(
     context_policy_id: str,
     instructions: str,
     rubric_id: str | None = None,
+    output_schema_version: int = 1,
 ) -> TaskDefinition:
     return TaskDefinition(
         role=role,
@@ -211,7 +213,7 @@ def _native(
         output_mode="native_json_schema",
         output_model=output_model,
         output_schema_id=f"{task_kind}-result",
-        output_schema_version=1,
+        output_schema_version=output_schema_version,
         context_policy_id=context_policy_id,
         context_policy_version=1,
         task_instructions=instructions,
@@ -277,12 +279,15 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             "book_strategist",
             "book.repair",
             "book",
-            BookCandidatePack,
+            BookRepairPatch,
             context_policy_id="book-repair-context-v1",
             instructions=(
-                "Apply only the evaluator-authorized Book repair scope; preserve all other "
-                f"decisions. {BOOK_CANDIDATE_CONTRACT}"
+                "Return only a semantic patch whose change components are a subset of the "
+                "evaluator-authorized Book repair contract in frozen context. Do not return "
+                "selected_title or repeat any omitted Book component; the Harness preserves "
+                "omitted content. Do not invent storage IDs, approval state, routes, or commands."
             ),
+            output_schema_version=2,
         ),
         _native(
             "book_strategist",
@@ -314,12 +319,22 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
                     "arc.revise",
                     "Revise the current Arc only within the explicit Arc-level change request.",
                 ),
-                (
-                    "arc.repair",
-                    "Apply only the evaluator-authorized Arc repair scope and preserve the rest.",
-                ),
             )
         ],
+        _native(
+            "arc_planner",
+            "arc.repair",
+            "arc",
+            ArcRepairPatch,
+            context_policy_id="arc-repair-context-v1",
+            instructions=(
+                "Return only a semantic patch whose change components are a subset of the "
+                "evaluator-authorized Arc repair scope in frozen context. Do not repeat omitted "
+                "Arc components; the Harness preserves them exactly. Do not invent storage IDs, "
+                "approval state, routes, or commands."
+            ),
+            output_schema_version=2,
+        ),
         _native(
             "chapter_writer",
             "chapter.plan",
@@ -368,9 +383,15 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             "chapter_writer",
             "chapter.repair.observation",
             "chapter",
-            ChapterObservationResult,
+            ChapterObservationRepairPatch,
             context_policy_id="chapter-observation-repair-context-v1",
-            instructions="Repair only the authorized observation or Canon proposal components.",
+            instructions=(
+                "Return only a semantic patch whose change components are a subset of the "
+                "authorized Chapter repair scope in frozen context. Use observations for the "
+                "summary and continuity observations, and canon for Canon proposals. Do not "
+                "repeat omitted components; the Harness preserves them."
+            ),
+            output_schema_version=2,
         ),
         _native(
             "evaluator",

@@ -167,7 +167,11 @@ class RunControlService:
                 project_id=request.project_id,
                 task_id=request.task_id,
             )
-            if predecessor is None or predecessor.status not in {"failed", "interrupted"}:
+            if predecessor is None or predecessor.status not in {
+                "failed",
+                "interrupted",
+                "delivery_failed",
+            }:
                 raise CommandPreconditionError("Failed task has no retryable terminal attempt.")
             next_number = await session.execution.next_attempt_number(task_id=request.task_id)
             await session.execution.insert_attempt(

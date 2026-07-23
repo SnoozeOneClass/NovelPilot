@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+from pydantic import ValidationError
 from pydantic_ai import ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
@@ -204,3 +206,97 @@ def test_cross_field_semantic_rules_are_present_in_model_visible_contracts() -> 
         chapter_properties["escalation_target"]["description"]
     )
     assert "cross_loop_escalation exactly when" in chapter_evaluation.task_instructions
+
+
+def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
+    definitions = {
+        "book": DEFAULT_TASK_REGISTRY.get(
+            role="book_strategist",
+            task_kind="book.repair",
+            contract_version=1,
+        ),
+        "arc": DEFAULT_TASK_REGISTRY.get(
+            role="arc_planner",
+            task_kind="arc.repair",
+            contract_version=1,
+        ),
+        "chapter": DEFAULT_TASK_REGISTRY.get(
+            role="chapter_writer",
+            task_kind="chapter.repair.observation",
+            contract_version=1,
+        ),
+    }
+
+    expected_components = {
+        "book": {"direction", "constraints", "rolling_plan", "completion_contract"},
+        "arc": {"title", "purpose", "beats", "target_chapter_count", "completion_signals"},
+        "chapter": {"observations", "canon"},
+    }
+    for layer, definition in definitions.items():
+        assert definition.output_schema_version == 2
+        assert set(definition.output_schema["properties"]) == {"changes"}
+        changes = definition.output_schema["properties"]["changes"]
+        assert changes["items"]["discriminator"]["propertyName"] == "component"
+        assert set(changes["items"]["discriminator"]["mapping"]) == expected_components[layer]
+        assert "subset" in definition.task_instructions
+        assert "Harness preserves" in definition.task_instructions
+
+    book_schema_text = str(definitions["book"].output_schema)
+    assert "selected_title" not in book_schema_text
+
+    chapter_evaluation = DEFAULT_TASK_REGISTRY.get(
+        role="evaluator",
+        task_kind="evaluate.chapter",
+        contract_version=1,
+    )
+    assert set(
+        chapter_evaluation.output_schema["properties"]["repair_scope"]["items"]["enum"]
+    ) == {"prose", "observations", "canon"}
+
+
+def test_local_repair_patch_contracts_reject_empty_and_duplicate_changes() -> None:
+    cases = (
+        (
+            "book_strategist",
+            "book.repair",
+            [
+                {"component": "direction", "value": "First direction"},
+                {"component": "direction", "value": "Second direction"},
+            ],
+        ),
+        (
+            "arc_planner",
+            "arc.repair",
+            [
+                {"component": "beats", "value": ["First beat"]},
+                {"component": "beats", "value": ["Second beat"]},
+            ],
+        ),
+        (
+            "chapter_writer",
+            "chapter.repair.observation",
+            [
+                {
+                    "component": "observations",
+                    "summary": "First summary",
+                    "continuity_observations": [],
+                },
+                {
+                    "component": "observations",
+                    "summary": "Second summary",
+                    "continuity_observations": [],
+                },
+            ],
+        ),
+    )
+    for role, task_kind, duplicate_changes in cases:
+        definition = DEFAULT_TASK_REGISTRY.get(
+            role=role,
+            task_kind=task_kind,
+            contract_version=1,
+        )
+        assert definition.output_model is not None
+        with pytest.raises(ValidationError):
+            definition.output_model.model_validate({"changes": []})
+        with pytest.raises(ValidationError, match="change each component"):
+            definition.output_model.model_validate({"changes": duplicate_changes})
