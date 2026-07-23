@@ -1,8 +1,8 @@
-# 本地使用
+# NovelPilot 本地使用
 
-## 安装
+## 1. 安装
 
-在仓库根目录运行：
+在仓库根目录：
 
 ```powershell
 python -m venv .venv
@@ -10,14 +10,15 @@ python -m venv .venv
 npm.cmd --prefix frontend install
 ```
 
-仓库根目录的 npm 脚本通过 `scripts\python.cmd` 选择解释器：优先使用标准
-venv 的 `.venv\Scripts\python.exe`，其次使用 Conda 前缀的
-`.venv\python.exe`，两者都不存在时使用当前 PATH 中已激活的 `python`。
-Python 环境不会随 Git 仓库同步，因此每台电脑需要单独创建环境或激活已有环境。
+根脚本通过 `scripts\python.cmd` 选择 `.venv\Scripts\python.exe`、Conda `.venv\python.exe` 或当前 PATH 中的 Python。
 
-## 启动应用
+## 2. 数据库初始化与启动
 
-分别在两个终端启动后端和前端：
+```powershell
+npm.cmd run backend:migrate
+```
+
+分别启动后端和前端：
 
 ```powershell
 npm.cmd run backend:dev
@@ -27,160 +28,129 @@ npm.cmd run backend:dev
 npm.cmd run frontend:dev
 ```
 
-打开：
+访问 `http://127.0.0.1:5173`。后端默认位于 `http://127.0.0.1:8010`。
+
+FastAPI 启动时会校验 schema revision、integrity、foreign keys 与 Blob hash，并由 lifespan 启动唯一 Run Engine。不要启动多个 Uvicorn worker。
+
+## 3. LLM Profile
+
+Profile 与 API key 位于 git ignored 的：
 
 ```text
-http://127.0.0.1:5173
+config/llm-profiles.local.json
 ```
 
-前端会把 API 请求代理到 FastAPI 后端 `http://127.0.0.1:8010`。
+运行时只接受 schema version 2，并要求 capability evidence 与当前配置 fingerprint 一致。项目可为 Book、Arc、Chapter、Evaluator 分别选择 Profile；未指定时使用 default Profile。`model_id` 不参与领域分支，同一 `api_family` 下切换模型不改变 Harness 结构。
 
-## 配置 LLM Profile
-
-可以在应用里的 LLM Profiles 面板配置，也可以用 PowerShell 配置：
+从旧本地配置一次性迁移：
 
 ```powershell
-$env:NOVELPILOT_API_KEY = "<your-api-key>"
-npm.cmd run profile:upsert -- --id main --name "Main Provider" --protocol openai-compatible --base-url "https://api.example.com/v1" --model "model-name" --api-key-env NOVELPILOT_API_KEY --request-options-json '{"reasoning_effort":"high"}' --select
+scripts\python.cmd scripts/migrate_profile_config.py
 ```
 
-支持的协议：
+迁移不会打印或移动 API key。能力不满足 `text_streaming` 或 `native_json_schema` 时任务明确失败，不会降级到另一种输出协议。
 
-- `openai-compatible`
-- `anthropic-compatible`
+## 4. 正常创作流程
 
-Profile 保存在 `config/llm-profiles.local.json`，这个文件会被 git 忽略。生成的小说项目只保存脱敏后的 profile/model 快照。
+1. 在工作台创建项目，选择 `full_auto` 或 `participatory` 和 capability-ready Profile。
+2. 点击 Start。浏览器仅发出一次显式命令；关闭页面不停止后端流程。
+3. BookStrategist 基于初始 Prompt 逐次提出一个高价值问题。可以选择推荐回答，也可以自由输入。
+4. Book 候选通过 Evaluator 后仍会等待显式批准；两种模式都不能跳过。
+5. full-auto 自动提交通过评审的 Arc；participatory 对每个 Arc 显示一个批准动作，可以采用建议章节数。
+6. Chapter 自动执行 plan → draft → observe → evaluate → commit；没有章节人工审批。
+7. 需要时 Pause。当前模型 activation 会正常收口，系统在下一个安全边界暂停。
+8. 普通暂停可 Resume；失败暂停只能使用专用 Retry。Retry 创建新 attempt，不改写原证据。
+9. 全书达到 completion 后导出 Markdown。导出只包含正式章节。
 
-设置页的“额外请求参数（JSON）”会把任意 Provider 请求体字段合并进正式调用，例如 `reasoning_effort`、`temperature`、`max_completion_tokens` 或 Provider 私有扩展。Novelpilot 只固定保护 profile 选择的 `model`、已经装配的 `messages/system` 与默认开启的 `stream`，不再自动注入温度、输出 token 上限或 `response_format`。Anthropic 兼容接口通常要求 `max_tokens`，需要在 profile 中显式填写。扩展参数不是秘密存储区，不要把额外密钥写在这里。
+页面刷新、SSE 重连、切换项目和普通 GET 不会改变 Route。
 
-所有正式模型调用默认读取流式响应，并通过 SSE 展示正文增量或结构化任务的接收进度。底层官方 SDK 负责连接池、SSE 解析和默认超时；SDK 自动重试关闭，NovelPilot 只执行并记录自己的单请求三次重试。Provider、代理、操作系统或网络仍可能主动断开连接。CLI 更新 profile 时，省略 `--request-options-json` 会保留原有扩展参数。
+## 5. 权威数据、导出和旧输出
 
-测试已保存的 profile：
+```text
+data/novelpilot.sqlite3       # 唯一权威应用库
+data/backups/                 # 一致快照及 manifest
+data/live-observations/       # 四轮真实观测报告
+config/*.local.json           # Profile 与本地密钥
+output/                       # Markdown 导出及保留的旧输出
+```
+
+旧 `output/project-*` 文件项目不会自动迁移，也不会被新后端读取或删除。新小说的状态恢复依赖 SQLite current rows、pending gates、attempt/delivery metadata，不依赖旧 JSONL 或实时 token。
+
+## 6. 备份与恢复
+
+备份前停止后端，或保证没有 running/pause_requested Run、running attempt 和已占用 engine slot：
 
 ```powershell
-npm.cmd run profile:test -- --profile-id main
+npm.cmd run backend:backup -- --destination data\backups\novelpilot-2026-07-23.sqlite3
 ```
 
-## 新建并创作小说
-
-1. 在项目选择器中选择“开始新书”或“继续创作”。
-2. 开始新书时选择 `full_auto` 或 `participatory` 初始模式；新项目先显示为“未命名新书”，无需预先输入书名。继续创作会恢复已有项目的内容、进度和模式。
-3. 配置并选择 LLM profile。
-4. 在“共创”中自由讨论全书方向。模型会持续维护完整草稿、已确认决定、已取代决定、待定项、假设和矛盾；讨论轮数不受限制。推荐回复会追加到未发送输入，不会覆盖已经写下的内容。
-5. 方向成熟后点击整理并审阅。候选必须逐项覆盖并结构化保留已确认决定，同时给出若干带理由的推荐书名；审阅通过后选择推荐书名或输入自定义书名，再明确批准当前候选版本。正式标题与全书方向会一起提交，有阻断问题时继续讨论后重新审阅。
-6. 启动或恢复 harness。
-7. 在“工作台”中观察三栏 loop 状态、模型可见输出、产物、上下文快照、审查、验证信号、patch 状态和路由决策；在“故事世界”查看故事弧、章节和正史，在“证据中心”查看完整审计轨迹。参与模式审批故事弧时，可以在 1～30 章范围内调整 Story Arc Loop 给出的建议章节数。
-8. 需要时随时提交反馈。反馈会在下一个安全 checkpoint 被处理。
-9. 需要时导出全书。
-
-项目打开后可以切换全自动或参与模式。运行中的原子动作不会被中断，必须先等待安全 checkpoint；已经等待人工审批的故事弧不会因为切到全自动而被跳过。当前故事弧状态缺失或无法验证时，系统会拒绝切到全自动。
-
-导出文件写入：
-
-```text
-output/project-<项目 ID>/exports/manuscript.md
-```
-
-导出只包含已经提交的章节 `final.md` 文件。
-
-## 制作消融实验母本
-
-“实验室”是常驻的独立入口，不是正常三层 Loop 的必经阶段。用于生成建议测试故事的 Prompt 与冻结步骤见 [消融实验母本故事 Prompt 1](benchmark-story-prompt.md)。
-
-母本身份只能在新建小说时声明：先选择“参与模式”，再勾选“创建实验母本项目”。母本项目在冻结前仍走完全相同的全书、故事弧和章节流程，但创作模式会保持为参与模式，不能中途取消母本身份、改为全自动，也不能把已有普通小说转换为母本。
-
-固定冻结点是：第一故事弧已完成并提交章节，第二故事弧已完成规划、正在等待人工审批，而且第二故事弧尚未开始写章。批准第二故事弧时，后端会先停止持久运行意图，再提交批准并自动发布母本；不会为第二故事弧分配章节或发起新的模型请求。
-
-母本写入：
-
-```text
-output/experiments/fixtures/fixture-<ID>/
-```
-
-该目录包含不可变快照、校验 manifest 和供未来 `none` 基线使用的 `direct_prompt.md`。发布成功后，源项目保留在普通项目列表中并标记为“已冻结母本”，可以打开、查看、导出、进入实验室或按普通项目删除，但不能继续生成或修改。
-
-若发布失败，第二故事弧批准不会回滚，源项目仍保持停止和只读。“实验室”会显示失败原因并提供本地发布重试；该重试不调用模型、不重新审批，也不改写全书、故事弧、正史或已提交章节。相同检查点重复发布只返回已校验的现有母本。
-
-## 本地项目数据
-
-生成的小说项目保存在：
-
-```text
-output/project-<项目 ID>/
-```
-
-这个目录会被 git 忽略。它可能包含草稿、正式章节、审查结果、状态补丁、事件、导出文件和 smoke 报告。
-
-全书讨论的主要文件是：
-
-```text
-book/setup.json                         # 当前讨论状态
-book/direction_draft.md                 # 最新候选方向草稿
-book/discussion/transcript.jsonl        # 完整本地讨论记录
-book/discussion/turn-*/attempt-*/       # 上下文、响应及不可变状态/草稿/transcript
-book/reviews/review-*/                  # 版本化候选、约束与审阅结论
-book/direction.md                       # 明确批准后的正式方向
-book/constraints.json                   # 明确批准后的结构化约束
-book/outline.md                         # 滚动故事弧规划契约
-```
-
-讨论草稿和 `book/reviews/` 不会自动成为正式方向。继续讨论会使当前待批准候选失效，但旧审阅目录保留用于追溯。另一个进程产生的过期结果会因 revision 冲突被丢弃；批准时正式全书文件会一起事务提交，不会留下半套已批准状态。
-
-## 质量门禁
-
-发布变更前运行完整本地质量门禁：
+校验备份：
 
 ```powershell
-npm.cmd run typecheck
-npm.cmd run lint
-npm.cmd run test
+npm.cmd run backend:backup:validate -- data\backups\novelpilot-2026-07-23.sqlite3
+```
+
+恢复前必须停止 FastAPI；目标库旁不能遗留 `-wal` 或 `-shm`：
+
+```powershell
+npm.cmd run backend:restore -- data\backups\novelpilot-2026-07-23.sqlite3
+```
+
+Restore 验证 manifest、文件 hash、integrity、FK、schema 与 Blob hash 后原子替换整库。它不支持把一个项目合并进另一个正在运行的数据库。
+
+## 7. 离线质量门禁
+
+```powershell
+npm.cmd run backend:migrate:test
+npm.cmd run backend:schema-check
+npm.cmd run backend:lint
+npm.cmd run backend:typecheck
+npm.cmd run backend:test
+npm.cmd run frontend:lint
+npm.cmd run frontend:typecheck
+npm.cmd run frontend:test
 npm.cmd run frontend:build
 npm.cmd run acceptance
 npm.cmd run audit:secrets
 ```
 
-基于 fixture 的测试覆盖开放式全书讨论、延迟命名与候选书名、上下文预算与版本追溯、确认决定覆盖、候选隔离、审阅阻断、并发冲突、多文件事务回滚、版本化批准、安全模式切换、profile 安全、LLM 适配器、事件 replay、运行控制、章节验证、状态补丁提交/拒绝、重试准备和全书导出。
+其中：
 
-## 真实 Provider Smoke 与文学审查
+- migration gate 执行 fresh upgrade、schema check、空库 downgrade/upgrade；
+- backend tests 覆盖数据库负约束、三层生命周期、Pydantic AI、Run Engine、恢复、API 和双模式 20 章整书；
+- acceptance 把产品能力映射到实现和离线测试，并检查旧运行路径已消失；
+- secret audit 扫描 `data/` 和 `output/` 下数据库、备份、导出与报告，发现 API key 时只报告脱敏路径、Profile id 和值类型。
 
-有真实 LLM profile 可用时，运行：
+## 8. 四次真实 Grok 4.5 观测
+
+只有上一节全部通过后才执行。先启动后端，再运行：
 
 ```powershell
-npm.cmd run smoke:live -- --profile-id main
+npm.cmd run observe:live-book-series -- --case benchmark-mother-natural-book-v1 --profile-id grok-4.5 --runs 4
 ```
 
-该命令会在 `output/` 下创建稳定内部 ID 的 smoke 项目，提交一份完整创作意图，执行开放讨论、包含推荐书名的候选综合、独立审阅和明确批准，然后运行一个有界的全自动章节 loop，导出 manuscript，并写入：
+runner 会先验证 Prompt SHA-256、固定四轮顺序、Profile capability 与 fingerprint，不会输出 secret。四轮各创建一个全新普通项目：
 
 ```text
-exports/live_smoke_report.json
+1 full_auto
+2 participatory
+3 full_auto
+4 participatory
 ```
 
-候选审阅阻断时，Smoke 会把问题重新注入讨论并重试，最多进行三次整理审阅。这个上限只用于自动化 smoke；应用内的真实全书讨论没有轮数上限。
+固定 actor 只执行正常产品动作：推荐 Book 回答、Book 批准，以及 participatory Arc 批准。它没有 Retry、Resume、Pause、数据库编辑、Prompt 编辑或模型输出修改能力。
 
-检查生成的 `final.md`、`review.md`、`verification.json` 和状态补丁文件后，记录人工审查结果：
+每轮结束立即写入独立脱敏报告；自然失败不补跑该轮，只要 Provider 仍可调用就继续下一个新项目。鉴权、额度、Profile 或能力问题阻止后续调用时，剩余 slot 标记 `not_run`。aggregate 只汇总事实，不生成 4/4 verdict。series 完成后停止，不自动诊断或修复，等待后续分析。
 
-```powershell
-npm.cmd run review:literary -- --project "<smoke-project-path>" --decision approved --chapter-assessment "<notes>" --state-patch-assessment "<notes>"
-```
+## 9. 应留在本地的内容
 
-然后审计完成度：
-
-```powershell
-npm.cmd run audit:completion -- --project "<smoke-project-path>"
-```
-
-只有静态验收、输出密钥审计、真实 provider smoke 和文学审查证据都通过时，完成度审计才会通过。
-
-## 应留在本地的内容
-
-这些路径不应进入公开 push：
+以下均已 git ignored，不应强制加入版本库：
 
 ```text
 config/*.local.json
+data/
 output/
+.venv/
 node_modules/
-.tmp/
-cache directories
+frontend/dist/
 ```
-
-如果本地存在 Trellis 或 agent 工作区文件，除非你明确想公开这些流程历史，否则应该把它们保留在本地私有分支。

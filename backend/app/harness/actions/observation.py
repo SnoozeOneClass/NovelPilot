@@ -1,2 +1,0 @@
-"""Candidate observation extraction action."""
-

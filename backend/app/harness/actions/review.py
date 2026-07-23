@@ -1,2 +1,0 @@
-"""Semantic review action."""
-

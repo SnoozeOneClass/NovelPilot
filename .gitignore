@@ -4,6 +4,9 @@ config/*.local.json
 # Generated novel output
 output/
 
+# Local application database and consistent backups
+data/
+
 # Local agent/Trellis workspaces
 .agents/
 .claude/

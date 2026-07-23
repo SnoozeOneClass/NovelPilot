@@ -1,2 +1,0 @@
-"""Filesystem-backed storage services."""
-

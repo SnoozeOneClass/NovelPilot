@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "case_id": "benchmark-mother-natural-book-v1",
+  "prompt_path": "scripts/live_acceptance_cases/benchmark_mother_natural_arc_prompt.md",
+  "prompt_sha256": "e3ca474d1741b83015292c9fcec7b5fc50e930d6321230016cde7f77bff7a65c",
+  "mode_schedule": [
+    "full_auto",
+    "participatory",
+    "full_auto",
+    "participatory"
+  ],
+  "expected_chapter_range": {
+    "minimum": 18,
+    "maximum": 22
+  },
+  "actor_policy": {
+    "id": "recommended-first-public-api-v1",
+    "book_input": "select_recommended_else_first",
+    "book_approval": "approve_reviewed_candidate",
+    "participatory_arc_approval": "accept_recommended_target",
+    "prohibited_actions": [
+      "retry_failed_task",
+      "resume_run",
+      "pause_run",
+      "database_mutation",
+      "model_output_mutation",
+      "prompt_mutation",
+      "profile_mutation"
+    ]
+  },
+  "harness_contract": {
+    "id": "novelpilot-domain-harness",
+    "version": 1,
+    "provider_request_limit": 6,
+    "transport_retry_limit": 5,
+    "timeout_policy_id": "provider-timeout-t1-v1"
+  },
+  "maximum_slot_hours": 12
+}

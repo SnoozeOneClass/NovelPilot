@@ -1,231 +1,168 @@
-# Novelpilot 架构说明
+# NovelPilot 架构说明
 
-## 产品目标
+## 1. 目标与边界
 
-Novelpilot 是一个本地、单用户的 AI 长篇小说创作 Web 应用。
+NovelPilot 是本地、单用户、单进程的长篇小说 Agent Harness。同一时间只运行一个小说生成任务，但可以有多个项目停在审批、普通暂停或失败暂停状态。
 
-它不是为了演示“LLM 能写一段小说”，而是为了展示一个可以长期运行的 Agent Loop Harness：系统需要保存目标、控制状态边界、产生可观察证据、执行验证、处理纠偏，并能从失败或重启中恢复。
+系统解决的不是“让模型写一段文本”，而是四类稳定性问题：
 
-第一版明确不处理云端复杂度：不做账号系统、不做多人协作、不做远程同步，也不要求托管部署。
+1. 模型连接、流式读取、结构化输出和错误分类不再由业务代码手搓；
+2. Agent 输出不能直接污染小说事实；
+3. Book、Story Arc、Chapter 的审批与版本边界必须可恢复、可审计；
+4. 浏览器刷新、SSE 断线和进程重启不能重复驱动生成。
 
-## 运行结构
+不在当前版本实现的能力包括账号、多用户、跨进程消息、云部署和 Experiment Lab UI。未来实验母本会引用同一套正式 baseline/CAS/evidence，不会引入另一档项目或日志模型。
 
-```text
-React/Vite 前端
-  |
-  | HTTP 命令：项目新建/打开/关闭、profile CRUD、setup、运行控制、反馈、导出
-  | SSE 流：harness 运行事件和模型可见输出
-  v
-FastAPI 后端
-  |
-  +-- Project service：管理 output/project-<项目 ID>/ 生命周期
-  +-- LLM profile service：管理被 git 忽略的本地 LLM 配置
-  +-- LLM gateway：OpenAI 兼容和 Anthropic 兼容适配器
-  +-- Harness orchestrator：全书 loop、故事弧 loop、章节 loop
-  +-- Storage service：文档产物、JSON 状态、事件、重试、导出
-```
-
-所有文件系统写入都由后端负责。前端是工作台：用户在这里选择项目、配置 profile、共创并批准全书方向、控制运行、查看 harness 证据、提交反馈，并导出已提交章节。
-
-前端按五个任务域组织：`共创`、`工作台`、`故事世界`、`证据中心`、`实验室`。其中实验室是常驻但独立于正常三层 Loop 的实验基础设施入口；设置不占用任务域导航。服务端状态由 TanStack Query 管理，SSE 层负责事件去重并只失效相关查询；长期事件、产物和章节列表使用 TanStack Virtual。主题通过同一套语义 Token 支持系统、亮色和暗色，不为不同主题复制组件样式。功能组件使用 CSS Modules，全局样式只保留 Token 和 Reset。
-
-## 三层 Loop
-
-Novelpilot 把长篇写作建模为三层嵌套 loop：
-
-- 全书 loop：维护长期类型承诺、读者承诺、主角方向、世界约束、结局倾向和用户的主要创作意图。
-- 故事弧 loop：滚动规划当前故事弧，管理多章累积效果、节奏、冲突推进、伏笔流动和阶段收束。
-- 章节 loop：装配上下文，生成章节目标、草稿、候选观测、审查、验证、正式正文、候选状态补丁，并提交已验证的正史更新。
-
-故事弧 loop 是滚动推进的，只规划当前故事弧，不要求一开始就生成整本书的完整路线图。一个故事弧结束后，系统会基于已提交正史、已批准的全书方向、前文、验证信号和待处理用户反馈来规划下一个故事弧。模型以结构化结果同时返回可读的 Markdown 计划和 1～30 范围内的建议章节数；全自动模式直接采用建议值，参与模式允许用户在批准当前故事弧时调整最终章节数。格式或范围无效时运行失败封闭，不使用固定章节数兜底。
-
-## 实验母本
-
-实验母本是项目创建时声明的身份，而不是实验室对已有小说执行的转换。它只能使用参与模式，冻结前继续复用普通的全书、故事弧和章节 Loop，不注入专用 Prompt 或增加额外审批。固定检查点是第一故事弧及其章节已经完成、第二故事弧计划正在等待批准且尚无章节；第二故事弧批准命令会在同一受控边界内先停止持久运行意图、提交批准，再自动发布母本，绝不会唤醒第二故事弧的章节生成。
-
-母本位于 `output/experiments/fixtures/fixture-<ID>/`，而不是源小说项目目录。后端按照固定白名单复制已批准的全书材料、相关故事弧计划和状态、预热章节的正式正文与已提交补丁，以及正史文件；草稿、失败尝试、讨论记录、运行锁和 LLM Profile 不会进入母本。每个文件由 manifest 记录大小与 SHA-256，manifest 自身也有校验侧车文件。
-
-冻结还会确定性生成 `direct_prompt.md`，为未来完全不使用 Harness 的 `none` 基线提供与其他方案同源的扁平输入。检查点指纹用于去重：源项目未发生变化时重复冻结只返回已有母本。发布过程先写临时目录、完整校验后再原子移动，成功后在源项目事件流中留下不含秘密的审计事件。
-
-第二故事弧一经批准，母本源项目就进入生成终态。发布成功记录为 `frozen`；本地发布或完整性校验失败记录为 `freeze_failed`，但不会回滚批准或恢复生成。两种状态都会在运行恢复和 RunHost 重启协调时强制持久意图为 `stopped`，并拒绝反馈、修订、模式/profile/policy 变更及运行重试等创作写操作。读取、导出、普通项目删除和实验室访问仍然保留。实验室只展示准备/完整性状态，并在 `freeze_failed` 后执行不调用模型的幂等本地发布重试。
-
-## 全书方向共创与批准
-
-全书方向是主要的深度 human-in-the-loop 阶段，不使用固定题库、固定顺序或问题数量。每轮讨论由模型结合当前草稿和讨论状态判断最关键的澄清点；模型可以给出用户口吻的参考回复，但自由输入始终存在。
-
-每轮模型调用必须返回完整的候选 Book Direction 草稿，同时维护：
-
-- 已确认决定。
-- 被用户明确取代的历史决定及当前输入证据。
-- 待澄清问题。
-- 尚未确认的假设。
-- 已发现但未解决的矛盾。
-- 面向下一轮的紧凑讨论摘要。
-
-Harness 只向模型注入完整方向草稿、维护后的摘要、决策状态和最近原始对话。更早的原始对话不会反复塞回 prompt，但完整 transcript 永久保留在本地。每个成功轮次保存不可变的草稿、讨论状态和 transcript 版本；上下文快照记录来源版本、注入内容的字符数与 SHA-256、摘要与排除项、总预算和装配理由，而不是复制一份完整 prompt。
-
-模型不能静默删除已有确认决定。只有用户当前输入明确改变或撤销决定时，模型才能记录取代关系，并必须提供来自该次用户输入的逐字证据。候选综合还必须逐项给出确认决定的文本证据，并把原决定保留在结构化约束中；确定性门禁会独立检查这两件事，不能只依赖审阅模型自报通过。
-
-模型给出的 `ready` 只是建议，不会自动结束讨论。用户主动请求审阅后，系统先综合候选方向、结构化约束和若干带理由的推荐书名，再发起一次独立语义审阅。冲突、把高影响假设写成事实、遗漏确认决定、内容无法约束后续创作、缺少滚动规划契约或提前写死未来全部故事弧都会阻止批准。用户可以选择推荐书名或输入自定义书名；只有用户明确批准当前候选版本，正式标题、`direction.md`、`constraints.json` 等全书产物才会在同一事务中提交。任何新讨论都会令当前候选失效，但不会删除旧审阅证据。
-
-讨论与审阅结果使用 setup revision 做 compare-and-swap。另一个后端进程若已推进状态，旧模型结果会被丢弃并留下事件，不能覆盖新状态。正式批准及候选包通过可恢复的多文件事务提交；中途写入失败会回滚全部目标。事件追加按文件锁分配序号，失败后的 outbox 重放以 `event_id` 去重。
-
-## 人类参与模式
-
-开始新书时，用户选择一种初始运行模式：
-
-- `full_auto`：故事弧计划和章节 loop 默认不需要故事弧级人工确认。
-- `participatory`：每个故事弧计划在开始写章节前暂停，等待人工审查。
-
-两种模式都允许用户随时提交反馈。反馈会立即记录，但不会打断正在进行的 LLM 原子动作；harness 会在下一个安全 checkpoint 处理反馈，并记录路由结果。
-
-运行模式属于可变的路由策略。项目处于非运行状态时可以切换；`running` 或 `pause_requested` 时必须先等待安全 checkpoint。切到参与模式会让当前尚未批准的故事弧进入人工审查；切到全自动只影响后续无需新建人工门禁的路由，已经持久化为 `awaiting_review` 的当前门禁仍然有效，直到用户明确批准。若当前故事弧状态缺失或无法验证，切换会失败封闭，不能借此绕过门禁。
-
-## 候选状态与已提交状态
-
-核心安全规则是：LLM 输出默认都是候选材料，在 harness 验证并提交前不是正史。
-
-这条规则同样适用于全书层：讨论草稿、模型综合结果和审阅包都不是已批准方向。模型调用失败或审阅失败不会改变正式全书产物，也不能自动放行。
-
-每个章节会产生这些核心产物：
+## 2. 总体分层
 
 ```text
-context_snapshot.json
-goal.md
-draft.md
-observations.json
-review.md
-verification.json
-candidate_state_patch.json
-committed_state_patch.json
-final.md
+React 工作台
+  ├─ 显式 HTTP Command：创建、Start、Pause、Resume、Retry、审批、反馈、导出
+  └─ Read/SSE：权威投影、durable cursor、可丢失 live delta
+                         │
+FastAPI lifespan         ▼
+  ├─ 唯一 async Run Engine
+  ├─ Pydantic AI Agent Executor
+  ├─ Domain Harness / Route / Commands
+  └─ SQLAlchemy Core Repositories
+                         │
+                         ▼
+               SQLite + project-owned CAS
 ```
 
-关键边界如下：
-
-- `draft.md` 是候选正文。
-- `observations.json` 是从草稿中提取的候选观测，不是正史状态。
-- `final.md` 只在验证通过后写入。
-- `candidate_state_patch.json` 在正式正文存在后由 LLM 提出。
-- `committed_state_patch.json` 只在 harness 校验通过后写入。
-- 正史文件只能通过已提交 patch 更新。
-
-这样可以防止状态污染。例如，某个被拒绝的草稿写了“重要角色死亡”，这个事件不能因为出现在候选观测里就进入正史。
-
-## 正史与存储
-
-小说项目保存在 `output/project-<项目 ID>/` 下。目录名来自稳定内部身份，正式标题稍后由全书 loop 决定，不参与路径计算。新项目会先在内部暂存目录完整初始化，成功后再原子发布到最终目录；应用启动和项目加载边界会恢复被进程中断的多文件事务，避免暴露半成品状态：
+依赖方向固定为：
 
 ```text
-project.json
-events.jsonl
-book/
-  setup.json
-  direction_draft.md
-  discussion/
-    transcript.jsonl
-    turn-0001/attempt-001/
-      context_snapshot.json
-      response.json
-      direction_draft.md
-      state.json
-      transcript.jsonl
-  reviews/
-    review-0001/
-      attempt-001/
-        context_snapshot.json
-      candidate_direction.md
-      candidate_constraints.json
-      candidate_titles.json
-      rolling_plan.md
-      verification.json
-      state.json
-      transcript.jsonl
-  direction.md
-  constraints.json
-  settings.md
-  outline.md
-  state.json
-  feedback.md
-arcs/
-  arc-001/
-    plan.md
-    revision.md
-    state.json
-chapters/
-  chapter-001/
-    attempts/
-    context_snapshot.json
-    goal.md
-    draft.md
-    observations.json
-    review.md
-    verification.json
-    final.md
-    candidate_state_patch.json
-    committed_state_patch.json
-canon/
-  characters.json
-  relationships.json
-  world_facts.json
-  foreshadowing.json
-exports/
-  manuscript.md
-  live_smoke_report.json
-  literary_review.json
+API -> application commands / queries
+Run Engine -> Route + Agent Executor + Domain Commands
+Agent Executor -> Pydantic AI + execution evidence
+Domain Commands -> layer-specific repositories
+Repositories -> SQLAlchemy Core / AsyncConnection
+Domain -X-> FastAPI, Pydantic AI, SQLAlchemy Row, live stream
 ```
 
-全书 manuscript 是导出产物，不是实时状态。它只由已提交的 `final.md` 章节拼接生成。
+旧 `RunHost`、旧 `app.llm` HTTP gateway、JSON/JSONL repository 和 active-project 文件均已删除。生产代码只有这一条路径。
 
-`project.json` 保存稳定项目 ID、可为空的正式标题、当前运行策略，以及项目种类和可选的母本生命周期。`settings.md` 与 `direction.md` 保存同一份已批准方向，前者作为现有下游上下文入口；`outline.md` 保存滚动故事弧规划契约，不保存预先写死的全书路线图。故事弧规划和章节上下文都会读取这份已批准契约。当前流程只在批准全书方向时写入正式标题；项目目录始终由项目 ID 决定，因此确定标题不会移动目录或改变项目 ID。
+## 3. Pydantic AI 与领域 Harness 的边界
 
-## 上下文快照
+Pydantic AI 接管通用能力：Provider/Model 调用、原生 JSON Schema、文本流、usage、SDK 异常与取消传播。NovelPilot 保留业务能力：
 
-`context_snapshot.json` 是审计产物，不是原始 prompt dump。章节 loop 和全书讨论都会记录使用了哪些上下文来源、可重建的不可变版本、注入块的字符数和哈希、哪些内容被摘要或排除、总字符预算，以及 harness 为什么这样装配上下文。
+- 有限 task registry 与冻结 Task Plan；
+- Prompt/Context 如何编排；
+- Book、Arc、Chapter Route；
+- 审批、revision、Canon、completion；
+- Run 控制、幂等、恢复和 Store。
 
-这是项目的核心卖点之一：前端可以展示 harness 如何控制模型看到的内容。
+四类角色均无领域写 Tool：
 
-## LLM Profile 与密钥安全
+| 角色 | 职责 |
+| --- | --- |
+| BookStrategist | Book 讨论、综合、修订、进度/完成判断 |
+| ArcPlanner | 当前 Story Arc 的滚动规划与修订 |
+| ChapterWriter | Chapter 计划、正文、观察与局部修订 |
+| Evaluator | 按 Book/Arc/Chapter rubric 只读评审 |
 
-LLM profile 是全局本地配置，不属于小说项目数据。它们保存在：
+计划、观察、评估使用原生结构化输出；章节正文使用文本流。Profile 不满足所需能力时在零 Provider 请求处失败，不静默降级。`api_family` 决定协议适配，`model_id` 只作为 opaque id；从 Grok 换到同协议 GPT 不改变 Agent、Route 或领域类型。
+
+## 4. LT1 生命周期与正式基线
+
+Book、Story Arc、Chapter 分别拥有显式生命周期表，不使用 `scope_kind` 万能表。
 
 ```text
-config/llm-profiles.local.json
+mutable workspace
+  -> review submission（冻结候选）
+  -> evaluator review
+  -> approval/policy authorization
+  -> immutable formal baseline
 ```
 
-Profile 支持：
+- 未通过审阅的工作稿可以原地更新，不为每次编辑创建 revision。
+- 已通过并提交的正式 baseline 不可覆盖；后续修改派生新 workspace。
+- 章节内部影响由 Chapter 层处理；影响 Story Arc 或全书时显式升级 change request。
+- Agent 只提出、修订或评审；Harness 通过 Domain Command 写权威状态。
+- 上游 baseline 更新后，下游 workspace 会标记 stale，并通过显式 rebase command 绑定最新依赖后重新生成。
 
-- `openai-compatible`
-- `anthropic-compatible`
+产品门禁：
 
-Gateway 的核心请求只负责模型、已装配消息和流式开关。OpenAI-compatible 与 Anthropic-compatible Adapter 分别使用官方同步 SDK 管理连接池、HTTP 与 SSE；SDK 隐藏重试固定为 0，Harness 保留唯一的单请求重试预算并记录每次重试。正式调用默认流式读取并使用 SDK 支持的默认超时行为，不统一强制温度、输出 token 上限或 `response_format`。Profile 可以保存任意 JSON `request_options` 并合并进 Provider 请求体；调用级参数可以覆盖 profile 扩展参数，但不能替换 profile 选择的 `model`、Harness 已装配的 `messages/system` 或关闭 `stream`。因此不同模型可以自行配置推理强度、采样、上限和私有扩展，Anthropic 所需的正整数 `max_tokens` 也由对应 profile 显式声明。
+- Book：两种模式都必须完成独立评审和用户显式批准。
+- Story Arc：full-auto 由 policy command 提交；participatory 每个 Arc 形成一个持久审批门禁。门禁形成后切回 full-auto 也不能绕过。
+- Chapter：独立评审通过后自动提交，没有人工章节审批。
 
-结构化 Harness 动作仍通过 prompt、解析器和候选产物 schema 约束结果，但这些属于业务契约，不再通过所有 Provider 都未必兼容的传输字段强制实现。自由文本动作可以把增量作为模型可见输出；全书讨论和故事弧计划等结构化动作只发布累计接收字符数，解析成功后再展示正式产物，避免把半截 JSON 当成小说内容。Provider 扩展参数会返回本地设置界面，不应承载额外秘密。
+## 5. SQLite、CAS 与 Transactional Outbox
 
-小说输出可以记录脱敏后的来源信息，例如 `profile_id` 和 `model_snapshot`，但不能保存 API key、原始 base URL、请求头或 provider 配置。分享输出前，可以用密钥审计命令扫描生成目录。
+SQLite 是唯一权威状态。数据库包含 34 张应用表，由 Alembic initial revision 和共享 `MetaData` 共同约束。
 
-## 事件、恢复与运行控制
+大型 Prompt、Context、typed result、正文和诊断附件存入项目拥有的 Content-Addressed Storage：
 
-`events.jsonl` 是持久化的 harness 审计流。SSE 会把实时事件暴露给前端。
+- Blob 身份是规范化未压缩字节的 SHA-256；
+- 仅同一项目内按 hash 去重；
+- 不跨项目共享 Blob，不需要 refcount 或后台 GC；
+- 项目删除通过外键级联删除该项目的内容、证据和领域行；
+- Fixture 将来作为独立不可变资产发布，不和普通项目 Blob 共生命周期。
 
-运行控制由后端 `RunHost` 持续推进，浏览器只负责观察和显式命令：
+`domain_events` 同时承担 Transactional Outbox：领域状态、command receipt 与事件在同一个 SQLite 事务提交。事务成功后，SSE 才能按 sequence/cursor 读取事件；不存在“状态已改但通知丢失”或“事件已发但状态回滚”的中间状态。这里不需要 Redis，因为系统没有跨进程消费者。
 
-- 暂停请求不会取消正在进行的 LLM 动作。
-- 暂停会在下一个安全 checkpoint 生效。
-- 用户第一次点击“开始创作”后，后端会连续推进内部 checkpoint；页面刷新、切换路由或关闭浏览器不会承担续跑职责。
-- 每个原子动作开始前写入 checkpoint，并且必须留下新的持久事件；没有状态进展的动作会被保护性停止，避免忙循环。
-- 恢复运行时读取已提交状态、候选身份和持久事件，而不是读取不完整的流式输出。已完成候选但缺少评测时，只补做评测，不重新生成正文。
-- 本地后端重启后，`RunHost` 会核对 `book/harness/run-state.json`，自动唤醒仍声明为 `running` 的项目。
-- 单次模型请求先进行有限次即时重试；瞬时网络失败耗尽后进入持久化 `waiting_for_provider`，按 10/20/40/80/160/300 秒退避自动重试，不要求用户守在页面点击恢复。
-- 鉴权、配置、能力不支持和确定性校验失败不会伪装成网络等待，而是停止并给出对应的修正或检查动作。
+Route、恢复、唯一约束和完成判断只读关系 metadata，不解压 Blob，也不从历史事件或 token 流重新推导权威状态。
 
-候选、评测和跨 Loop 路由都有稳定身份和持久证据。跨 Loop 路由会先写入待处理文件，再调用上层 Agent；即使进程中断也会先重放该路由。验证失败或状态补丁被拒绝时可以开启新的有限修订，失败候选会归档到 `attempts/`，而不是删除证据或覆盖已提交正文。
+## 6. Run Engine、事务与恢复
 
-## 完成证据
+FastAPI lifespan 创建并关闭唯一 `AsyncEngine`、Run Engine 和内存 live fan-out。Run Engine 每一步遵守：
 
-自动检查覆盖静态验收、类型检查、lint、测试、前端构建和输出密钥安全。最后两个门禁刻意保留为人工检查：
+```text
+短事务 claim
+  -> 事务外 Provider/确定性计算
+  -> 短事务写 terminal evidence
+  -> 独立 Domain Command 事务
+  -> 重新读取 Route
+```
 
-- 使用真实配置的 LLM profile 跑通完整流程。
-- 审查生成章节和状态补丁是否具有文学可用性。
+模型请求、流式等待、SSE backpressure 和用户审批等待都不持有数据库事务。
 
-这些门禁会在 smoke 项目的 `exports/` 目录下产生本地证据。
+- SQLite `engine_slot` 强制全局最多一个实际执行任务。
+- Pause 写入 desired state，当前 activation 正常收口后在安全边界暂停。
+- 普通 Resume 只适用于普通暂停；`failure_paused` 只能通过专用 Retry 创建新 attempt。
+- running attempt 使用 lease/heartbeat。启动 reconcile 对过期 attempt 最多自动创建一次 `crash_replay`；再次中断则失败暂停。
+- 已有完整 result 但尚未 delivery 时只补 Domain Command，不重复调用模型。
+- 同一 Domain Command 的 idempotency key 与 request fingerprint 保证重放不重复提交 baseline 或事件。
+
+## 7. 重试、超时与证据
+
+每个 task activation 是一次全新的无隐藏记忆 Agent run：
+
+- 最多 6 个真实 Provider 请求；
+- 其中最多 5 次 transport retry；
+- structured output 最多额外一次 model repair，但与 transport retry 共用六次总预算；
+- T1：connect/pool 10 秒、write 60 秒、read 10 分钟、activation 30 分钟。
+
+连接错误、408/409/425/429/5xx 等按合同分类；鉴权、配置、能力和明确 invalid request 快速失败。失败 task 持久化类型化错误与已脱敏诊断，不在后台无限等待 Provider。
+
+长期证据以完整任务为粒度：冻结的 Task Plan、输入 manifest、消息、完整工具过程、最终结果、usage、retry 链和错误附件。逐 token delta 不进入 SQLite，只发布到进程内 `LossyLiveFanout`；刷新和重启不回放旧 delta。
+
+## 8. API 与前端状态模型
+
+所有项目 endpoint 显式使用 `project_id`。前端 localStorage 只记当前打开哪个项目，不是后端领域事实。
+
+- Query 直接返回 current baseline/workspace、pending gate、blocking failure 和可执行 commands。
+- Mutation 必须携带 `Idempotency-Key`，返回最新权威投影。
+- SSE 先按 durable event cursor 补进度，再附加可丢失 live prose。
+- React effect、页面刷新、项目切换和 SSE 重连都不能 Start、Resume 或 Retry。
+- 诊断 endpoint 只返回 task/attempt/profile fingerprint/usage/error metadata，不返回或解析正文 Blob。
+
+## 9. 备份、恢复与导出
+
+继续运行所需的备份是整个应用数据库的一致快照，不是复制 `.sqlite3` 主文件：
+
+1. 服务停止或所有运行到达安全边界；
+2. SQLite Online Backup API 创建快照；
+3. 校验 integrity、foreign keys、schema revision 和每个 Blob hash；
+4. 写入绑定文件大小、SHA-256、event sequence 和 Blob count 的 manifest。
+
+Restore 要求 FastAPI 已停止且无 WAL/SHM sidecar，验证后原子替换整库，不做项目行级 merge。
+
+单本小说只提供 Markdown 导出。导出按 book ordinal 读取正式 Chapter baseline，计算 snapshot fingerprint 与 content hash；workspace 草稿、失败 attempt 和 live delta 永远不会进入正文。
+
+## 10. 实验与真实观测
+
+未来母本冻结会在明确节点把正式 baseline、Canon、任务证据 identity 和 manifest 发布为不可变 bundle。普通项目与母本在冻结前使用完全相同的领域模型和持久化规则。
+
+首轮真实观测是独立的 post-acceptance series：同一 Prompt/hash、Profile/fingerprint、代码 source hash、Harness contract 和 actor policy，按 `full_auto → participatory → full_auto → participatory` 创建四个新项目。合法 Book/Arc 产品动作不算技术救援；runner 不调用 Retry/Resume，不修改模型输出、Prompt、Profile 或数据库。结果只形成事实报告和问题索引，不反向决定离线工程验收。

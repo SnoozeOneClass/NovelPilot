@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import type { ThemePreference } from "./types";
+
+type ThemePreference = "system" | "light" | "dark";
 
 const THEME_STORAGE_KEY = "novelpilot.theme";
 

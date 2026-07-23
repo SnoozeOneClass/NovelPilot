@@ -1,2 +1,0 @@
-"""Atomic harness action modules."""
-

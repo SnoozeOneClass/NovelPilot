@@ -1,2 +1,0 @@
-"""Context assembly action."""
-
