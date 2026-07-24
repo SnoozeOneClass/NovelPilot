@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.db.uow import StoreSession
 from app.domain.commands import (
@@ -19,11 +19,10 @@ from app.domain.commands import (
 from app.store.change_requests import (
     ArcBookChangeRequestRecord,
     ChapterArcChangeRequestRecord,
-    ChapterBookChangeRequestRecord,
 )
 from app.store.command_bus import CommandBus
 
-ChangeRequestKind = Literal["chapter_to_arc", "chapter_to_book", "arc_to_book"]
+ChangeRequestKind = Literal["chapter_to_arc", "arc_to_book"]
 TargetLayer = Literal["arc", "book"]
 
 
@@ -44,7 +43,19 @@ class ActivateChangeResult(BaseModel):
     change_request_id: str
     target_layer: TargetLayer
     target_id: str
-    workspace_lock_version: int = Field(ge=1)
+    action: Literal["revision_workspace_opened", "arc_revision_limit_reached"]
+    workspace_lock_version: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _action_shape(self) -> ActivateChangeResult:
+        opened = self.action == "revision_workspace_opened"
+        if opened != (self.workspace_lock_version is not None):
+            raise ValueError(
+                "Only revision_workspace_opened carries workspace_lock_version."
+            )
+        if self.target_layer == "book" and not opened:
+            raise ValueError("Book activation has no Arc revision-limit outcome.")
+        return self
 
 
 class RejectChangeRequest(BaseModel):
@@ -135,18 +146,6 @@ class ChangeRequestCommandService:
                     canon_baseline_id=project.current_canon_baseline_id,
                     timestamp=timestamp,
                 )
-            elif request.request_kind == "chapter_to_book":
-                chapter_book_change = await session.changes.get_chapter_book(
-                    project_id=request.project_id,
-                    request_id=request.change_request_id,
-                )
-                result = await self._activate_book(
-                    session,
-                    change=chapter_book_change,
-                    request=request,
-                    canon_baseline_id=project.current_canon_baseline_id,
-                    timestamp=timestamp,
-                )
             else:
                 arc_book_change = await session.changes.get_arc_book(
                     project_id=request.project_id,
@@ -205,7 +204,7 @@ class ChangeRequestCommandService:
                 )
                 if chapter_arc_change is None or chapter_arc_change.status != "open":
                     raise CommandPreconditionError("Chapter-to-Arc request is not open.")
-                rejected = await session.changes.reject_chapter_arc(
+                rejected = await session.changes.supersede_chapter_arc(
                     project_id=request.project_id,
                     request_id=request.change_request_id,
                     reason=request.reason,
@@ -217,25 +216,6 @@ class ChangeRequestCommandService:
                     chapter_id=chapter_arc_change.chapter_id,
                     timestamp=timestamp,
                 )
-            elif request.request_kind == "chapter_to_book":
-                chapter_book_change = await session.changes.get_chapter_book(
-                    project_id=request.project_id,
-                    request_id=request.change_request_id,
-                )
-                if chapter_book_change is None or chapter_book_change.status != "open":
-                    raise CommandPreconditionError("Chapter-to-Book request is not open.")
-                rejected = await session.changes.reject_chapter_book(
-                    project_id=request.project_id,
-                    request_id=request.change_request_id,
-                    reason=request.reason,
-                    now_ms=timestamp,
-                )
-                await self._block_chapter_for_user(
-                    session,
-                    project_id=request.project_id,
-                    chapter_id=chapter_book_change.chapter_id,
-                    timestamp=timestamp,
-                )
             else:
                 arc_book_change = await session.changes.get_arc_book(
                     project_id=request.project_id,
@@ -243,7 +223,7 @@ class ChangeRequestCommandService:
                 )
                 if arc_book_change is None or arc_book_change.status != "open":
                     raise CommandPreconditionError("Arc-to-Book request is not open.")
-                rejected = await session.changes.reject_arc_book(
+                rejected = await session.changes.supersede_arc_book(
                     project_id=request.project_id,
                     request_id=request.change_request_id,
                     reason=request.reason,
@@ -294,10 +274,30 @@ class ChangeRequestCommandService:
     ) -> ActivateChangeResult:
         if (
             change is None
-            or change.status != "open"
+            or change.status != "reviewed"
             or change.target_arc_baseline_id != request.expected_target_baseline_id
+            or change.latest_parent_review_id is None
         ):
             raise CommandPreconditionError("Chapter-to-Arc request is stale.")
+        parent_review = await session.arc_parent_reviews.get(
+            project_id=request.project_id,
+            review_id=change.latest_parent_review_id,
+        )
+        if (
+            parent_review is None
+            or parent_review.request_id != change.id
+            or parent_review.disposition != "arc_revision_warranted"
+            or parent_review.automatic_correction_round != 0
+            or parent_review.opened_arc_workspace_id is not None
+        ):
+            raise CommandPreconditionError(
+                "Arc revision lacks current Arc-layer authorization."
+            )
+        revision_origin = (
+            "user_initiated"
+            if parent_review.correction_lineage_origin == "user_initiated"
+            else "automatic_arc_recovery"
+        )
         book = await session.books.get_for_project(request.project_id)
         arc = await session.arcs.get(project_id=request.project_id, arc_id=change.arc_id)
         workspace = await session.arcs.get_workspace(
@@ -315,6 +315,30 @@ class ChangeRequestCommandService:
             or workspace.lock_version != request.expected_workspace_lock_version
         ):
             raise CommandPreconditionError("Arc revision target is no longer current.")
+        if (
+            revision_origin == "automatic_arc_recovery"
+            and await session.arcs.has_automatic_recovery_baseline(arc_id=change.arc_id)
+        ):
+            source_task = await session.execution.get_successful_task(
+                project_id=request.project_id,
+                task_id=parent_review.source_task_id,
+                attempt_id=parent_review.source_attempt_id,
+            )
+            if source_task is None or not await session.runs.ensure_wait_for_user(
+                run_id=source_task.run_id,
+                reason_code="arc_revision_limit_reached",
+                now_ms=timestamp,
+            ):
+                raise CommandPreconditionError(
+                    "Run could not enter the Arc revision-limit wait."
+                )
+            return ActivateChangeResult(
+                project_id=request.project_id,
+                change_request_id=request.change_request_id,
+                target_layer="arc",
+                target_id=change.arc_id,
+                action="arc_revision_limit_reached",
+            )
         gate = await session.arcs.find_pending_gate(
             project_id=request.project_id,
             arc_id=arc.id,
@@ -345,8 +369,20 @@ class ChangeRequestCommandService:
             base_arc_baseline_id=arc.current_baseline_id,
             book_baseline_id=book.current_baseline_id,
             canon_baseline_id=canon_baseline_id,
+            revision_origin=revision_origin,
+            source_arc_parent_review_id=parent_review.id,
+            source_arc_closure_review_id=None,
+            source_book_parent_review_id=None,
+            source_book_boundary_review_id=None,
+            source_feedback_id=None,
+            correction_lineage_id=parent_review.correction_lineage_id,
+            correction_lineage_origin=parent_review.correction_lineage_origin,
+            automatic_correction_round=1,
             plan_ref_id=None,
-            recommended_target_chapter_count=None,
+            minimum_chapter_count=None,
+            recommended_closure_chapter_count=None,
+            maximum_chapter_count=None,
+            closure_chapter_count=None,
             guidance_ref_id=change.evidence_ref_id,
             semantic_repair_count=0,
             stale_reason_code=None,
@@ -358,11 +394,20 @@ class ChangeRequestCommandService:
             expected_lock_version=workspace.lock_version,
         ):
             raise CommandPreconditionError("Arc revision workspace CAS failed.")
+        if not await session.arc_parent_reviews.mark_workspace_opened(
+            project_id=request.project_id,
+            review_id=parent_review.id,
+            workspace_id=workspace.id,
+        ):
+            raise CommandPreconditionError(
+                "Arc parent review workspace pointer CAS failed."
+            )
         return ActivateChangeResult(
             project_id=request.project_id,
             change_request_id=request.change_request_id,
             target_layer="arc",
             target_id=arc.id,
+            action="revision_workspace_opened",
             workspace_lock_version=updated.lock_version,
         )
 
@@ -370,17 +415,32 @@ class ChangeRequestCommandService:
     async def _activate_book(
         session: StoreSession,
         *,
-        change: ChapterBookChangeRequestRecord | ArcBookChangeRequestRecord | None,
+        change: ArcBookChangeRequestRecord | None,
         request: ActivateChangeRequest,
         canon_baseline_id: str,
         timestamp: int,
     ) -> ActivateChangeResult:
         if (
             change is None
-            or change.status != "open"
+            or change.status != "reviewed"
             or change.target_book_baseline_id != request.expected_target_baseline_id
+            or change.latest_parent_review_id is None
         ):
             raise CommandPreconditionError("Book change request is stale.")
+        parent_review = await session.book_parent_reviews.get(
+            project_id=request.project_id,
+            review_id=change.latest_parent_review_id,
+        )
+        if (
+            parent_review is None
+            or parent_review.request_id != change.id
+            or parent_review.disposition != "book_revision_warranted"
+            or parent_review.automatic_correction_round != 0
+            or parent_review.opened_book_workspace_id is not None
+        ):
+            raise CommandPreconditionError(
+                "Book revision lacks current Book-layer authorization."
+            )
         book = await session.books.get_for_project(request.project_id)
         workspace = await session.books.get_workspace(
             project_id=request.project_id,
@@ -428,11 +488,20 @@ class ChangeRequestCommandService:
             expected_lock_version=workspace.lock_version,
         ):
             raise CommandPreconditionError("Book revision workspace CAS failed.")
+        if not await session.book_parent_reviews.mark_workspace_opened(
+            project_id=request.project_id,
+            review_id=parent_review.id,
+            workspace_id=workspace.id,
+        ):
+            raise CommandPreconditionError(
+                "Book parent review workspace pointer CAS failed."
+            )
         return ActivateChangeResult(
             project_id=request.project_id,
             change_request_id=request.change_request_id,
             target_layer="book",
             target_id=book.id,
+            action="revision_workspace_opened",
             workspace_lock_version=updated.lock_version,
         )
 

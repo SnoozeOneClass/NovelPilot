@@ -81,7 +81,7 @@ export const workspaceApi = {
   }),
   runControl: (
     projectId: string,
-    action: "start" | "pause" | "resume" | "retry",
+    action: "start" | "pause" | "resume" | "retry" | "retry-action",
     expectedLockVersion: number,
     idempotencyKey: string
   ) => postMutation(
@@ -106,19 +106,18 @@ export const workspaceApi = {
     postMutation(`/api/projects/${encodeURIComponent(projectId)}/book/approve`, idempotencyKey),
   approveArc: (
     projectId: string,
-    targetChapterCount: number | null,
+    closureChapterCount: number | null,
     idempotencyKey: string
   ) => postMutation(
     `/api/projects/${encodeURIComponent(projectId)}/arc/approve`,
     idempotencyKey,
-    { target_chapter_count: targetChapterCount }
+    { closure_chapter_count: closureChapterCount }
   ),
   submitFeedback: (
     projectId: string,
     input: {
       content: string;
       route_layer: "book" | "arc" | "chapter";
-      expected_workspace_lock_version: number;
     },
     idempotencyKey: string
   ) => postMutation(

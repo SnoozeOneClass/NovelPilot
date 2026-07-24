@@ -20,12 +20,13 @@ def test_clean_slate_acceptance_inventory_is_fully_owned_by_offline_evidence() -
 
     assert report["engineering_acceptance_requires_live_success"] is False
     assert report["summary"] == {
-        "covered": 17,
+        "covered": 18,
         "partial": 0,
         "missing": 0,
-        "total": 17,
+        "total": 18,
     }
     assert all(item["status"] == "covered" for item in report["criteria"])
+    assert by_id["hierarchical_loop_authority"]["status"] == "covered"
     assert by_id["legacy_runtime_removed"]["status"] == "covered"
     assert by_id["live_observation_ready"]["status"] == "covered"
     assert "post-acceptance observation" in report["scope"]
@@ -42,6 +43,6 @@ def test_acceptance_markdown_states_live_result_is_not_the_engineering_gate() ->
     )
 
     assert "# NovelPilot Clean-Slate Acceptance Report" in completed.stdout
-    assert "Summary: 17 covered, 0 partial, 0 missing, 17 total." in completed.stdout
+    assert "Summary: 18 covered, 0 partial, 0 missing, 18 total." in completed.stdout
     assert "four-run real-model series" in completed.stdout
     assert "legacy_runtime_removed [covered]" in completed.stdout

@@ -11,7 +11,12 @@ from alembic import command
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.agents.contracts import ArcPlanProposal
+from app.agents.contracts import (
+    ArcClosureSignal,
+    ArcPlanProposal,
+    ArcStateTransition,
+)
+from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
 from app.db.engine import create_sqlite_async_engine
 from app.db.maintenance import alembic_config
 from app.db.schema import (
@@ -27,7 +32,7 @@ from app.domain.arc.commands import ArcCommandService
 from app.domain.arc.contracts import (
     ApplyArcTaskRequest,
     ApproveArcRequest,
-    ArcBeatsRepair,
+    ArcAdvisoryBeatsRepair,
     ArcEvaluation,
     ArcRepairPatch,
     ArcTitleRepair,
@@ -42,7 +47,10 @@ from app.domain.book.contracts import (
     ApplyBookCandidateRequest,
     ApproveBookRequest,
     BookCandidatePack,
+    BookCompletionRequirement,
+    BookCreativeConstraints,
     BookEvaluation,
+    BookRollingPlan,
     CompletionContract,
     RecordBookReviewRequest,
     SubmitBookRequest,
@@ -78,6 +86,44 @@ class ReviewedArc:
     plan: ArcPlanProposal
 
 
+def _arc_plan(
+    *,
+    title: str,
+    purpose: str,
+    target_chapter_count: int,
+    advisory_beats: list[str],
+) -> ArcPlanProposal:
+    return ArcPlanProposal(
+        title=title,
+        purpose=purpose,
+        desired_state_transition=ArcStateTransition(
+            start_state="The memory-edit source is unknown.",
+            end_state="The first memory-edit source is identified.",
+        ),
+        conflict_trajectory=[
+            "Witness accounts contradict one another.",
+            "Physical evidence exposes the first edit source.",
+        ],
+        pacing_trajectory=["investigation", "escalation", "stage closure"],
+        character_obligations=["The investigator commits to verifiable evidence."],
+        foreshadowing_obligations=[],
+        prohibitions=["Do not invalidate committed evidence as a dream."],
+        minimum_chapter_count=target_chapter_count,
+        recommended_closure_chapter_count=target_chapter_count,
+        maximum_chapter_count=min(30, target_chapter_count + 2),
+        closure_chapter_count=target_chapter_count,
+        closure_signals=[
+            ArcClosureSignal(
+                signal_key="first_edit_source_identified",
+                description="The source of the first memory edit is identified.",
+                evidence_expectation="Committed Chapter observations name the source.",
+                required=True,
+            )
+        ],
+        advisory_beats=advisory_beats,
+    )
+
+
 async def _seed_approved_book(
     engine: AsyncEngine,
     *,
@@ -109,13 +155,34 @@ async def _seed_approved_book(
             expected_workspace_lock_version=1,
             candidate=BookCandidatePack(
                 direction="Conflicting testimony reveals that memory can be edited.",
-                constraints={"pov": "limited-third"},
+                constraints=BookCreativeConstraints(
+                    genre_reader_promise="A fair-play memory mystery.",
+                    premise_story_engine="Physical evidence contradicts rewritten memory.",
+                    stable_world_invariants=["Physical evidence cannot be memory-edited."],
+                    stable_character_invariants=["The investigator pursues verifiable truth."],
+                    core_selling_points=["Each contradiction can be investigated."],
+                    prohibited_outcomes=["Committed facts cannot be dismissed as a dream."],
+                ),
                 selected_title="Echo Testimony",
-                rolling_plan={"strategy": "one-arc-at-a-time"},
+                rolling_plan=BookRollingPlan(
+                    long_term_character_directions=["Trust evidence over memory."],
+                    high_level_phase_strategy=["Expose the edit", "Confront its source"],
+                    whole_book_pacing_strategy="Escalate through bounded rolling Arcs.",
+                    ending_tendency="The investigator chooses truth at personal cost.",
+                    arc_planning_guidelines=["Each Arc closes observable evidence."],
+                ),
                 completion_contract=CompletionContract(
                     minimum_chapter_count=1,
                     maximum_chapter_count=12,
-                    completion_requirements=["Resolve the central memory conflict"],
+                    completion_requirements=[
+                        BookCompletionRequirement(
+                            requirement_key="memory_conflict_resolved",
+                            description="Resolve the central memory conflict.",
+                            evidence_expectation=(
+                                "A final committed Chapter proves the resolution."
+                            ),
+                        )
+                    ],
                 ),
             ),
         ),
@@ -153,8 +220,12 @@ async def _seed_approved_book(
             submission_id=submitted.result.submission_id,
             evaluator_task_id=task_id,
             evaluator_attempt_id=attempt_id,
-            rubric_id="book-rubric",
-            rubric_version=1,
+            rubric_id=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                "evaluate.book"
+            ).rubric_id,
+            rubric_version=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                "evaluate.book"
+            ).rubric_version,
             deterministic_precheck={"passed": True},
         ),
         idempotency_key=f"{project_id}:book-review",
@@ -203,12 +274,14 @@ async def _prepare_reviewed_arc(
         ),
         idempotency_key=f"{project_id}:arc-create",
     )
-    plan = ArcPlanProposal(
+    plan = _arc_plan(
         title="The First Contradiction",
         purpose="Expose the memory edit mechanism.",
-        beats=["Witnesses disagree", "The discrepancy leaves physical evidence"],
         target_chapter_count=target_chapter_count,
-        completion_signals=["The source of the first edit is identified"],
+        advisory_beats=[
+            "Witnesses disagree",
+            "The discrepancy leaves physical evidence",
+        ],
     )
     plan_task, plan_attempt = await insert_successful_task(
         engine,
@@ -246,6 +319,12 @@ async def _prepare_reviewed_arc(
         ),
         idempotency_key=f"{project_id}:arc-submit",
     )
+    evaluator_task_kind = (
+        "verify_repair.arc"
+        if repair_count_before_review is not None
+        and repair_count_before_review > 0
+        else "evaluate.arc"
+    )
     evaluator_task, evaluator_attempt = await insert_successful_task(
         engine,
         project_id=project_id,
@@ -253,12 +332,7 @@ async def _prepare_reviewed_arc(
         task_id=f"{created.result.arc_id}:evaluate",
         attempt_id=f"{created.result.arc_id}:evaluate:attempt",
         role="evaluator",
-        task_kind=(
-            "verify_repair.arc"
-            if repair_count_before_review is not None
-            and repair_count_before_review > 0
-            else "evaluate.arc"
-        ),
+        task_kind=evaluator_task_kind,
         scope_layer="arc",
         book_id=book.book_id,
         book_baseline_id=book.book_baseline_id,
@@ -288,8 +362,12 @@ async def _prepare_reviewed_arc(
             submission_id=submitted.result.submission_id,
             evaluator_task_id=evaluator_task,
             evaluator_attempt_id=evaluator_attempt,
-            rubric_id="arc-rubric",
-            rubric_version=1,
+            rubric_id=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                evaluator_task_kind
+            ).rubric_id,
+            rubric_version=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                evaluator_task_kind
+            ).rubric_version,
             deterministic_precheck={"passed": True},
         ),
         idempotency_key=f"{project_id}:arc-review",
@@ -348,7 +426,7 @@ def test_full_auto_pass_commits_without_arc_gate_and_preserves_final_hint(
                 idempotency_key="project-auto:arc-commit",
             )
             assert committed.result.authorization_kind == "policy_auto"
-            assert committed.result.target_chapter_count == 3
+            assert committed.result.closure_chapter_count == 3
             assert committed.result.lifecycle_status == "active"
             async with engine.connect() as connection:
                 arc = (
@@ -364,8 +442,8 @@ def test_full_auto_pass_commits_without_arc_gate_and_preserves_final_hint(
                     await connection.execute(
                         select(
                             arc_baselines.c.purpose,
-                            arc_baselines.c.recommended_target_chapter_count,
-                            arc_baselines.c.target_chapter_count,
+                            arc_baselines.c.recommended_closure_chapter_count,
+                            arc_baselines.c.closure_chapter_count,
                             arc_baselines.c.authorization_kind,
                         ).where(arc_baselines.c.id == committed.result.baseline_id)
                     )
@@ -425,12 +503,12 @@ def test_participatory_pass_waits_for_exactly_one_adjustable_user_approval(
                     submission_id=setup.submission_id,
                     review_id=setup.review.review_id,
                     approval_gate_id=setup.review.approval_gate_id,
-                    target_chapter_count=4,
+                    closure_chapter_count=4,
                 ),
                 idempotency_key="participatory:approve",
             )
             assert committed.result.authorization_kind == "human_approval"
-            assert committed.result.target_chapter_count == 4
+            assert committed.result.closure_chapter_count == 4
             async with engine.connect() as connection:
                 assert await connection.scalar(select(func.count()).select_from(arc_approvals)) == 1
                 assert (
@@ -509,7 +587,7 @@ def test_full_auto_review_then_mode_switch_creates_persistent_gate(
                     submission_id=setup.submission_id,
                     review_id=setup.review.review_id,
                     approval_gate_id=gate_id,
-                    target_chapter_count=3,
+                    closure_chapter_count=3,
                 ),
                 idempotency_key="race:approve",
             )
@@ -599,12 +677,11 @@ def test_stale_arc_plan_delivery_is_discarded_without_overwriting_workspace(
                 ),
                 idempotency_key="stale:create",
             )
-            first = ArcPlanProposal(
+            first = _arc_plan(
                 title="First",
                 purpose="First accepted plan",
-                beats=["A"],
                 target_chapter_count=2,
-                completion_signals=["A resolved"],
+                advisory_beats=["A"],
             )
             stale = first.model_copy(update={"title": "Stale"})
             tasks: list[tuple[str, str]] = []
@@ -683,24 +760,33 @@ def test_arc_local_repair_is_bounded_by_components_and_five_attempts(
                 evaluation=ArcEvaluation(
                     decision="local_repair",
                     summary="Only the beats need a bounded repair.",
-                    repair_scope=["beats"],
+                    repair_scope=["advisory_beats"],
                 ),
             )
             assert setup.review.next_action == "repair"
             unauthorized = ArcRepairPatch(
                 changes=[
                     ArcTitleRepair(component="title", value="Unauthorized title"),
-                    ArcBeatsRepair(component="beats", value=["Repaired beat"]),
+                    ArcAdvisoryBeatsRepair(
+                        component="advisory_beats",
+                        value=["Repaired beat"],
+                    ),
                 ]
             )
             authorized = ArcRepairPatch(
                 changes=[
-                    ArcBeatsRepair(component="beats", value=["Repaired beat"]),
+                    ArcAdvisoryBeatsRepair(
+                        component="advisory_beats",
+                        value=["Repaired beat"],
+                    ),
                 ]
             )
             no_op = ArcRepairPatch(
                 changes=[
-                    ArcBeatsRepair(component="beats", value=setup.plan.beats),
+                    ArcAdvisoryBeatsRepair(
+                        component="advisory_beats",
+                        value=setup.plan.advisory_beats,
+                    ),
                 ]
             )
             task_pairs: list[tuple[str, str]] = []
@@ -788,11 +874,14 @@ def test_arc_local_repair_is_bounded_by_components_and_five_attempts(
                 )
                 assert workspace.semantic_repair_count == 1
                 assert unauthorized_state == "pending"
-                assert merged_plan.beats == ["Repaired beat"]
+                assert merged_plan.advisory_beats == ["Repaired beat"]
                 assert merged_plan.purpose == setup.plan.purpose
                 assert merged_plan.title == setup.plan.title
-                assert merged_plan.target_chapter_count == setup.plan.target_chapter_count
-                assert merged_plan.completion_signals == setup.plan.completion_signals
+                assert (
+                    merged_plan.closure_chapter_count
+                    == setup.plan.closure_chapter_count
+                )
+                assert merged_plan.closure_signals == setup.plan.closure_signals
 
             exhausted = await _prepare_reviewed_arc(
                 engine,
@@ -801,7 +890,7 @@ def test_arc_local_repair_is_bounded_by_components_and_five_attempts(
                 evaluation=ArcEvaluation(
                     decision="local_repair",
                     summary="The sixth repair must not start.",
-                    repair_scope=["beats"],
+                    repair_scope=["advisory_beats"],
                 ),
                 repair_count_before_review=5,
             )

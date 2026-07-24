@@ -14,11 +14,23 @@ from typing import cast
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 from app.db.revisions import HEAD_REVISION
 from app.db.schema import EXPECTED_TABLE_NAMES
 
 BACKUP_FORMAT_VERSION = 1
+BACKUP_REQUIRED_TABLE_NAMES = frozenset(
+    {
+        "agent_task_attempts",
+        "alembic_version",
+        "content_blobs",
+        "content_refs",
+        "domain_events",
+        "engine_slot",
+        "generation_runs",
+    }
+)
 
 
 class DatabaseHealthError(RuntimeError):
@@ -113,12 +125,12 @@ def _canonical_blob_bytes(row: sqlite3.Row) -> bytes:
     return canonical
 
 
-def validate_database(
+def _validate_database_snapshot(
     database_path: Path,
     *,
-    expected_revision: str = HEAD_REVISION,
+    expected_revision: str | None,
+    required_tables: frozenset[str] | set[str],
 ) -> DatabaseHealth:
-    """Validate a closed/snapshot database without mutating it."""
     with closing(_connect_existing(database_path.resolve())) as connection:
         integrity_rows = connection.execute("PRAGMA integrity_check").fetchall()
         if [row[0] for row in integrity_rows] != ["ok"]:
@@ -134,7 +146,6 @@ def validate_database(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
-        required_tables = EXPECTED_TABLE_NAMES | {"alembic_version"}
         missing = required_tables - tables
         if missing:
             raise DatabaseHealthError(f"Database is missing tables: {sorted(missing)!r}")
@@ -143,7 +154,9 @@ def validate_database(
             "SELECT version_num FROM alembic_version"
         ).fetchone()
         revision = None if revision_row is None else cast(str, revision_row[0])
-        if revision != expected_revision:
+        if revision is None:
+            raise DatabaseHealthError("Database has no Alembic schema revision.")
+        if expected_revision is not None and revision != expected_revision:
             raise DatabaseHealthError(
                 f"Schema revision mismatch: expected {expected_revision}, found {revision}."
             )
@@ -178,6 +191,39 @@ def validate_database(
             highest_event_sequence=event_sequence,
             blob_count=len(blob_rows),
         )
+
+
+def validate_database(
+    database_path: Path,
+    *,
+    expected_revision: str = HEAD_REVISION,
+) -> DatabaseHealth:
+    """Validate a current application database without mutating it."""
+    return _validate_database_snapshot(
+        database_path,
+        expected_revision=expected_revision,
+        required_tables=EXPECTED_TABLE_NAMES | {"alembic_version"},
+    )
+
+
+def _validate_upgradeable_snapshot(database_path: Path) -> DatabaseHealth:
+    """Validate a backup candidate at any revision known to this migration tree."""
+    health = _validate_database_snapshot(
+        database_path,
+        expected_revision=None,
+        required_tables=BACKUP_REQUIRED_TABLE_NAMES,
+    )
+    revisions = {
+        script.revision
+        for script in ScriptDirectory.from_config(
+            alembic_config(database_path)
+        ).walk_revisions()
+    }
+    if health.schema_revision not in revisions:
+        raise DatabaseHealthError(
+            f"Backup schema revision is not upgradeable: {health.schema_revision}."
+        )
+    return health
 
 
 def _assert_quiescent(connection: sqlite3.Connection) -> None:
@@ -232,7 +278,7 @@ def create_consistent_backup(source_path: Path, destination_path: Path) -> Backu
             _assert_quiescent(source_connection)
             with closing(sqlite3.connect(staging)) as destination_connection:
                 source_connection.backup(destination_connection)
-        health = validate_database(staging)
+        health = _validate_upgradeable_snapshot(staging)
         file_size = staging.stat().st_size
         digest = _sha256_file(staging)
         os.replace(staging, destination)
@@ -291,7 +337,9 @@ def validate_backup(backup_path: Path) -> tuple[BackupManifest, DatabaseHealth]:
         raise BackupManifestError("Backup size does not match its manifest.")
     if _sha256_file(backup) != manifest.sha256:
         raise BackupManifestError("Backup hash does not match its manifest.")
-    health = validate_database(backup, expected_revision=manifest.schema_revision)
+    health = _validate_upgradeable_snapshot(backup)
+    if health.schema_revision != manifest.schema_revision:
+        raise BackupManifestError("Backup schema revision does not match its manifest.")
     if (
         health.highest_event_sequence != manifest.highest_event_sequence
         or health.blob_count != manifest.blob_count

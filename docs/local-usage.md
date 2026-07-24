@@ -76,11 +76,14 @@ scripts\python.cmd scripts/migrate_profile_config.py
 2. 点击 Start。浏览器仅发出一次显式命令；关闭页面不停止后端流程。
 3. BookStrategist 基于初始 Prompt 逐次提出一个高价值问题。可以选择推荐回答，也可以自由输入。
 4. Book 候选通过 Evaluator 后仍会等待显式批准；两种模式都不能跳过。
-5. full-auto 自动提交通过评审的 Arc；participatory 对每个 Arc 显示一个批准动作，可以采用建议章节数。
+5. full-auto 自动提交通过评审的当前 Arc 契约；participatory 对每个 Arc 显示一个批准动作，可以采用建议的收束检查章节数。
 6. Chapter 自动执行 plan → draft → observe → evaluate → commit；没有章节人工审批。
-7. 需要时 Pause。当前模型 activation 会正常收口，系统在下一个安全边界暂停。
-8. 普通暂停可 Resume；失败暂停只能使用专用 Retry。Retry 创建新 attempt，不改写原证据。
-9. 全书达到 completion 后导出 Markdown。导出只包含正式章节。
+7. 达到 Arc 的 `closure_chapter_count` 只会触发收束评估。Arc 契约确实被正式 Chapter/Canon 事实满足后，Harness 才提交 formal closure。
+8. formal closure 触发 Book boundary evaluation：未完结时产生下一 Arc 的持久 handoff；满足全书终止契约时提交 formal completion。
+9. 用户反馈只会先排队，由 Run Engine 在当前原子动作结束后的安全边界按 FIFO 应用。页面会显示反馈是 queued、applied 还是 dismissed。
+10. 如果系统显示 creator question，回答会绑定具体 owning layer 和来源 review；系统执行或评估契约错误不会伪装成用户待办。
+11. 需要时 Pause。当前模型 activation 会正常收口，系统在下一个安全边界暂停。普通暂停可 Resume；失败暂停只能使用专用 Retry。
+12. 全书达到 formal completion 后导出 Markdown。导出只包含正式章节。
 
 页面刷新、SSE 重连、切换项目和普通 GET 不会改变 Route。
 
@@ -116,7 +119,7 @@ npm.cmd run backend:backup:validate -- data\backups\novelpilot-2026-07-23.sqlite
 npm.cmd run backend:restore -- data\backups\novelpilot-2026-07-23.sqlite3
 ```
 
-Restore 验证 manifest、文件 hash、integrity、FK、schema 与 Blob hash 后原子替换整库。它不支持把一个项目合并进另一个正在运行的数据库。
+备份可以来自当前迁移树中的旧 schema revision，因此应在不兼容迁移前先执行备份命令。Restore 验证 manifest、文件 hash、integrity、FK、备份自身 revision 与 Blob hash，在 staging 库升级到当前 head 后再原子替换整库。它不支持把一个项目合并进另一个正在运行的数据库。
 
 ## 7. 离线质量门禁
 
@@ -141,15 +144,16 @@ npm.cmd run audit:secrets
 - acceptance 把产品能力映射到实现和离线测试，并检查旧运行路径已消失；
 - secret audit 扫描 `data/` 和 `output/` 下数据库、备份、导出与报告，发现 API key 时只报告脱敏路径、Profile id 和值类型。
 
-## 8. 四次真实 Grok 4.5 观测
+## 8. 四次真实模型观测
 
 只有上一节全部通过后才执行。先启动后端，再运行：
 
 ```powershell
-npm.cmd run observe:live-book-series -- --case benchmark-mother-natural-book-v1 --profile-id grok-4.5 --runs 4
+npm.cmd run profile:probe -- jemmy-gpt-5.6-terra
+npm.cmd run observe:live-book-series -- --case benchmark-mother-natural-book-v1 --profile-id jemmy-gpt-5.6-terra --runs 4
 ```
 
-runner 会先验证 Prompt SHA-256、固定四轮顺序、Profile capability 与 fingerprint，不会输出 secret。四轮各创建一个全新普通项目：
+当前冻结测试 Profile 是 `jemmy-gpt-5.6-terra`：OpenAI Responses 协议、模型 `gpt-5.6-terra`、base URL `https://api.jemmy.icu/v1`。runner 会先验证 Prompt SHA-256、固定四轮顺序、Profile capability 与 fingerprint，不会输出 secret。四轮各创建一个全新普通项目：
 
 ```text
 1 full_auto

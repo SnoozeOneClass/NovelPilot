@@ -12,6 +12,7 @@ from app.domain.commands import CommandEffect, CommandEnvelope, CommandExecution
 from app.store.command_bus import CommandBus
 from app.store.content import prepare_canonical_json
 from app.store.execution import ActionableTaskRecord
+from app.store.runs import GenerationRunRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,30 @@ class RecordDeliveryFailureResult(BaseModel):
     run_id: str
     task_id: str
     attempt_id: str
+    failure_code: str
+    failure_ref_id: str
+    run_status: str
+
+
+class RecordHarnessActionFailureRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    project_id: str
+    run_id: str
+    expected_run_lock_version: int
+    action_key: str
+    failure_code: str
+    message: str
+    exception_type: str
+    details: dict[str, object] | None = None
+
+
+class RecordHarnessActionFailureResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    project_id: str
+    run_id: str
+    action_key: str
     failure_code: str
     failure_ref_id: str
     run_status: str
@@ -129,7 +154,7 @@ class DeliveryFailureService:
                 raise RuntimeError(
                     "Successful Agent task changed before delivery failure could be persisted."
                 )
-            if not await session.runs.failure_pause(
+            if not await session.runs.failure_pause_for_task(
                 run_id=task.run_id,
                 task_id=task.task_id,
                 failure_code=failure.code,
@@ -166,5 +191,117 @@ class DeliveryFailureService:
         return await self._command_bus.execute(
             envelope=envelope,
             result_type=RecordDeliveryFailureResult,
+            handler=handler,
+        )
+
+
+class HarnessActionFailureService:
+    """Persist a deterministic failure that occurs before any Agent task exists."""
+
+    def __init__(
+        self,
+        command_bus: CommandBus,
+        *,
+        id_factory: Callable[[], str] | None = None,
+        now_ms: Callable[[], int] | None = None,
+    ) -> None:
+        self._command_bus = command_bus
+        self._id_factory = id_factory or (lambda: uuid.uuid4().hex)
+        self._now_ms = now_ms or (lambda: time.time_ns() // 1_000_000)
+
+    async def failure_pause(
+        self,
+        *,
+        run: GenerationRunRecord,
+        action_key: str,
+        failure_code: str,
+        message: str,
+        exception_type: str,
+        details: dict[str, object] | None = None,
+    ) -> CommandExecution[RecordHarnessActionFailureResult]:
+        timestamp = self._now_ms()
+        request = RecordHarnessActionFailureRequest(
+            project_id=run.project_id,
+            run_id=run.id,
+            expected_run_lock_version=run.lock_version,
+            action_key=action_key,
+            failure_code=failure_code,
+            message=message,
+            exception_type=exception_type,
+            details=details,
+        )
+        prepared_failure = prepare_canonical_json(
+            {
+                "schema_id": "harness-action-failure-v1",
+                "code": failure_code,
+                "message": message,
+                "exception_type": exception_type,
+                "details": details,
+                "action_key": action_key,
+            }
+        )
+        envelope = CommandEnvelope.for_request(
+            project_id=run.project_id,
+            idempotency_key=(
+                f"failure-pause-action:{run.id}:{run.lock_version}:{action_key}"
+            ),
+            command_kind="failure_pause_for_harness_action",
+            request_schema="failure_pause_for_harness_action.request.v1",
+            request_payload=request,
+            actor="system",
+            command_id=self._id_factory(),
+            run_id=run.id,
+            created_at_ms=timestamp,
+        )
+
+        async def handler(
+            session: StoreSession,
+        ) -> CommandEffect[RecordHarnessActionFailureResult]:
+            failure_ref = await session.content.put(
+                project_id=run.project_id,
+                prepared=prepared_failure,
+                semantic_kind="harness_action_error_summary",
+                media_type="application/json",
+                schema_id="harness-action-failure",
+                schema_version=1,
+                created_at_ms=timestamp,
+            )
+            if not await session.runs.failure_pause_for_action(
+                run_id=run.id,
+                expected_lock_version=run.lock_version,
+                action_key=action_key,
+                failure_code=failure_code,
+                failure_ref_id=failure_ref.id,
+                now_ms=timestamp,
+            ):
+                raise RuntimeError(
+                    "Run changed before Harness-action failure could be persisted."
+                )
+            return CommandEffect(
+                result=RecordHarnessActionFailureResult(
+                    project_id=run.project_id,
+                    run_id=run.id,
+                    action_key=action_key,
+                    failure_code=failure_code,
+                    failure_ref_id=failure_ref.id,
+                    run_status="failure_paused",
+                ),
+                events=(
+                    EventDraft(
+                        event_type="run.failure_paused",
+                        aggregate_type="generation_run",
+                        aggregate_id=run.id,
+                        payload={
+                            "action_key": action_key,
+                            "failure_code": failure_code,
+                            "failure_kind": "harness_action",
+                        },
+                    ),
+                ),
+            )
+
+        return await self._command_bus.execute(
+            envelope=envelope,
+            result_type=RecordHarnessActionFailureResult,
             handler=handler,
         )

@@ -15,10 +15,10 @@ from app.agents.contracts import (
     BookDiscussionResult,
     BookDiscussionSuggestion,
 )
+from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
 from app.db.engine import create_sqlite_async_engine
 from app.db.maintenance import alembic_config
 from app.db.schema import (
-    agent_task_attempts,
     agent_tasks,
     book_approvals,
     book_baselines,
@@ -35,12 +35,15 @@ from app.domain.book.contracts import (
     ApplyBookDiscussionTaskRequest,
     ApproveBookRequest,
     BookCandidatePack,
+    BookCompletionRequirement,
     BookConstraintsRepair,
+    BookCreativeConstraints,
     BookDirectionRepair,
     BookDiscussionState,
     BookEvaluation,
     BookRepairContract,
     BookRepairPatch,
+    BookRollingPlan,
     CompletionContract,
     RecordBookReviewRequest,
     RecordBookUserInputRequest,
@@ -50,8 +53,55 @@ from app.domain.commands import CommandPreconditionError
 from app.domain.projects import CreateProjectRequest, ProjectCommandService
 from app.runtime.control import RunControlRequest, RunControlService
 from app.store.command_bus import CommandBus
-from app.store.content import ContentRepository, prepare_canonical_json
+from app.store.content import ContentRepository
 from tests.helpers.lifecycle_seed import insert_successful_task
+
+
+BOOK_EVALUATION_STRATEGY = DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task("evaluate.book")
+BOOK_REPAIR_EVALUATION_STRATEGY = DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+    "verify_repair.book"
+)
+
+
+def _book_constraints(*, perspective: str = "limited-third") -> BookCreativeConstraints:
+    return BookCreativeConstraints(
+        genre_reader_promise="A fair-play memory mystery.",
+        premise_story_engine=(
+            f"Physical evidence challenges rewritten memory through a {perspective} viewpoint."
+        ),
+        stable_world_invariants=["Physical evidence cannot be memory-edited."],
+        stable_character_invariants=["The investigator pursues verifiable truth."],
+        core_selling_points=["Each contradiction can be investigated."],
+        prohibited_outcomes=["Committed facts cannot be dismissed as a dream."],
+    )
+
+
+def _book_rolling_plan() -> BookRollingPlan:
+    return BookRollingPlan(
+        long_term_character_directions=["Trust evidence over memory."],
+        high_level_phase_strategy=["Expose the edit", "Confront its source"],
+        whole_book_pacing_strategy="Escalate through bounded rolling Arcs.",
+        ending_tendency="The investigator chooses truth at personal cost.",
+        arc_planning_guidelines=["Each Arc must close observable evidence."],
+    )
+
+
+def _completion_contract(
+    *,
+    minimum_chapter_count: int = 18,
+    maximum_chapter_count: int = 22,
+) -> CompletionContract:
+    return CompletionContract(
+        minimum_chapter_count=minimum_chapter_count,
+        maximum_chapter_count=maximum_chapter_count,
+        completion_requirements=[
+            BookCompletionRequirement(
+                requirement_key="memory_conflict_resolved",
+                description="Resolve the central memory conflict.",
+                evidence_expectation="Committed Chapter evidence proves the resolution.",
+            )
+        ],
+    )
 
 
 async def _insert_successful_book_evaluator_task(
@@ -66,90 +116,20 @@ async def _insert_successful_book_evaluator_task(
 ) -> tuple[str, str]:
     task_id = "evaluate-book-task"
     attempt_id = "evaluate-book-attempt"
-    prepared = prepare_canonical_json(evaluation)
-    async with engine.begin() as connection:
-        result_ref = await ContentRepository(connection).put(
-            project_id=project_id,
-            prepared=prepared,
-            semantic_kind="agent.typed_result",
-            media_type="application/json",
-            schema_id="book-evaluation",
-            schema_version=1,
-            created_at_ms=20,
-        )
-        await connection.execute(
-            agent_tasks.insert().values(
-                id=task_id,
-                project_id=project_id,
-                run_id=run_id,
-                task_key="evaluate.book:first-submission",
-                action_key="evaluate.book",
-                role="evaluator",
-                task_kind="evaluate.book",
-                scope_layer="book",
-                book_id=book_id,
-                workspace_lock_version=workspace_lock_version,
-                canon_baseline_id=canon_id,
-                task_plan_ref_id=result_ref.id,
-                input_manifest_ref_id=result_ref.id,
-                input_messages_ref_id=result_ref.id,
-                profile_snapshot_ref_id=result_ref.id,
-                input_fingerprint=prepared.sha256,
-                prompt_fingerprint=prepared.sha256,
-                context_policy_id="book-evaluator-context-v1",
-                context_policy_version=1,
-                context_policy_fingerprint=prepared.sha256,
-                output_schema_id="book-evaluation",
-                output_schema_version=1,
-                output_schema_fingerprint=prepared.sha256,
-                rubric_id="book-rubric",
-                rubric_version=1,
-                harness_policy_id="novelpilot-domain-harness",
-                harness_policy_version=1,
-                profile_id="fixture-profile",
-                profile_fingerprint=prepared.sha256,
-                api_family="openai_responses",
-                model_id="fixture-model",
-                output_mode="native_json_schema",
-                requires_native_json_schema=1,
-                requires_text_streaming=0,
-                transport_retry_limit=5,
-                model_request_limit=2,
-                connect_timeout_ms=10_000,
-                pool_timeout_ms=10_000,
-                write_timeout_ms=60_000,
-                read_timeout_ms=600_000,
-                activation_timeout_ms=1_800_000,
-                timeout_policy_id="provider-timeout-t1-v1",
-                status="succeeded",
-                successful_attempt_id=attempt_id,
-                delivery_state="pending",
-                created_at_ms=20,
-                updated_at_ms=20,
-            )
-        )
-        await connection.execute(
-            agent_task_attempts.insert().values(
-                id=attempt_id,
-                project_id=project_id,
-                task_id=task_id,
-                attempt_number=1,
-                retry_kind="initial",
-                status="succeeded",
-                framework_fingerprint=prepared.sha256,
-                provider_request_count=1,
-                transport_retry_count=0,
-                model_request_count=1,
-                input_tokens=10,
-                output_tokens=5,
-                total_tokens=15,
-                result_ref_id=result_ref.id,
-                created_at_ms=20,
-                started_at_ms=20,
-                finished_at_ms=21,
-            )
-        )
-    return task_id, attempt_id
+    return await insert_successful_task(
+        engine,
+        project_id=project_id,
+        run_id=run_id,
+        task_id=task_id,
+        attempt_id=attempt_id,
+        role="evaluator",
+        task_kind="evaluate.book",
+        scope_layer="book",
+        book_id=book_id,
+        canon_baseline_id=canon_id,
+        workspace_lock_version=workspace_lock_version,
+        result=evaluation,
+    )
 
 
 def test_book_requires_review_and_user_approval_before_formal_baseline(
@@ -179,14 +159,10 @@ def test_book_requires_review_and_user_approval_before_formal_baseline(
                     expected_workspace_lock_version=1,
                     candidate=BookCandidatePack(
                         direction="围绕一份会改变叙述者记忆的证词展开。",
-                        constraints={"pov": "limited-third", "tone": "suspense"},
+                        constraints=_book_constraints(),
                         selected_title="《证词回声》",
-                        rolling_plan={"strategy": "plan-one-arc-at-a-time"},
-                        completion_contract=CompletionContract(
-                            minimum_chapter_count=18,
-                            maximum_chapter_count=22,
-                            completion_requirements=["主谜题闭合", "人物选择产生后果"],
-                        ),
+                        rolling_plan=_book_rolling_plan(),
+                        completion_contract=_completion_contract(),
                     ),
                 ),
                 idempotency_key="apply-candidate",
@@ -230,8 +206,8 @@ def test_book_requires_review_and_user_approval_before_formal_baseline(
                     submission_id=submitted.result.submission_id,
                     evaluator_task_id=task_id,
                     evaluator_attempt_id=attempt_id,
-                    rubric_id="book-rubric",
-                    rubric_version=1,
+                    rubric_id=BOOK_EVALUATION_STRATEGY.rubric_id,
+                    rubric_version=BOOK_EVALUATION_STRATEGY.rubric_version,
                     deterministic_precheck={"passed": True, "checks": ["chapter_range"]},
                 ),
                 idempotency_key="record-review",
@@ -334,13 +310,10 @@ def test_stale_book_workspace_cannot_overwrite_newer_candidate(tmp_path: Path) -
                 expected_workspace_lock_version=1,
                 candidate=BookCandidatePack(
                     direction="first",
-                    constraints={},
+                    constraints=_book_constraints(),
                     selected_title="A",
-                    rolling_plan={},
-                    completion_contract=CompletionContract(
-                        minimum_chapter_count=18,
-                        maximum_chapter_count=22,
-                    ),
+                    rolling_plan=_book_rolling_plan(),
+                    completion_contract=_completion_contract(),
                 ),
             )
             await service.apply_candidate(request, idempotency_key="candidate-1")
@@ -491,14 +464,10 @@ def test_task_driven_book_loop_reaches_baseline_only_after_explicit_approval(
 
             candidate = BookCandidatePack(
                 direction="An unreliable witness investigates who edited her memory.",
-                constraints={"pov": "limited-third", "tone": "suspense"},
+                constraints=_book_constraints(),
                 selected_title="Echo Testimony",
-                rolling_plan={"strategy": "one-arc-at-a-time"},
-                completion_contract=CompletionContract(
-                    minimum_chapter_count=18,
-                    maximum_chapter_count=22,
-                    completion_requirements=["Resolve the central memory conflict"],
-                ),
+                rolling_plan=_book_rolling_plan(),
+                completion_contract=_completion_contract(),
             )
             await insert_successful_task(
                 engine,
@@ -557,8 +526,8 @@ def test_task_driven_book_loop_reaches_baseline_only_after_explicit_approval(
                     submission_id=submitted.result.submission_id,
                     evaluator_task_id="evaluate-loop-book",
                     evaluator_attempt_id="evaluate-loop-book-attempt",
-                    rubric_id="book-rubric-v1",
-                    rubric_version=1,
+                    rubric_id=BOOK_EVALUATION_STRATEGY.rubric_id,
+                    rubric_version=BOOK_EVALUATION_STRATEGY.rubric_version,
                     deterministic_precheck={"passed": True},
                 ),
                 idempotency_key="review-loop-book",
@@ -739,13 +708,10 @@ def test_book_local_repair_is_scope_bounded_and_sixth_cycle_failure_pauses_run(
             )
             original = BookCandidatePack(
                 direction="A witness investigates the deliberate editing of her memory.",
-                constraints={"pov": "limited-third"},
+                constraints=_book_constraints(),
                 selected_title="Echo Testimony",
-                rolling_plan={"strategy": "one-arc-at-a-time"},
-                completion_contract=CompletionContract(
-                    minimum_chapter_count=18,
-                    maximum_chapter_count=22,
-                ),
+                rolling_plan=_book_rolling_plan(),
+                completion_contract=_completion_contract(),
             )
             await insert_successful_task(
                 engine,
@@ -809,8 +775,8 @@ def test_book_local_repair_is_scope_bounded_and_sixth_cycle_failure_pauses_run(
                     submission_id=first_submission.result.submission_id,
                     evaluator_task_id="evaluate-book-for-repair",
                     evaluator_attempt_id="evaluate-book-for-repair-attempt",
-                    rubric_id="book-rubric-v1",
-                    rubric_version=1,
+                    rubric_id=BOOK_EVALUATION_STRATEGY.rubric_id,
+                    rubric_version=BOOK_EVALUATION_STRATEGY.rubric_version,
                     deterministic_precheck={"passed": True},
                 ),
                 idempotency_key="record-book-local-repair",
@@ -821,7 +787,7 @@ def test_book_local_repair_is_scope_bounded_and_sixth_cycle_failure_pauses_run(
                 changes=[
                     BookConstraintsRepair(
                         component="constraints",
-                        value={"pov": "first-person"},
+                        value=_book_constraints(perspective="first-person"),
                     )
                 ]
             )
@@ -923,8 +889,8 @@ def test_book_local_repair_is_scope_bounded_and_sixth_cycle_failure_pauses_run(
                     )
                     preserved.append(json.loads(packed.unpack_and_verify()))
             assert preserved == [
-                original.constraints,
-                original.rolling_plan,
+                original.constraints.model_dump(mode="json"),
+                original.rolling_plan.model_dump(mode="json"),
                 original.completion_contract.model_dump(mode="json"),
             ]
             assert title_payload["selected_title"] == original.selected_title
@@ -964,8 +930,8 @@ def test_book_local_repair_is_scope_bounded_and_sixth_cycle_failure_pauses_run(
                     submission_id=exhausted_submission.result.submission_id,
                     evaluator_task_id="evaluate-exhausted-book",
                     evaluator_attempt_id="evaluate-exhausted-book-attempt",
-                    rubric_id="book-rubric-v1",
-                    rubric_version=1,
+                    rubric_id=BOOK_REPAIR_EVALUATION_STRATEGY.rubric_id,
+                    rubric_version=BOOK_REPAIR_EVALUATION_STRATEGY.rubric_version,
                     deterministic_precheck={"passed": True},
                 ),
                 idempotency_key="pause-exhausted-book",

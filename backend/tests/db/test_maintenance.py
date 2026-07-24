@@ -119,6 +119,24 @@ def test_backup_is_consistent_validated_and_restorable(tmp_path: Path) -> None:
     assert project_ids == {"project-before-cut"}
 
 
+def test_backup_accepts_supported_pre_head_database_and_restore_migrates(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source-old.sqlite3"
+    backup = tmp_path / "snapshot-old.sqlite3"
+    restored = tmp_path / "restored-current.sqlite3"
+    command.upgrade(alembic_config(source), "7c0d2a9f4b31")
+
+    manifest = create_consistent_backup(source, backup)
+    assert manifest.schema_revision == "7c0d2a9f4b31"
+    verified_manifest, backup_health = validate_backup(backup)
+    assert verified_manifest == manifest
+    assert backup_health.schema_revision == "7c0d2a9f4b31"
+
+    restored_health = restore_database(backup, restored)
+    assert restored_health.schema_revision == "1be6decc58a4"
+
+
 def test_backup_refuses_active_execution_state(tmp_path: Path) -> None:
     database = tmp_path / "source.sqlite3"
     command.upgrade(alembic_config(database), "head")

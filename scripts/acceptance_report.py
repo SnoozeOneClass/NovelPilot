@@ -75,7 +75,7 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
         requirement="Full-auto has no Arc approval, while participatory has exactly one persistent approval per Arc.",
         probes=(
             EvidenceProbe("backend/app/domain/arc/commands.py", ("arc.approval_required", "policy_auto", "human_approval")),
-            EvidenceProbe("backend/tests/runtime/test_domain_driver.py", ("arc_gates == (0 if operation_mode == \"full_auto\" else 10)",)),
+            EvidenceProbe("backend/tests/runtime/test_domain_driver.py", ("arc_gates == (0 if operation_mode == \"full_auto\" else 2)",)),
             EvidenceProbe("backend/tests/domain/test_arc_lifecycle.py", ("approval_gate", "full_auto")),
         ),
     ),
@@ -130,19 +130,64 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
     ),
     AcceptanceCriterion(
         id="feedback_and_revision",
-        requirement="Feedback and approved-content changes bind evidence, escalate explicitly, and rebase stale workspaces.",
+        requirement=(
+            "Feedback is queued and applied at safe boundaries; approved-content changes "
+            "escalate explicitly and rebase stale workspaces."
+        ),
         probes=(
-            EvidenceProbe("backend/app/domain/feedback.py", ("FeedbackCommandService", "activate")),
+            EvidenceProbe("backend/app/domain/feedback.py", ("QueueFeedbackRequest", "apply")),
             EvidenceProbe("backend/app/domain/change_requests.py", ("ChangeRequest", "activate")),
             EvidenceProbe("backend/tests/domain/test_feedback.py", ("guidance", "context")),
             EvidenceProbe("backend/tests/domain/test_stale_rebase.py", ("rebase", "stale")),
         ),
     ),
     AcceptanceCriterion(
-        id="completion_snapshot_export",
-        requirement="Completion is explicit, snapshots are immutable identities, and Markdown uses committed Chapters only.",
+        id="hierarchical_loop_authority",
+        requirement=(
+            "Book > Arc > Chapter authority, bounded downward correction, and explicit "
+            "parent reviews prevent lower layers from replacing upper baselines."
+        ),
         probes=(
-            EvidenceProbe("backend/app/domain/completion.py", ("book.completed", "run.completed")),
+            EvidenceProbe(
+                "backend/app/domain/authority.py",
+                (
+                    "record_arc_parent_review",
+                    "record_book_parent_review",
+                    "_bounded_review_disposition",
+                ),
+            ),
+            EvidenceProbe(
+                "backend/app/domain/change_requests.py",
+                (
+                    "Arc revision lacks current Arc-layer authorization",
+                    "Book revision lacks current Book-layer authorization",
+                ),
+            ),
+            EvidenceProbe(
+                "backend/tests/domain/test_change_requests.py",
+                ("activate-without-authority", "record_arc_revision_authorization"),
+            ),
+            EvidenceProbe(
+                "backend/app/runtime/driver.py",
+                ("automatic_correction_round=1", "source_arc_parent_review_id"),
+            ),
+        ),
+    ),
+    AcceptanceCriterion(
+        id="completion_snapshot_export",
+        requirement=(
+            "Formal Arc closure and Book boundary authority precede completion; snapshots "
+            "are immutable identities and Markdown uses committed Chapters only."
+        ),
+        probes=(
+            EvidenceProbe(
+                "backend/app/domain/authority.py",
+                ("record_arc_closure_review", "commit_book_completion", "book.completed"),
+            ),
+            EvidenceProbe(
+                "backend/tests/domain/test_completion.py",
+                ("_prepare_formal_arc_boundary", "complete_book"),
+            ),
             EvidenceProbe("backend/app/domain/snapshots.py", ("ProjectSnapshotManifest", "fingerprint")),
             EvidenceProbe("backend/app/domain/export.py", ("ManuscriptExportResult", "content_sha256")),
             EvidenceProbe("backend/tests/domain/test_export_and_snapshot.py", ("snapshot", "export")),
@@ -182,7 +227,7 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
     ),
     AcceptanceCriterion(
         id="live_observation_ready",
-        requirement="A non-gating four-slot Grok observation is frozen, public-API-only, and records zero rescue.",
+        requirement="A non-gating four-slot real-model observation is frozen, public-API-only, and records zero rescue.",
         probes=(
             EvidenceProbe(
                 "scripts/live_acceptance_cases/benchmark_mother_natural_book_v1.json",

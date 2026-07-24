@@ -57,10 +57,10 @@ Pydantic AI 接管通用能力：Provider/Model 调用、原生 JSON Schema、�
 
 | 角色 | 职责 |
 | --- | --- |
-| BookStrategist | Book 讨论、综合、修订、进度/完成判断 |
-| ArcPlanner | 当前 Story Arc 的滚动规划与修订 |
+| BookStrategist | Book 讨论、候选综合与正式修订候选 |
+| ArcPlanner | 当前 Story Arc 契约的规划与修订候选 |
 | ChapterWriter | Chapter 计划、正文、观察与局部修订 |
-| Evaluator | 按 Book/Arc/Chapter rubric 只读评审 |
+| Evaluator | 按任务绑定的 Book/Arc/Chapter、父层审查、Arc 收束、Book 边界和证据纠正策略只读评审 |
 
 计划、观察、评估使用原生结构化输出；章节正文使用文本流。结果格式与线协议相互独立：结构化任务由 Agent 保留一次原生输出修复，但每次底层 Provider 调用同样使用流式连接，完整 Pydantic 校验通过前不会形成结果或领域事实。
 
@@ -82,9 +82,9 @@ mutable workspace
 
 - 未通过审阅的工作稿可以原地更新，不为每次编辑创建 revision。
 - 已通过并提交的正式 baseline 不可覆盖；后续修改派生新 workspace。
-- 章节内部影响由 Chapter 层处理；影响 Story Arc 或全书时显式升级 change request。
+- 章节内部影响由 Chapter 层处理；影响 Story Arc 或全书时只能逐级升级 change request。
 - Agent 只提出、修订或评审；Harness 通过 Domain Command 写权威状态。
-- 上游 baseline 更新后，下游 workspace 会标记 stale，并通过显式 rebase command 绑定最新依赖后重新生成。
+- 上游 baseline 更新后，未提交的下游 workspace 会失效并显式重绑；已提交历史不会被自动 rebase/replay。
 
 产品门禁：
 
@@ -92,9 +92,21 @@ mutable workspace
 - Story Arc：full-auto 由 policy command 提交；participatory 每个 Arc 形成一个持久审批门禁。门禁形成后切回 full-auto 也不能绕过。
 - Chapter：独立评审通过后自动提交，没有人工章节审批。
 
+### 4.1 三层终止契约与层级权威
+
+`Book > Story Arc > Chapter` 是正式语义权威顺序。下层可以提交证据和直属上层审查请求，但不能判断或替换上层 baseline：
+
+- Chapter 只在当前 Book/Arc baseline、当前 Canon 和当前章目标齐备时启动。正文、observations 与 Canon intent 通过独立评审并由原子 Command 提交，才算 Chapter 退出成功。
+- Arc 只在当前 Book baseline 与合法的上一 Arc progress handoff（首 Arc 除外）齐备时启动。`closure_chapter_count` 只触发最低限度的收束检查；只有 Arc 契约被已提交事实满足并形成 formal closure，Arc 才算结束。
+- 每个 formal Arc closure 触发一次独立 Book boundary evaluation。它只能形成绑定该精确输入的下一 Arc handoff、Book 层审查，或 formal Book completion；“章节数到了”与“流程跑完了”都不能直接完成 Book。
+
+Arc 收束或父层审查的自动向下纠正，在同一冻结评审 lineage 中最多一轮。第二次出现同类问题时，若拥有该问题的 Agent 给出了用户可以回答的具体问题，则进入显式 creator wait；执行、评估契约或上下文问题进入失败暂停，不能伪装成等待用户。
+
+首版只允许叙事性 Chapter successor 修改当前 lineage 顶端。只要已有后续 Chapter、formal Arc closure 或 Book handoff，就进入 `waiting_for_user/historical_rewrite_unsupported` 并保持所有权威指针不变。正文逐字不变的 evidence-only correction 可以在 Arc 收束前修复 observations/Canon，但必须证明正文证据成立且后续 Chapter 不冲突。
+
 ## 5. SQLite、CAS 与 Transactional Outbox
 
-SQLite 是唯一权威状态。数据库包含 34 张应用表，由 Alembic initial revision 和共享 `MetaData` 共同约束。
+SQLite 是唯一权威状态。数据库包含 39 张应用表，由 Alembic revision 与共享 `MetaData` 共同约束。
 
 大型 Prompt、Context、typed result、正文和诊断附件存入项目拥有的 Content-Addressed Storage：
 
@@ -152,6 +164,9 @@ NovelPilot 不按任务或领域层设置产品级输出 token 预算。Response
 
 - Query 直接返回 current baseline/workspace、pending gate、blocking failure 和可执行 commands。
 - Mutation 必须携带 `Idempotency-Key`，返回最新权威投影。
+- 用户反馈 endpoint 只按 FIFO 入队；唯一 Run Engine 在当前原子动作结束后的安全边界应用。失败暂停期间反馈继续保留，不会隐式 Retry。
+- creator wait 投影包含拥有问题的层级、来源 review 和具体问题。回答沿同一来源 lineage 入队；普通建议与正式问题回答不会混成同一种状态。
+- 最近反馈投影明确区分 queued、applied 和 dismissed，并保留捕获时 baseline、来源 review 与结果 lineage，页面刷新后无需从 SSE 猜测是否已经生效。
 - SSE 先按 durable event cursor 补进度，再附加可丢失 live prose。
 - React effect、页面刷新、项目切换和 SSE 重连都不能 Start、Resume 或 Retry。
 - 诊断 endpoint 只返回 task/attempt/profile fingerprint/usage/error metadata，不返回或解析正文 Blob。
@@ -162,10 +177,10 @@ NovelPilot 不按任务或领域层设置产品级输出 token 预算。Response
 
 1. 服务停止或所有运行到达安全边界；
 2. SQLite Online Backup API 创建快照；
-3. 校验 integrity、foreign keys、schema revision 和每个 Blob hash；
+3. 校验 integrity、foreign keys、已知且可升级的 schema revision 和每个 Blob hash；
 4. 写入绑定文件大小、SHA-256、event sequence 和 Blob count 的 manifest。
 
-Restore 要求 FastAPI 已停止且无 WAL/SHM sidecar，验证后原子替换整库，不做项目行级 merge。
+迁移前备份允许处于当前 Alembic 迁移树中的旧 revision；它按备份自身 revision 校验，不会拿 head 表集合错误拒绝旧库。Restore 要求 FastAPI 已停止且无 WAL/SHM sidecar，先验证快照，再迁移 staging 库到 head，最后原子替换整库；不做项目行级 merge。
 
 单本小说只提供 Markdown 导出。导出按 book ordinal 读取正式 Chapter baseline，计算 snapshot fingerprint 与 content hash；workspace 草稿、失败 attempt 和 live delta 永远不会进入正文。
 

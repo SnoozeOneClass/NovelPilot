@@ -23,6 +23,8 @@ class BookRecord:
     project_id: str
     lifecycle_status: str
     current_baseline_id: str | None
+    latest_boundary_review_id: str | None
+    current_progress_handoff_id: str | None
     current_completion_id: str | None
     created_at_ms: int
     updated_at_ms: int
@@ -134,6 +136,12 @@ def _book_record(row: RowMapping) -> BookRecord:
         project_id=cast(str, row["project_id"]),
         lifecycle_status=cast(str, row["lifecycle_status"]),
         current_baseline_id=cast(str | None, row["current_baseline_id"]),
+        latest_boundary_review_id=cast(
+            str | None, row["latest_boundary_review_id"]
+        ),
+        current_progress_handoff_id=cast(
+            str | None, row["current_progress_handoff_id"]
+        ),
         current_completion_id=cast(str | None, row["current_completion_id"]),
         created_at_ms=cast(int, row["created_at_ms"]),
         updated_at_ms=cast(int, row["updated_at_ms"]),
@@ -444,6 +452,8 @@ class BookRepository:
             .values(
                 lifecycle_status="active",
                 current_baseline_id=new_baseline_id,
+                latest_boundary_review_id=None,
+                current_progress_handoff_id=None,
                 updated_at_ms=updated_at_ms,
             )
         )
@@ -469,6 +479,7 @@ class BookRepository:
             )
             .values(
                 lifecycle_status="completed",
+                current_progress_handoff_id=None,
                 current_completion_id=completion_id,
                 updated_at_ms=updated_at_ms,
             )

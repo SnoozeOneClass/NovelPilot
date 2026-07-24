@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, cast
 
-from sqlalchemy import RowMapping, Table, select, update
+from sqlalchemy import RowMapping, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.db.schema import (
@@ -12,7 +12,6 @@ from app.db.schema import (
     arc_review_submissions,
     arc_workspaces,
     chapter_arc_change_requests,
-    chapter_book_change_requests,
     chapter_review_submissions,
     chapter_workspaces,
     story_arcs,
@@ -31,26 +30,9 @@ class ChapterArcChangeRequestRecord:
     target_arc_baseline_id: str
     evidence_ref_id: str
     status: str
+    latest_parent_review_id: str | None
     resolved_by_arc_baseline_id: str | None
-    close_reason_code: str | None
-    created_at_ms: int
-    closed_at_ms: int | None
-
-
-@dataclass(frozen=True, slots=True)
-class ChapterBookChangeRequestRecord:
-    id: str
-    project_id: str
-    book_id: str
-    arc_id: str
-    chapter_id: str
-    source_submission_id: str
-    source_review_id: str
-    target_book_baseline_id: str
-    evidence_ref_id: str
-    status: str
-    resolved_by_book_baseline_id: str | None
-    close_reason_code: str | None
+    resolution_code: str | None
     created_at_ms: int
     closed_at_ms: int | None
 
@@ -61,25 +43,30 @@ class ArcBookChangeRequestRecord:
     project_id: str
     book_id: str
     arc_id: str
-    source_submission_id: str
-    source_review_id: str
+    source_candidate_submission_id: str | None
+    source_candidate_review_id: str | None
+    source_arc_parent_review_id: str | None
+    source_arc_closure_review_id: str | None
     target_book_baseline_id: str
     evidence_ref_id: str
     status: str
+    latest_parent_review_id: str | None
     resolved_by_book_baseline_id: str | None
-    close_reason_code: str | None
+    resolution_code: str | None
     created_at_ms: int
     closed_at_ms: int | None
 
 
 @dataclass(frozen=True, slots=True)
 class OpenChangeRequestRecord:
-    request_kind: Literal["chapter_to_arc", "chapter_to_book", "arc_to_book"]
+    request_kind: Literal["chapter_to_arc", "arc_to_book"]
     id: str
     project_id: str
     target_id: str
     target_baseline_id: str
     evidence_ref_id: str
+    status: str
+    latest_parent_review_id: str | None
     created_at_ms: int
 
 
@@ -95,31 +82,11 @@ def _chapter_arc_record(row: RowMapping) -> ChapterArcChangeRequestRecord:
         target_arc_baseline_id=cast(str, row["target_arc_baseline_id"]),
         evidence_ref_id=cast(str, row["evidence_ref_id"]),
         status=cast(str, row["status"]),
+        latest_parent_review_id=cast(str | None, row["latest_parent_review_id"]),
         resolved_by_arc_baseline_id=cast(
             str | None, row["resolved_by_arc_baseline_id"]
         ),
-        close_reason_code=cast(str | None, row["close_reason_code"]),
-        created_at_ms=cast(int, row["created_at_ms"]),
-        closed_at_ms=cast(int | None, row["closed_at_ms"]),
-    )
-
-
-def _chapter_book_record(row: RowMapping) -> ChapterBookChangeRequestRecord:
-    return ChapterBookChangeRequestRecord(
-        id=cast(str, row["id"]),
-        project_id=cast(str, row["project_id"]),
-        book_id=cast(str, row["book_id"]),
-        arc_id=cast(str, row["arc_id"]),
-        chapter_id=cast(str, row["chapter_id"]),
-        source_submission_id=cast(str, row["source_submission_id"]),
-        source_review_id=cast(str, row["source_review_id"]),
-        target_book_baseline_id=cast(str, row["target_book_baseline_id"]),
-        evidence_ref_id=cast(str, row["evidence_ref_id"]),
-        status=cast(str, row["status"]),
-        resolved_by_book_baseline_id=cast(
-            str | None, row["resolved_by_book_baseline_id"]
-        ),
-        close_reason_code=cast(str | None, row["close_reason_code"]),
+        resolution_code=cast(str | None, row["resolution_code"]),
         created_at_ms=cast(int, row["created_at_ms"]),
         closed_at_ms=cast(int | None, row["closed_at_ms"]),
     )
@@ -131,15 +98,26 @@ def _arc_book_record(row: RowMapping) -> ArcBookChangeRequestRecord:
         project_id=cast(str, row["project_id"]),
         book_id=cast(str, row["book_id"]),
         arc_id=cast(str, row["arc_id"]),
-        source_submission_id=cast(str, row["source_submission_id"]),
-        source_review_id=cast(str, row["source_review_id"]),
+        source_candidate_submission_id=cast(
+            str | None, row["source_candidate_submission_id"]
+        ),
+        source_candidate_review_id=cast(
+            str | None, row["source_candidate_review_id"]
+        ),
+        source_arc_parent_review_id=cast(
+            str | None, row["source_arc_parent_review_id"]
+        ),
+        source_arc_closure_review_id=cast(
+            str | None, row["source_arc_closure_review_id"]
+        ),
         target_book_baseline_id=cast(str, row["target_book_baseline_id"]),
         evidence_ref_id=cast(str, row["evidence_ref_id"]),
         status=cast(str, row["status"]),
+        latest_parent_review_id=cast(str | None, row["latest_parent_review_id"]),
         resolved_by_book_baseline_id=cast(
             str | None, row["resolved_by_book_baseline_id"]
         ),
-        close_reason_code=cast(str | None, row["close_reason_code"]),
+        resolution_code=cast(str | None, row["resolution_code"]),
         created_at_ms=cast(int, row["created_at_ms"]),
         closed_at_ms=cast(int | None, row["closed_at_ms"]),
     )
@@ -150,12 +128,21 @@ class ChangeRequestRepository:
         self._connection = connection
 
     async def list_open(self, *, project_id: str) -> list[OpenChangeRequestRecord]:
+        return [
+            record
+            for record in await self.list_unresolved(project_id=project_id)
+            if record.status == "open"
+        ]
+
+    async def list_unresolved(
+        self, *, project_id: str
+    ) -> list[OpenChangeRequestRecord]:
         records: list[OpenChangeRequestRecord] = []
         chapter_arc_rows = (
             await self._connection.execute(
                 select(chapter_arc_change_requests).where(
                     chapter_arc_change_requests.c.project_id == project_id,
-                    chapter_arc_change_requests.c.status == "open",
+                    chapter_arc_change_requests.c.status.in_(("open", "reviewed")),
                 )
             )
         ).mappings()
@@ -167,35 +154,19 @@ class ChangeRequestRepository:
                 target_id=cast(str, row["arc_id"]),
                 target_baseline_id=cast(str, row["target_arc_baseline_id"]),
                 evidence_ref_id=cast(str, row["evidence_ref_id"]),
+                status=cast(str, row["status"]),
+                latest_parent_review_id=cast(
+                    str | None, row["latest_parent_review_id"]
+                ),
                 created_at_ms=cast(int, row["created_at_ms"]),
             )
             for row in chapter_arc_rows
-        )
-        chapter_book_rows = (
-            await self._connection.execute(
-                select(chapter_book_change_requests).where(
-                    chapter_book_change_requests.c.project_id == project_id,
-                    chapter_book_change_requests.c.status == "open",
-                )
-            )
-        ).mappings()
-        records.extend(
-            OpenChangeRequestRecord(
-                request_kind="chapter_to_book",
-                id=cast(str, row["id"]),
-                project_id=cast(str, row["project_id"]),
-                target_id=cast(str, row["book_id"]),
-                target_baseline_id=cast(str, row["target_book_baseline_id"]),
-                evidence_ref_id=cast(str, row["evidence_ref_id"]),
-                created_at_ms=cast(int, row["created_at_ms"]),
-            )
-            for row in chapter_book_rows
         )
         arc_book_rows = (
             await self._connection.execute(
                 select(arc_book_change_requests).where(
                     arc_book_change_requests.c.project_id == project_id,
-                    arc_book_change_requests.c.status == "open",
+                    arc_book_change_requests.c.status.in_(("open", "reviewed")),
                 )
             )
         ).mappings()
@@ -207,6 +178,10 @@ class ChangeRequestRepository:
                 target_id=cast(str, row["book_id"]),
                 target_baseline_id=cast(str, row["target_book_baseline_id"]),
                 evidence_ref_id=cast(str, row["evidence_ref_id"]),
+                status=cast(str, row["status"]),
+                latest_parent_review_id=cast(
+                    str | None, row["latest_parent_review_id"]
+                ),
                 created_at_ms=cast(int, row["created_at_ms"]),
             )
             for row in arc_book_rows
@@ -226,19 +201,6 @@ class ChangeRequestRepository:
         ).mappings().one_or_none()
         return None if row is None else _chapter_arc_record(row)
 
-    async def get_chapter_book(
-        self, *, project_id: str, request_id: str
-    ) -> ChapterBookChangeRequestRecord | None:
-        row = (
-            await self._connection.execute(
-                select(chapter_book_change_requests).where(
-                    chapter_book_change_requests.c.project_id == project_id,
-                    chapter_book_change_requests.c.id == request_id,
-                )
-            )
-        ).mappings().one_or_none()
-        return None if row is None else _chapter_book_record(row)
-
     async def get_arc_book(
         self, *, project_id: str, request_id: str
     ) -> ArcBookChangeRequestRecord | None:
@@ -252,58 +214,151 @@ class ChangeRequestRepository:
         ).mappings().one_or_none()
         return None if row is None else _arc_book_record(row)
 
-    async def reject_chapter_arc(
-        self, *, project_id: str, request_id: str, reason: str, now_ms: int
-    ) -> bool:
-        return await self._reject(
-            chapter_arc_change_requests,
-            project_id=project_id,
-            request_id=request_id,
-            reason=reason,
-            now_ms=now_ms,
-        )
-
-    async def reject_chapter_book(
-        self, *, project_id: str, request_id: str, reason: str, now_ms: int
-    ) -> bool:
-        return await self._reject(
-            chapter_book_change_requests,
-            project_id=project_id,
-            request_id=request_id,
-            reason=reason,
-            now_ms=now_ms,
-        )
-
-    async def reject_arc_book(
-        self, *, project_id: str, request_id: str, reason: str, now_ms: int
-    ) -> bool:
-        return await self._reject(
-            arc_book_change_requests,
-            project_id=project_id,
-            request_id=request_id,
-            reason=reason,
-            now_ms=now_ms,
-        )
-
-    async def _reject(
+    async def mark_chapter_arc_reviewed(
         self,
-        table: Table,
         *,
         project_id: str,
         request_id: str,
-        reason: str,
+        expected_latest_review_id: str | None,
+        review_id: str,
+    ) -> bool:
+        expected_pointer = (
+            chapter_arc_change_requests.c.latest_parent_review_id.is_(None)
+            if expected_latest_review_id is None
+            else chapter_arc_change_requests.c.latest_parent_review_id
+            == expected_latest_review_id
+        )
+        result = await self._connection.execute(
+            update(chapter_arc_change_requests)
+            .where(
+                chapter_arc_change_requests.c.project_id == project_id,
+                chapter_arc_change_requests.c.id == request_id,
+                chapter_arc_change_requests.c.status.in_(("open", "reviewed")),
+                expected_pointer,
+            )
+            .values(status="reviewed", latest_parent_review_id=review_id)
+        )
+        return result.rowcount == 1
+
+    async def mark_arc_book_reviewed(
+        self,
+        *,
+        project_id: str,
+        request_id: str,
+        expected_latest_review_id: str | None,
+        review_id: str,
+    ) -> bool:
+        expected_pointer = (
+            arc_book_change_requests.c.latest_parent_review_id.is_(None)
+            if expected_latest_review_id is None
+            else arc_book_change_requests.c.latest_parent_review_id
+            == expected_latest_review_id
+        )
+        result = await self._connection.execute(
+            update(arc_book_change_requests)
+            .where(
+                arc_book_change_requests.c.project_id == project_id,
+                arc_book_change_requests.c.id == request_id,
+                arc_book_change_requests.c.status.in_(("open", "reviewed")),
+                expected_pointer,
+            )
+            .values(status="reviewed", latest_parent_review_id=review_id)
+        )
+        return result.rowcount == 1
+
+    async def supersede_chapter_arc(
+        self, *, project_id: str, request_id: str, reason: str, now_ms: int
+    ) -> bool:
+        result = await self._connection.execute(
+            update(chapter_arc_change_requests)
+            .where(
+                chapter_arc_change_requests.c.project_id == project_id,
+                chapter_arc_change_requests.c.id == request_id,
+                chapter_arc_change_requests.c.status.in_(("open", "reviewed")),
+            )
+            .values(
+                status="superseded",
+                resolved_by_arc_baseline_id=None,
+                resolution_code=reason,
+                closed_at_ms=now_ms,
+            )
+        )
+        return result.rowcount == 1
+
+    async def supersede_arc_book(
+        self, *, project_id: str, request_id: str, reason: str, now_ms: int
+    ) -> bool:
+        result = await self._connection.execute(
+            update(arc_book_change_requests)
+            .where(
+                arc_book_change_requests.c.project_id == project_id,
+                arc_book_change_requests.c.id == request_id,
+                arc_book_change_requests.c.status.in_(("open", "reviewed")),
+            )
+            .values(
+                status="superseded",
+                resolved_by_book_baseline_id=None,
+                resolution_code=reason,
+                closed_at_ms=now_ms,
+            )
+        )
+        return result.rowcount == 1
+
+    async def resolve_chapter_arc_without_replacement(
+        self,
+        *,
+        project_id: str,
+        request_id: str,
+        parent_review_id: str,
+        current_arc_baseline_id: str,
+        resolution_code: str,
         now_ms: int,
     ) -> bool:
         result = await self._connection.execute(
-            update(table)
+            update(chapter_arc_change_requests)
             .where(
-                table.c.project_id == project_id,
-                table.c.id == request_id,
-                table.c.status == "open",
+                chapter_arc_change_requests.c.project_id == project_id,
+                chapter_arc_change_requests.c.id == request_id,
+                chapter_arc_change_requests.c.status == "reviewed",
+                chapter_arc_change_requests.c.latest_parent_review_id
+                == parent_review_id,
+                chapter_arc_change_requests.c.target_arc_baseline_id
+                == current_arc_baseline_id,
             )
             .values(
-                status="rejected",
-                close_reason_code=reason,
+                status="resolved",
+                resolved_by_arc_baseline_id=current_arc_baseline_id,
+                resolution_code=resolution_code,
+                closed_at_ms=now_ms,
+            )
+        )
+        return result.rowcount == 1
+
+    async def resolve_arc_book_without_replacement(
+        self,
+        *,
+        project_id: str,
+        request_id: str,
+        parent_review_id: str,
+        current_book_baseline_id: str,
+        resolution_code: str,
+        now_ms: int,
+    ) -> bool:
+        result = await self._connection.execute(
+            update(arc_book_change_requests)
+            .where(
+                arc_book_change_requests.c.project_id == project_id,
+                arc_book_change_requests.c.id == request_id,
+                arc_book_change_requests.c.status == "reviewed",
+                arc_book_change_requests.c.latest_parent_review_id
+                == parent_review_id,
+                arc_book_change_requests.c.target_book_baseline_id
+                == current_book_baseline_id,
+            )
+            .values(
+                status="resolved",
+                resolved_by_book_baseline_id=current_book_baseline_id,
+                resolution_code=resolution_code,
                 closed_at_ms=now_ms,
             )
         )
@@ -329,12 +384,13 @@ class ChangeRequestRepository:
                 chapter_arc_change_requests.c.arc_id == arc_id,
                 chapter_arc_change_requests.c.target_arc_baseline_id
                 == previous_baseline_id,
-                chapter_arc_change_requests.c.status == "open",
+                chapter_arc_change_requests.c.status == "reviewed",
+                chapter_arc_change_requests.c.latest_parent_review_id.is_not(None),
             )
             .values(
                 status="resolved",
                 resolved_by_arc_baseline_id=new_baseline_id,
-                close_reason_code="arc_baseline_committed",
+                resolution_code="arc_baseline_committed",
                 closed_at_ms=now_ms,
             )
         )
@@ -354,38 +410,23 @@ class ChangeRequestRepository:
         previous_baseline_id: str | None,
         new_baseline_id: str,
         now_ms: int,
-    ) -> tuple[int, int]:
+    ) -> int:
         if previous_baseline_id is None:
-            return 0, 0
-        chapter_result = await self._connection.execute(
-            update(chapter_book_change_requests)
-            .where(
-                chapter_book_change_requests.c.project_id == project_id,
-                chapter_book_change_requests.c.book_id == book_id,
-                chapter_book_change_requests.c.target_book_baseline_id
-                == previous_baseline_id,
-                chapter_book_change_requests.c.status == "open",
-            )
-            .values(
-                status="resolved",
-                resolved_by_book_baseline_id=new_baseline_id,
-                close_reason_code="book_baseline_committed",
-                closed_at_ms=now_ms,
-            )
-        )
-        arc_result = await self._connection.execute(
+            return 0
+        result = await self._connection.execute(
             update(arc_book_change_requests)
             .where(
                 arc_book_change_requests.c.project_id == project_id,
                 arc_book_change_requests.c.book_id == book_id,
                 arc_book_change_requests.c.target_book_baseline_id
                 == previous_baseline_id,
-                arc_book_change_requests.c.status == "open",
+                arc_book_change_requests.c.status == "reviewed",
+                arc_book_change_requests.c.latest_parent_review_id.is_not(None),
             )
             .values(
                 status="resolved",
                 resolved_by_book_baseline_id=new_baseline_id,
-                close_reason_code="book_baseline_committed",
+                resolution_code="book_baseline_committed",
                 closed_at_ms=now_ms,
             )
         )
@@ -401,7 +442,7 @@ class ChangeRequestRepository:
             previous_baseline_id=previous_baseline_id,
             now_ms=now_ms,
         )
-        return chapter_result.rowcount, arc_result.rowcount
+        return result.rowcount
 
     async def _stale_chapter_work_for_arc(
         self,
@@ -467,7 +508,9 @@ class ChangeRequestRepository:
                 select(story_arcs.c.id).where(
                     story_arcs.c.project_id == project_id,
                     story_arcs.c.book_id == book_id,
-                    story_arcs.c.lifecycle_status.in_(("planning", "active")),
+                    story_arcs.c.lifecycle_status.in_(
+                        ("planning", "active", "closing")
+                    ),
                 )
             ),
         )
@@ -503,7 +546,9 @@ class ChangeRequestRepository:
                     select(story_arcs.c.id).where(
                         story_arcs.c.project_id == project_id,
                         story_arcs.c.book_id == book_id,
-                        story_arcs.c.lifecycle_status.in_(("planning", "active")),
+                        story_arcs.c.lifecycle_status.in_(
+                            ("planning", "active", "closing")
+                        ),
                     )
                 ),
             )
@@ -512,6 +557,25 @@ class ChangeRequestRepository:
                 lock_version=arc_workspaces.c.lock_version + 1,
                 stale_reason_code="upstream_book_revised",
                 stale_at_ms=now_ms,
+                updated_at_ms=now_ms,
+            )
+        )
+        await self._connection.execute(
+            update(story_arcs)
+            .where(
+                story_arcs.c.project_id == project_id,
+                story_arcs.c.book_id == book_id,
+                story_arcs.c.id.in_(affected),
+                story_arcs.c.lifecycle_status.in_(
+                    ("planning", "active", "closing")
+                ),
+            )
+            .values(
+                lifecycle_status="planning",
+                current_baseline_id=None,
+                latest_closure_review_id=None,
+                current_closure_id=None,
+                completed_at_ms=None,
                 updated_at_ms=now_ms,
             )
         )
@@ -564,17 +628,19 @@ class ChangeRequestRepository:
             )
         )
 
-    async def has_open(self, *, project_id: str) -> bool:
-        for table in (
-            chapter_arc_change_requests,
-            chapter_book_change_requests,
-            arc_book_change_requests,
-        ):
+    async def has_unresolved(self, *, project_id: str) -> bool:
+        for table in (chapter_arc_change_requests, arc_book_change_requests):
             value = await self._connection.scalar(
                 select(table.c.id)
-                .where(table.c.project_id == project_id, table.c.status == "open")
+                .where(
+                    table.c.project_id == project_id,
+                    table.c.status.in_(("open", "reviewed")),
+                )
                 .limit(1)
             )
             if value is not None:
                 return True
         return False
+
+    async def has_open(self, *, project_id: str) -> bool:
+        return await self.has_unresolved(project_id=project_id)

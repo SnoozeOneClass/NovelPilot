@@ -15,7 +15,6 @@ ChapterReviewDecision = Literal[
     "pass",
     "local_repair",
     "escalate_to_arc",
-    "escalate_to_book",
     "needs_user",
 ]
 
@@ -150,7 +149,7 @@ class CommitChapterResult(BaseModel):
     canon_before_id: str
     canon_after_id: str
     canon_changed: bool
-    arc_completed: bool
+    arc_closure_due: bool
 
 
 class ChapterTextView(BaseModel):

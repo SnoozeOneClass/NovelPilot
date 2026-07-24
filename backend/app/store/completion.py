@@ -25,6 +25,7 @@ from app.db.schema import (
 class TerminalArcRecord:
     arc_id: str
     arc_baseline_id: str
+    arc_closure_id: str | None
     purpose: str
     lifecycle_status: str
 
@@ -45,6 +46,8 @@ class BookCompletionRecord:
     completion_version: int
     parent_completion_id: str | None
     book_baseline_id: str
+    book_boundary_review_id: str
+    arc_closure_id: str
     terminal_arc_id: str
     terminal_arc_baseline_id: str
     terminal_chapter_id: str
@@ -69,6 +72,7 @@ class CompletionRepository:
                 select(
                     story_arcs.c.id,
                     story_arcs.c.current_baseline_id,
+                    story_arcs.c.current_closure_id,
                     story_arcs.c.purpose,
                     story_arcs.c.lifecycle_status,
                 )
@@ -85,6 +89,7 @@ class CompletionRepository:
         return TerminalArcRecord(
             arc_id=cast(str, row["id"]),
             arc_baseline_id=cast(str, row["current_baseline_id"]),
+            arc_closure_id=cast(str | None, row["current_closure_id"]),
             purpose=cast(str, row["purpose"]),
             lifecycle_status=cast(str, row["lifecycle_status"]),
         )
@@ -141,7 +146,7 @@ class CompletionRepository:
             select(story_arcs.c.id).where(
                 story_arcs.c.project_id == project_id,
                 story_arcs.c.book_id == book_id,
-                story_arcs.c.lifecycle_status.in_(("planning", "active")),
+                story_arcs.c.lifecycle_status.in_(("planning", "active", "closing")),
             ),
             select(chapters.c.id).where(
                 chapters.c.project_id == project_id,

@@ -85,7 +85,7 @@ class ObservationApi(Protocol):
         self,
         *,
         project_id: str,
-        target_chapter_count: int | None,
+        closure_chapter_count: int | None,
         key: str,
     ) -> JsonObject: ...
 
@@ -195,14 +195,14 @@ class HttpObservationApi:
         self,
         *,
         project_id: str,
-        target_chapter_count: int | None,
+        closure_chapter_count: int | None,
         key: str,
     ) -> JsonObject:
         result = self._request(
             "POST",
             f"/api/projects/{project_id}/arc/approve",
             key=key,
-            body={"target_chapter_count": target_chapter_count},
+            body={"closure_chapter_count": closure_chapter_count},
         )
         return cast(JsonObject, result["state"])
 
@@ -642,10 +642,12 @@ def run_observation_slot(
                     )
                     break
                 arc = cast(JsonObject, state.get("current_arc") or {})
-                target = arc.get("recommended_target_chapter_count")
+                checkpoint = arc.get("recommended_closure_chapter_count")
                 state = api.approve_arc(
                     project_id=project_id,
-                    target_chapter_count=None if target is None else int(target),
+                    closure_chapter_count=(
+                        None if checkpoint is None else int(checkpoint)
+                    ),
                     key=f"{series_id}:{slot}:arc-approve:{arc.get('arc_id')}",
                 )
                 action_counts["arc_approval"] += 1
@@ -654,7 +656,7 @@ def run_observation_slot(
                         "kind": "arc_approval",
                         "arc_id": arc.get("arc_id"),
                         "arc_ordinal": arc.get("ordinal"),
-                        "target_chapter_count": target,
+                        "closure_chapter_count": checkpoint,
                     }
                 )
                 continue

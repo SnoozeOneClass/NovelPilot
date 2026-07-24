@@ -34,8 +34,23 @@ from app.domain.book.contracts import (
     RecordBookReviewRequest,
     SubmitBookRequest,
 )
+from app.domain.authority import (
+    AuthorityTaskFailure,
+    CommitBookCompletionRequest,
+    CommitBookProgressHandoffRequest,
+    LoopAuthorityCommandService,
+    OpenArcClosureRevisionRequest,
+    OpenBookBoundaryRevisionRequest,
+    RecordArcClosureReviewRequest,
+    RecordArcParentReviewRequest,
+    RecordBookBoundaryReviewRequest,
+    RecordBookParentReviewRequest,
+)
 from app.domain.change_requests import ActivateChangeRequest, ChangeRequestCommandService
-from app.domain.chapter.commands import ChapterCommandService
+from app.domain.chapter.commands import (
+    ChapterCommandService,
+    ChapterEvidenceVerificationFailure,
+)
 from app.domain.chapter.contracts import (
     ApplyChapterTaskRequest,
     CommitChapterRequest,
@@ -44,11 +59,15 @@ from app.domain.chapter.contracts import (
     RebaseStaleChapterRequest,
     SubmitChapterRequest,
 )
-from app.domain.completion import ApplyBookProgressRequest, CompletionCommandService
 from app.domain.commands import CommandPreconditionError
+from app.domain.feedback import ApplyFeedbackRequest, FeedbackCommandService
 from app.profiles import ProfileCatalog, ProfileConfigurationError
 from app.runtime.context import HarnessContextBuilder
-from app.runtime.failures import DeliveryFailureService, NormalizedDeliveryFailure
+from app.runtime.failures import (
+    DeliveryFailureService,
+    HarnessActionFailureService,
+    NormalizedDeliveryFailure,
+)
 from app.store.agent_tasks import AgentTaskStore
 from app.store.command_bus import CommandBus
 from app.store.content import prepare_canonical_json
@@ -60,6 +79,19 @@ LOGGER = logging.getLogger(__name__)
 
 class HarnessInvariantError(RuntimeError):
     """Authoritative facts do not describe one legal next Domain Harness action."""
+
+
+class EvaluationContractAssemblyError(RuntimeError):
+    """A frozen task strategy, rubric, or typed contract cannot be assembled."""
+
+
+class ContextAssemblyError(RuntimeError):
+    """Authoritative semantic context cannot be assembled for a frozen task."""
+
+
+def _stable_lineage_id(*parts: str) -> str:
+    material = ":".join(("novelpilot", "correction-lineage", *parts))
+    return uuid.uuid5(uuid.NAMESPACE_URL, material).hex
 
 
 def _normalize_delivery_failure(error: Exception) -> NormalizedDeliveryFailure:
@@ -80,9 +112,21 @@ def _normalize_delivery_failure(error: Exception) -> NormalizedDeliveryFailure:
             exception_type=type(error).__name__,
             details=details,
         )
+    if isinstance(error, AuthorityTaskFailure):
+        return NormalizedDeliveryFailure(
+            code=error.code,
+            message=str(error),
+            exception_type=type(error).__name__,
+        )
     if isinstance(error, CommandPreconditionError):
         return NormalizedDeliveryFailure(
             code="domain_delivery_rejected",
+            message=str(error),
+            exception_type=type(error).__name__,
+        )
+    if isinstance(error, ChapterEvidenceVerificationFailure):
+        return NormalizedDeliveryFailure(
+            code="evidence_correction_verification_failed",
             message=str(error),
             exception_type=type(error).__name__,
         )
@@ -138,6 +182,20 @@ class _TaskInstruction:
     arc_baseline_id: str | None = None
     chapter_id: str | None = None
     chapter_baseline_id: str | None = None
+    canon_baseline_id: str | None = None
+    correction_lineage_id: str | None = None
+    correction_lineage_origin: Literal[
+        "review_initiated", "user_initiated"
+    ] | None = None
+    automatic_correction_round: Literal[0, 1] | None = None
+    source_arc_parent_review_id: str | None = None
+    source_book_parent_review_id: str | None = None
+    source_arc_closure_review_id: str | None = None
+    source_book_boundary_review_id: str | None = None
+    source_chapter_arc_request_id: str | None = None
+    source_arc_book_request_id: str | None = None
+    source_arc_closure_id: str | None = None
+    source_feedback_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +211,10 @@ class _CommandInstruction:
         "submit_chapter",
         "commit_arc_auto",
         "commit_chapter",
+        "open_arc_closure_revision",
+        "open_book_boundary_revision",
+        "commit_book_handoff",
+        "commit_book_completion",
     ]
     request: object
     idempotency_key: str
@@ -166,10 +228,6 @@ _SEMANTIC_GOALS: dict[str, str] = {
     "book.synthesize": "Synthesize the approved discussion into a coherent whole-book baseline candidate.",
     "book.revise": "Revise the whole-book candidate only for the active formal Book change.",
     "book.repair": "Repair only the evaluator-authorized Book components.",
-    "book.assess_progress_or_completion": (
-        "At a completed Story Arc boundary, decide whether to continue, plan the final Arc, "
-        "complete the Book, or request user input."
-    ),
     "arc.plan": "Plan the next rolling Story Arc under the approved Book and current Canon.",
     "arc.revise": "Revise the current Story Arc only for its active formal change.",
     "arc.repair": "Repair only the evaluator-authorized Story Arc components.",
@@ -189,6 +247,21 @@ _SEMANTIC_GOALS: dict[str, str] = {
     "verify_repair.arc": "Verify the repaired Story Arc candidate against the prior findings.",
     "evaluate.chapter": "Independently evaluate the complete Chapter candidate and Canon proposal.",
     "verify_repair.chapter": "Verify the repaired Chapter candidate against the prior findings.",
+    "evaluate.arc_parent_contract": (
+        "Review one evidence-bound Chapter concern at immediate-parent Arc authority."
+    ),
+    "evaluate.book_parent_contract": (
+        "Review one evidence-bound Arc concern at Book authority."
+    ),
+    "evaluate.arc_closure": (
+        "Judge every frozen Arc closure signal against the exact committed boundary."
+    ),
+    "evaluate.book_boundary": (
+        "Judge Book progress and completion requirements after one formal Arc closure."
+    ),
+    "verify_evidence.chapter": (
+        "Verify an evidence-only Chapter correction against byte-frozen approved prose."
+    ),
 }
 
 
@@ -218,15 +291,34 @@ class DomainRunDriver:
         self._arcs = ArcCommandService(bus)
         self._chapters = ChapterCommandService(bus)
         self._changes = ChangeRequestCommandService(bus)
-        self._completion = CompletionCommandService(bus)
+        self._authority = LoopAuthorityCommandService(bus)
+        self._feedback = FeedbackCommandService(bus, now_ms=self._now_ms)
         self._delivery_failures = DeliveryFailureService(
+            bus,
+            now_ms=self._now_ms,
+        )
+        self._harness_action_failures = HarnessActionFailureService(
             bus,
             now_ms=self._now_ms,
         )
 
     async def drive_one(self, run: GenerationRunRecord) -> None:
         async with UnitOfWork(self._engine) as store:
+            queued_feedback = await store.feedback.get_oldest_routed(
+                project_id=run.project_id
+            )
             actionable = await store.execution.find_actionable_for_run(run_id=run.id)
+        if queued_feedback is not None:
+            if run.status == "failure_paused":
+                return
+            await self._feedback.apply(
+                ApplyFeedbackRequest(
+                    project_id=run.project_id,
+                    feedback_id=queued_feedback.id,
+                ),
+                idempotency_key=f"engine:apply-feedback:{queued_feedback.id}",
+            )
+            return
         if actionable is not None:
             if actionable.task_status == "queued":
                 await self._execute_task(actionable)
@@ -247,11 +339,149 @@ class DomainRunDriver:
                     )
             return
 
-        instruction = await self._decide_next(run)
+        try:
+            instruction = await self._decide_next(run)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            await self._pause_harness_action(
+                run=run,
+                action_key=f"route:{run.id}:{run.lock_version}",
+                failure_code="context_assembly_invalid",
+                message=(
+                    "Deterministic Route could not derive one legal next action "
+                    "from current authority."
+                ),
+                error=error,
+                phase="route",
+            )
+            return
         if isinstance(instruction, _TaskInstruction):
-            await self._freeze_task(run, instruction)
+            action_key = self._task_freeze_action_key(run, instruction)
+            try:
+                await self._freeze_task(run, instruction)
+            except asyncio.CancelledError:
+                raise
+            except EvaluationContractAssemblyError as error:
+                await self._pause_harness_action(
+                    run=run,
+                    action_key=action_key,
+                    failure_code="evaluation_contract_invalid",
+                    message=(
+                        "The Agent task strategy, rubric, or typed contract could "
+                        "not be frozen."
+                    ),
+                    error=error,
+                    phase="evaluation_contract",
+                    task_kind=instruction.task_kind,
+                )
+            except ContextAssemblyError as error:
+                await self._pause_harness_action(
+                    run=run,
+                    action_key=action_key,
+                    failure_code="context_assembly_invalid",
+                    message=(
+                        "The Agent task context could not be assembled from current "
+                        "authoritative facts."
+                    ),
+                    error=error,
+                    phase="context",
+                    task_kind=instruction.task_kind,
+                )
+            except Exception as error:
+                await self._pause_harness_action(
+                    run=run,
+                    action_key=action_key,
+                    failure_code="execution_failure",
+                    message="The Harness failed before the Agent task was durably frozen.",
+                    error=error,
+                    phase="task_freeze",
+                    task_kind=instruction.task_kind,
+                )
         elif isinstance(instruction, _CommandInstruction):
-            await self._apply_command(instruction)
+            try:
+                await self._apply_command(instruction)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                await self._pause_harness_action(
+                    run=run,
+                    action_key=f"domain-command:{instruction.idempotency_key}",
+                    failure_code="execution_failure",
+                    message="The deterministic Domain command could not be committed.",
+                    error=error,
+                    phase="domain_command",
+                )
+
+    async def _pause_harness_action(
+        self,
+        *,
+        run: GenerationRunRecord,
+        action_key: str,
+        failure_code: str,
+        message: str,
+        error: Exception,
+        phase: str,
+        task_kind: str | None = None,
+    ) -> None:
+        LOGGER.exception(
+            "Harness action %s failed before a deliverable Agent task existed",
+            action_key,
+            exc_info=error,
+        )
+        details: dict[str, object] = {"phase": phase}
+        if task_kind is not None:
+            details["task_kind"] = task_kind
+        await self._harness_action_failures.failure_pause(
+            run=run,
+            action_key=action_key,
+            failure_code=failure_code,
+            message=message,
+            exception_type=type(error).__name__,
+            details=details,
+        )
+
+    @staticmethod
+    def _task_freeze_action_key(
+        run: GenerationRunRecord,
+        instruction: _TaskInstruction,
+    ) -> str:
+        scope_id = instruction.chapter_id or instruction.arc_id or instruction.book_id
+        prepared = prepare_canonical_json(
+            {
+                "run_id": run.id,
+                "run_lock_version": run.lock_version,
+                "role": instruction.role,
+                "task_kind": instruction.task_kind,
+                "scope_id": scope_id,
+                "workspace_lock_version": instruction.workspace_lock_version,
+                "book_baseline_id": instruction.book_baseline_id,
+                "arc_baseline_id": instruction.arc_baseline_id,
+                "chapter_baseline_id": instruction.chapter_baseline_id,
+                "canon_baseline_id": instruction.canon_baseline_id,
+                "correction_lineage_id": instruction.correction_lineage_id,
+                "automatic_correction_round": instruction.automatic_correction_round,
+                "source_arc_parent_review_id": (
+                    instruction.source_arc_parent_review_id
+                ),
+                "source_book_parent_review_id": (
+                    instruction.source_book_parent_review_id
+                ),
+                "source_arc_closure_review_id": (
+                    instruction.source_arc_closure_review_id
+                ),
+                "source_book_boundary_review_id": (
+                    instruction.source_book_boundary_review_id
+                ),
+                "source_chapter_arc_request_id": (
+                    instruction.source_chapter_arc_request_id
+                ),
+                "source_arc_book_request_id": instruction.source_arc_book_request_id,
+                "source_arc_closure_id": instruction.source_arc_closure_id,
+                "source_feedback_id": instruction.source_feedback_id,
+            }
+        )
+        return f"freeze-task:{instruction.task_kind}:{prepared.sha256}"
 
     async def _execute_task(self, task: ActionableTaskRecord) -> None:
         lease_token = uuid.uuid4().hex
@@ -302,15 +532,49 @@ class DomainRunDriver:
                 profile_id,
                 message=str(error),
             ).snapshot
-        semantic_goal = _SEMANTIC_GOALS[instruction.task_kind]
-        context = await self._context.build(
-            task_kind=instruction.task_kind,
-            project_id=run.project_id,
-            book_id=instruction.book_id,
-            arc_id=instruction.arc_id,
-            chapter_id=instruction.chapter_id,
-            semantic_goal=semantic_goal,
-        )
+        try:
+            semantic_goal = _SEMANTIC_GOALS[instruction.task_kind]
+            definition = self._registry.get(
+                role=instruction.role,
+                task_kind=instruction.task_kind,
+                contract_version=1,
+            )
+            evaluation_strategy = None
+            if instruction.role == "evaluator":
+                if self._registry.evaluation_strategies is None:
+                    raise HarnessInvariantError(
+                        "Evaluator task registry has no evaluation strategies."
+                    )
+                evaluation_strategy = self._registry.evaluation_strategies.for_task(
+                    instruction.task_kind
+                )
+        except Exception as error:
+            raise EvaluationContractAssemblyError(
+                f"Cannot assemble frozen contract for {instruction.task_kind!r}."
+            ) from error
+        try:
+            context = await self._context.build(
+                task_kind=instruction.task_kind,
+                project_id=run.project_id,
+                book_id=instruction.book_id,
+                arc_id=instruction.arc_id,
+                chapter_id=instruction.chapter_id,
+                semantic_goal=semantic_goal,
+                definition=definition,
+                evaluation_strategy=evaluation_strategy,
+                source_arc_parent_review_id=instruction.source_arc_parent_review_id,
+                source_book_parent_review_id=instruction.source_book_parent_review_id,
+                source_arc_closure_review_id=instruction.source_arc_closure_review_id,
+                source_book_boundary_review_id=instruction.source_book_boundary_review_id,
+                source_chapter_arc_request_id=instruction.source_chapter_arc_request_id,
+                source_arc_book_request_id=instruction.source_arc_book_request_id,
+                source_arc_closure_id=instruction.source_arc_closure_id,
+                canon_baseline_id=instruction.canon_baseline_id,
+            )
+        except Exception as error:
+            raise ContextAssemblyError(
+                f"Cannot assemble context for {instruction.task_kind!r}."
+            ) from error
         context_fingerprint = prepare_canonical_json(context.manifest).sha256
         scope_id = instruction.chapter_id or instruction.arc_id or instruction.book_id
         task_key = ":".join(
@@ -322,7 +586,19 @@ class DomainRunDriver:
                 instruction.book_baseline_id or "none",
                 instruction.arc_baseline_id or "none",
                 instruction.chapter_baseline_id or "none",
-                project.current_canon_baseline_id,
+                instruction.correction_lineage_id or "none",
+                str(instruction.automatic_correction_round)
+                if instruction.automatic_correction_round is not None
+                else "none",
+                instruction.source_arc_parent_review_id or "none",
+                instruction.source_book_parent_review_id or "none",
+                instruction.source_arc_closure_review_id or "none",
+                instruction.source_book_boundary_review_id or "none",
+                instruction.source_chapter_arc_request_id or "none",
+                instruction.source_arc_book_request_id or "none",
+                instruction.source_arc_closure_id or "none",
+                instruction.source_feedback_id or "none",
+                instruction.canon_baseline_id or project.current_canon_baseline_id,
                 context_fingerprint,
             ]
         )
@@ -337,7 +613,9 @@ class DomainRunDriver:
             task_kind=instruction.task_kind,
             contract_version=1,
             book_id=instruction.book_id,
-            canon_baseline_id=project.current_canon_baseline_id,
+            canon_baseline_id=(
+                instruction.canon_baseline_id or project.current_canon_baseline_id
+            ),
             semantic_goal=semantic_goal,
             prompt=context.prompt,
             context_manifest=context.manifest,
@@ -348,6 +626,17 @@ class DomainRunDriver:
             book_baseline_id=instruction.book_baseline_id,
             arc_baseline_id=instruction.arc_baseline_id,
             chapter_baseline_id=instruction.chapter_baseline_id,
+            correction_lineage_id=instruction.correction_lineage_id,
+            correction_lineage_origin=instruction.correction_lineage_origin,
+            automatic_correction_round=instruction.automatic_correction_round,
+            source_arc_parent_review_id=instruction.source_arc_parent_review_id,
+            source_book_parent_review_id=instruction.source_book_parent_review_id,
+            source_arc_closure_review_id=instruction.source_arc_closure_review_id,
+            source_book_boundary_review_id=instruction.source_book_boundary_review_id,
+            source_chapter_arc_request_id=instruction.source_chapter_arc_request_id,
+            source_arc_book_request_id=instruction.source_arc_book_request_id,
+            source_arc_closure_id=instruction.source_arc_closure_id,
+            source_feedback_id=instruction.source_feedback_id,
         )
         await self._tasks.create_initial(
             plan=plan,
@@ -417,8 +706,8 @@ class DomainRunDriver:
                     submission_id=book_submission.id,
                     evaluator_task_id=task.task_id,
                     evaluator_attempt_id=task.attempt_id,
-                    rubric_id="book-rubric-v1",
-                    rubric_version=1,
+                    rubric_id=self._required_task_rubric_id(task),
+                    rubric_version=self._required_task_rubric_version(task),
                     deterministic_precheck={"passed": True, "manifest": "book-submission-v1"},
                 ),
                 idempotency_key=key,
@@ -457,8 +746,8 @@ class DomainRunDriver:
                     submission_id=arc_submission.id,
                     evaluator_task_id=task.task_id,
                     evaluator_attempt_id=task.attempt_id,
-                    rubric_id="arc-rubric-v1",
-                    rubric_version=1,
+                    rubric_id=self._required_task_rubric_id(task),
+                    rubric_version=self._required_task_rubric_version(task),
                     deterministic_precheck={"passed": True, "manifest": "arc-submission-v1"},
                 ),
                 idempotency_key=key,
@@ -493,8 +782,8 @@ class DomainRunDriver:
                     submission_id=chapter_submission.id,
                     evaluator_task_id=task.task_id,
                     evaluator_attempt_id=task.attempt_id,
-                    rubric_id="chapter-rubric-v1",
-                    rubric_version=1,
+                    rubric_id=self._required_task_rubric_id(task),
+                    rubric_version=self._required_task_rubric_version(task),
                     deterministic_precheck={
                         "passed": True,
                         "manifest": "chapter-submission-v1",
@@ -503,10 +792,107 @@ class DomainRunDriver:
                 idempotency_key=key,
             )
             return
-        if task.task_kind == "book.assess_progress_or_completion":
-            await self._deliver_completion_assessment(task, key=key)
+        if task.task_kind == "verify_evidence.chapter":
+            if task.chapter_id is None:
+                raise HarnessInvariantError(
+                    "Chapter evidence evaluator task has no chapter_id."
+                )
+            async with UnitOfWork(self._engine) as store:
+                chapter_submission = await store.chapters.find_pending_submission(
+                    project_id=task.project_id,
+                    chapter_id=task.chapter_id,
+                )
+            if chapter_submission is None:
+                raise HarnessInvariantError(
+                    "Chapter evidence evaluator result has no submission."
+                )
+            await self._chapters.record_evidence_review(
+                RecordChapterReviewRequest(
+                    project_id=task.project_id,
+                    chapter_id=task.chapter_id,
+                    submission_id=chapter_submission.id,
+                    evaluator_task_id=task.task_id,
+                    evaluator_attempt_id=task.attempt_id,
+                    rubric_id=self._required_task_rubric_id(task),
+                    rubric_version=self._required_task_rubric_version(task),
+                    deterministic_precheck={
+                        "manifest": "chapter-evidence-submission-v1",
+                    },
+                ),
+                idempotency_key=key,
+            )
+            return
+        if task.task_kind == "evaluate.arc_parent_contract":
+            if task.arc_id is None or task.source_chapter_arc_request_id is None:
+                raise HarnessInvariantError(
+                    "Arc parent review lacks its exact Chapter-to-Arc request."
+                )
+            await self._authority.record_arc_parent_review(
+                RecordArcParentReviewRequest(
+                    project_id=task.project_id,
+                    book_id=task.book_id,
+                    arc_id=task.arc_id,
+                    request_id=task.source_chapter_arc_request_id,
+                    task_id=task.task_id,
+                    attempt_id=task.attempt_id,
+                ),
+                idempotency_key=key,
+            )
+            return
+        if task.task_kind == "evaluate.book_parent_contract":
+            if task.source_arc_book_request_id is None:
+                raise HarnessInvariantError(
+                    "Book parent review lacks its exact Arc-to-Book request."
+                )
+            await self._authority.record_book_parent_review(
+                RecordBookParentReviewRequest(
+                    project_id=task.project_id,
+                    book_id=task.book_id,
+                    request_id=task.source_arc_book_request_id,
+                    task_id=task.task_id,
+                    attempt_id=task.attempt_id,
+                ),
+                idempotency_key=key,
+            )
+            return
+        if task.task_kind == "evaluate.arc_closure":
+            if task.arc_id is None:
+                raise HarnessInvariantError("Arc closure task has no arc_id.")
+            await self._authority.record_arc_closure_review(
+                RecordArcClosureReviewRequest(
+                    project_id=task.project_id,
+                    book_id=task.book_id,
+                    arc_id=task.arc_id,
+                    task_id=task.task_id,
+                    attempt_id=task.attempt_id,
+                ),
+                idempotency_key=key,
+            )
+            return
+        if task.task_kind == "evaluate.book_boundary":
+            await self._authority.record_book_boundary_review(
+                RecordBookBoundaryReviewRequest(
+                    project_id=task.project_id,
+                    book_id=task.book_id,
+                    task_id=task.task_id,
+                    attempt_id=task.attempt_id,
+                ),
+                idempotency_key=key,
+            )
             return
         raise HarnessInvariantError(f"No delivery command for task kind {task.task_kind!r}.")
+
+    @staticmethod
+    def _required_task_rubric_id(task: ActionableTaskRecord) -> str:
+        if task.rubric_id is None or not task.rubric_id.strip():
+            raise HarnessInvariantError("Evaluator task has no frozen rubric identity.")
+        return task.rubric_id
+
+    @staticmethod
+    def _required_task_rubric_version(task: ActionableTaskRecord) -> int:
+        if task.rubric_version is None or task.rubric_version < 1:
+            raise HarnessInvariantError("Evaluator task has no frozen rubric version.")
+        return task.rubric_version
 
     async def _deliver_chapter_component(
         self,
@@ -536,46 +922,6 @@ class DomainRunDriver:
         }
         await methods[task.task_kind](request, idempotency_key=key)
 
-    async def _deliver_completion_assessment(
-        self,
-        task: ActionableTaskRecord,
-        *,
-        key: str,
-    ) -> None:
-        if task.book_baseline_id is None or task.workspace_lock_version is None:
-            raise HarnessInvariantError("Completion assessment lacks frozen Book dependencies.")
-        async with UnitOfWork(self._engine) as store:
-            project = await store.projects.get(task.project_id)
-            terminal_arc = await store.completion.get_terminal_arc(
-                project_id=task.project_id,
-                book_id=task.book_id,
-            )
-            if terminal_arc is None:
-                raise HarnessInvariantError("Completion assessment has no terminal Story Arc.")
-            terminal_chapter = await store.completion.get_terminal_chapter(
-                project_id=task.project_id,
-                book_id=task.book_id,
-                arc_id=terminal_arc.arc_id,
-            )
-        if project is None or terminal_chapter is None:
-            raise HarnessInvariantError("Completion assessment boundary is incomplete.")
-        await self._completion.apply_assessment(
-            ApplyBookProgressRequest(
-                project_id=task.project_id,
-                book_id=task.book_id,
-                task_id=task.task_id,
-                attempt_id=task.attempt_id,
-                expected_book_baseline_id=task.book_baseline_id,
-                expected_canon_baseline_id=project.current_canon_baseline_id,
-                expected_book_workspace_lock_version=task.workspace_lock_version,
-                terminal_arc_id=terminal_arc.arc_id,
-                terminal_arc_baseline_id=terminal_arc.arc_baseline_id,
-                terminal_chapter_id=terminal_chapter.chapter_id,
-                terminal_chapter_baseline_id=terminal_chapter.chapter_baseline_id,
-            ),
-            idempotency_key=key,
-        )
-
     async def _decide_next(self, run: GenerationRunRecord) -> _Instruction:
         async with UnitOfWork(self._engine) as store:
             project = await store.projects.get(run.project_id)
@@ -593,38 +939,403 @@ class DomainRunDriver:
             if book_workspace is None:
                 raise HarnessInvariantError("Book workspace is missing.")
 
-            open_changes = await store.changes.list_open(project_id=project.id)
-            for change in open_changes:
+            correction_feedback = (
+                await store.feedback.get_unstarted_correction_lineage(
+                    project_id=project.id,
+                    run_id=run.id,
+                )
+            )
+            if correction_feedback is not None:
+                lineage_id = correction_feedback.resulting_correction_lineage_id
+                if lineage_id is None:
+                    raise HarnessInvariantError(
+                        "Applied correction feedback lost its user lineage."
+                    )
+                if correction_feedback.arc_parent_review_id is not None:
+                    arc_parent_review = await store.arc_parent_reviews.get(
+                        project_id=project.id,
+                        review_id=correction_feedback.arc_parent_review_id,
+                    )
+                    if arc_parent_review is None:
+                        raise HarnessInvariantError(
+                            "Applied Arc-parent feedback lost its source review."
+                        )
+                    arc = await store.arcs.get(
+                        project_id=project.id,
+                        arc_id=arc_parent_review.arc_id,
+                    )
+                    workspace = await store.arcs.get_workspace(
+                        project_id=project.id,
+                        arc_id=arc_parent_review.arc_id,
+                    )
+                    if arc is None or workspace is None:
+                        raise HarnessInvariantError(
+                            "Applied Arc-parent feedback lost its target."
+                        )
+                    return _TaskInstruction(
+                        role="evaluator",
+                        task_kind="evaluate.arc_parent_contract",
+                        book_id=book.id,
+                        arc_id=arc.id,
+                        workspace_lock_version=workspace.lock_version,
+                        book_baseline_id=book.current_baseline_id,
+                        arc_baseline_id=arc.current_baseline_id,
+                        correction_lineage_id=lineage_id,
+                        correction_lineage_origin="user_initiated",
+                        automatic_correction_round=0,
+                        source_arc_parent_review_id=arc_parent_review.id,
+                        source_chapter_arc_request_id=arc_parent_review.request_id,
+                        source_feedback_id=correction_feedback.id,
+                    )
+                if correction_feedback.book_parent_review_id is not None:
+                    book_parent_review = await store.book_parent_reviews.get(
+                        project_id=project.id,
+                        review_id=correction_feedback.book_parent_review_id,
+                    )
+                    if book_parent_review is None:
+                        raise HarnessInvariantError(
+                            "Applied Book-parent feedback lost its source review."
+                        )
+                    book_change = await store.changes.get_arc_book(
+                        project_id=project.id,
+                        request_id=book_parent_review.request_id,
+                    )
+                    subject_arc = (
+                        None
+                        if book_change is None
+                        else await store.arcs.get(
+                            project_id=project.id,
+                            arc_id=book_change.arc_id,
+                        )
+                    )
+                    if book_change is None or subject_arc is None:
+                        raise HarnessInvariantError(
+                            "Applied Book-parent feedback lost its source Arc."
+                        )
+                    return _TaskInstruction(
+                        role="evaluator",
+                        task_kind="evaluate.book_parent_contract",
+                        book_id=book.id,
+                        workspace_lock_version=book_workspace.lock_version,
+                        book_baseline_id=book.current_baseline_id,
+                        arc_baseline_id=subject_arc.current_baseline_id,
+                        correction_lineage_id=lineage_id,
+                        correction_lineage_origin="user_initiated",
+                        automatic_correction_round=0,
+                        source_book_parent_review_id=book_parent_review.id,
+                        source_arc_book_request_id=book_parent_review.request_id,
+                        source_feedback_id=correction_feedback.id,
+                    )
+                if correction_feedback.arc_closure_review_id is not None:
+                    arc_closure_review = await store.arc_closure_reviews.get(
+                        project_id=project.id,
+                        review_id=correction_feedback.arc_closure_review_id,
+                    )
+                    if arc_closure_review is None:
+                        raise HarnessInvariantError(
+                            "Applied Arc-closure feedback lost its source review."
+                        )
+                    workspace = await store.arcs.get_workspace(
+                        project_id=project.id,
+                        arc_id=arc_closure_review.arc_id,
+                    )
+                    if workspace is None:
+                        raise HarnessInvariantError(
+                            "Applied Arc-closure feedback lost its workspace."
+                        )
+                    return _TaskInstruction(
+                        role="evaluator",
+                        task_kind="evaluate.arc_closure",
+                        book_id=book.id,
+                        arc_id=arc_closure_review.arc_id,
+                        workspace_lock_version=workspace.lock_version,
+                        book_baseline_id=arc_closure_review.book_baseline_id,
+                        arc_baseline_id=arc_closure_review.arc_baseline_id,
+                        canon_baseline_id=arc_closure_review.canon_baseline_id,
+                        correction_lineage_id=lineage_id,
+                        correction_lineage_origin="user_initiated",
+                        automatic_correction_round=0,
+                        source_arc_closure_review_id=arc_closure_review.id,
+                        source_feedback_id=correction_feedback.id,
+                    )
+                if correction_feedback.book_boundary_review_id is not None:
+                    book_boundary_review = await store.book_boundary_reviews.get(
+                        project_id=project.id,
+                        review_id=correction_feedback.book_boundary_review_id,
+                    )
+                    if book_boundary_review is None:
+                        raise HarnessInvariantError(
+                            "Applied Book-boundary feedback lost its source review."
+                        )
+                    return _TaskInstruction(
+                        role="evaluator",
+                        task_kind="evaluate.book_boundary",
+                        book_id=book.id,
+                        workspace_lock_version=book_workspace.lock_version,
+                        book_baseline_id=book.current_baseline_id,
+                        canon_baseline_id=book_boundary_review.canon_baseline_id,
+                        correction_lineage_id=lineage_id,
+                        correction_lineage_origin="user_initiated",
+                        automatic_correction_round=0,
+                        source_book_boundary_review_id=book_boundary_review.id,
+                        source_arc_closure_id=book_boundary_review.arc_closure_id,
+                        source_feedback_id=correction_feedback.id,
+                    )
+                raise HarnessInvariantError(
+                    "Applied correction feedback has no relational source review."
+                )
+
+            unresolved_changes = await store.changes.list_unresolved(
+                project_id=project.id
+            )
+            for change in unresolved_changes:
+                if change.status != "open":
+                    continue
+                lineage_id = _stable_lineage_id(
+                    run.id,
+                    change.request_kind,
+                    change.id,
+                    change.target_baseline_id,
+                )
                 if change.request_kind == "chapter_to_arc":
                     target = await store.arcs.get_workspace(
                         project_id=project.id,
                         arc_id=change.target_id,
                     )
                     if target is None:
-                        raise HarnessInvariantError("Open Chapter-to-Arc request lost its target.")
-                    activated = (
-                        target.state == "active"
-                        and target.base_arc_baseline_id == change.target_baseline_id
+                        raise HarnessInvariantError(
+                            "Open Chapter-to-Arc request lost its target."
+                        )
+                    return _TaskInstruction(
+                        role="evaluator",
+                        task_kind="evaluate.arc_parent_contract",
+                        book_id=book.id,
+                        arc_id=change.target_id,
+                        workspace_lock_version=target.lock_version,
+                        book_baseline_id=book.current_baseline_id,
+                        arc_baseline_id=change.target_baseline_id,
+                        correction_lineage_id=lineage_id,
+                        correction_lineage_origin="review_initiated",
+                        automatic_correction_round=0,
+                        source_chapter_arc_request_id=change.id,
                     )
-                    expected_lock = target.lock_version
+                full_change = await store.changes.get_arc_book(
+                    project_id=project.id,
+                    request_id=change.id,
+                )
+                source_arc = (
+                    None
+                    if full_change is None
+                    else await store.arcs.get(
+                        project_id=project.id,
+                        arc_id=full_change.arc_id,
+                    )
+                )
+                if full_change is None or source_arc is None:
+                    raise HarnessInvariantError(
+                        "Open Arc-to-Book request lost its source Arc."
+                    )
+                return _TaskInstruction(
+                    role="evaluator",
+                    task_kind="evaluate.book_parent_contract",
+                    book_id=book.id,
+                    workspace_lock_version=book_workspace.lock_version,
+                    book_baseline_id=change.target_baseline_id,
+                    arc_baseline_id=source_arc.current_baseline_id,
+                    correction_lineage_id=lineage_id,
+                    correction_lineage_origin="review_initiated",
+                    automatic_correction_round=0,
+                    source_arc_book_request_id=change.id,
+                )
+
+            for change in unresolved_changes:
+                if change.status != "reviewed" or change.latest_parent_review_id is None:
+                    continue
+                if change.request_kind == "chapter_to_arc":
+                    review = await store.arc_parent_reviews.get(
+                        project_id=project.id,
+                        review_id=change.latest_parent_review_id,
+                    )
+                    target = await store.arcs.get_workspace(
+                        project_id=project.id,
+                        arc_id=change.target_id,
+                    )
+                    if review is None or target is None:
+                        raise HarnessInvariantError(
+                            "Reviewed Chapter-to-Arc request lost its authority."
+                        )
+                    if (
+                        review.disposition == "arc_revision_warranted"
+                        and review.opened_arc_workspace_id is None
+                    ):
+                        return _CommandInstruction(
+                            kind="activate_change",
+                            request=ActivateChangeRequest(
+                                project_id=project.id,
+                                change_request_id=change.id,
+                                request_kind="chapter_to_arc",
+                                expected_target_baseline_id=change.target_baseline_id,
+                                expected_workspace_lock_version=target.lock_version,
+                            ),
+                            idempotency_key=(
+                                f"engine:activate-arc-review:{review.id}"
+                            ),
+                        )
+                    if (
+                        review.disposition
+                        in {"keep_arc", "chapter_evidence_review_required"}
+                        and review.automatic_correction_round == 0
+                    ):
+                        correction = (
+                            await store.chapters.get_correction_workspace_for_review(
+                                project_id=project.id,
+                                arc_id=change.target_id,
+                                source_arc_parent_review_id=review.id,
+                            )
+                        )
+                        if correction is None:
+                            raise HarnessInvariantError(
+                                "Arc parent review lost its downward Chapter correction."
+                            )
+                        _, correction_workspace = correction
+                        if (
+                            correction_workspace.correction_lineage_id
+                            != review.correction_lineage_id
+                            or correction_workspace.automatic_correction_round != 1
+                        ):
+                            raise HarnessInvariantError(
+                                "Arc parent successor lost its correction lineage."
+                            )
+                        if correction_workspace.state == "idle":
+                            target = await store.arcs.get_workspace(
+                                project_id=project.id,
+                                arc_id=change.target_id,
+                            )
+                            current_arc = await store.arcs.get(
+                                project_id=project.id,
+                                arc_id=change.target_id,
+                            )
+                            if (
+                                target is None
+                                or current_arc is None
+                                or current_arc.current_baseline_id
+                                != change.target_baseline_id
+                            ):
+                                raise HarnessInvariantError(
+                                    "Arc parent successor target is no longer current."
+                                )
+                            return _TaskInstruction(
+                                role="evaluator",
+                                task_kind="evaluate.arc_parent_contract",
+                                book_id=book.id,
+                                arc_id=change.target_id,
+                                workspace_lock_version=target.lock_version,
+                                book_baseline_id=book.current_baseline_id,
+                                arc_baseline_id=change.target_baseline_id,
+                                canon_baseline_id=project.current_canon_baseline_id,
+                                correction_lineage_id=review.correction_lineage_id,
+                                correction_lineage_origin=cast(
+                                    Literal["review_initiated", "user_initiated"],
+                                    review.correction_lineage_origin,
+                                ),
+                                automatic_correction_round=1,
+                                source_arc_parent_review_id=review.id,
+                                source_chapter_arc_request_id=change.id,
+                                source_feedback_id=review.source_feedback_id,
+                            )
                 else:
-                    activated = (
-                        book_workspace.state == "active"
-                        and book_workspace.base_book_baseline_id == change.target_baseline_id
+                    book_parent_review = await store.book_parent_reviews.get(
+                        project_id=project.id,
+                        review_id=change.latest_parent_review_id,
                     )
-                    expected_lock = book_workspace.lock_version
-                if not activated:
-                    return _CommandInstruction(
-                        kind="activate_change",
-                        request=ActivateChangeRequest(
+                    if book_parent_review is None:
+                        raise HarnessInvariantError(
+                            "Reviewed Arc-to-Book request lost its authority."
+                        )
+                    if (
+                        book_parent_review.disposition
+                        == "book_revision_warranted"
+                        and book_parent_review.opened_book_workspace_id is None
+                    ):
+                        return _CommandInstruction(
+                            kind="activate_change",
+                            request=ActivateChangeRequest(
+                                project_id=project.id,
+                                change_request_id=change.id,
+                                request_kind="arc_to_book",
+                                expected_target_baseline_id=change.target_baseline_id,
+                                expected_workspace_lock_version=book_workspace.lock_version,
+                            ),
+                            idempotency_key=(
+                                f"engine:activate-book-review:"
+                                f"{book_parent_review.id}"
+                            ),
+                        )
+                    if (
+                        book_parent_review.disposition
+                        in {"keep_book", "arc_evidence_review_required"}
+                        and book_parent_review.automatic_correction_round == 0
+                    ):
+                        full_change = await store.changes.get_arc_book(
                             project_id=project.id,
-                            change_request_id=change.id,
-                            request_kind=change.request_kind,
-                            expected_target_baseline_id=change.target_baseline_id,
-                            expected_workspace_lock_version=expected_lock,
-                        ),
-                        idempotency_key=f"engine:activate-change:{change.id}",
-                    )
+                            request_id=change.id,
+                        )
+                        correction_arc = (
+                            None
+                            if full_change is None
+                            else await store.arcs.get(
+                                project_id=project.id,
+                                arc_id=full_change.arc_id,
+                            )
+                        )
+                        arc_correction_workspace = (
+                            None
+                            if full_change is None
+                            else await store.arcs.get_workspace(
+                                project_id=project.id,
+                                arc_id=full_change.arc_id,
+                            )
+                        )
+                        if (
+                            full_change is None
+                            or correction_arc is None
+                            or arc_correction_workspace is None
+                            or arc_correction_workspace.source_book_parent_review_id
+                            != book_parent_review.id
+                        ):
+                            raise HarnessInvariantError(
+                                "Book parent review lost its downward Arc correction."
+                            )
+                        if (
+                            arc_correction_workspace.correction_lineage_id
+                            != book_parent_review.correction_lineage_id
+                            or arc_correction_workspace.automatic_correction_round
+                            != 1
+                        ):
+                            raise HarnessInvariantError(
+                                "Book parent successor lost its correction lineage."
+                            )
+                        if arc_correction_workspace.state == "idle":
+                            return _TaskInstruction(
+                                role="evaluator",
+                                task_kind="evaluate.book_parent_contract",
+                                book_id=book.id,
+                                workspace_lock_version=book_workspace.lock_version,
+                                book_baseline_id=book.current_baseline_id,
+                                arc_baseline_id=correction_arc.current_baseline_id,
+                                canon_baseline_id=project.current_canon_baseline_id,
+                                correction_lineage_id=(
+                                    book_parent_review.correction_lineage_id
+                                ),
+                                correction_lineage_origin=cast(
+                                    Literal["review_initiated", "user_initiated"],
+                                    book_parent_review.correction_lineage_origin,
+                                ),
+                                automatic_correction_round=1,
+                                source_book_parent_review_id=book_parent_review.id,
+                                source_arc_book_request_id=change.id,
+                                source_feedback_id=book_parent_review.source_feedback_id,
+                            )
 
             book_instruction = await self._decide_book(
                 store=store,
@@ -633,8 +1344,9 @@ class DomainRunDriver:
                 book=book,
                 workspace=book_workspace,
                 has_open_book_change=any(
-                    change.request_kind in {"chapter_to_book", "arc_to_book"}
-                    for change in open_changes
+                    change.request_kind == "arc_to_book"
+                    and change.status == "reviewed"
+                    for change in unresolved_changes
                 ),
             )
             if book_instruction is not None:
@@ -795,14 +1507,189 @@ class DomainRunDriver:
                     ),
                     idempotency_key=f"engine:create-initial-arc:{book_id}:{book_baseline_id}",
                 )
-            if latest.lifecycle_status != "completed" or latest.current_baseline_id is None:
+            if (
+                latest.lifecycle_status != "completed"
+                or latest.current_baseline_id is None
+                or latest.current_closure_id is None
+            ):
                 raise HarnessInvariantError("Book has no unfinished Arc and no completed boundary.")
-            return _TaskInstruction(
-                role="book_strategist",
-                task_kind="book.assess_progress_or_completion",
-                book_id=book_id,
-                workspace_lock_version=cast(int, getattr(book_workspace, "lock_version")),
-                book_baseline_id=book_baseline_id,
+            closure = await getattr(session, "arc_closures").get(
+                project_id=project_id,
+                closure_id=latest.current_closure_id,
+            )
+            if closure is None:
+                raise HarnessInvariantError(
+                    "Completed Story Arc lost its formal closure."
+                )
+            boundary = (
+                None
+                if cast(str | None, getattr(book, "latest_boundary_review_id"))
+                is None
+                else await getattr(session, "book_boundary_reviews").get(
+                    project_id=project_id,
+                    review_id=cast(
+                        str, getattr(book, "latest_boundary_review_id")
+                    ),
+                )
+            )
+            revision_predecessor = (
+                None
+                if boundary is not None
+                else await getattr(
+                    session, "book_boundary_reviews"
+                ).get_latest_opened_revision_for_closure(
+                    project_id=project_id,
+                    book_id=book_id,
+                    arc_closure_id=closure.id,
+                    workspace_id=cast(str, getattr(book_workspace, "id")),
+                )
+            )
+            if (
+                boundary is None
+                or boundary.arc_closure_id != closure.id
+                or boundary.book_baseline_id != book_baseline_id
+            ):
+                predecessor = (
+                    boundary
+                    if boundary is not None
+                    and boundary.arc_closure_id == closure.id
+                    else revision_predecessor
+                )
+                if predecessor is not None:
+                    current_book_baseline = await getattr(
+                        session, "books"
+                    ).get_baseline(
+                        project_id=project_id,
+                        book_id=book_id,
+                        baseline_id=book_baseline_id,
+                    )
+                    if (
+                        current_book_baseline is None
+                        or (
+                            predecessor.book_baseline_id != book_baseline_id
+                            and current_book_baseline.parent_baseline_id
+                            != predecessor.book_baseline_id
+                        )
+                    ):
+                        raise HarnessInvariantError(
+                            "Book boundary successor is not a direct Book lineage child."
+                        )
+                return _TaskInstruction(
+                    role="evaluator",
+                    task_kind="evaluate.book_boundary",
+                    book_id=book_id,
+                    workspace_lock_version=cast(
+                        int, getattr(book_workspace, "lock_version")
+                    ),
+                    book_baseline_id=book_baseline_id,
+                    canon_baseline_id=closure.canon_baseline_id,
+                    correction_lineage_id=(
+                        _stable_lineage_id(
+                            run.id,
+                            "book_boundary",
+                            closure.id,
+                            book_baseline_id,
+                        )
+                        if predecessor is None
+                        else predecessor.correction_lineage_id
+                    ),
+                    correction_lineage_origin=(
+                        "review_initiated"
+                        if predecessor is None
+                        else cast(
+                            Literal["review_initiated", "user_initiated"],
+                            predecessor.correction_lineage_origin,
+                        )
+                    ),
+                    automatic_correction_round=(
+                        0 if predecessor is None else 1
+                    ),
+                    source_book_boundary_review_id=(
+                        None if predecessor is None else predecessor.id
+                    ),
+                    source_arc_closure_id=closure.id,
+                    source_feedback_id=(
+                        None if predecessor is None else predecessor.source_feedback_id
+                    ),
+                )
+            if boundary.disposition in {
+                "continue_regular_arc",
+                "plan_final_arc",
+            }:
+                handoff = await getattr(
+                    session, "book_progress_handoffs"
+                ).get_for_boundary_review(
+                    project_id=project_id,
+                    boundary_review_id=boundary.id,
+                )
+                if handoff is None:
+                    return _CommandInstruction(
+                        kind="commit_book_handoff",
+                        request=CommitBookProgressHandoffRequest(
+                            project_id=project_id,
+                            book_id=book_id,
+                            boundary_review_id=boundary.id,
+                        ),
+                        idempotency_key=(
+                            f"engine:commit-book-handoff:{boundary.id}"
+                        ),
+                    )
+                return _CommandInstruction(
+                    kind="create_arc",
+                    request=CreateStoryArcRequest(
+                        project_id=project_id,
+                        book_id=book_id,
+                        expected_book_baseline_id=book_baseline_id,
+                        expected_canon_baseline_id=canon_baseline_id,
+                        purpose=cast(
+                            Literal["regular", "final"],
+                            handoff.next_arc_purpose,
+                        ),
+                    ),
+                    idempotency_key=(
+                        f"engine:create-arc-from-handoff:{handoff.id}"
+                    ),
+                )
+            if boundary.disposition == "complete_book":
+                return _CommandInstruction(
+                    kind="commit_book_completion",
+                    request=CommitBookCompletionRequest(
+                        project_id=project_id,
+                        book_id=book_id,
+                        boundary_review_id=boundary.id,
+                    ),
+                    idempotency_key=(
+                        f"engine:commit-book-completion:{boundary.id}"
+                    ),
+                )
+            if (
+                boundary.disposition == "book_revision_warranted"
+                and boundary.opened_book_workspace_id is None
+            ):
+                return _CommandInstruction(
+                    kind="open_book_boundary_revision",
+                    request=OpenBookBoundaryRevisionRequest(
+                        project_id=project_id,
+                        book_id=book_id,
+                        boundary_review_id=boundary.id,
+                        expected_workspace_lock_version=cast(
+                            int, getattr(book_workspace, "lock_version")
+                        ),
+                    ),
+                    idempotency_key=(
+                        f"engine:open-book-boundary-revision:{boundary.id}"
+                    ),
+                )
+            if boundary.disposition in {
+                "waiting_for_user",
+                "no_legal_route",
+                "book_revision_warranted",
+            }:
+                raise HarnessInvariantError(
+                    "Runnable Book boundary has no completed disposition action."
+                )
+            raise HarnessInvariantError(
+                f"Unknown Book boundary disposition {boundary.disposition!r}."
             )
 
         workspace = await arcs.get_workspace(project_id=project_id, arc_id=arc.id)
@@ -918,6 +1805,168 @@ class DomainRunDriver:
                     idempotency_key=f"engine:submit-arc:{arc.id}:{workspace.lock_version}",
                 )
             raise HarnessInvariantError("Active Story Arc workspace has no plan action.")
+        if workspace.state == "idle" and arc.lifecycle_status == "closing":
+            active_lower_correction = (
+                await getattr(session, "chapters").get_non_idle_workspace_for_arc(
+                    project_id=project_id,
+                    arc_id=arc.id,
+                )
+            )
+            if active_lower_correction is not None:
+                _, lower_workspace = active_lower_correction
+                if (
+                    lower_workspace.source_arc_parent_review_id is None
+                    and lower_workspace.source_arc_closure_review_id is None
+                ):
+                    raise HarnessInvariantError(
+                        "Closing Arc contains unrelated unfinished Chapter work."
+                    )
+                return await self._decide_chapter(
+                    store=session,
+                    run=run,
+                    project_id=project_id,
+                    book_id=book_id,
+                    book_baseline_id=book_baseline_id,
+                    canon_baseline_id=canon_baseline_id,
+                    arc=arc,
+                    arc_baseline_id=cast(str, arc.current_baseline_id),
+                )
+            latest_closure_review = (
+                None
+                if arc.latest_closure_review_id is None
+                else await getattr(session, "arc_closure_reviews").get(
+                    project_id=project_id,
+                    review_id=arc.latest_closure_review_id,
+                )
+            )
+            if latest_closure_review is None:
+                source_review = (
+                    None
+                    if workspace.source_arc_closure_review_id is None
+                    else await getattr(session, "arc_closure_reviews").get(
+                        project_id=project_id,
+                        review_id=workspace.source_arc_closure_review_id,
+                    )
+                )
+                if source_review is None:
+                    lineage_id = _stable_lineage_id(
+                        run.id,
+                        "arc_closure",
+                        arc.id,
+                        cast(str, arc.current_baseline_id),
+                    )
+                    lineage_origin: Literal[
+                        "review_initiated", "user_initiated"
+                    ] = "review_initiated"
+                    correction_round: Literal[0, 1] = 0
+                    source_review_id = None
+                else:
+                    if (
+                        workspace.correction_lineage_id
+                        != source_review.correction_lineage_id
+                        or workspace.automatic_correction_round != 1
+                    ):
+                        raise HarnessInvariantError(
+                            "Arc closure successor lost its correction lineage."
+                        )
+                    lineage_id = source_review.correction_lineage_id
+                    lineage_origin = cast(
+                        Literal["review_initiated", "user_initiated"],
+                        source_review.correction_lineage_origin,
+                    )
+                    correction_round = 1
+                    source_review_id = source_review.id
+                return _TaskInstruction(
+                    role="evaluator",
+                    task_kind="evaluate.arc_closure",
+                    book_id=book_id,
+                    arc_id=arc.id,
+                    workspace_lock_version=workspace.lock_version,
+                    book_baseline_id=book_baseline_id,
+                    arc_baseline_id=arc.current_baseline_id,
+                    correction_lineage_id=lineage_id,
+                    correction_lineage_origin=lineage_origin,
+                    automatic_correction_round=correction_round,
+                    source_arc_closure_review_id=source_review_id,
+                )
+            if (
+                latest_closure_review.disposition == "arc_revision_warranted"
+                and latest_closure_review.opened_arc_workspace_id is None
+            ):
+                return _CommandInstruction(
+                    kind="open_arc_closure_revision",
+                    request=OpenArcClosureRevisionRequest(
+                        project_id=project_id,
+                        book_id=book_id,
+                        arc_id=arc.id,
+                        closure_review_id=latest_closure_review.id,
+                        expected_workspace_lock_version=workspace.lock_version,
+                    ),
+                    idempotency_key=(
+                        f"engine:open-arc-closure-revision:"
+                        f"{latest_closure_review.id}"
+                    ),
+                )
+            if (
+                latest_closure_review.disposition
+                == "chapter_evidence_review_required"
+                and latest_closure_review.automatic_correction_round == 0
+            ):
+                correction = (
+                    await getattr(
+                        session, "chapters"
+                    ).get_correction_workspace_for_review(
+                        project_id=project_id,
+                        arc_id=arc.id,
+                        source_arc_closure_review_id=latest_closure_review.id,
+                    )
+                )
+                if correction is None:
+                    raise HarnessInvariantError(
+                        "Arc closure review lost its Chapter evidence correction."
+                    )
+                _, correction_workspace = correction
+                if (
+                    correction_workspace.state != "idle"
+                    or correction_workspace.correction_lineage_id
+                    != latest_closure_review.correction_lineage_id
+                    or correction_workspace.automatic_correction_round != 1
+                ):
+                    raise HarnessInvariantError(
+                        "Arc closure successor evidence is incomplete."
+                    )
+                return _TaskInstruction(
+                    role="evaluator",
+                    task_kind="evaluate.arc_closure",
+                    book_id=book_id,
+                    arc_id=arc.id,
+                    workspace_lock_version=workspace.lock_version,
+                    book_baseline_id=book_baseline_id,
+                    arc_baseline_id=arc.current_baseline_id,
+                    canon_baseline_id=canon_baseline_id,
+                    correction_lineage_id=(
+                        latest_closure_review.correction_lineage_id
+                    ),
+                    correction_lineage_origin=cast(
+                        Literal["review_initiated", "user_initiated"],
+                        latest_closure_review.correction_lineage_origin,
+                    ),
+                    automatic_correction_round=1,
+                    source_arc_closure_review_id=latest_closure_review.id,
+                    source_feedback_id=latest_closure_review.source_feedback_id,
+                )
+            if latest_closure_review.disposition in {
+                "book_review_required",
+                "chapter_evidence_review_required",
+                "waiting_for_user",
+                "no_legal_route",
+            }:
+                raise HarnessInvariantError(
+                    "Runnable Arc closure has no completed disposition action."
+                )
+            raise HarnessInvariantError(
+                "Passing Arc closure review did not complete its Arc atomically."
+            )
         if workspace.state != "idle" or arc.current_baseline_id is None:
             raise HarnessInvariantError("Story Arc current baseline is not ready for Chapters.")
         return await self._decide_chapter(
@@ -961,7 +2010,7 @@ class DomainRunDriver:
             if baseline is None:
                 raise HarnessInvariantError("Current Story Arc baseline does not exist.")
             committed = await chapters.count_committed(arc_id=arc_id)
-            if committed < baseline.target_chapter_count:
+            if committed < baseline.closure_chapter_count:
                 return _CommandInstruction(
                     kind="create_chapter",
                     request=CreateChapterRequest(
@@ -977,7 +2026,9 @@ class DomainRunDriver:
                         f"{canon_baseline_id}"
                     ),
                 )
-            raise HarnessInvariantError("Story Arc reached its target but was not completed.")
+            raise HarnessInvariantError(
+                "Story Arc reached its closure checkpoint without entering closure review."
+            )
 
         chapter, workspace = active
         if workspace.state == "stale":
@@ -1004,6 +2055,35 @@ class DomainRunDriver:
             raise HarnessInvariantError("Blocked Chapter workspace remained runnable.")
         if workspace.state != "active":
             raise HarnessInvariantError("Non-idle Chapter workspace is not active.")
+        evidence_correction = False
+        if workspace.source_arc_parent_review_id is not None:
+            source_review = await getattr(store, "arc_parent_reviews").get(
+                project_id=project_id,
+                review_id=workspace.source_arc_parent_review_id,
+            )
+            if source_review is None:
+                raise HarnessInvariantError(
+                    "Chapter correction lost its source Arc parent review."
+                )
+            evidence_correction = (
+                source_review.disposition
+                == "chapter_evidence_review_required"
+            )
+        elif workspace.source_arc_closure_review_id is not None:
+            source_closure_review = await getattr(
+                store, "arc_closure_reviews"
+            ).get(
+                project_id=project_id,
+                review_id=workspace.source_arc_closure_review_id,
+            )
+            if source_closure_review is None:
+                raise HarnessInvariantError(
+                    "Chapter correction lost its source Arc closure review."
+                )
+            evidence_correction = (
+                source_closure_review.disposition
+                == "chapter_evidence_review_required"
+            )
         pending = await chapters.find_pending_submission(
             project_id=project_id,
             chapter_id=chapter.id,
@@ -1015,9 +2095,13 @@ class DomainRunDriver:
         if pending is not None:
             if latest_review is None or latest_review.submission_id != pending.id:
                 task_kind = (
-                    "verify_repair.chapter"
-                    if workspace.semantic_repair_count > 0
-                    else "evaluate.chapter"
+                    "verify_evidence.chapter"
+                    if evidence_correction
+                    else (
+                        "verify_repair.chapter"
+                        if workspace.semantic_repair_count > 0
+                        else "evaluate.chapter"
+                    )
                 )
                 return _TaskInstruction(
                     role="evaluator",
@@ -1029,6 +2113,22 @@ class DomainRunDriver:
                     book_baseline_id=pending.book_baseline_id,
                     arc_baseline_id=pending.arc_baseline_id,
                     chapter_baseline_id=pending.base_chapter_baseline_id,
+                    correction_lineage_id=workspace.correction_lineage_id,
+                    correction_lineage_origin=cast(
+                        Literal["review_initiated", "user_initiated"] | None,
+                        workspace.correction_lineage_origin,
+                    ),
+                    automatic_correction_round=cast(
+                        Literal[0, 1] | None,
+                        workspace.automatic_correction_round,
+                    ),
+                    source_arc_parent_review_id=(
+                        workspace.source_arc_parent_review_id
+                    ),
+                    source_arc_closure_review_id=(
+                        workspace.source_arc_closure_review_id
+                    ),
+                    source_feedback_id=workspace.source_feedback_id,
                 )
             if latest_review.decision == "pass":
                 return _CommandInstruction(
@@ -1047,6 +2147,38 @@ class DomainRunDriver:
                     ),
                 )
             raise HarnessInvariantError("Rejected Chapter submission remained pending.")
+
+        if evidence_correction:
+            if (
+                workspace.base_chapter_baseline_id is None
+                or workspace.plan_ref_id is None
+                or workspace.draft_ref_id is None
+            ):
+                raise HarnessInvariantError(
+                    "Evidence correction lost its byte-frozen Chapter content."
+                )
+            if workspace.observations_ref_id is None:
+                return self._chapter_task(
+                    "chapter.revise.observe",
+                    chapter,
+                    workspace,
+                )
+            if workspace.candidate_canon_patch_ref_id is None:
+                raise HarnessInvariantError(
+                    "Evidence correction observations have no bound Canon intent."
+                )
+            return _CommandInstruction(
+                kind="submit_chapter",
+                request=SubmitChapterRequest(
+                    project_id=project_id,
+                    chapter_id=chapter.id,
+                    expected_workspace_lock_version=workspace.lock_version,
+                ),
+                idempotency_key=(
+                    f"engine:submit-chapter-evidence:{chapter.id}:"
+                    f"{workspace.lock_version}"
+                ),
+            )
 
         if latest_review is not None and latest_review.decision == "local_repair":
             if latest_review.repair_contract_ref_id is None:
@@ -1156,6 +2288,26 @@ class DomainRunDriver:
             chapter_baseline_id=cast(
                 str | None, getattr(workspace, "base_chapter_baseline_id")
             ),
+            correction_lineage_id=cast(
+                str | None, getattr(workspace, "correction_lineage_id")
+            ),
+            correction_lineage_origin=cast(
+                Literal["review_initiated", "user_initiated"] | None,
+                getattr(workspace, "correction_lineage_origin"),
+            ),
+            automatic_correction_round=cast(
+                Literal[0, 1] | None,
+                getattr(workspace, "automatic_correction_round"),
+            ),
+            source_arc_parent_review_id=cast(
+                str | None, getattr(workspace, "source_arc_parent_review_id")
+            ),
+            source_arc_closure_review_id=cast(
+                str | None, getattr(workspace, "source_arc_closure_review_id")
+            ),
+            source_feedback_id=cast(
+                str | None, getattr(workspace, "source_feedback_id")
+            ),
         )
 
     async def _apply_command(self, instruction: _CommandInstruction) -> None:
@@ -1207,6 +2359,26 @@ class DomainRunDriver:
         elif instruction.kind == "commit_chapter":
             await self._chapters.commit_chapter_and_canon(
                 cast(CommitChapterRequest, instruction.request),
+                idempotency_key=instruction.idempotency_key,
+            )
+        elif instruction.kind == "open_arc_closure_revision":
+            await self._authority.open_arc_closure_revision(
+                cast(OpenArcClosureRevisionRequest, instruction.request),
+                idempotency_key=instruction.idempotency_key,
+            )
+        elif instruction.kind == "open_book_boundary_revision":
+            await self._authority.open_book_boundary_revision(
+                cast(OpenBookBoundaryRevisionRequest, instruction.request),
+                idempotency_key=instruction.idempotency_key,
+            )
+        elif instruction.kind == "commit_book_handoff":
+            await self._authority.commit_book_progress_handoff(
+                cast(CommitBookProgressHandoffRequest, instruction.request),
+                idempotency_key=instruction.idempotency_key,
+            )
+        elif instruction.kind == "commit_book_completion":
+            await self._authority.commit_book_completion(
+                cast(CommitBookCompletionRequest, instruction.request),
                 idempotency_key=instruction.idempotency_key,
             )
         else:  # pragma: no cover - Literal exhaustiveness guard.

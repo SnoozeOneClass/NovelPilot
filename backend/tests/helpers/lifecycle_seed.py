@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.agents.contracts import ArcPlanProposal
+from app.agents.contracts import ArcClosureSignal, ArcPlanProposal, ArcStateTransition
+from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
 from app.db.schema import agent_task_attempts, agent_tasks
 from app.domain.arc.commands import ArcCommandService
 from app.domain.arc.contracts import (
@@ -21,7 +23,10 @@ from app.domain.book.contracts import (
     ApplyBookCandidateRequest,
     ApproveBookRequest,
     BookCandidatePack,
+    BookCompletionRequirement,
+    BookCreativeConstraints,
     BookEvaluation,
+    BookRollingPlan,
     CompletionContract,
     RecordBookReviewRequest,
     SubmitBookRequest,
@@ -63,9 +68,25 @@ async def insert_successful_task(
     arc_baseline_id: str | None = None,
     chapter_id: str | None = None,
     chapter_baseline_id: str | None = None,
+    correction_lineage_id: str | None = None,
+    correction_lineage_origin: str | None = None,
+    automatic_correction_round: int | None = None,
+    source_arc_parent_review_id: str | None = None,
+    source_book_parent_review_id: str | None = None,
+    source_arc_closure_review_id: str | None = None,
+    source_book_boundary_review_id: str | None = None,
+    source_chapter_arc_request_id: str | None = None,
+    source_arc_book_request_id: str | None = None,
+    source_arc_closure_id: str | None = None,
+    source_feedback_id: str | None = None,
     output_mode: str = "native_json_schema",
 ) -> tuple[str, str]:
     prepared = prepare_canonical_json(result)
+    evaluation_strategy = (
+        DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(task_kind)
+        if role == "evaluator"
+        else None
+    )
     async with engine.begin() as connection:
         result_ref = await ContentRepository(connection).put(
             project_id=project_id,
@@ -94,6 +115,17 @@ async def insert_successful_task(
                 arc_baseline_id=arc_baseline_id,
                 chapter_baseline_id=chapter_baseline_id,
                 canon_baseline_id=canon_baseline_id,
+                correction_lineage_id=correction_lineage_id,
+                correction_lineage_origin=correction_lineage_origin,
+                automatic_correction_round=automatic_correction_round,
+                source_arc_parent_review_id=source_arc_parent_review_id,
+                source_book_parent_review_id=source_book_parent_review_id,
+                source_arc_closure_review_id=source_arc_closure_review_id,
+                source_book_boundary_review_id=source_book_boundary_review_id,
+                source_chapter_arc_request_id=source_chapter_arc_request_id,
+                source_arc_book_request_id=source_arc_book_request_id,
+                source_arc_closure_id=source_arc_closure_id,
+                source_feedback_id=source_feedback_id,
                 task_plan_ref_id=result_ref.id,
                 input_manifest_ref_id=result_ref.id,
                 input_messages_ref_id=result_ref.id,
@@ -106,8 +138,24 @@ async def insert_successful_task(
                 output_schema_id=f"{task_kind}-result",
                 output_schema_version=1,
                 output_schema_fingerprint=prepared.sha256,
-                rubric_id=(f"{scope_layer}-rubric" if role == "evaluator" else None),
-                rubric_version=(1 if role == "evaluator" else None),
+                evaluation_strategy_id=(
+                    None
+                    if evaluation_strategy is None
+                    else evaluation_strategy.strategy_id
+                ),
+                evaluation_strategy_version=(
+                    None
+                    if evaluation_strategy is None
+                    else evaluation_strategy.strategy_version
+                ),
+                rubric_id=(
+                    None if evaluation_strategy is None else evaluation_strategy.rubric_id
+                ),
+                rubric_version=(
+                    None
+                    if evaluation_strategy is None
+                    else evaluation_strategy.rubric_version
+                ),
                 harness_policy_id="novelpilot-domain-harness",
                 harness_policy_version=1,
                 profile_id="fixture-profile",
@@ -161,6 +209,7 @@ async def seed_approved_book_and_arc(
     *,
     project_id: str = "project-a",
     target_chapter_count: int = 2,
+    arc_purpose: Literal["regular", "final"] = "regular",
 ) -> ApprovedFoundation:
     bus = CommandBus(engine)
     project = await ProjectCommandService(bus).create_project(
@@ -187,13 +236,32 @@ async def seed_approved_book_and_arc(
             expected_workspace_lock_version=1,
             candidate=BookCandidatePack(
                 direction="Conflicting testimony reveals that memory can be edited.",
-                constraints={"pov": "limited-third", "planning": "rolling-arcs"},
+                constraints=BookCreativeConstraints(
+                    genre_reader_promise="A fair-play memory mystery.",
+                    premise_story_engine="Physical evidence contradicts rewritten memory.",
+                    stable_world_invariants=["Physical evidence cannot be memory-edited."],
+                    stable_character_invariants=["The investigator pursues verifiable truth."],
+                    core_selling_points=["Each contradiction can be investigated."],
+                    prohibited_outcomes=["Committed facts cannot be dismissed as a dream."],
+                ),
                 selected_title="Echo Testimony",
-                rolling_plan={"strategy": "one-arc-at-a-time"},
+                rolling_plan=BookRollingPlan(
+                    long_term_character_directions=["Trust evidence over memory."],
+                    high_level_phase_strategy=["Expose the edit", "Confront its source"],
+                    whole_book_pacing_strategy="Escalate through bounded rolling Arcs.",
+                    ending_tendency="The investigator chooses truth at personal cost.",
+                    arc_planning_guidelines=["Each Arc must close observable evidence."],
+                ),
                 completion_contract=CompletionContract(
                     minimum_chapter_count=1,
                     maximum_chapter_count=10,
-                    completion_requirements=["Resolve the central memory conflict"],
+                    completion_requirements=[
+                        BookCompletionRequirement(
+                            requirement_key="memory_conflict_resolved",
+                            description="Resolve the central memory conflict.",
+                            evidence_expectation="A final committed Chapter proves the resolution.",
+                        )
+                    ],
                 ),
             ),
         ),
@@ -231,8 +299,12 @@ async def seed_approved_book_and_arc(
             submission_id=submitted.result.submission_id,
             evaluator_task_id=book_task_id,
             evaluator_attempt_id=book_attempt_id,
-            rubric_id="book-rubric",
-            rubric_version=1,
+            rubric_id=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                "evaluate.book"
+            ).rubric_id,
+            rubric_version=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                "evaluate.book"
+            ).rubric_version,
             deterministic_precheck={"passed": True},
         ),
         idempotency_key=f"{project_id}:book-review",
@@ -254,7 +326,7 @@ async def seed_approved_book_and_arc(
             book_id=project.result.book_id,
             expected_book_baseline_id=approved.result.baseline_id,
             expected_canon_baseline_id=project.result.canon_baseline_id,
-            purpose="regular",
+            purpose=arc_purpose,
         ),
         idempotency_key=f"{project_id}:create-arc",
     )
@@ -276,9 +348,30 @@ async def seed_approved_book_and_arc(
         result=ArcPlanProposal(
             title="The First Contradiction",
             purpose="Expose the memory edit mechanism.",
-            beats=["Witnesses disagree", "The discrepancy leaves physical evidence"],
-            target_chapter_count=target_chapter_count,
-            completion_signals=["The source of the first edit is identified"],
+            desired_state_transition=ArcStateTransition(
+                start_state="The first memory contradiction is unexplained.",
+                end_state="The first edit source is identified with physical evidence.",
+            ),
+            conflict_trajectory=["Witnesses disagree", "Physical evidence survives"],
+            pacing_trajectory=["Establish contradiction", "Test it", "Close the stage"],
+            character_obligations=["The investigator changes one belief about memory."],
+            foreshadowing_obligations=["Leave one clue for the next Arc."],
+            prohibitions=["Do not contradict committed Canon."],
+            minimum_chapter_count=1,
+            recommended_closure_chapter_count=target_chapter_count,
+            maximum_chapter_count=max(target_chapter_count, 3),
+            closure_chapter_count=target_chapter_count,
+            closure_signals=[
+                ArcClosureSignal(
+                    signal_key="first_edit_identified",
+                    description="The source of the first edit is identified.",
+                    evidence_expectation="Committed Chapter observations identify it.",
+                )
+            ],
+            advisory_beats=[
+                "Witnesses disagree",
+                "The discrepancy leaves physical evidence",
+            ],
         ),
     )
     applied = await arc_service.apply_task_result(
@@ -328,8 +421,12 @@ async def seed_approved_book_and_arc(
             submission_id=submitted_arc.result.submission_id,
             evaluator_task_id=evaluator_task_id,
             evaluator_attempt_id=evaluator_attempt_id,
-            rubric_id="arc-rubric",
-            rubric_version=1,
+            rubric_id=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                "evaluate.arc"
+            ).rubric_id,
+            rubric_version=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                "evaluate.arc"
+            ).rubric_version,
             deterministic_precheck={"passed": True},
         ),
         idempotency_key=f"{project_id}:review-arc",

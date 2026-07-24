@@ -218,7 +218,7 @@ class ReconcileService:
                     updated_at_ms=timestamp,
                 ):
                     raise CommandPreconditionError("Abandoned task is no longer running.")
-                if not await session.runs.failure_pause(
+                if not await session.runs.failure_pause_for_task(
                     run_id=record.run_id,
                     task_id=record.task_id,
                     failure_code="crash_replay_exhausted",
@@ -297,7 +297,7 @@ class ReconcileService:
                 or latest.status not in {"failed", "delivery_failed"}
             ):
                 raise CommandPreconditionError("Task no longer has the observed failed attempt.")
-            if not await session.runs.failure_pause(
+            if not await session.runs.failure_pause_for_task(
                 run_id=record.run_id,
                 task_id=record.task_id,
                 failure_code=record.error_code,

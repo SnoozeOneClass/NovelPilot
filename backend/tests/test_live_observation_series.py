@@ -99,10 +99,10 @@ class FakeObservationApi:
         self,
         *,
         project_id: str,
-        target_chapter_count: int | None,
+        closure_chapter_count: int | None,
         key: str,
     ) -> dict[str, Any]:
-        assert target_chapter_count == 20
+        assert closure_chapter_count == 20
         assert ":arc-approve:" in key
         self.projects[project_id]["stage"] = 4
         self.actions.append((project_id, "arc_approval"))
@@ -121,7 +121,7 @@ class FakeObservationApi:
             "attempts": [
                 {
                     "task_id": f"{project_id}:task",
-                    "task_kind": "book.assess_progress_or_completion",
+                    "task_kind": "evaluate.book_boundary",
                     "attempt_id": f"{project_id}:attempt",
                     "attempt_number": 1,
                     "attempt_status": "succeeded",
@@ -218,7 +218,7 @@ class FakeObservationApi:
                 "arc_id": f"{project_id}:arc",
                 "ordinal": 1,
                 "lifecycle_status": "completed" if stage == 4 else "planning",
-                "recommended_target_chapter_count": 20,
+                "recommended_closure_chapter_count": 20,
             },
             "current_chapter": None,
             "latest_event_sequence": stage,

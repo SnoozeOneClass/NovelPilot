@@ -47,6 +47,17 @@ class RetryFailedTaskRequest(RunControlRequest):
         return value
 
 
+class RetryFailedActionRequest(RunControlRequest):
+    action_key: str
+
+    @field_validator("action_key")
+    @classmethod
+    def _action_non_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("action_key must be non-blank.")
+        return value
+
+
 class RunControlResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -160,6 +171,7 @@ class RunControlService:
                 run is None
                 or run.lock_version != request.expected_lock_version
                 or run.status != "failure_paused"
+                or run.failure_source_kind != "agent_task"
                 or run.blocking_task_id != request.task_id
             ):
                 raise CommandPreconditionError("Run is not blocked by the requested failed task.")
@@ -190,7 +202,11 @@ class RunControlService:
                 updated_at_ms=timestamp,
             ):
                 raise CommandPreconditionError("Failed task could not enter its retry boundary.")
-            if not await session.runs.retry_failure(run=run, now_ms=timestamp):
+            if not await session.runs.retry_task_failure(
+                run=run,
+                task_id=request.task_id,
+                now_ms=timestamp,
+            ):
                 raise CommandPreconditionError("Failure-paused Run changed before Retry.")
             updated = await session.runs.get(
                 project_id=request.project_id,
@@ -205,6 +221,51 @@ class RunControlService:
             idempotency_key=idempotency_key,
             command_kind="retry_failed_agent_task",
             event_type="run.failed_task_retry_requested",
+            mutate=mutate,
+        )
+
+    async def retry_failed_action(
+        self,
+        request: RetryFailedActionRequest,
+        *,
+        idempotency_key: str,
+    ) -> CommandExecution[RunControlResult]:
+        async def mutate(session: StoreSession, timestamp: int) -> RunControlResult:
+            run = await session.runs.get(
+                project_id=request.project_id,
+                run_id=request.run_id,
+            )
+            if (
+                run is None
+                or run.lock_version != request.expected_lock_version
+                or run.status != "failure_paused"
+                or run.failure_source_kind != "harness_action"
+                or run.blocking_action_key != request.action_key
+            ):
+                raise CommandPreconditionError(
+                    "Run is not blocked by the requested Harness action."
+                )
+            if not await session.runs.retry_action_failure(
+                run=run,
+                action_key=request.action_key,
+                now_ms=timestamp,
+            ):
+                raise CommandPreconditionError(
+                    "Failure-paused Run changed before action Retry."
+                )
+            updated = await session.runs.get(
+                project_id=request.project_id,
+                run_id=request.run_id,
+            )
+            if updated is None:  # pragma: no cover
+                raise CommandPreconditionError("Run disappeared after action Retry.")
+            return _result(updated)
+
+        return await self._execute(
+            request=request,
+            idempotency_key=idempotency_key,
+            command_kind="retry_failed_harness_action",
+            event_type="run.failed_action_retry_requested",
             mutate=mutate,
         )
 

@@ -4,6 +4,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from alembic import command
@@ -21,6 +22,7 @@ from app.agents.contracts import (
     LayerEvaluationResult,
     SemanticCanonProposal,
 )
+from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
 from app.db.engine import create_sqlite_async_engine
 from app.db.maintenance import alembic_config
 from app.db.schema import (
@@ -73,12 +75,19 @@ async def _prepare_reviewed_chapter(
     canon_change: bool,
     evaluation: LayerEvaluationResult | None = None,
     repair_count_before_review: int | None = None,
+    arc_purpose: Literal["regular", "final"] = "regular",
+    foundation: ApprovedFoundation | None = None,
+    idempotency_suffix: str = "",
 ) -> ReviewedChapter:
-    foundation = await seed_approved_book_and_arc(
-        engine,
-        project_id=project_id,
-        target_chapter_count=target_chapter_count,
-    )
+    if foundation is None:
+        foundation = await seed_approved_book_and_arc(
+            engine,
+            project_id=project_id,
+            target_chapter_count=target_chapter_count,
+            arc_purpose=arc_purpose,
+        )
+    elif foundation.project_id != project_id:
+        raise ValueError("The supplied Chapter foundation belongs to another project.")
     service = ChapterCommandService(CommandBus(engine))
     created = await service.create_chapter(
         CreateChapterRequest(
@@ -89,7 +98,7 @@ async def _prepare_reviewed_chapter(
             expected_arc_baseline_id=foundation.arc_baseline_id,
             expected_canon_baseline_id=foundation.canon_baseline_id,
         ),
-        idempotency_key=f"{project_id}:chapter-create",
+        idempotency_key=f"{project_id}:chapter-create{idempotency_suffix}",
     )
     chapter_id = created.result.chapter_id
     plan_task, plan_attempt = await insert_successful_task(
@@ -215,6 +224,12 @@ async def _prepare_reviewed_chapter(
         ),
         idempotency_key=f"{chapter_id}:submit",
     )
+    evaluator_task_kind = (
+        "verify_repair.chapter"
+        if repair_count_before_review is not None
+        and repair_count_before_review > 0
+        else "evaluate.chapter"
+    )
     evaluator_task, evaluator_attempt = await insert_successful_task(
         engine,
         project_id=project_id,
@@ -222,12 +237,7 @@ async def _prepare_reviewed_chapter(
         task_id=f"{chapter_id}:evaluate",
         attempt_id=f"{chapter_id}:evaluate:attempt",
         role="evaluator",
-        task_kind=(
-            "verify_repair.chapter"
-            if repair_count_before_review is not None
-            and repair_count_before_review > 0
-            else "evaluate.chapter"
-        ),
+        task_kind=evaluator_task_kind,
         scope_layer="chapter",
         book_id=foundation.book_id,
         book_baseline_id=foundation.book_baseline_id,
@@ -261,8 +271,12 @@ async def _prepare_reviewed_chapter(
             submission_id=submitted.result.submission_id,
             evaluator_task_id=evaluator_task,
             evaluator_attempt_id=evaluator_attempt,
-            rubric_id="chapter-rubric",
-            rubric_version=1,
+            rubric_id=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                evaluator_task_kind
+            ).rubric_id,
+            rubric_version=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                evaluator_task_kind
+            ).rubric_version,
             deterministic_precheck={"passed": True, "checks": ["exact_evidence"]},
         ),
         idempotency_key=f"{chapter_id}:review",
@@ -283,7 +297,7 @@ async def _prepare_reviewed_chapter(
     )
 
 
-def test_chapter_and_changed_canon_commit_atomically_and_complete_arc(
+def test_chapter_and_changed_canon_commit_atomically_and_open_arc_closure(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "chapter-canon.sqlite3"
@@ -318,7 +332,7 @@ def test_chapter_and_changed_canon_commit_atomically_and_complete_arc(
             assert replayed.result == committed.result
             assert committed.result.canon_changed
             assert committed.result.canon_after_id != committed.result.canon_before_id
-            assert committed.result.arc_completed
+            assert committed.result.arc_closure_due
 
             async with engine.connect() as connection:
                 chapter = (
@@ -361,7 +375,7 @@ def test_chapter_and_changed_canon_commit_atomically_and_complete_arc(
                 "committed",
                 committed.result.chapter_baseline_id,
             )
-            assert arc_status == "completed"
+            assert arc_status == "closing"
             assert current_canon == committed.result.canon_after_id
             text = await ChapterQueryService(engine).get_current_text(
                 project_id=ready.foundation.project_id,
@@ -400,7 +414,7 @@ def test_noop_canon_patch_reuses_current_pointer(tmp_path: Path) -> None:
             )
             assert not committed.result.canon_changed
             assert committed.result.canon_before_id == committed.result.canon_after_id
-            assert not committed.result.arc_completed
+            assert not committed.result.arc_closure_due
             async with engine.connect() as connection:
                 assert (
                     await connection.scalar(select(func.count()).select_from(canon_baselines))
@@ -891,9 +905,8 @@ def test_chapter_escalation_opens_explicit_arc_request_and_blocks_workspace(
                 target_chapter_count=2,
                 canon_change=False,
                 evaluation=LayerEvaluationResult(
-                    decision="cross_loop_escalation",
+                    decision="escalate_to_arc",
                     summary="The approved Arc requires a contradiction this Chapter cannot resolve.",
-                    escalation_target="arc",
                 ),
             )
             async with engine.connect() as connection:

@@ -4,15 +4,21 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.agents.contracts import EvaluationIssue
+from app.agents.contracts import ArcClosureSignal, ArcStateTransition, EvaluationIssue
 
 ArcPurpose = Literal["regular", "final"]
 ArcRepairComponent = Literal[
     "title",
     "purpose",
-    "beats",
-    "target_chapter_count",
-    "completion_signals",
+    "desired_state_transition",
+    "conflict_trajectory",
+    "pacing_trajectory",
+    "character_obligations",
+    "foreshadowing_obligations",
+    "prohibitions",
+    "chapter_range",
+    "closure_signals",
+    "advisory_beats",
 ]
 ArcReviewDecision = Literal["pass", "local_repair", "escalate_to_book", "needs_user"]
 
@@ -31,36 +37,108 @@ class ArcPurposeRepair(BaseModel):
     value: str = Field(min_length=1, description="Replacement Story Arc purpose.")
 
 
-class ArcBeatsRepair(BaseModel):
+class ArcStateTransitionRepair(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    component: Literal["beats"]
-    value: list[str] = Field(min_length=1, description="Replacement ordered Story Arc beats.")
+    component: Literal["desired_state_transition"]
+    value: ArcStateTransition
 
 
-class ArcTargetChapterCountRepair(BaseModel):
+class ArcConflictTrajectoryRepair(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    component: Literal["target_chapter_count"]
-    value: int = Field(ge=1, le=30)
+    component: Literal["conflict_trajectory"]
+    value: list[str] = Field(min_length=1)
 
 
-class ArcCompletionSignalsRepair(BaseModel):
+class ArcPacingTrajectoryRepair(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    component: Literal["completion_signals"]
-    value: list[str] = Field(
-        min_length=1,
-        description="Replacement observable Story Arc completion conditions.",
-    )
+    component: Literal["pacing_trajectory"]
+    value: list[str] = Field(min_length=1)
+
+
+class ArcCharacterObligationsRepair(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    component: Literal["character_obligations"]
+    value: list[str] = Field(min_length=1)
+
+
+class ArcForeshadowingObligationsRepair(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    component: Literal["foreshadowing_obligations"]
+    value: list[str]
+
+
+class ArcProhibitionsRepair(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    component: Literal["prohibitions"]
+    value: list[str] = Field(min_length=1)
+
+
+class ArcChapterRange(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    minimum_chapter_count: int = Field(ge=1, le=30)
+    recommended_closure_chapter_count: int = Field(ge=1, le=30)
+    maximum_chapter_count: int = Field(ge=1, le=30)
+    closure_chapter_count: int = Field(ge=1, le=30)
+
+    @model_validator(mode="after")
+    def _valid_range(self) -> ArcChapterRange:
+        if not (
+            self.minimum_chapter_count
+            <= self.recommended_closure_chapter_count
+            <= self.maximum_chapter_count
+        ):
+            raise ValueError(
+                "Arc Chapter range must satisfy minimum <= recommended <= maximum."
+            )
+        if not (
+            self.minimum_chapter_count
+            <= self.closure_chapter_count
+            <= self.maximum_chapter_count
+        ):
+            raise ValueError("Arc closure checkpoint must fall inside its Chapter range.")
+        return self
+
+
+class ArcChapterRangeRepair(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    component: Literal["chapter_range"]
+    value: ArcChapterRange
+
+
+class ArcClosureSignalsRepair(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    component: Literal["closure_signals"]
+    value: list[ArcClosureSignal] = Field(min_length=1)
+
+
+class ArcAdvisoryBeatsRepair(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    component: Literal["advisory_beats"]
+    value: list[str]
 
 
 ArcRepairChange = Annotated[
     ArcTitleRepair
     | ArcPurposeRepair
-    | ArcBeatsRepair
-    | ArcTargetChapterCountRepair
-    | ArcCompletionSignalsRepair,
+    | ArcStateTransitionRepair
+    | ArcConflictTrajectoryRepair
+    | ArcPacingTrajectoryRepair
+    | ArcCharacterObligationsRepair
+    | ArcForeshadowingObligationsRepair
+    | ArcProhibitionsRepair
+    | ArcChapterRangeRepair
+    | ArcClosureSignalsRepair
+    | ArcAdvisoryBeatsRepair,
     Field(discriminator="component"),
 ]
 
@@ -262,7 +340,7 @@ class CommitArcAutoRequest(BaseModel):
 
 class ApproveArcRequest(CommitArcAutoRequest):
     approval_gate_id: str
-    target_chapter_count: int = Field(ge=1, le=30)
+    closure_chapter_count: int = Field(ge=1, le=30)
 
 
 class RejectArcGateRequest(BaseModel):
@@ -283,9 +361,12 @@ class CommitArcResult(BaseModel):
     arc_id: str
     baseline_id: str
     baseline_version: int = Field(ge=1)
-    target_chapter_count: int = Field(ge=1, le=30)
+    minimum_chapter_count: int = Field(ge=1, le=30)
+    recommended_closure_chapter_count: int = Field(ge=1, le=30)
+    maximum_chapter_count: int = Field(ge=1, le=30)
+    closure_chapter_count: int = Field(ge=1, le=30)
     authorization_kind: Literal["policy_auto", "human_approval"]
-    lifecycle_status: Literal["active", "completed"]
+    lifecycle_status: Literal["active", "closing"]
 
 
 class RejectArcGateResult(BaseModel):

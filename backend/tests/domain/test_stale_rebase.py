@@ -67,8 +67,9 @@ def test_stale_arc_workspace_rebases_to_current_upstream_facts(tmp_path: Path) -
                         select(
                             arc_workspaces.c.state,
                             arc_workspaces.c.base_arc_baseline_id,
+                            arc_workspaces.c.revision_origin,
                             arc_workspaces.c.plan_ref_id,
-                            arc_workspaces.c.recommended_target_chapter_count,
+                            arc_workspaces.c.recommended_closure_chapter_count,
                             arc_workspaces.c.stale_reason_code,
                         ).where(arc_workspaces.c.arc_id == foundation.arc_id)
                     )
@@ -76,6 +77,7 @@ def test_stale_arc_workspace_rebases_to_current_upstream_facts(tmp_path: Path) -
             assert tuple(row) == (
                 "active",
                 foundation.arc_baseline_id,
+                "parent_book_baseline_rebase",
                 None,
                 None,
                 None,

@@ -117,3 +117,61 @@ def test_api_errors_use_one_envelope(tmp_path: Path) -> None:
                 "details": None,
             }
         }
+
+
+def test_feedback_post_only_queues_at_the_captured_authority(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        database_path=tmp_path / "feedback-api.sqlite3",
+        profile_path=tmp_path / "profiles.json",
+        export_root=tmp_path / "exports",
+        run_engine_enabled=False,
+    )
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/projects",
+            headers={"Idempotency-Key": "create-feedback-api-project"},
+            json=_project_payload(),
+        )
+        assert created.status_code == 201
+        before = created.json()["state"]
+
+        submitted = client.post(
+            "/api/projects/api-project/feedback",
+            headers={"Idempotency-Key": "queue-book-feedback"},
+            json={
+                "content": "Keep this future direction after the current atomic action.",
+                "route_layer": "book",
+            },
+        )
+        assert submitted.status_code == 200
+        after = submitted.json()["state"]
+        assert after["run"] == before["run"]
+        assert (
+            after["book"]["workspace_lock_version"]
+            == before["book"]["workspace_lock_version"]
+        )
+        assert len(after["recent_feedback"]) == 1
+        feedback = after["recent_feedback"][0]
+        assert feedback["feedback_id"]
+        assert feedback["feedback_kind"] == "unsolicited"
+        assert feedback["status"] == "routed"
+        assert feedback["content"] == (
+            "Keep this future direction after the current atomic action."
+        )
+        assert feedback["route_layer"] == "book"
+        assert feedback["book_id"] == after["book"]["book_id"]
+        assert feedback["arc_id"] is None
+        assert feedback["chapter_id"] is None
+        assert feedback["captured_run_id"] == after["run"]["run_id"]
+        assert feedback["applied_command_id"] is None
+        assert feedback["applied_at_ms"] is None
+
+        page = client.get("/api/projects/api-project/events?after=0")
+        assert page.status_code == 200
+        assert [event["event_type"] for event in page.json()["events"]] == [
+            "project.created",
+            "feedback.queued",
+        ]

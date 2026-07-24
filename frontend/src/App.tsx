@@ -305,7 +305,9 @@ function ProjectWorkspace(props: ProjectWorkspaceProps) {
   const [message, setMessage] = useState("");
   const [feedback, setFeedback] = useState("");
   const [feedbackLayer, setFeedbackLayer] = useState<"book" | "arc" | "chapter">("book");
-  const [arcTarget, setArcTarget] = useState(state.current_arc?.recommended_target_chapter_count ?? 1);
+  const [arcTarget, setArcTarget] = useState(
+    state.current_arc?.recommended_closure_chapter_count ?? 1
+  );
   const [mode, setMode] = useState<OperationMode>(state.project.operation_mode);
   const commands = useMemo(
     () => new Map(state.commands.map((item) => [item.command_id, item])),
@@ -313,12 +315,26 @@ function ProjectWorkspace(props: ProjectWorkspaceProps) {
   );
 
   useEffect(() => {
-    setArcTarget(state.current_arc?.recommended_target_chapter_count ?? 1);
-  }, [state.current_arc?.arc_id, state.current_arc?.recommended_target_chapter_count]);
+    setArcTarget(state.current_arc?.recommended_closure_chapter_count ?? 1);
+  }, [
+    state.current_arc?.arc_id,
+    state.current_arc?.recommended_closure_chapter_count
+  ]);
 
   useEffect(() => setMode(state.project.operation_mode), [state.project.operation_mode]);
 
-  function runControl(action: "start" | "pause" | "resume" | "retry") {
+  useEffect(() => {
+    if (state.creator_input_request) {
+      setFeedbackLayer(state.creator_input_request.route_layer);
+    }
+  }, [
+    state.creator_input_request?.review_id,
+    state.creator_input_request?.route_layer
+  ]);
+
+  function runControl(
+    action: "start" | "pause" | "resume" | "retry" | "retry-action"
+  ) {
     return onMutate(action, () => workspaceApi.runControl(
       projectId,
       action,
@@ -340,12 +356,6 @@ function ProjectWorkspace(props: ProjectWorkspaceProps) {
     setMessage("");
   }
 
-  const feedbackLock = feedbackLayer === "chapter"
-    ? state.current_chapter?.workspace_lock_version
-    : feedbackLayer === "arc"
-      ? state.current_arc?.workspace_lock_version
-      : state.book.workspace_lock_version;
-
   return (
     <main className={styles.workspace}>
       <aside className={styles.sidebar}>
@@ -364,10 +374,11 @@ function ProjectWorkspace(props: ProjectWorkspaceProps) {
             <ActionButton icon={<Pause size={16} />} label="暂停" item={command(state, "pause_run")} busy={busyAction === "pause"} onClick={() => void runControl("pause")} />
             <ActionButton icon={<Play size={16} />} label="继续" item={command(state, "resume_run")} busy={busyAction === "resume"} onClick={() => void runControl("resume")} />
             <ActionButton icon={<RotateCcw size={16} />} label="重试失败任务" item={command(state, "retry_failed_task")} busy={busyAction === "retry"} danger onClick={() => void runControl("retry")} />
+            <ActionButton icon={<RotateCcw size={16} />} label="重试 Harness 动作" item={command(state, "retry_failed_action")} busy={busyAction === "retry-action"} danger onClick={() => void runControl("retry-action")} />
           </div>
         </header>
         {notice && <div className={styles.notice}><CircleAlert size={17} /><span>{notice}</span><button onClick={() => onNotice(null)}>×</button></div>}
-        {state.run.status === "failure_paused" && <section className={styles.failure}><strong>流程已在失败边界暂停</strong><p>{state.run.failure_code ?? "未知错误"}。普通继续不会绕过失败任务，请使用“重试失败任务”。</p></section>}
+        {state.run.status === "failure_paused" && <section className={styles.failure}><strong>流程已在失败边界暂停</strong><p>{state.run.failure_code ?? "未知错误"}。普通继续不会绕过失败来源，请使用当前启用的显式重试操作。</p></section>}
 
         <section id="control" className={styles.summaryGrid}>
           <SummaryCard label="正式章节" value={`${state.project.committed_chapter_count}`} detail={state.book.minimum_chapter_count ? `目标 ${state.book.minimum_chapter_count}–${state.book.maximum_chapter_count} 章` : "等待 Book 基线"} />
@@ -388,7 +399,7 @@ function ProjectWorkspace(props: ProjectWorkspaceProps) {
 
         <section id="arc" className={styles.section}>
           <div className={styles.sectionHeading}><div><span>Arc Loop</span><h2>故事弧</h2></div><StatePill text={state.current_arc?.lifecycle_status ?? "未创建"} /></div>
-          {state.current_arc ? <div className={styles.factGrid}><Fact label="Arc ID" value={state.current_arc.arc_id} /><Fact label="正式版本" value={state.current_arc.baseline_version ? `v${state.current_arc.baseline_version}` : "候选中"} /><Fact label="章节进度" value={`${state.current_arc.committed_chapter_count} / ${state.current_arc.target_chapter_count ?? state.current_arc.recommended_target_chapter_count ?? "?"}`} /><Fact label="审阅" value={state.current_arc.pending_review_decision ?? "—"} /></div> : <p className={styles.muted}>Book 批准后由 Run Engine 创建首个 Story Arc。</p>}
+          {state.current_arc ? <div className={styles.factGrid}><Fact label="Arc ID" value={state.current_arc.arc_id} /><Fact label="正式版本" value={state.current_arc.baseline_version ? `v${state.current_arc.baseline_version}` : "候选中"} /><Fact label="章节进度" value={`${state.current_arc.committed_chapter_count} / ${state.current_arc.closure_chapter_count ?? state.current_arc.recommended_closure_chapter_count ?? "?"}`} /><Fact label="审阅" value={state.current_arc.pending_review_decision ?? "—"} /></div> : <p className={styles.muted}>Book 批准后由 Run Engine 创建首个 Story Arc。</p>}
           {command(state, "approve_arc").enabled && <div className={styles.gateRow}><label>本弧目标章节数<input type="number" min={1} max={30} value={arcTarget} onChange={(event) => setArcTarget(Number(event.target.value))} /></label><ActionButton icon={<Check size={16} />} label="批准当前故事弧" item={command(state, "approve_arc")} busy={busyAction === "approve-arc"} primary onClick={() => void onMutate("approve-arc", () => workspaceApi.approveArc(projectId, arcTarget, idempotencyKey("approve-arc")))} /></div>}
         </section>
 
@@ -400,7 +411,9 @@ function ProjectWorkspace(props: ProjectWorkspaceProps) {
 
         <section className={styles.section}>
           <div className={styles.sectionHeading}><div><span>Change Route</span><h2>提交分层反馈</h2></div><MessageSquareText size={20} /></div>
-          <form className={styles.feedback} onSubmit={(event) => { event.preventDefault(); if (!feedback.trim() || feedbackLock === undefined) return; void onMutate("feedback", () => workspaceApi.submitFeedback(projectId, { content: feedback.trim(), route_layer: feedbackLayer, expected_workspace_lock_version: feedbackLock }, idempotencyKey("feedback"))).then(() => setFeedback("")); }}><select value={feedbackLayer} onChange={(event) => setFeedbackLayer(event.target.value as "book" | "arc" | "chapter")}><option value="book">影响全书方向</option><option value="arc" disabled={!state.current_arc}>影响当前故事弧</option><option value="chapter" disabled={!state.current_chapter}>仅影响当前章节</option></select><textarea rows={3} value={feedback} onChange={(event) => setFeedback(event.target.value)} placeholder="描述需要修改的内容。Harness 会按所选层级建立正式变更。" /><button className={styles.primary} disabled={!feedback.trim() || feedbackLock === undefined || !commands.get("submit_feedback")?.enabled}><Send size={16} />提交反馈</button></form>
+          {state.creator_input_request && <div className={styles.question}><strong>{state.creator_input_request.question.question}</strong><p>{state.creator_input_request.question.controlled_fact}</p>{state.creator_input_request.question.evidence.map((item) => <small key={item}>{item}</small>)}</div>}
+          <form className={styles.feedback} onSubmit={(event) => { event.preventDefault(); if (!feedback.trim()) return; void onMutate("feedback", () => workspaceApi.submitFeedback(projectId, { content: feedback.trim(), route_layer: feedbackLayer }, idempotencyKey("feedback"))).then(() => setFeedback("")); }}><select value={feedbackLayer} disabled={state.creator_input_request !== null} onChange={(event) => setFeedbackLayer(event.target.value as "book" | "arc" | "chapter")}><option value="book">影响全书方向</option><option value="arc" disabled={!state.current_arc}>影响当前故事弧</option><option value="chapter" disabled={!state.current_chapter}>仅影响当前章节</option></select><textarea rows={3} value={feedback} onChange={(event) => setFeedback(event.target.value)} placeholder={state.creator_input_request ? "回答上面的创作者问题。输入会在当前原子动作结束后注入。" : "描述需要修改的内容。Harness 会在安全边界按所选层级处理。"} /><button className={styles.primary} disabled={!feedback.trim() || !commands.get("submit_feedback")?.enabled}><Send size={16} />{state.creator_input_request ? "提交回答" : "提交反馈"}</button></form>
+          {state.recent_feedback.length > 0 && <div className={styles.taskTable}><div className={styles.taskHead}><span>最近反馈</span><span>状态</span><span>生效边界</span><span>目标</span></div>{state.recent_feedback.slice(0, 10).map((item) => <div key={item.feedback_id}><span><strong>{item.feedback_kind === "correction_wait_response" ? "创作者回答" : "分层反馈"}</strong><small>{item.content}</small></span><span><StatePill text={item.status} />{item.dismiss_reason_code && <small className={styles.error}>{item.dismiss_reason_code}</small>}</span><span><small>{item.status === "routed" ? "已排队；当前原子动作不受影响" : item.status === "applied" ? "已由 Run Engine 在安全边界注入" : item.status === "dismissed" ? "未改变权威状态" : "等待路由"}</small></span><span>{item.route_layer ?? "—"}</span></div>)}</div>}
         </section>
 
         <section id="evidence" className={styles.section}>

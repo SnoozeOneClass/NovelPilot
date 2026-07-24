@@ -12,6 +12,7 @@ from app.agents.contracts import (
     ChapterPlanProposal,
     LayerEvaluationResult,
 )
+from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
 from app.db.engine import create_sqlite_async_engine
 from app.db.maintenance import alembic_config
 from app.db.schema import (
@@ -30,7 +31,10 @@ from app.domain.book.contracts import (
     ApplyBookCandidateTaskRequest,
     ApproveBookRequest,
     BookCandidatePack,
+    BookCompletionRequirement,
+    BookCreativeConstraints,
     BookEvaluation,
+    BookRollingPlan,
     CompletionContract,
     RecordBookReviewRequest,
     SubmitBookRequest,
@@ -45,8 +49,7 @@ from app.domain.chapter.contracts import (
 from app.domain.feedback import (
     ApplyFeedbackRequest,
     FeedbackCommandService,
-    RouteFeedbackRequest,
-    SubmitFeedbackRequest,
+    QueueFeedbackRequest,
 )
 from app.store.command_bus import CommandBus
 from tests.domain.test_chapter_lifecycle import _prepare_reviewed_chapter
@@ -69,21 +72,14 @@ def test_book_revision_requires_review_and_user_approval_then_stales_active_arc_
             )
             bus = CommandBus(engine)
             feedback_service = FeedbackCommandService(bus)
-            feedback = await feedback_service.submit(
-                SubmitFeedbackRequest(
+            feedback = await feedback_service.queue(
+                QueueFeedbackRequest(
                     project_id=foundation.project_id,
                     content="Clarify the future-only Book constraint before more Chapters.",
-                ),
-                idempotency_key="revision:feedback",
-            )
-            await feedback_service.route(
-                RouteFeedbackRequest(
-                    project_id=foundation.project_id,
-                    feedback_id=feedback.result.feedback_id,
                     route_layer="book",
                     book_id=foundation.book_id,
                 ),
-                idempotency_key="revision:route",
+                idempotency_key="revision:queue-book-feedback",
             )
             async with engine.connect() as connection:
                 workspace_lock = await connection.scalar(
@@ -102,13 +98,41 @@ def test_book_revision_requires_review_and_user_approval_then_stales_active_arc_
             )
             candidate = BookCandidatePack(
                 direction="Conflicting testimony reveals memory editing without rewriting history.",
-                constraints={"pov": "limited-third", "history": "preserve-committed"},
+                constraints=BookCreativeConstraints(
+                    genre_reader_promise="A fair-play memory mystery.",
+                    premise_story_engine="Physical evidence reveals memory editing.",
+                    stable_world_invariants=[
+                        "Physical evidence cannot be retroactively edited."
+                    ],
+                    stable_character_invariants=["Mara requires verifiable evidence."],
+                    core_selling_points=["Evidence-bound reversals"],
+                    prohibited_outcomes=["Do not erase committed history."],
+                ),
                 selected_title="Echo Testimony",
-                rolling_plan={"strategy": "one-arc-at-a-time", "revision": "future-only"},
+                rolling_plan=BookRollingPlan(
+                    long_term_character_directions=[
+                        "Mara learns to distinguish trust from certainty."
+                    ],
+                    high_level_phase_strategy=[
+                        "Identify the edit mechanism",
+                        "Confront its operator",
+                    ],
+                    whole_book_pacing_strategy="Escalate through bounded Arcs.",
+                    ending_tendency="Resolve the central edit at a personal cost.",
+                    arc_planning_guidelines=[
+                        "Every Arc must close an observable state transition."
+                    ],
+                ),
                 completion_contract=CompletionContract(
                     minimum_chapter_count=1,
                     maximum_chapter_count=12,
-                    completion_requirements=["Resolve the central memory conflict"],
+                    completion_requirements=[
+                        BookCompletionRequirement(
+                            requirement_key="central_memory_conflict_resolved",
+                            description="Resolve the central memory conflict.",
+                            evidence_expectation="Committed Chapters prove the resolution.",
+                        )
+                    ],
                 ),
             )
             revise_task, revise_attempt = await insert_successful_task(
@@ -170,8 +194,12 @@ def test_book_revision_requires_review_and_user_approval_then_stales_active_arc_
                     submission_id=submitted.result.submission_id,
                     evaluator_task_id=evaluator_task,
                     evaluator_attempt_id=evaluator_attempt,
-                    rubric_id="book-rubric",
-                    rubric_version=1,
+                        rubric_id=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                            "evaluate.book"
+                        ).rubric_id,
+                        rubric_version=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                            "evaluate.book"
+                        ).rubric_version,
                     deterministic_precheck={"passed": True},
                 ),
                 idempotency_key="revision:review-book",
@@ -215,7 +243,7 @@ def test_book_revision_requires_review_and_user_approval_then_stales_active_arc_
                     )
                 ).one()
                 assert tuple(arc_workspace) == ("stale", "upstream_book_revised")
-                assert tuple(arc) == (foundation.arc_baseline_id, "active")
+                assert tuple(arc) == (None, "planning")
                 assert await connection.scalar(select(func.count()).select_from(book_baselines)) == 2
                 assert await connection.scalar(select(func.count()).select_from(arc_baselines)) == 1
         finally:
@@ -252,23 +280,16 @@ def test_chapter_revision_creates_v2_without_increasing_committed_chapter_count(
                 idempotency_key="chapter-revision:commit-v1",
             )
             feedback_service = FeedbackCommandService(bus)
-            feedback = await feedback_service.submit(
-                SubmitFeedbackRequest(
+            feedback = await feedback_service.queue(
+                QueueFeedbackRequest(
                     project_id=ready.foundation.project_id,
                     content="Tighten this Chapter's reveal while preserving its Canon outcome.",
-                ),
-                idempotency_key="chapter-revision:feedback",
-            )
-            await feedback_service.route(
-                RouteFeedbackRequest(
-                    project_id=ready.foundation.project_id,
-                    feedback_id=feedback.result.feedback_id,
                     route_layer="chapter",
                     book_id=ready.foundation.book_id,
                     arc_id=ready.foundation.arc_id,
                     chapter_id=ready.chapter_id,
                 ),
-                idempotency_key="chapter-revision:route",
+                idempotency_key="chapter-revision:queue-feedback",
             )
             async with engine.connect() as connection:
                 workspace_lock = await connection.scalar(
@@ -424,8 +445,12 @@ def test_chapter_revision_creates_v2_without_increasing_committed_chapter_count(
                     submission_id=submitted.result.submission_id,
                     evaluator_task_id=evaluator_task,
                     evaluator_attempt_id=evaluator_attempt,
-                    rubric_id="chapter-rubric",
-                    rubric_version=1,
+                    rubric_id=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                        "evaluate.chapter"
+                    ).rubric_id,
+                    rubric_version=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                        "evaluate.chapter"
+                    ).rubric_version,
                     deterministic_precheck={"passed": True},
                 ),
                 idempotency_key="chapter-revision:review",

@@ -10,6 +10,7 @@ from typing import cast
 from pydantic import BaseModel
 
 from app.agents.contracts import BookDiscussionResult
+from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
 from app.db.uow import StoreSession
 from app.domain.book.contracts import (
     ApplyBookCandidateRequest,
@@ -1173,6 +1174,9 @@ class BookCommandService:
                 if workspace is not None and workspace.semantic_repair_count > 0
                 else "evaluate.book"
             )
+            strategy = DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                expected_task_kind
+            )
             if (
                 submission is None
                 or submission.book_id != request.book_id
@@ -1181,6 +1185,13 @@ class BookCommandService:
                 or task_snapshot.delivery_state != "pending"
                 or task_snapshot.role != "evaluator"
                 or task_snapshot.task_kind != expected_task_kind
+                or task_snapshot.evaluation_strategy_id != strategy.strategy_id
+                or task_snapshot.evaluation_strategy_version
+                != strategy.strategy_version
+                or task_snapshot.rubric_id != strategy.rubric_id
+                or task_snapshot.rubric_version != strategy.rubric_version
+                or request.rubric_id != strategy.rubric_id
+                or request.rubric_version != strategy.rubric_version
                 or task_snapshot.scope_layer != "book"
                 or task_snapshot.book_id != request.book_id
                 or task_snapshot.workspace_lock_version != submission.workspace_lock_version
@@ -1267,7 +1278,7 @@ class BookCommandService:
                         ref_id=failure_ref_id,
                         created_at_ms=timestamp,
                     )
-                    if not await session.runs.failure_pause(
+                    if not await session.runs.failure_pause_for_task(
                         run_id=task_snapshot.run_id,
                         task_id=task_snapshot.task_id,
                         failure_code="semantic_repair_exhausted",
@@ -1536,14 +1547,12 @@ class BookCommandService:
                     now_ms=timestamp,
                 ):
                     raise CommandPreconditionError("Book approval could not wake the Run.")
-            resolved_chapter_requests, resolved_arc_requests = (
-                await session.changes.resolve_for_book_baseline(
-                    project_id=request.project_id,
-                    book_id=request.book_id,
-                    previous_baseline_id=request.expected_current_baseline_id,
-                    new_baseline_id=baseline_id,
-                    now_ms=timestamp,
-                )
+            resolved_arc_requests = await session.changes.resolve_for_book_baseline(
+                project_id=request.project_id,
+                book_id=request.book_id,
+                previous_baseline_id=request.expected_current_baseline_id,
+                new_baseline_id=baseline_id,
+                now_ms=timestamp,
             )
             result = ApproveBookResult(
                 project_id=request.project_id,
@@ -1564,7 +1573,7 @@ class BookCommandService:
                         },
                     )
             ]
-            if resolved_chapter_requests or resolved_arc_requests:
+            if resolved_arc_requests:
                 events.append(
                     EventDraft(
                         event_type="change_request.resolved",
@@ -1572,7 +1581,6 @@ class BookCommandService:
                         aggregate_id=request.book_id,
                         payload={
                             "book_baseline_id": baseline_id,
-                            "chapter_request_count": resolved_chapter_requests,
                             "arc_request_count": resolved_arc_requests,
                         },
                     )

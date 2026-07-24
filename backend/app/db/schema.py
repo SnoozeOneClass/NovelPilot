@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from typing import Any
 
 from sqlalchemy import (
     BLOB,
@@ -32,7 +31,20 @@ metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
 WORKSPACE_STATES = ("idle", "active", "blocked_by_user", "blocked_by_upstream", "stale")
 SUBMISSION_DISPOSITIONS = ("pending", "superseded", "rejected", "promoted")
-CHANGE_REQUEST_STATUSES = ("open", "resolved", "rejected", "superseded")
+CHANGE_REQUEST_STATUSES = ("open", "reviewed", "resolved", "superseded")
+CORRECTION_LINEAGE_ORIGINS = ("review_initiated", "user_initiated")
+ARC_REVISION_ORIGINS = (
+    "initial",
+    "automatic_arc_recovery",
+    "user_initiated",
+    "parent_book_baseline_rebase",
+)
+CHAPTER_REVISION_ORIGINS = (
+    "initial",
+    "local_revision",
+    "arc_evidence_correction",
+    "user_initiated",
+)
 
 
 def _ck(name: str, expression: str) -> CheckConstraint:
@@ -106,6 +118,41 @@ def _workspace_common_checks() -> list[CheckConstraint]:
     ]
 
 
+def _correction_lineage_checks() -> list[CheckConstraint]:
+    return [
+        _enum_ck(
+            "correction_lineage_origin",
+            "correction_lineage_origin",
+            CORRECTION_LINEAGE_ORIGINS,
+        ),
+        _ck(
+            "automatic_correction_round",
+            "automatic_correction_round IN (0, 1)",
+        ),
+        _ck("review_ordinal_positive", "review_ordinal >= 1"),
+        _ck(
+            "correction_lineage_predecessor",
+            "((automatic_correction_round = 0 AND review_ordinal = 1 "
+            "AND predecessor_review_id IS NULL) "
+            "OR (automatic_correction_round = 1 AND review_ordinal = 2 "
+            "AND predecessor_review_id IS NOT NULL))",
+        ),
+        _ck(
+            "user_lineage_source",
+            "((correction_lineage_origin = 'review_initiated' "
+            "AND source_feedback_id IS NULL AND source_exhausted_review_id IS NULL) "
+            "OR (correction_lineage_origin = 'user_initiated' "
+            "AND source_feedback_id IS NOT NULL "
+            "AND source_exhausted_review_id IS NOT NULL))",
+        ),
+        _ck(
+            "creator_question",
+            "((resolution_owner = 'creator' AND user_question_ref_id IS NOT NULL) "
+            "OR (resolution_owner <> 'creator' AND user_question_ref_id IS NULL))",
+        ),
+    ]
+
+
 # Identity/current -----------------------------------------------------------------
 
 projects = Table(
@@ -149,6 +196,8 @@ books = Table(
     Column("project_id", String, nullable=False),
     Column("lifecycle_status", String, nullable=False),
     Column("current_baseline_id", String),
+    Column("latest_boundary_review_id", String),
+    Column("current_progress_handoff_id", String),
     Column("current_completion_id", String),
     Column("created_at_ms", Integer, nullable=False),
     Column("updated_at_ms", Integer, nullable=False),
@@ -158,15 +207,37 @@ books = Table(
     _ck(
         "lifecycle_pointers",
         "((lifecycle_status = 'developing' AND current_baseline_id IS NULL "
-        "AND current_completion_id IS NULL) "
+        "AND latest_boundary_review_id IS NULL "
+        "AND current_progress_handoff_id IS NULL AND current_completion_id IS NULL) "
         "OR (lifecycle_status = 'active' AND current_baseline_id IS NOT NULL "
         "AND current_completion_id IS NULL) "
         "OR (lifecycle_status = 'completed' AND current_baseline_id IS NOT NULL "
+        "AND current_progress_handoff_id IS NULL "
         "AND current_completion_id IS NOT NULL))",
     ),
     ForeignKeyConstraint(
         ["project_id", "id", "current_baseline_id"],
         ["book_baselines.project_id", "book_baselines.book_id", "book_baselines.id"],
+        deferrable=True,
+        initially="DEFERRED",
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "id", "latest_boundary_review_id"],
+        [
+            "book_boundary_reviews.project_id",
+            "book_boundary_reviews.book_id",
+            "book_boundary_reviews.id",
+        ],
+        deferrable=True,
+        initially="DEFERRED",
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "id", "current_progress_handoff_id"],
+        [
+            "book_progress_handoffs.project_id",
+            "book_progress_handoffs.book_id",
+            "book_progress_handoffs.id",
+        ],
         deferrable=True,
         initially="DEFERRED",
     ),
@@ -188,6 +259,8 @@ story_arcs = Table(
     Column("purpose", String, nullable=False),
     Column("lifecycle_status", String, nullable=False),
     Column("current_baseline_id", String),
+    Column("latest_closure_review_id", String),
+    Column("current_closure_id", String),
     Column("created_at_ms", Integer, nullable=False),
     Column("updated_at_ms", Integer, nullable=False),
     Column("completed_at_ms", Integer),
@@ -197,19 +270,46 @@ story_arcs = Table(
     UniqueConstraint("book_id", "ordinal"),
     _ck("ordinal_positive", "ordinal >= 1"),
     _enum_ck("purpose", "purpose", ("regular", "final")),
-    _enum_ck("lifecycle_status", "lifecycle_status", ("planning", "active", "completed")),
-    _ck(
-        "active_baseline_required",
-        "lifecycle_status = 'planning' OR current_baseline_id IS NOT NULL",
+    _enum_ck(
+        "lifecycle_status",
+        "lifecycle_status",
+        ("planning", "active", "closing", "completed"),
     ),
     _ck(
-        "completion_timestamp",
-        "((lifecycle_status = 'completed' AND completed_at_ms IS NOT NULL) "
-        "OR (lifecycle_status <> 'completed' AND completed_at_ms IS NULL))",
+        "lifecycle_pointers",
+        "((lifecycle_status = 'planning' AND current_closure_id IS NULL "
+        "AND completed_at_ms IS NULL) "
+        "OR (lifecycle_status IN ('active', 'closing') "
+        "AND current_baseline_id IS NOT NULL AND current_closure_id IS NULL "
+        "AND completed_at_ms IS NULL) "
+        "OR (lifecycle_status = 'completed' AND current_baseline_id IS NOT NULL "
+        "AND current_closure_id IS NOT NULL AND completed_at_ms IS NOT NULL))",
     ),
     ForeignKeyConstraint(
         ["project_id", "book_id"],
         ["books.project_id", "books.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "id", "latest_closure_review_id"],
+        [
+            "arc_closure_reviews.project_id",
+            "arc_closure_reviews.book_id",
+            "arc_closure_reviews.arc_id",
+            "arc_closure_reviews.id",
+        ],
+        deferrable=True,
+        initially="DEFERRED",
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "id", "current_closure_id"],
+        [
+            "arc_closures.project_id",
+            "arc_closures.book_id",
+            "arc_closures.arc_id",
+            "arc_closures.id",
+        ],
+        deferrable=True,
+        initially="DEFERRED",
     ),
     ForeignKeyConstraint(
         ["project_id", "book_id", "id", "current_baseline_id"],
@@ -227,7 +327,7 @@ Index(
     "uq_arc_one_unfinished_per_book",
     story_arcs.c.book_id,
     unique=True,
-    sqlite_where=story_arcs.c.lifecycle_status.in_(("planning", "active")),
+    sqlite_where=story_arcs.c.lifecycle_status.in_(("planning", "active", "closing")),
 )
 
 chapters = Table(
@@ -612,6 +712,8 @@ book_completions = Table(
     Column("completion_version", Integer, nullable=False),
     Column("parent_completion_id", String),
     Column("book_baseline_id", String, nullable=False),
+    Column("book_boundary_review_id", String, nullable=False),
+    Column("arc_closure_id", String, nullable=False),
     Column("terminal_arc_id", String, nullable=False),
     Column("terminal_arc_baseline_id", String, nullable=False),
     Column("terminal_chapter_id", String, nullable=False),
@@ -624,6 +726,7 @@ book_completions = Table(
     Column("created_at_ms", Integer, nullable=False),
     *_project_owned_constraints(),
     UniqueConstraint("book_id", "completion_version"),
+    UniqueConstraint("book_boundary_review_id"),
     UniqueConstraint("project_id", "book_id", "id"),
     _ck(
         "version_parent",
@@ -638,6 +741,23 @@ book_completions = Table(
     ForeignKeyConstraint(
         ["project_id", "book_id", "book_baseline_id"],
         ["book_baselines.project_id", "book_baselines.book_id", "book_baselines.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "book_boundary_review_id"],
+        [
+            "book_boundary_reviews.project_id",
+            "book_boundary_reviews.book_id",
+            "book_boundary_reviews.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "terminal_arc_id", "arc_closure_id"],
+        [
+            "arc_closures.project_id",
+            "arc_closures.book_id",
+            "arc_closures.arc_id",
+            "arc_closures.id",
+        ],
     ),
     ForeignKeyConstraint(
         ["project_id", "book_id", "terminal_arc_id", "terminal_arc_baseline_id"],
@@ -690,10 +810,28 @@ arc_workspaces = Table(
     Column("base_arc_baseline_id", String),
     Column("book_baseline_id", String, nullable=False),
     Column("canon_baseline_id", String, nullable=False),
+    Column("book_progress_handoff_id", String),
     Column("prior_arc_id", String),
     Column("prior_arc_baseline_id", String),
+    Column(
+        "revision_origin",
+        String,
+        nullable=False,
+        server_default=text("'initial'"),
+    ),
+    Column("source_arc_parent_review_id", String),
+    Column("source_arc_closure_review_id", String),
+    Column("source_book_parent_review_id", String),
+    Column("source_book_boundary_review_id", String),
+    Column("source_feedback_id", String),
+    Column("correction_lineage_id", String),
+    Column("correction_lineage_origin", String),
+    Column("automatic_correction_round", Integer),
     Column("plan_ref_id", String),
-    Column("recommended_target_chapter_count", Integer),
+    Column("minimum_chapter_count", Integer),
+    Column("recommended_closure_chapter_count", Integer),
+    Column("maximum_chapter_count", Integer),
+    Column("closure_chapter_count", Integer),
     Column("guidance_ref_id", String),
     Column("repair_policy_id", String, nullable=False),
     Column("semantic_repair_count", Integer, nullable=False),
@@ -706,10 +844,32 @@ arc_workspaces = Table(
     UniqueConstraint("arc_id"),
     UniqueConstraint("project_id", "book_id", "arc_id", "id"),
     *_workspace_common_checks(),
+    _enum_ck("revision_origin", "revision_origin", ARC_REVISION_ORIGINS),
     _ck(
-        "plan_count_pair",
-        "((plan_ref_id IS NULL AND recommended_target_chapter_count IS NULL) "
-        "OR (plan_ref_id IS NOT NULL AND recommended_target_chapter_count BETWEEN 1 AND 30))",
+        "source_review_at_most_one",
+        "(source_arc_parent_review_id IS NOT NULL) "
+        "+ (source_arc_closure_review_id IS NOT NULL) "
+        "+ (source_book_parent_review_id IS NOT NULL) "
+        "+ (source_book_boundary_review_id IS NOT NULL) <= 1",
+    ),
+    _ck(
+        "correction_lineage_shape",
+        "((correction_lineage_id IS NULL AND correction_lineage_origin IS NULL "
+        "AND automatic_correction_round IS NULL) "
+        "OR (correction_lineage_id IS NOT NULL "
+        "AND correction_lineage_origin IN ('review_initiated', 'user_initiated') "
+        "AND automatic_correction_round IN (0, 1)))",
+    ),
+    _ck(
+        "plan_count_shape",
+        "((plan_ref_id IS NULL AND minimum_chapter_count IS NULL "
+        "AND recommended_closure_chapter_count IS NULL "
+        "AND maximum_chapter_count IS NULL AND closure_chapter_count IS NULL) "
+        "OR (plan_ref_id IS NOT NULL AND minimum_chapter_count >= 1 "
+        "AND recommended_closure_chapter_count >= minimum_chapter_count "
+        "AND maximum_chapter_count >= recommended_closure_chapter_count "
+        "AND closure_chapter_count BETWEEN minimum_chapter_count "
+        "AND maximum_chapter_count))",
     ),
     _ck(
         "prior_arc_pair",
@@ -738,6 +898,14 @@ arc_workspaces = Table(
         ["canon_baselines.project_id", "canon_baselines.id"],
     ),
     ForeignKeyConstraint(
+        ["project_id", "book_id", "book_progress_handoff_id"],
+        [
+            "book_progress_handoffs.project_id",
+            "book_progress_handoffs.book_id",
+            "book_progress_handoffs.id",
+        ],
+    ),
+    ForeignKeyConstraint(
         ["project_id", "book_id", "prior_arc_id", "prior_arc_baseline_id"],
         [
             "arc_baselines.project_id",
@@ -745,6 +913,44 @@ arc_workspaces = Table(
             "arc_baselines.arc_id",
             "arc_baselines.id",
         ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "source_arc_parent_review_id"],
+        [
+            "arc_parent_reviews.project_id",
+            "arc_parent_reviews.book_id",
+            "arc_parent_reviews.arc_id",
+            "arc_parent_reviews.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "source_arc_closure_review_id"],
+        [
+            "arc_closure_reviews.project_id",
+            "arc_closure_reviews.book_id",
+            "arc_closure_reviews.arc_id",
+            "arc_closure_reviews.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "source_book_parent_review_id"],
+        [
+            "book_parent_reviews.project_id",
+            "book_parent_reviews.book_id",
+            "book_parent_reviews.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "source_book_boundary_review_id"],
+        [
+            "book_boundary_reviews.project_id",
+            "book_boundary_reviews.book_id",
+            "book_boundary_reviews.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "source_feedback_id"],
+        ["user_feedback.project_id", "user_feedback.id"],
     ),
     *_content_ref_fks("plan_ref_id", "guidance_ref_id"),
 )
@@ -765,7 +971,10 @@ arc_review_submissions = Table(
     Column("prior_arc_baseline_id", String),
     Column("purpose", String, nullable=False),
     Column("plan_ref_id", String, nullable=False),
-    Column("recommended_target_chapter_count", Integer, nullable=False),
+    Column("minimum_chapter_count", Integer, nullable=False),
+    Column("recommended_closure_chapter_count", Integer, nullable=False),
+    Column("maximum_chapter_count", Integer, nullable=False),
+    Column("closure_chapter_count", Integer, nullable=False),
     Column("content_manifest_ref_id", String, nullable=False),
     Column("content_fingerprint", String, nullable=False),
     Column("disposition", String, nullable=False),
@@ -776,8 +985,12 @@ arc_review_submissions = Table(
     UniqueConstraint("project_id", "book_id", "arc_id", "id"),
     _ck("workspace_lock_version_positive", "workspace_lock_version >= 1"),
     _ck(
-        "recommended_count_range",
-        "recommended_target_chapter_count BETWEEN 1 AND 30",
+        "chapter_count_ranges",
+        "minimum_chapter_count >= 1 "
+        "AND recommended_closure_chapter_count >= minimum_chapter_count "
+        "AND maximum_chapter_count >= recommended_closure_chapter_count "
+        "AND closure_chapter_count BETWEEN minimum_chapter_count "
+        "AND maximum_chapter_count",
     ),
     _ck("content_fingerprint", _sha_expression("content_fingerprint")),
     _enum_ck("purpose", "purpose", ("regular", "final")),
@@ -945,7 +1158,7 @@ arc_approvals = Table(
     Column("submission_id", String, nullable=False),
     Column("review_id", String, nullable=False),
     Column("decision", String, nullable=False),
-    Column("target_chapter_count", Integer),
+    Column("closure_chapter_count", Integer),
     Column("created_at_ms", Integer, nullable=False),
     *_project_owned_constraints(),
     UniqueConstraint("gate_id"),
@@ -962,9 +1175,9 @@ arc_approvals = Table(
     ),
     _enum_ck("decision", "decision", ("approved", "rejected")),
     _ck(
-        "approval_target_count",
-        "((decision = 'approved' AND target_chapter_count BETWEEN 1 AND 30) "
-        "OR (decision = 'rejected' AND target_chapter_count IS NULL))",
+        "approval_closure_count",
+        "((decision = 'approved' AND closure_chapter_count >= 1) "
+        "OR (decision = 'rejected' AND closure_chapter_count IS NULL))",
     ),
     ForeignKeyConstraint(
         ["project_id", "book_id", "arc_id", "submission_id", "review_id", "gate_id"],
@@ -992,12 +1205,16 @@ arc_baselines = Table(
     Column("review_id", String, nullable=False),
     Column("book_baseline_id", String, nullable=False),
     Column("canon_baseline_id", String, nullable=False),
+    Column("book_progress_handoff_id", String),
     Column("prior_arc_id", String),
     Column("prior_arc_baseline_id", String),
     Column("purpose", String, nullable=False),
     Column("plan_ref_id", String, nullable=False),
-    Column("recommended_target_chapter_count", Integer, nullable=False),
-    Column("target_chapter_count", Integer, nullable=False),
+    Column("minimum_chapter_count", Integer, nullable=False),
+    Column("recommended_closure_chapter_count", Integer, nullable=False),
+    Column("maximum_chapter_count", Integer, nullable=False),
+    Column("closure_chapter_count", Integer, nullable=False),
+    Column("revision_origin", String, nullable=False),
     Column("authorization_kind", String, nullable=False),
     Column("approval_gate_id", String),
     Column("approval_id", String),
@@ -1015,8 +1232,11 @@ arc_baselines = Table(
     ),
     _ck(
         "chapter_count_ranges",
-        "recommended_target_chapter_count BETWEEN 1 AND 30 "
-        "AND target_chapter_count BETWEEN 1 AND 30",
+        "minimum_chapter_count >= 1 "
+        "AND recommended_closure_chapter_count >= minimum_chapter_count "
+        "AND maximum_chapter_count >= recommended_closure_chapter_count "
+        "AND closure_chapter_count BETWEEN minimum_chapter_count "
+        "AND maximum_chapter_count",
     ),
     _ck(
         "prior_arc_pair",
@@ -1024,11 +1244,13 @@ arc_baselines = Table(
         "OR (prior_arc_id IS NOT NULL AND prior_arc_baseline_id IS NOT NULL))",
     ),
     _enum_ck("purpose", "purpose", ("regular", "final")),
+    _enum_ck("revision_origin", "revision_origin", ARC_REVISION_ORIGINS),
     _enum_ck("authorization_kind", "authorization_kind", ("policy_auto", "human_approval")),
     _ck(
         "authorization",
         "((authorization_kind = 'policy_auto' AND approval_gate_id IS NULL "
-        "AND approval_id IS NULL AND target_chapter_count = recommended_target_chapter_count) "
+        "AND approval_id IS NULL "
+        "AND closure_chapter_count = recommended_closure_chapter_count) "
         "OR (authorization_kind = 'human_approval' AND approval_gate_id IS NOT NULL "
         "AND approval_id IS NOT NULL))",
     ),
@@ -1080,6 +1302,14 @@ arc_baselines = Table(
         ["canon_baselines.project_id", "canon_baselines.id"],
     ),
     ForeignKeyConstraint(
+        ["project_id", "book_id", "book_progress_handoff_id"],
+        [
+            "book_progress_handoffs.project_id",
+            "book_progress_handoffs.book_id",
+            "book_progress_handoffs.id",
+        ],
+    ),
+    ForeignKeyConstraint(
         ["project_id", "book_id", "prior_arc_id", "prior_arc_baseline_id"],
         [
             "arc_baselines.project_id",
@@ -1099,6 +1329,12 @@ arc_baselines = Table(
     ),
     *_content_ref_fks("plan_ref_id"),
 )
+Index(
+    "uq_arc_one_automatic_recovery_baseline",
+    arc_baselines.c.arc_id,
+    unique=True,
+    sqlite_where=arc_baselines.c.revision_origin == "automatic_arc_recovery",
+)
 
 
 # Chapter/Canon lifecycle ----------------------------------------------------------
@@ -1117,6 +1353,18 @@ chapter_workspaces = Table(
     Column("book_baseline_id", String, nullable=False),
     Column("arc_baseline_id", String, nullable=False),
     Column("canon_baseline_id", String, nullable=False),
+    Column(
+        "revision_origin",
+        String,
+        nullable=False,
+        server_default=text("'initial'"),
+    ),
+    Column("source_arc_parent_review_id", String),
+    Column("source_arc_closure_review_id", String),
+    Column("source_feedback_id", String),
+    Column("correction_lineage_id", String),
+    Column("correction_lineage_origin", String),
+    Column("automatic_correction_round", Integer),
     Column("plan_ref_id", String),
     Column("draft_ref_id", String),
     Column("observations_ref_id", String),
@@ -1133,6 +1381,20 @@ chapter_workspaces = Table(
     UniqueConstraint("chapter_id"),
     UniqueConstraint("project_id", "book_id", "arc_id", "chapter_id", "id"),
     *_workspace_common_checks(),
+    _enum_ck("revision_origin", "revision_origin", CHAPTER_REVISION_ORIGINS),
+    _ck(
+        "source_review_at_most_one",
+        "(source_arc_parent_review_id IS NOT NULL) "
+        "+ (source_arc_closure_review_id IS NOT NULL) <= 1",
+    ),
+    _ck(
+        "correction_lineage_shape",
+        "((correction_lineage_id IS NULL AND correction_lineage_origin IS NULL "
+        "AND automatic_correction_round IS NULL) "
+        "OR (correction_lineage_id IS NOT NULL "
+        "AND correction_lineage_origin IN ('review_initiated', 'user_initiated') "
+        "AND automatic_correction_round IN (0, 1)))",
+    ),
     _ck(
         "component_dependencies",
         "(draft_ref_id IS NULL OR plan_ref_id IS NOT NULL) "
@@ -1169,6 +1431,28 @@ chapter_workspaces = Table(
     ForeignKeyConstraint(
         ["project_id", "canon_baseline_id"],
         ["canon_baselines.project_id", "canon_baselines.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "source_arc_parent_review_id"],
+        [
+            "arc_parent_reviews.project_id",
+            "arc_parent_reviews.book_id",
+            "arc_parent_reviews.arc_id",
+            "arc_parent_reviews.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "source_arc_closure_review_id"],
+        [
+            "arc_closure_reviews.project_id",
+            "arc_closure_reviews.book_id",
+            "arc_closure_reviews.arc_id",
+            "arc_closure_reviews.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "source_feedback_id"],
+        ["user_feedback.project_id", "user_feedback.id"],
     ),
     *_content_ref_fks(
         "plan_ref_id",
@@ -1298,7 +1582,7 @@ chapter_reviews = Table(
     _enum_ck(
         "decision",
         "decision",
-        ("pass", "local_repair", "escalate_to_arc", "escalate_to_book", "needs_user"),
+        ("pass", "local_repair", "escalate_to_arc", "needs_user"),
     ),
     _ck("rubric_version_positive", "rubric_version >= 1"),
     _ck(
@@ -1343,6 +1627,9 @@ chapter_baselines = Table(
     Column("arc_baseline_id", String, nullable=False),
     Column("canon_before_id", String, nullable=False),
     Column("canon_after_id", String, nullable=False),
+    Column("revision_origin", String, nullable=False),
+    Column("source_arc_parent_review_id", String),
+    Column("source_arc_closure_review_id", String),
     Column("plan_ref_id", String, nullable=False),
     Column("prose_ref_id", String, nullable=False),
     Column("observations_ref_id", String, nullable=False),
@@ -1362,6 +1649,12 @@ chapter_baselines = Table(
     ),
     _ck("chapter_title_non_blank", _non_blank_expression("chapter_title")),
     _ck("character_count_non_negative", "character_count >= 0"),
+    _enum_ck("revision_origin", "revision_origin", CHAPTER_REVISION_ORIGINS),
+    _ck(
+        "source_review_at_most_one",
+        "(source_arc_parent_review_id IS NOT NULL) "
+        "+ (source_arc_closure_review_id IS NOT NULL) <= 1",
+    ),
     ForeignKeyConstraint(
         ["project_id", "book_id", "arc_id", "chapter_id", "parent_baseline_id"],
         [
@@ -1405,6 +1698,24 @@ chapter_baselines = Table(
         ["canon_baselines.project_id", "canon_baselines.id"],
         deferrable=True,
         initially="DEFERRED",
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "source_arc_parent_review_id"],
+        [
+            "arc_parent_reviews.project_id",
+            "arc_parent_reviews.book_id",
+            "arc_parent_reviews.arc_id",
+            "arc_parent_reviews.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "source_arc_closure_review_id"],
+        [
+            "arc_closure_reviews.project_id",
+            "arc_closure_reviews.book_id",
+            "arc_closure_reviews.arc_id",
+            "arc_closure_reviews.id",
+        ],
     ),
     *_content_ref_fks(
         "plan_ref_id",
@@ -1487,16 +1798,32 @@ user_feedback = Table(
     Column("id", String, primary_key=True),
     Column("project_id", String, nullable=False),
     Column("content_ref_id", String, nullable=False),
+    Column("feedback_kind", String, nullable=False, server_default=text("'unsolicited'")),
     Column("status", String, nullable=False),
     Column("route_layer", String),
+    Column("captured_run_id", String, nullable=False),
     Column("book_id", String),
     Column("arc_id", String),
     Column("chapter_id", String),
+    Column("captured_book_baseline_id", String),
+    Column("captured_arc_baseline_id", String),
+    Column("captured_chapter_baseline_id", String),
+    Column("arc_parent_review_id", String),
+    Column("book_parent_review_id", String),
+    Column("arc_closure_review_id", String),
+    Column("book_boundary_review_id", String),
+    Column("resulting_correction_lineage_id", String),
+    Column("dismiss_reason_code", String),
     Column("applied_command_id", String),
     Column("created_at_ms", Integer, nullable=False),
     Column("routed_at_ms", Integer),
     Column("applied_at_ms", Integer),
     *_project_owned_constraints(),
+    _enum_ck(
+        "feedback_kind",
+        "feedback_kind",
+        ("unsolicited", "correction_wait_response"),
+    ),
     _enum_ck("status", "status", ("pending", "routed", "applied", "dismissed")),
     _ck(
         "route_target_shape",
@@ -1509,16 +1836,48 @@ user_feedback = Table(
         "AND arc_id IS NOT NULL AND chapter_id IS NOT NULL))",
     ),
     _ck(
+        "review_source_shape",
+        "((feedback_kind = 'unsolicited' "
+        "AND arc_parent_review_id IS NULL AND book_parent_review_id IS NULL "
+        "AND arc_closure_review_id IS NULL AND book_boundary_review_id IS NULL) "
+        "OR (feedback_kind = 'correction_wait_response' "
+        "AND ((arc_parent_review_id IS NOT NULL) "
+        "+ (book_parent_review_id IS NOT NULL) "
+        "+ (arc_closure_review_id IS NOT NULL) "
+        "+ (book_boundary_review_id IS NOT NULL) = 1)))",
+    ),
+    _ck(
+        "captured_baseline_shape",
+        "(captured_arc_baseline_id IS NULL OR captured_book_baseline_id IS NOT NULL) "
+        "AND (captured_chapter_baseline_id IS NULL "
+        "OR captured_arc_baseline_id IS NOT NULL)",
+    ),
+    _ck(
         "status_fields",
         "((status = 'pending' AND route_layer IS NULL AND routed_at_ms IS NULL "
-        "AND applied_command_id IS NULL AND applied_at_ms IS NULL) "
+        "AND applied_command_id IS NULL AND applied_at_ms IS NULL "
+        "AND dismiss_reason_code IS NULL "
+        "AND resulting_correction_lineage_id IS NULL) "
         "OR (status = 'routed' AND route_layer IS NOT NULL AND routed_at_ms IS NOT NULL "
-        "AND applied_command_id IS NULL AND applied_at_ms IS NULL) "
+        "AND applied_command_id IS NULL AND applied_at_ms IS NULL "
+        "AND dismiss_reason_code IS NULL "
+        "AND resulting_correction_lineage_id IS NULL) "
         "OR (status = 'applied' AND route_layer IS NOT NULL AND routed_at_ms IS NOT NULL "
-        "AND applied_command_id IS NOT NULL AND applied_at_ms IS NOT NULL) "
-        "OR (status = 'dismissed' AND applied_command_id IS NULL AND applied_at_ms IS NOT NULL "
+        "AND applied_command_id IS NOT NULL AND applied_at_ms IS NOT NULL "
+        "AND dismiss_reason_code IS NULL "
+        "AND ((feedback_kind = 'unsolicited' "
+        "AND resulting_correction_lineage_id IS NULL) "
+        "OR (feedback_kind = 'correction_wait_response' "
+        "AND resulting_correction_lineage_id IS NOT NULL))) "
+        "OR (status = 'dismissed' AND applied_command_id IS NULL "
+        "AND applied_at_ms IS NOT NULL AND dismiss_reason_code IS NOT NULL "
+        "AND resulting_correction_lineage_id IS NULL "
         "AND ((route_layer IS NULL AND routed_at_ms IS NULL) "
         "OR (route_layer IS NOT NULL AND routed_at_ms IS NOT NULL))))",
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "captured_run_id"],
+        ["generation_runs.project_id", "generation_runs.id"],
     ),
     ForeignKeyConstraint(
         ["project_id", "book_id"],
@@ -1533,6 +1892,51 @@ user_feedback = Table(
         ["chapters.project_id", "chapters.book_id", "chapters.arc_id", "chapters.id"],
     ),
     ForeignKeyConstraint(
+        ["project_id", "book_id", "captured_book_baseline_id"],
+        ["book_baselines.project_id", "book_baselines.book_id", "book_baselines.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "captured_arc_baseline_id"],
+        [
+            "arc_baselines.project_id",
+            "arc_baselines.book_id",
+            "arc_baselines.arc_id",
+            "arc_baselines.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        [
+            "project_id",
+            "book_id",
+            "arc_id",
+            "chapter_id",
+            "captured_chapter_baseline_id",
+        ],
+        [
+            "chapter_baselines.project_id",
+            "chapter_baselines.book_id",
+            "chapter_baselines.arc_id",
+            "chapter_baselines.chapter_id",
+            "chapter_baselines.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "arc_parent_review_id"],
+        ["arc_parent_reviews.project_id", "arc_parent_reviews.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_parent_review_id"],
+        ["book_parent_reviews.project_id", "book_parent_reviews.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "arc_closure_review_id"],
+        ["arc_closure_reviews.project_id", "arc_closure_reviews.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_boundary_review_id"],
+        ["book_boundary_reviews.project_id", "book_boundary_reviews.id"],
+    ),
+    ForeignKeyConstraint(
         ["project_id", "applied_command_id"],
         ["command_receipts.project_id", "command_receipts.id"],
         deferrable=True,
@@ -1545,12 +1949,16 @@ user_feedback = Table(
 def _change_request_status_ck(resolved_column: str) -> CheckConstraint:
     return _ck(
         "status_resolution_fields",
-        f"((status = 'open' AND {resolved_column} IS NULL "
-        "AND close_reason_code IS NULL AND closed_at_ms IS NULL) "
-        f"OR (status = 'resolved' AND {resolved_column} IS NOT NULL "
-        "AND close_reason_code IS NOT NULL AND closed_at_ms IS NOT NULL) "
-        f"OR (status IN ('rejected', 'superseded') AND {resolved_column} IS NULL "
-        "AND close_reason_code IS NOT NULL AND closed_at_ms IS NOT NULL))",
+        f"((status = 'open' AND latest_parent_review_id IS NULL "
+        f"AND {resolved_column} IS NULL AND resolution_code IS NULL "
+        "AND closed_at_ms IS NULL) "
+        "OR (status = 'reviewed' AND latest_parent_review_id IS NOT NULL "
+        f"AND {resolved_column} IS NULL AND resolution_code IS NULL "
+        "AND closed_at_ms IS NULL) "
+        "OR (status = 'resolved' AND latest_parent_review_id IS NOT NULL "
+        "AND resolution_code IS NOT NULL AND closed_at_ms IS NOT NULL) "
+        f"OR (status = 'superseded' AND {resolved_column} IS NULL "
+        "AND resolution_code IS NOT NULL AND closed_at_ms IS NOT NULL))",
     )
 
 
@@ -1567,11 +1975,13 @@ chapter_arc_change_requests = Table(
     Column("target_arc_baseline_id", String, nullable=False),
     Column("evidence_ref_id", String, nullable=False),
     Column("status", String, nullable=False),
+    Column("latest_parent_review_id", String),
     Column("resolved_by_arc_baseline_id", String),
-    Column("close_reason_code", String),
+    Column("resolution_code", String),
     Column("created_at_ms", Integer, nullable=False),
     Column("closed_at_ms", Integer),
     *_project_owned_constraints(),
+    UniqueConstraint("project_id", "book_id", "arc_id", "id"),
     UniqueConstraint("source_review_id"),
     _enum_ck("status", "status", CHANGE_REQUEST_STATUSES),
     _change_request_status_ck("resolved_by_arc_baseline_id"),
@@ -1603,6 +2013,18 @@ chapter_arc_change_requests = Table(
         ],
     ),
     ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "id", "latest_parent_review_id"],
+        [
+            "arc_parent_reviews.project_id",
+            "arc_parent_reviews.book_id",
+            "arc_parent_reviews.arc_id",
+            "arc_parent_reviews.request_id",
+            "arc_parent_reviews.id",
+        ],
+        deferrable=True,
+        initially="DEFERRED",
+    ),
+    ForeignKeyConstraint(
         ["project_id", "book_id", "arc_id", "resolved_by_arc_baseline_id"],
         [
             "arc_baselines.project_id",
@@ -1615,86 +2037,824 @@ chapter_arc_change_requests = Table(
 )
 
 
-def _book_change_request_table(name: str, *, source_layer: str) -> Table:
-    source_columns: list[Column[Any]] = [
-        Column("id", String, primary_key=True),
-        Column("project_id", String, nullable=False),
-        Column("book_id", String, nullable=False),
-        Column("arc_id", String, nullable=False),
-    ]
-    if source_layer == "chapter":
-        source_columns.append(Column("chapter_id", String, nullable=False))
-    source_columns.extend(
-        [
-            Column("source_submission_id", String, nullable=False),
-            Column("source_review_id", String, nullable=False),
-            Column("target_book_baseline_id", String, nullable=False),
-            Column("evidence_ref_id", String, nullable=False),
-            Column("status", String, nullable=False),
-            Column("resolved_by_book_baseline_id", String),
-            Column("close_reason_code", String),
-            Column("created_at_ms", Integer, nullable=False),
-            Column("closed_at_ms", Integer),
-        ]
-    )
-    if source_layer == "chapter":
-        source_fk = ForeignKeyConstraint(
-            [
-                "project_id",
-                "book_id",
-                "arc_id",
-                "chapter_id",
-                "source_submission_id",
-                "source_review_id",
-            ],
-            [
-                "chapter_reviews.project_id",
-                "chapter_reviews.book_id",
-                "chapter_reviews.arc_id",
-                "chapter_reviews.chapter_id",
-                "chapter_reviews.submission_id",
-                "chapter_reviews.id",
-            ],
-        )
-    else:
-        source_fk = ForeignKeyConstraint(
-            ["project_id", "book_id", "arc_id", "source_submission_id", "source_review_id"],
-            [
-                "arc_reviews.project_id",
-                "arc_reviews.book_id",
-                "arc_reviews.arc_id",
-                "arc_reviews.submission_id",
-                "arc_reviews.id",
-            ],
-        )
-    return Table(
-        name,
-        metadata,
-        *source_columns,
-        *_project_owned_constraints(),
-        UniqueConstraint("source_review_id"),
-        _enum_ck("status", "status", CHANGE_REQUEST_STATUSES),
-        _change_request_status_ck("resolved_by_book_baseline_id"),
-        source_fk,
-        ForeignKeyConstraint(
-            ["project_id", "book_id", "target_book_baseline_id"],
-            ["book_baselines.project_id", "book_baselines.book_id", "book_baselines.id"],
-        ),
-        ForeignKeyConstraint(
-            ["project_id", "book_id", "resolved_by_book_baseline_id"],
-            ["book_baselines.project_id", "book_baselines.book_id", "book_baselines.id"],
-        ),
-        _content_ref_fk("evidence_ref_id"),
-    )
-
-
-chapter_book_change_requests = _book_change_request_table(
-    "chapter_book_change_requests",
-    source_layer="chapter",
-)
-arc_book_change_requests = _book_change_request_table(
+arc_book_change_requests = Table(
     "arc_book_change_requests",
-    source_layer="arc",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("project_id", String, nullable=False),
+    Column("book_id", String, nullable=False),
+    Column("arc_id", String, nullable=False),
+    Column("source_candidate_submission_id", String),
+    Column("source_candidate_review_id", String),
+    Column("source_arc_parent_review_id", String),
+    Column("source_arc_closure_review_id", String),
+    Column("target_book_baseline_id", String, nullable=False),
+    Column("evidence_ref_id", String, nullable=False),
+    Column("status", String, nullable=False),
+    Column("latest_parent_review_id", String),
+    Column("resolved_by_book_baseline_id", String),
+    Column("resolution_code", String),
+    Column("created_at_ms", Integer, nullable=False),
+    Column("closed_at_ms", Integer),
+    *_project_owned_constraints(),
+    UniqueConstraint("project_id", "book_id", "id"),
+    UniqueConstraint("project_id", "book_id", "arc_id", "id"),
+    _enum_ck("status", "status", CHANGE_REQUEST_STATUSES),
+    _change_request_status_ck("resolved_by_book_baseline_id"),
+    _ck(
+        "source_review_shape",
+        "((source_candidate_submission_id IS NULL "
+        "AND source_candidate_review_id IS NULL) "
+        "OR (source_candidate_submission_id IS NOT NULL "
+        "AND source_candidate_review_id IS NOT NULL)) "
+        "AND ((source_candidate_review_id IS NOT NULL) "
+        "+ (source_arc_parent_review_id IS NOT NULL) "
+        "+ (source_arc_closure_review_id IS NOT NULL) = 1)",
+    ),
+    ForeignKeyConstraint(
+        [
+            "project_id",
+            "book_id",
+            "arc_id",
+            "source_candidate_submission_id",
+            "source_candidate_review_id",
+        ],
+        [
+            "arc_reviews.project_id",
+            "arc_reviews.book_id",
+            "arc_reviews.arc_id",
+            "arc_reviews.submission_id",
+            "arc_reviews.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "source_arc_parent_review_id"],
+        [
+            "arc_parent_reviews.project_id",
+            "arc_parent_reviews.book_id",
+            "arc_parent_reviews.arc_id",
+            "arc_parent_reviews.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "source_arc_closure_review_id"],
+        [
+            "arc_closure_reviews.project_id",
+            "arc_closure_reviews.book_id",
+            "arc_closure_reviews.arc_id",
+            "arc_closure_reviews.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "target_book_baseline_id"],
+        ["book_baselines.project_id", "book_baselines.book_id", "book_baselines.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "id", "latest_parent_review_id"],
+        [
+            "book_parent_reviews.project_id",
+            "book_parent_reviews.book_id",
+            "book_parent_reviews.request_id",
+            "book_parent_reviews.id",
+        ],
+        deferrable=True,
+        initially="DEFERRED",
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "resolved_by_book_baseline_id"],
+        ["book_baselines.project_id", "book_baselines.book_id", "book_baselines.id"],
+    ),
+    _content_ref_fk("evidence_ref_id"),
+)
+Index(
+    "uq_arc_book_request_candidate_source",
+    arc_book_change_requests.c.source_candidate_review_id,
+    unique=True,
+    sqlite_where=arc_book_change_requests.c.source_candidate_review_id.is_not(None),
+)
+Index(
+    "uq_arc_book_request_parent_source",
+    arc_book_change_requests.c.source_arc_parent_review_id,
+    unique=True,
+    sqlite_where=arc_book_change_requests.c.source_arc_parent_review_id.is_not(None),
+)
+Index(
+    "uq_arc_book_request_closure_source",
+    arc_book_change_requests.c.source_arc_closure_review_id,
+    unique=True,
+    sqlite_where=arc_book_change_requests.c.source_arc_closure_review_id.is_not(None),
+)
+
+
+# Explicit parent, closure, and Book-boundary authority ----------------------------
+
+arc_parent_reviews = Table(
+    "arc_parent_reviews",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("project_id", String, nullable=False),
+    Column("book_id", String, nullable=False),
+    Column("arc_id", String, nullable=False),
+    Column("request_id", String, nullable=False),
+    Column("target_arc_baseline_id", String, nullable=False),
+    Column("source_task_id", String, nullable=False),
+    Column("source_attempt_id", String, nullable=False),
+    Column("strategy_id", String, nullable=False),
+    Column("strategy_version", Integer, nullable=False),
+    Column("rubric_id", String, nullable=False),
+    Column("rubric_version", Integer, nullable=False),
+    Column("arc_contract_judgment", String, nullable=False),
+    Column("parent_review_judgment", String, nullable=False),
+    Column("disposition", String, nullable=False),
+    Column("resolution_owner", String, nullable=False),
+    Column("detail_ref_id", String, nullable=False),
+    Column("precheck_ref_id", String, nullable=False),
+    Column("user_question_ref_id", String),
+    Column("exact_input_fingerprint", String, nullable=False),
+    Column("correction_lineage_id", String, nullable=False),
+    Column("correction_lineage_origin", String, nullable=False),
+    Column("automatic_correction_round", Integer, nullable=False),
+    Column("review_ordinal", Integer, nullable=False),
+    Column("predecessor_review_id", String),
+    Column("source_feedback_id", String),
+    Column("source_exhausted_review_id", String),
+    Column("opened_arc_workspace_id", String),
+    Column("created_at_ms", Integer, nullable=False),
+    *_project_owned_constraints(),
+    UniqueConstraint("project_id", "book_id", "arc_id", "id"),
+    UniqueConstraint("project_id", "book_id", "arc_id", "request_id", "id"),
+    UniqueConstraint("request_id", "exact_input_fingerprint"),
+    UniqueConstraint("source_task_id"),
+    UniqueConstraint(
+        "project_id",
+        "correction_lineage_id",
+        "automatic_correction_round",
+    ),
+    _ck("strategy_versions_positive", "strategy_version >= 1 AND rubric_version >= 1"),
+    _ck("exact_input_fingerprint", _sha_expression("exact_input_fingerprint")),
+    _enum_ck(
+        "arc_contract_judgment",
+        "arc_contract_judgment",
+        ("remains_applicable", "revision_warranted", "unable_to_judge"),
+    ),
+    _enum_ck(
+        "parent_review_judgment",
+        "parent_review_judgment",
+        ("not_required", "book_review_required"),
+    ),
+    _enum_ck(
+        "disposition",
+        "disposition",
+        (
+            "keep_arc",
+            "arc_revision_warranted",
+            "book_review_required",
+            "chapter_evidence_review_required",
+            "waiting_for_user",
+            "no_legal_route",
+        ),
+    ),
+    _enum_ck(
+        "resolution_owner",
+        "resolution_owner",
+        ("none", "chapter", "arc", "book", "creator"),
+    ),
+    *_correction_lineage_checks(),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "request_id"],
+        [
+            "chapter_arc_change_requests.project_id",
+            "chapter_arc_change_requests.book_id",
+            "chapter_arc_change_requests.arc_id",
+            "chapter_arc_change_requests.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "target_arc_baseline_id"],
+        [
+            "arc_baselines.project_id",
+            "arc_baselines.book_id",
+            "arc_baselines.arc_id",
+            "arc_baselines.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "source_task_id", "source_attempt_id"],
+        [
+            "agent_task_attempts.project_id",
+            "agent_task_attempts.task_id",
+            "agent_task_attempts.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        [
+            "project_id",
+            "book_id",
+            "arc_id",
+            "request_id",
+            "predecessor_review_id",
+        ],
+        [
+            "arc_parent_reviews.project_id",
+            "arc_parent_reviews.book_id",
+            "arc_parent_reviews.arc_id",
+            "arc_parent_reviews.request_id",
+            "arc_parent_reviews.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        [
+            "project_id",
+            "book_id",
+            "arc_id",
+            "request_id",
+            "source_exhausted_review_id",
+        ],
+        [
+            "arc_parent_reviews.project_id",
+            "arc_parent_reviews.book_id",
+            "arc_parent_reviews.arc_id",
+            "arc_parent_reviews.request_id",
+            "arc_parent_reviews.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "source_feedback_id"],
+        ["user_feedback.project_id", "user_feedback.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "opened_arc_workspace_id"],
+        [
+            "arc_workspaces.project_id",
+            "arc_workspaces.book_id",
+            "arc_workspaces.arc_id",
+            "arc_workspaces.id",
+        ],
+    ),
+    *_content_ref_fks("detail_ref_id", "precheck_ref_id", "user_question_ref_id"),
+)
+
+book_parent_reviews = Table(
+    "book_parent_reviews",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("project_id", String, nullable=False),
+    Column("book_id", String, nullable=False),
+    Column("arc_id", String, nullable=False),
+    Column("request_id", String, nullable=False),
+    Column("target_book_baseline_id", String, nullable=False),
+    Column("source_task_id", String, nullable=False),
+    Column("source_attempt_id", String, nullable=False),
+    Column("strategy_id", String, nullable=False),
+    Column("strategy_version", Integer, nullable=False),
+    Column("rubric_id", String, nullable=False),
+    Column("rubric_version", Integer, nullable=False),
+    Column("book_contract_judgment", String, nullable=False),
+    Column("disposition", String, nullable=False),
+    Column("resolution_owner", String, nullable=False),
+    Column("detail_ref_id", String, nullable=False),
+    Column("precheck_ref_id", String, nullable=False),
+    Column("user_question_ref_id", String),
+    Column("exact_input_fingerprint", String, nullable=False),
+    Column("correction_lineage_id", String, nullable=False),
+    Column("correction_lineage_origin", String, nullable=False),
+    Column("automatic_correction_round", Integer, nullable=False),
+    Column("review_ordinal", Integer, nullable=False),
+    Column("predecessor_review_id", String),
+    Column("source_feedback_id", String),
+    Column("source_exhausted_review_id", String),
+    Column("opened_book_workspace_id", String),
+    Column("created_at_ms", Integer, nullable=False),
+    *_project_owned_constraints(),
+    UniqueConstraint("project_id", "book_id", "id"),
+    UniqueConstraint("project_id", "book_id", "request_id", "id"),
+    UniqueConstraint("request_id", "exact_input_fingerprint"),
+    UniqueConstraint("source_task_id"),
+    UniqueConstraint(
+        "project_id",
+        "correction_lineage_id",
+        "automatic_correction_round",
+    ),
+    _ck("strategy_versions_positive", "strategy_version >= 1 AND rubric_version >= 1"),
+    _ck("exact_input_fingerprint", _sha_expression("exact_input_fingerprint")),
+    _enum_ck(
+        "book_contract_judgment",
+        "book_contract_judgment",
+        ("remains_applicable", "revision_warranted", "unable_to_judge"),
+    ),
+    _enum_ck(
+        "disposition",
+        "disposition",
+        (
+            "keep_book",
+            "book_revision_warranted",
+            "arc_evidence_review_required",
+            "waiting_for_user",
+            "no_legal_route",
+        ),
+    ),
+    _enum_ck(
+        "resolution_owner",
+        "resolution_owner",
+        ("none", "arc", "book", "creator"),
+    ),
+    *_correction_lineage_checks(),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "request_id"],
+        [
+            "arc_book_change_requests.project_id",
+            "arc_book_change_requests.book_id",
+            "arc_book_change_requests.arc_id",
+            "arc_book_change_requests.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "target_book_baseline_id"],
+        ["book_baselines.project_id", "book_baselines.book_id", "book_baselines.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "source_task_id", "source_attempt_id"],
+        [
+            "agent_task_attempts.project_id",
+            "agent_task_attempts.task_id",
+            "agent_task_attempts.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "request_id", "predecessor_review_id"],
+        [
+            "book_parent_reviews.project_id",
+            "book_parent_reviews.book_id",
+            "book_parent_reviews.request_id",
+            "book_parent_reviews.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "request_id", "source_exhausted_review_id"],
+        [
+            "book_parent_reviews.project_id",
+            "book_parent_reviews.book_id",
+            "book_parent_reviews.request_id",
+            "book_parent_reviews.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "source_feedback_id"],
+        ["user_feedback.project_id", "user_feedback.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "opened_book_workspace_id"],
+        [
+            "book_workspaces.project_id",
+            "book_workspaces.book_id",
+            "book_workspaces.id",
+        ],
+    ),
+    *_content_ref_fks("detail_ref_id", "precheck_ref_id", "user_question_ref_id"),
+)
+
+arc_closure_reviews = Table(
+    "arc_closure_reviews",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("project_id", String, nullable=False),
+    Column("book_id", String, nullable=False),
+    Column("arc_id", String, nullable=False),
+    Column("book_baseline_id", String, nullable=False),
+    Column("arc_baseline_id", String, nullable=False),
+    Column("canon_baseline_id", String, nullable=False),
+    Column("terminal_chapter_id", String, nullable=False),
+    Column("terminal_chapter_baseline_id", String, nullable=False),
+    Column("committed_chapter_count", Integer, nullable=False),
+    Column("closure_chapter_count", Integer, nullable=False),
+    Column("chapter_set_fingerprint", String, nullable=False),
+    Column("chapter_set_manifest_ref_id", String, nullable=False),
+    Column("source_task_id", String, nullable=False),
+    Column("source_attempt_id", String, nullable=False),
+    Column("strategy_id", String, nullable=False),
+    Column("strategy_version", Integer, nullable=False),
+    Column("rubric_id", String, nullable=False),
+    Column("rubric_version", Integer, nullable=False),
+    Column("arc_contract_judgment", String, nullable=False),
+    Column("parent_review_judgment", String, nullable=False),
+    Column("disposition", String, nullable=False),
+    Column("resolution_owner", String, nullable=False),
+    Column("detail_ref_id", String, nullable=False),
+    Column("precheck_ref_id", String, nullable=False),
+    Column("user_question_ref_id", String),
+    Column("exact_input_fingerprint", String, nullable=False),
+    Column("correction_lineage_id", String, nullable=False),
+    Column("correction_lineage_origin", String, nullable=False),
+    Column("automatic_correction_round", Integer, nullable=False),
+    Column("review_ordinal", Integer, nullable=False),
+    Column("predecessor_review_id", String),
+    Column("source_feedback_id", String),
+    Column("source_exhausted_review_id", String),
+    Column("opened_arc_workspace_id", String),
+    Column("created_at_ms", Integer, nullable=False),
+    *_project_owned_constraints(),
+    UniqueConstraint("project_id", "book_id", "arc_id", "id"),
+    UniqueConstraint("source_task_id"),
+    UniqueConstraint("arc_id", "exact_input_fingerprint"),
+    UniqueConstraint(
+        "project_id",
+        "correction_lineage_id",
+        "automatic_correction_round",
+    ),
+    _ck(
+        "chapter_counts",
+        "committed_chapter_count >= 1 "
+        "AND closure_chapter_count = committed_chapter_count",
+    ),
+    _ck("chapter_set_fingerprint", _sha_expression("chapter_set_fingerprint")),
+    _ck("exact_input_fingerprint", _sha_expression("exact_input_fingerprint")),
+    _ck("strategy_versions_positive", "strategy_version >= 1 AND rubric_version >= 1"),
+    _enum_ck(
+        "arc_contract_judgment",
+        "arc_contract_judgment",
+        ("remains_applicable", "revision_warranted", "unable_to_judge"),
+    ),
+    _enum_ck(
+        "parent_review_judgment",
+        "parent_review_judgment",
+        ("not_required", "book_review_required"),
+    ),
+    _enum_ck(
+        "disposition",
+        "disposition",
+        (
+            "pass",
+            "arc_revision_warranted",
+            "book_review_required",
+            "chapter_evidence_review_required",
+            "waiting_for_user",
+            "no_legal_route",
+        ),
+    ),
+    _enum_ck(
+        "resolution_owner",
+        "resolution_owner",
+        ("none", "chapter", "arc", "book", "creator"),
+    ),
+    *_correction_lineage_checks(),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "book_baseline_id"],
+        ["book_baselines.project_id", "book_baselines.book_id", "book_baselines.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "arc_baseline_id"],
+        [
+            "arc_baselines.project_id",
+            "arc_baselines.book_id",
+            "arc_baselines.arc_id",
+            "arc_baselines.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "canon_baseline_id"],
+        ["canon_baselines.project_id", "canon_baselines.id"],
+    ),
+    ForeignKeyConstraint(
+        [
+            "project_id",
+            "book_id",
+            "arc_id",
+            "terminal_chapter_id",
+            "terminal_chapter_baseline_id",
+        ],
+        [
+            "chapter_baselines.project_id",
+            "chapter_baselines.book_id",
+            "chapter_baselines.arc_id",
+            "chapter_baselines.chapter_id",
+            "chapter_baselines.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "source_task_id", "source_attempt_id"],
+        [
+            "agent_task_attempts.project_id",
+            "agent_task_attempts.task_id",
+            "agent_task_attempts.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "predecessor_review_id"],
+        [
+            "arc_closure_reviews.project_id",
+            "arc_closure_reviews.book_id",
+            "arc_closure_reviews.arc_id",
+            "arc_closure_reviews.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "source_exhausted_review_id"],
+        [
+            "arc_closure_reviews.project_id",
+            "arc_closure_reviews.book_id",
+            "arc_closure_reviews.arc_id",
+            "arc_closure_reviews.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "source_feedback_id"],
+        ["user_feedback.project_id", "user_feedback.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "opened_arc_workspace_id"],
+        [
+            "arc_workspaces.project_id",
+            "arc_workspaces.book_id",
+            "arc_workspaces.arc_id",
+            "arc_workspaces.id",
+        ],
+    ),
+    *_content_ref_fks(
+        "chapter_set_manifest_ref_id",
+        "detail_ref_id",
+        "precheck_ref_id",
+        "user_question_ref_id",
+    ),
+)
+
+arc_closures = Table(
+    "arc_closures",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("project_id", String, nullable=False),
+    Column("book_id", String, nullable=False),
+    Column("arc_id", String, nullable=False),
+    Column("closure_version", Integer, nullable=False),
+    Column("parent_closure_id", String),
+    Column("closure_review_id", String, nullable=False),
+    Column("book_baseline_id", String, nullable=False),
+    Column("arc_baseline_id", String, nullable=False),
+    Column("canon_baseline_id", String, nullable=False),
+    Column("terminal_chapter_id", String, nullable=False),
+    Column("terminal_chapter_baseline_id", String, nullable=False),
+    Column("committed_chapter_count", Integer, nullable=False),
+    Column("chapter_set_fingerprint", String, nullable=False),
+    Column("chapter_set_manifest_ref_id", String, nullable=False),
+    Column("normalized_result_ref_id", String, nullable=False),
+    Column("created_at_ms", Integer, nullable=False),
+    *_project_owned_constraints(),
+    UniqueConstraint("project_id", "book_id", "id"),
+    UniqueConstraint("project_id", "book_id", "arc_id", "id"),
+    UniqueConstraint("arc_id", "closure_version"),
+    UniqueConstraint("closure_review_id"),
+    _ck(
+        "version_parent",
+        "((closure_version = 1 AND parent_closure_id IS NULL) "
+        "OR (closure_version >= 2 AND parent_closure_id IS NOT NULL))",
+    ),
+    _ck("committed_chapter_count_positive", "committed_chapter_count >= 1"),
+    _ck("chapter_set_fingerprint", _sha_expression("chapter_set_fingerprint")),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "parent_closure_id"],
+        [
+            "arc_closures.project_id",
+            "arc_closures.book_id",
+            "arc_closures.arc_id",
+            "arc_closures.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "closure_review_id"],
+        [
+            "arc_closure_reviews.project_id",
+            "arc_closure_reviews.book_id",
+            "arc_closure_reviews.arc_id",
+            "arc_closure_reviews.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "book_baseline_id"],
+        ["book_baselines.project_id", "book_baselines.book_id", "book_baselines.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "arc_baseline_id"],
+        [
+            "arc_baselines.project_id",
+            "arc_baselines.book_id",
+            "arc_baselines.arc_id",
+            "arc_baselines.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "canon_baseline_id"],
+        ["canon_baselines.project_id", "canon_baselines.id"],
+    ),
+    ForeignKeyConstraint(
+        [
+            "project_id",
+            "book_id",
+            "arc_id",
+            "terminal_chapter_id",
+            "terminal_chapter_baseline_id",
+        ],
+        [
+            "chapter_baselines.project_id",
+            "chapter_baselines.book_id",
+            "chapter_baselines.arc_id",
+            "chapter_baselines.chapter_id",
+            "chapter_baselines.id",
+        ],
+    ),
+    *_content_ref_fks("chapter_set_manifest_ref_id", "normalized_result_ref_id"),
+)
+
+book_boundary_reviews = Table(
+    "book_boundary_reviews",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("project_id", String, nullable=False),
+    Column("book_id", String, nullable=False),
+    Column("book_baseline_id", String, nullable=False),
+    Column("arc_closure_id", String, nullable=False),
+    Column("canon_baseline_id", String, nullable=False),
+    Column("committed_chapter_count", Integer, nullable=False),
+    Column("chapter_set_fingerprint", String, nullable=False),
+    Column("source_task_id", String, nullable=False),
+    Column("source_attempt_id", String, nullable=False),
+    Column("strategy_id", String, nullable=False),
+    Column("strategy_version", Integer, nullable=False),
+    Column("rubric_id", String, nullable=False),
+    Column("rubric_version", Integer, nullable=False),
+    Column("requirement_statuses_ref_id", String, nullable=False),
+    Column("ending_trajectory_judgment", String, nullable=False),
+    Column("book_contract_judgment", String, nullable=False),
+    Column("disposition", String, nullable=False),
+    Column("resolution_owner", String, nullable=False),
+    Column("detail_ref_id", String, nullable=False),
+    Column("precheck_ref_id", String, nullable=False),
+    Column("user_question_ref_id", String),
+    Column("exact_input_fingerprint", String, nullable=False),
+    Column("correction_lineage_id", String, nullable=False),
+    Column("correction_lineage_origin", String, nullable=False),
+    Column("automatic_correction_round", Integer, nullable=False),
+    Column("review_ordinal", Integer, nullable=False),
+    Column("predecessor_review_id", String),
+    Column("source_feedback_id", String),
+    Column("source_exhausted_review_id", String),
+    Column("opened_book_workspace_id", String),
+    Column("created_at_ms", Integer, nullable=False),
+    *_project_owned_constraints(),
+    UniqueConstraint("project_id", "book_id", "id"),
+    UniqueConstraint("source_task_id"),
+    UniqueConstraint("book_id", "exact_input_fingerprint"),
+    UniqueConstraint(
+        "project_id",
+        "correction_lineage_id",
+        "automatic_correction_round",
+    ),
+    _ck("committed_chapter_count_positive", "committed_chapter_count >= 1"),
+    _ck("chapter_set_fingerprint", _sha_expression("chapter_set_fingerprint")),
+    _ck("exact_input_fingerprint", _sha_expression("exact_input_fingerprint")),
+    _ck("strategy_versions_positive", "strategy_version >= 1 AND rubric_version >= 1"),
+    _enum_ck(
+        "ending_trajectory_judgment",
+        "ending_trajectory_judgment",
+        (
+            "regular_arc_needed",
+            "final_arc_ready",
+            "completion_ready",
+            "unable_to_judge",
+        ),
+    ),
+    _enum_ck(
+        "book_contract_judgment",
+        "book_contract_judgment",
+        ("remains_applicable", "revision_warranted", "unable_to_judge"),
+    ),
+    _enum_ck(
+        "disposition",
+        "disposition",
+        (
+            "continue_regular_arc",
+            "plan_final_arc",
+            "complete_book",
+            "book_revision_warranted",
+            "waiting_for_user",
+            "no_legal_route",
+        ),
+    ),
+    _enum_ck(
+        "resolution_owner",
+        "resolution_owner",
+        ("none", "arc", "book", "creator"),
+    ),
+    *_correction_lineage_checks(),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "book_baseline_id"],
+        ["book_baselines.project_id", "book_baselines.book_id", "book_baselines.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_closure_id"],
+        ["arc_closures.project_id", "arc_closures.book_id", "arc_closures.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "canon_baseline_id"],
+        ["canon_baselines.project_id", "canon_baselines.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "source_task_id", "source_attempt_id"],
+        [
+            "agent_task_attempts.project_id",
+            "agent_task_attempts.task_id",
+            "agent_task_attempts.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "predecessor_review_id"],
+        [
+            "book_boundary_reviews.project_id",
+            "book_boundary_reviews.book_id",
+            "book_boundary_reviews.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "source_exhausted_review_id"],
+        [
+            "book_boundary_reviews.project_id",
+            "book_boundary_reviews.book_id",
+            "book_boundary_reviews.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "source_feedback_id"],
+        ["user_feedback.project_id", "user_feedback.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "opened_book_workspace_id"],
+        [
+            "book_workspaces.project_id",
+            "book_workspaces.book_id",
+            "book_workspaces.id",
+        ],
+    ),
+    *_content_ref_fks(
+        "requirement_statuses_ref_id",
+        "detail_ref_id",
+        "precheck_ref_id",
+        "user_question_ref_id",
+    ),
+)
+
+book_progress_handoffs = Table(
+    "book_progress_handoffs",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("project_id", String, nullable=False),
+    Column("book_id", String, nullable=False),
+    Column("handoff_version", Integer, nullable=False),
+    Column("parent_handoff_id", String),
+    Column("source_boundary_review_id", String, nullable=False),
+    Column("arc_closure_id", String, nullable=False),
+    Column("book_baseline_id", String, nullable=False),
+    Column("canon_baseline_id", String, nullable=False),
+    Column("next_arc_purpose", String, nullable=False),
+    Column("remaining_requirements_ref_id", String, nullable=False),
+    Column("guidance_ref_id", String, nullable=False),
+    Column("created_at_ms", Integer, nullable=False),
+    *_project_owned_constraints(),
+    UniqueConstraint("project_id", "book_id", "id"),
+    UniqueConstraint("book_id", "handoff_version"),
+    UniqueConstraint("source_boundary_review_id"),
+    _ck(
+        "version_parent",
+        "((handoff_version = 1 AND parent_handoff_id IS NULL) "
+        "OR (handoff_version >= 2 AND parent_handoff_id IS NOT NULL))",
+    ),
+    _enum_ck("next_arc_purpose", "next_arc_purpose", ("regular", "final")),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "parent_handoff_id"],
+        [
+            "book_progress_handoffs.project_id",
+            "book_progress_handoffs.book_id",
+            "book_progress_handoffs.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "source_boundary_review_id"],
+        [
+            "book_boundary_reviews.project_id",
+            "book_boundary_reviews.book_id",
+            "book_boundary_reviews.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_closure_id"],
+        ["arc_closures.project_id", "arc_closures.book_id", "arc_closures.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "book_baseline_id"],
+        ["book_baselines.project_id", "book_baselines.book_id", "book_baselines.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "canon_baseline_id"],
+        ["canon_baselines.project_id", "canon_baselines.id"],
+    ),
+    *_content_ref_fks("remaining_requirements_ref_id", "guidance_ref_id"),
 )
 
 
@@ -1710,7 +2870,9 @@ generation_runs = Table(
     Column("desired_state", String, nullable=False),
     Column("lock_version", Integer, nullable=False),
     Column("wait_reason_code", String),
+    Column("failure_source_kind", String),
     Column("blocking_task_id", String),
+    Column("blocking_action_key", String),
     Column("failure_code", String),
     Column("failure_ref_id", String),
     Column("created_at_ms", Integer, nullable=False),
@@ -1746,10 +2908,23 @@ generation_runs = Table(
         "AND desired_state = 'paused'))",
     ),
     _ck(
+        "wait_reason_fields",
+        "((status = 'waiting_for_user' AND wait_reason_code IS NOT NULL "
+        "AND length(trim(wait_reason_code)) > 0) "
+        "OR (status <> 'waiting_for_user' AND wait_reason_code IS NULL))",
+    ),
+    _ck(
         "failure_pause_fields",
-        "((status = 'failure_paused' AND blocking_task_id IS NOT NULL "
-        "AND failure_code IS NOT NULL AND failure_ref_id IS NOT NULL) "
-        "OR (status <> 'failure_paused' AND blocking_task_id IS NULL "
+        "((status = 'failure_paused' "
+        "AND failure_source_kind IN ('agent_task', 'harness_action') "
+        "AND failure_code IS NOT NULL AND failure_ref_id IS NOT NULL "
+        "AND ((failure_source_kind = 'agent_task' "
+        "AND blocking_task_id IS NOT NULL AND blocking_action_key IS NULL) "
+        "OR (failure_source_kind = 'harness_action' "
+        "AND blocking_task_id IS NULL AND blocking_action_key IS NOT NULL "
+        "AND length(trim(blocking_action_key)) > 0))) "
+        "OR (status <> 'failure_paused' AND failure_source_kind IS NULL "
+        "AND blocking_task_id IS NULL AND blocking_action_key IS NULL "
         "AND failure_code IS NULL AND failure_ref_id IS NULL))",
     ),
     ForeignKeyConstraint(
@@ -1811,6 +2986,17 @@ agent_tasks = Table(
     Column("arc_baseline_id", String),
     Column("chapter_baseline_id", String),
     Column("canon_baseline_id", String, nullable=False),
+    Column("correction_lineage_id", String),
+    Column("correction_lineage_origin", String),
+    Column("automatic_correction_round", Integer),
+    Column("source_arc_parent_review_id", String),
+    Column("source_book_parent_review_id", String),
+    Column("source_arc_closure_review_id", String),
+    Column("source_book_boundary_review_id", String),
+    Column("source_chapter_arc_request_id", String),
+    Column("source_arc_book_request_id", String),
+    Column("source_arc_closure_id", String),
+    Column("source_feedback_id", String),
     Column("task_plan_ref_id", String, nullable=False),
     Column("input_manifest_ref_id", String, nullable=False),
     Column("input_messages_ref_id", String, nullable=False),
@@ -1823,6 +3009,8 @@ agent_tasks = Table(
     Column("output_schema_id", String, nullable=False),
     Column("output_schema_version", Integer, nullable=False),
     Column("output_schema_fingerprint", String, nullable=False),
+    Column("evaluation_strategy_id", String),
+    Column("evaluation_strategy_version", Integer),
     Column("rubric_id", String),
     Column("rubric_version", Integer),
     Column("harness_policy_id", String, nullable=False),
@@ -1877,6 +3065,31 @@ agent_tasks = Table(
         "AND arc_baseline_id IS NOT NULL))",
     ),
     _ck(
+        "correction_lineage_shape",
+        "((correction_lineage_id IS NULL AND correction_lineage_origin IS NULL "
+        "AND automatic_correction_round IS NULL AND source_feedback_id IS NULL) "
+        "OR (correction_lineage_id IS NOT NULL "
+        "AND correction_lineage_origin IN ('review_initiated', 'user_initiated') "
+        "AND automatic_correction_round IN (0, 1) "
+        "AND ((correction_lineage_origin = 'review_initiated' "
+        "AND source_feedback_id IS NULL) "
+        "OR (correction_lineage_origin = 'user_initiated' "
+        "AND source_feedback_id IS NOT NULL))))",
+    ),
+    _ck(
+        "source_review_at_most_one",
+        "(source_arc_parent_review_id IS NOT NULL) "
+        "+ (source_book_parent_review_id IS NOT NULL) "
+        "+ (source_arc_closure_review_id IS NOT NULL) "
+        "+ (source_book_boundary_review_id IS NOT NULL) <= 1",
+    ),
+    _ck(
+        "source_authority_at_most_one",
+        "(source_chapter_arc_request_id IS NOT NULL) "
+        "+ (source_arc_book_request_id IS NOT NULL) "
+        "+ (source_arc_closure_id IS NOT NULL) <= 1",
+    ),
+    _ck(
         "fingerprints",
         f"{_sha_expression('input_fingerprint')} "
         f"AND {_sha_expression('prompt_fingerprint')} "
@@ -1895,10 +3108,18 @@ agent_tasks = Table(
         "OR (rubric_id IS NOT NULL AND length(trim(rubric_id)) > 0 "
         "AND rubric_version >= 1))",
     ),
+    _ck(
+        "evaluation_strategy_pair",
+        "((role = 'evaluator' AND evaluation_strategy_id IS NOT NULL "
+        "AND length(trim(evaluation_strategy_id)) > 0 "
+        "AND evaluation_strategy_version >= 1 AND rubric_id IS NOT NULL) "
+        "OR (role <> 'evaluator' AND evaluation_strategy_id IS NULL "
+        "AND evaluation_strategy_version IS NULL))",
+    ),
     _enum_ck(
         "api_family",
         "api_family",
-        ("openai_responses", "openai_chat_completions", "anthropic_messages"),
+        ("openai_responses", "anthropic_messages"),
     ),
     _enum_ck("output_mode", "output_mode", ("native_json_schema", "text_streaming")),
     _ck(
@@ -1987,6 +3208,47 @@ agent_tasks = Table(
     ForeignKeyConstraint(
         ["project_id", "predecessor_task_id"],
         ["agent_tasks.project_id", "agent_tasks.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "source_arc_parent_review_id"],
+        ["arc_parent_reviews.project_id", "arc_parent_reviews.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "source_book_parent_review_id"],
+        ["book_parent_reviews.project_id", "book_parent_reviews.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "source_arc_closure_review_id"],
+        ["arc_closure_reviews.project_id", "arc_closure_reviews.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "source_book_boundary_review_id"],
+        ["book_boundary_reviews.project_id", "book_boundary_reviews.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "source_chapter_arc_request_id"],
+        [
+            "chapter_arc_change_requests.project_id",
+            "chapter_arc_change_requests.book_id",
+            "chapter_arc_change_requests.arc_id",
+            "chapter_arc_change_requests.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "source_arc_book_request_id"],
+        [
+            "arc_book_change_requests.project_id",
+            "arc_book_change_requests.book_id",
+            "arc_book_change_requests.id",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "source_arc_closure_id"],
+        ["arc_closures.project_id", "arc_closures.book_id", "arc_closures.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "source_feedback_id"],
+        ["user_feedback.project_id", "user_feedback.id"],
     ),
     ForeignKeyConstraint(
         ["project_id", "applied_command_id"],
@@ -2340,6 +3602,7 @@ Index(
     user_feedback.c.project_id,
     user_feedback.c.status,
     user_feedback.c.created_at_ms,
+    user_feedback.c.id,
 )
 Index(
     "ix_chapter_arc_changes_target_status_created",
@@ -2348,16 +3611,40 @@ Index(
     chapter_arc_change_requests.c.created_at_ms,
 )
 Index(
-    "ix_chapter_book_changes_target_status_created",
-    chapter_book_change_requests.c.book_id,
-    chapter_book_change_requests.c.status,
-    chapter_book_change_requests.c.created_at_ms,
-)
-Index(
     "ix_arc_book_changes_target_status_created",
     arc_book_change_requests.c.book_id,
     arc_book_change_requests.c.status,
     arc_book_change_requests.c.created_at_ms,
+)
+Index(
+    "ix_arc_parent_reviews_request_created",
+    arc_parent_reviews.c.request_id,
+    arc_parent_reviews.c.created_at_ms,
+)
+Index(
+    "ix_book_parent_reviews_request_created",
+    book_parent_reviews.c.request_id,
+    book_parent_reviews.c.created_at_ms,
+)
+Index(
+    "ix_arc_closure_reviews_arc_created",
+    arc_closure_reviews.c.arc_id,
+    arc_closure_reviews.c.created_at_ms,
+)
+Index(
+    "ix_arc_closures_arc_version",
+    arc_closures.c.arc_id,
+    arc_closures.c.closure_version,
+)
+Index(
+    "ix_book_boundary_reviews_book_created",
+    book_boundary_reviews.c.book_id,
+    book_boundary_reviews.c.created_at_ms,
+)
+Index(
+    "ix_book_progress_handoffs_book_version",
+    book_progress_handoffs.c.book_id,
+    book_progress_handoffs.c.handoff_version,
 )
 Index(
     "ix_generation_runs_project_status_updated",
@@ -2465,8 +3752,13 @@ EXPECTED_TABLE_NAMES = frozenset(
         "canon_baselines",
         "user_feedback",
         "chapter_arc_change_requests",
-        "chapter_book_change_requests",
         "arc_book_change_requests",
+        "arc_parent_reviews",
+        "book_parent_reviews",
+        "arc_closure_reviews",
+        "arc_closures",
+        "book_boundary_reviews",
+        "book_progress_handoffs",
         "generation_runs",
         "engine_slot",
         "agent_tasks",
@@ -2478,4 +3770,4 @@ EXPECTED_TABLE_NAMES = frozenset(
 )
 
 if frozenset(metadata.tables) != EXPECTED_TABLE_NAMES:
-    raise RuntimeError("LT1 metadata table catalog drifted from the approved 34-table topology.")
+    raise RuntimeError("LT1 metadata table catalog drifted from the approved 39-table topology.")

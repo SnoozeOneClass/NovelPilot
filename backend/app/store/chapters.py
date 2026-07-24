@@ -8,12 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.db.schema import (
     arc_baselines,
+    arc_closures,
+    book_progress_handoffs,
     chapter_baselines,
+    chapter_arc_change_requests,
     chapter_review_submissions,
     chapter_reviews,
     chapter_workspaces,
-    chapter_arc_change_requests,
-    chapter_book_change_requests,
     chapters,
     projects,
     story_arcs,
@@ -28,7 +29,10 @@ class ActiveArcContext:
     arc_baseline_id: str
     book_baseline_id: str
     canon_baseline_id: str
-    target_chapter_count: int
+    minimum_chapter_count: int
+    recommended_closure_chapter_count: int
+    maximum_chapter_count: int
+    closure_chapter_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +63,13 @@ class ChapterWorkspaceRecord:
     book_baseline_id: str
     arc_baseline_id: str
     canon_baseline_id: str
+    revision_origin: str
+    source_arc_parent_review_id: str | None
+    source_arc_closure_review_id: str | None
+    source_feedback_id: str | None
+    correction_lineage_id: str | None
+    correction_lineage_origin: str | None
+    automatic_correction_round: int | None
     plan_ref_id: str | None
     draft_ref_id: str | None
     observations_ref_id: str | None
@@ -132,6 +143,9 @@ class ChapterBaselineRecord:
     arc_baseline_id: str
     canon_before_id: str
     canon_after_id: str
+    revision_origin: str
+    source_arc_parent_review_id: str | None
+    source_arc_closure_review_id: str | None
     plan_ref_id: str
     prose_ref_id: str
     observations_ref_id: str
@@ -185,6 +199,21 @@ def _workspace_record(row: RowMapping) -> ChapterWorkspaceRecord:
         book_baseline_id=cast(str, row["book_baseline_id"]),
         arc_baseline_id=cast(str, row["arc_baseline_id"]),
         canon_baseline_id=cast(str, row["canon_baseline_id"]),
+        revision_origin=cast(str, row["revision_origin"]),
+        source_arc_parent_review_id=cast(
+            str | None, row["source_arc_parent_review_id"]
+        ),
+        source_arc_closure_review_id=cast(
+            str | None, row["source_arc_closure_review_id"]
+        ),
+        source_feedback_id=cast(str | None, row["source_feedback_id"]),
+        correction_lineage_id=cast(str | None, row["correction_lineage_id"]),
+        correction_lineage_origin=cast(
+            str | None, row["correction_lineage_origin"]
+        ),
+        automatic_correction_round=cast(
+            int | None, row["automatic_correction_round"]
+        ),
         plan_ref_id=cast(str | None, row["plan_ref_id"]),
         draft_ref_id=cast(str | None, row["draft_ref_id"]),
         observations_ref_id=cast(str | None, row["observations_ref_id"]),
@@ -263,6 +292,13 @@ def _baseline_record(row: RowMapping) -> ChapterBaselineRecord:
         arc_baseline_id=cast(str, row["arc_baseline_id"]),
         canon_before_id=cast(str, row["canon_before_id"]),
         canon_after_id=cast(str, row["canon_after_id"]),
+        revision_origin=cast(str, row["revision_origin"]),
+        source_arc_parent_review_id=cast(
+            str | None, row["source_arc_parent_review_id"]
+        ),
+        source_arc_closure_review_id=cast(
+            str | None, row["source_arc_closure_review_id"]
+        ),
         plan_ref_id=cast(str, row["plan_ref_id"]),
         prose_ref_id=cast(str, row["prose_ref_id"]),
         observations_ref_id=cast(str, row["observations_ref_id"]),
@@ -285,7 +321,11 @@ class ChapterRepository:
         arc_id: str,
         allow_completed: bool = False,
     ) -> ActiveArcContext | None:
-        allowed_statuses = ("active", "completed") if allow_completed else ("active",)
+        allowed_statuses = (
+            ("active", "closing", "completed")
+            if allow_completed
+            else ("active",)
+        )
         row = (
             await self._connection.execute(
                 select(
@@ -295,7 +335,10 @@ class ChapterRepository:
                     story_arcs.c.current_baseline_id.label("arc_baseline_id"),
                     arc_baselines.c.book_baseline_id,
                     projects.c.current_canon_baseline_id.label("canon_baseline_id"),
-                    arc_baselines.c.target_chapter_count,
+                    arc_baselines.c.minimum_chapter_count,
+                    arc_baselines.c.recommended_closure_chapter_count,
+                    arc_baselines.c.maximum_chapter_count,
+                    arc_baselines.c.closure_chapter_count,
                 )
                 .join(
                     arc_baselines,
@@ -322,7 +365,12 @@ class ChapterRepository:
             arc_baseline_id=cast(str, row["arc_baseline_id"]),
             book_baseline_id=cast(str, row["book_baseline_id"]),
             canon_baseline_id=cast(str, row["canon_baseline_id"]),
-            target_chapter_count=cast(int, row["target_chapter_count"]),
+            minimum_chapter_count=cast(int, row["minimum_chapter_count"]),
+            recommended_closure_chapter_count=cast(
+                int, row["recommended_closure_chapter_count"]
+            ),
+            maximum_chapter_count=cast(int, row["maximum_chapter_count"]),
+            closure_chapter_count=cast(int, row["closure_chapter_count"]),
         )
 
     async def next_ordinals(self, *, book_id: str, arc_id: str) -> tuple[int, int]:
@@ -366,6 +414,24 @@ class ChapterRepository:
                 select(chapters).where(
                     chapters.c.project_id == project_id,
                     chapters.c.id == chapter_id,
+                )
+            )
+        ).mappings().one_or_none()
+        return None if row is None else _chapter_record(row)
+
+    async def get_by_book_ordinal(
+        self,
+        *,
+        project_id: str,
+        book_id: str,
+        book_ordinal: int,
+    ) -> ChapterRecord | None:
+        row = (
+            await self._connection.execute(
+                select(chapters).where(
+                    chapters.c.project_id == project_id,
+                    chapters.c.book_id == book_id,
+                    chapters.c.book_ordinal == book_ordinal,
                 )
             )
         ).mappings().one_or_none()
@@ -422,6 +488,51 @@ class ChapterRepository:
                 )
                 .order_by(chapters.c.arc_ordinal.desc())
                 .limit(1)
+            )
+        ).mappings().one_or_none()
+        if row is None:
+            return None
+        chapter = _chapter_record(row)
+        workspace = await self.get_workspace(
+            project_id=project_id,
+            chapter_id=chapter.id,
+        )
+        if workspace is None:  # pragma: no cover - the join proved it exists.
+            return None
+        return chapter, workspace
+
+    async def get_correction_workspace_for_review(
+        self,
+        *,
+        project_id: str,
+        arc_id: str,
+        source_arc_parent_review_id: str | None = None,
+        source_arc_closure_review_id: str | None = None,
+    ) -> tuple[ChapterRecord, ChapterWorkspaceRecord] | None:
+        if (source_arc_parent_review_id is None) == (
+            source_arc_closure_review_id is None
+        ):
+            raise ValueError("Exactly one Chapter correction source review is required.")
+        source_predicate = (
+            chapter_workspaces.c.source_arc_parent_review_id
+            == source_arc_parent_review_id
+            if source_arc_parent_review_id is not None
+            else chapter_workspaces.c.source_arc_closure_review_id
+            == source_arc_closure_review_id
+        )
+        row = (
+            await self._connection.execute(
+                select(chapters)
+                .join(
+                    chapter_workspaces,
+                    (chapter_workspaces.c.project_id == chapters.c.project_id)
+                    & (chapter_workspaces.c.chapter_id == chapters.c.id),
+                )
+                .where(
+                    chapters.c.project_id == project_id,
+                    chapters.c.arc_id == arc_id,
+                    source_predicate,
+                )
             )
         ).mappings().one_or_none()
         if row is None:
@@ -651,17 +762,17 @@ class ChapterRepository:
         )
         return result.rowcount == 1
 
-    async def complete_arc_if_target_reached(
+    async def begin_arc_closure_review(
         self,
         *,
         project_id: str,
         arc_id: str,
         arc_baseline_id: str,
         committed_count: int,
-        target_chapter_count: int,
+        closure_chapter_count: int,
         now_ms: int,
     ) -> bool:
-        if committed_count != target_chapter_count:
+        if committed_count != closure_chapter_count:
             return False
         result = await self._connection.execute(
             update(story_arcs)
@@ -672,12 +783,70 @@ class ChapterRepository:
                 story_arcs.c.lifecycle_status == "active",
             )
             .values(
-                lifecycle_status="completed",
-                completed_at_ms=now_ms,
+                lifecycle_status="closing",
                 updated_at_ms=now_ms,
             )
         )
         return result.rowcount == 1
+
+    async def narrative_replacement_blocker(
+        self,
+        *,
+        project_id: str,
+        book_id: str,
+        arc_id: str,
+        chapter_id: str,
+    ) -> str | None:
+        chapter = await self.get(project_id=project_id, chapter_id=chapter_id)
+        if (
+            chapter is None
+            or chapter.book_id != book_id
+            or chapter.arc_id != arc_id
+            or chapter.lifecycle_status != "committed"
+            or chapter.current_baseline_id is None
+        ):
+            return "chapter_not_current_committed_tip"
+        later_chapter_id = await self._connection.scalar(
+            select(chapters.c.id)
+            .where(
+                chapters.c.project_id == project_id,
+                chapters.c.book_id == book_id,
+                chapters.c.arc_id == arc_id,
+                chapters.c.book_ordinal > chapter.book_ordinal,
+                chapters.c.lifecycle_status == "committed",
+            )
+            .limit(1)
+        )
+        if later_chapter_id is not None:
+            return "later_chapter_exists"
+        closure_id = await self._connection.scalar(
+            select(arc_closures.c.id)
+            .where(
+                arc_closures.c.project_id == project_id,
+                arc_closures.c.book_id == book_id,
+                arc_closures.c.arc_id == arc_id,
+            )
+            .limit(1)
+        )
+        if closure_id is not None:
+            return "formal_arc_closure_exists"
+        handoff_id = await self._connection.scalar(
+            select(book_progress_handoffs.c.id)
+            .join(
+                arc_closures,
+                (arc_closures.c.project_id == book_progress_handoffs.c.project_id)
+                & (arc_closures.c.id == book_progress_handoffs.c.arc_closure_id),
+            )
+            .where(
+                book_progress_handoffs.c.project_id == project_id,
+                book_progress_handoffs.c.book_id == book_id,
+                arc_closures.c.arc_id == arc_id,
+            )
+            .limit(1)
+        )
+        if handoff_id is not None:
+            return "book_handoff_exists"
+        return None
 
     async def insert_arc_change_request(
         self, record: ChapterChangeRequestRecord
@@ -692,25 +861,6 @@ class ChapterRepository:
                 source_submission_id=record.source_submission_id,
                 source_review_id=record.source_review_id,
                 target_arc_baseline_id=record.target_baseline_id,
-                evidence_ref_id=record.evidence_ref_id,
-                status=record.status,
-                created_at_ms=record.created_at_ms,
-            )
-        )
-
-    async def insert_book_change_request(
-        self, record: ChapterChangeRequestRecord
-    ) -> None:
-        await self._connection.execute(
-            chapter_book_change_requests.insert().values(
-                id=record.id,
-                project_id=record.project_id,
-                book_id=record.book_id,
-                arc_id=record.arc_id,
-                chapter_id=record.chapter_id,
-                source_submission_id=record.source_submission_id,
-                source_review_id=record.source_review_id,
-                target_book_baseline_id=record.target_baseline_id,
                 evidence_ref_id=record.evidence_ref_id,
                 status=record.status,
                 created_at_ms=record.created_at_ms,

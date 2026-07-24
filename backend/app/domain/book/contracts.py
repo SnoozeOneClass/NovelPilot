@@ -157,6 +157,18 @@ class ApplyBookCandidateTaskResult(BaseModel):
     workspace_lock_version: int = Field(ge=1)
 
 
+class BookCompletionRequirement(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    requirement_key: str = Field(
+        min_length=1,
+        pattern=r"^[a-z0-9][a-z0-9_.-]*$",
+    )
+    description: str = Field(min_length=1)
+    evidence_expectation: str = Field(min_length=1)
+    required: Literal[True] = True
+
+
 class CompletionContract(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -168,16 +180,43 @@ class CompletionContract(BaseModel):
         ge=1,
         description="Maximum chapter count; it must be at least minimum_chapter_count.",
     )
-    completion_requirements: list[str] = Field(
-        default_factory=list,
-        description="Semantic conditions that must be satisfied before the novel can complete.",
+    completion_requirements: list[BookCompletionRequirement] = Field(
+        min_length=1,
+        description=(
+            "Keyed semantic conditions that must all be satisfied before the "
+            "novel can complete."
+        ),
     )
 
     @model_validator(mode="after")
     def _ordered_range(self) -> CompletionContract:
         if self.maximum_chapter_count < self.minimum_chapter_count:
             raise ValueError("maximum_chapter_count must be >= minimum_chapter_count")
+        keys = [item.requirement_key for item in self.completion_requirements]
+        if len(keys) != len(set(keys)):
+            raise ValueError("Book completion requirement keys must be unique.")
         return self
+
+
+class BookCreativeConstraints(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    genre_reader_promise: str = Field(min_length=1)
+    premise_story_engine: str = Field(min_length=1)
+    stable_world_invariants: list[str] = Field(min_length=1)
+    stable_character_invariants: list[str] = Field(min_length=1)
+    core_selling_points: list[str] = Field(min_length=1)
+    prohibited_outcomes: list[str] = Field(min_length=1)
+
+
+class BookRollingPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    long_term_character_directions: list[str] = Field(min_length=1)
+    high_level_phase_strategy: list[str] = Field(min_length=1)
+    whole_book_pacing_strategy: str = Field(min_length=1)
+    ending_tendency: str = Field(min_length=1)
+    arc_planning_guidelines: list[str] = Field(min_length=1)
 
 
 class BookCandidatePack(BaseModel):
@@ -187,14 +226,14 @@ class BookCandidatePack(BaseModel):
         min_length=1,
         description="Coherent whole-book direction synthesized from the frozen creator evidence.",
     )
-    constraints: dict[str, object] = Field(
+    constraints: BookCreativeConstraints = Field(
         description="Explicit creative constraints for downstream Story Arc planning.",
     )
     selected_title: str = Field(
         min_length=1,
         description="Formal title already selected in the frozen Book discussion.",
     )
-    rolling_plan: dict[str, object] = Field(
+    rolling_plan: BookRollingPlan = Field(
         description="Whole-book rolling-plan strategy without pre-writing every chapter.",
     )
     completion_contract: CompletionContract
@@ -219,7 +258,7 @@ class BookConstraintsRepair(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     component: Literal["constraints"]
-    value: dict[str, object] = Field(
+    value: BookCreativeConstraints = Field(
         description="Replacement creative constraints for downstream planning."
     )
 
@@ -228,7 +267,7 @@ class BookRollingPlanRepair(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     component: Literal["rolling_plan"]
-    value: dict[str, object] = Field(description="Replacement rolling-plan strategy.")
+    value: BookRollingPlan = Field(description="Replacement rolling-plan strategy.")
 
 
 class BookCompletionContractRepair(BaseModel):

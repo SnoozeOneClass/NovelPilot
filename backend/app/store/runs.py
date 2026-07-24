@@ -3,11 +3,11 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import cast
 
-from sqlalchemy import RowMapping, func, select, update
+from sqlalchemy import RowMapping, and_, exists, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.db.schema import engine_slot, generation_runs
+from app.db.schema import engine_slot, generation_runs, user_feedback
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,7 +21,9 @@ class GenerationRunRecord:
     wait_reason_code: str | None
     created_at_ms: int
     updated_at_ms: int
+    failure_source_kind: str | None = None
     blocking_task_id: str | None = None
+    blocking_action_key: str | None = None
     failure_code: str | None = None
     failure_ref_id: str | None = None
     started_at_ms: int | None = None
@@ -48,7 +50,9 @@ def _run_record(row: RowMapping) -> GenerationRunRecord:
         desired_state=cast(str, row["desired_state"]),
         lock_version=cast(int, row["lock_version"]),
         wait_reason_code=cast(str | None, row["wait_reason_code"]),
+        failure_source_kind=cast(str | None, row["failure_source_kind"]),
         blocking_task_id=cast(str | None, row["blocking_task_id"]),
+        blocking_action_key=cast(str | None, row["blocking_action_key"]),
         failure_code=cast(str | None, row["failure_code"]),
         failure_ref_id=cast(str | None, row["failure_ref_id"]),
         created_at_ms=cast(int, row["created_at_ms"]),
@@ -119,13 +123,25 @@ class RunRepository:
         return cast(int, value) + 1
 
     async def find_next_runnable(self) -> GenerationRunRecord | None:
+        queued_feedback_exists = exists(
+            select(user_feedback.c.id).where(
+                user_feedback.c.project_id == generation_runs.c.project_id,
+                user_feedback.c.status == "routed",
+            )
+        )
         row = (
             await self._connection.execute(
                 select(generation_runs)
                 .where(
-                    generation_runs.c.status == "running",
                     generation_runs.c.desired_state == "running",
                     generation_runs.c.finished_at_ms.is_(None),
+                    or_(
+                        generation_runs.c.status == "running",
+                        and_(
+                            generation_runs.c.status == "waiting_for_user",
+                            queued_feedback_exists,
+                        ),
+                    ),
                 )
                 .order_by(generation_runs.c.updated_at_ms, generation_runs.c.id)
                 .limit(1)
@@ -383,7 +399,7 @@ class RunRepository:
         )
         return result.rowcount == 1
 
-    async def failure_pause(
+    async def failure_pause_for_task(
         self,
         *,
         run_id: str,
@@ -403,7 +419,9 @@ class RunRepository:
                 status="failure_paused",
                 desired_state="paused",
                 wait_reason_code=None,
+                failure_source_kind="agent_task",
                 blocking_task_id=task_id,
+                blocking_action_key=None,
                 failure_code=failure_code,
                 failure_ref_id=failure_ref_id,
                 updated_at_ms=now_ms,
@@ -412,7 +430,80 @@ class RunRepository:
         )
         return result.rowcount == 1
 
-    async def retry_failure(self, *, run: GenerationRunRecord, now_ms: int) -> bool:
+    async def failure_pause_for_action(
+        self,
+        *,
+        run_id: str,
+        expected_lock_version: int,
+        action_key: str,
+        failure_code: str,
+        failure_ref_id: str,
+        now_ms: int,
+    ) -> bool:
+        result = await self._connection.execute(
+            update(generation_runs)
+            .where(
+                generation_runs.c.id == run_id,
+                generation_runs.c.lock_version == expected_lock_version,
+                generation_runs.c.status.in_(
+                    ("running", "pause_requested", "paused")
+                ),
+                generation_runs.c.finished_at_ms.is_(None),
+            )
+            .values(
+                status="failure_paused",
+                desired_state="paused",
+                wait_reason_code=None,
+                failure_source_kind="harness_action",
+                blocking_task_id=None,
+                blocking_action_key=action_key,
+                failure_code=failure_code,
+                failure_ref_id=failure_ref_id,
+                updated_at_ms=now_ms,
+                lock_version=generation_runs.c.lock_version + 1,
+            )
+        )
+        return result.rowcount == 1
+
+    async def retry_task_failure(
+        self,
+        *,
+        run: GenerationRunRecord,
+        task_id: str,
+        now_ms: int,
+    ) -> bool:
+        return await self._retry_matching_failure(
+            run=run,
+            source_kind="agent_task",
+            task_id=task_id,
+            action_key=None,
+            now_ms=now_ms,
+        )
+
+    async def retry_action_failure(
+        self,
+        *,
+        run: GenerationRunRecord,
+        action_key: str,
+        now_ms: int,
+    ) -> bool:
+        return await self._retry_matching_failure(
+            run=run,
+            source_kind="harness_action",
+            task_id=None,
+            action_key=action_key,
+            now_ms=now_ms,
+        )
+
+    async def _retry_matching_failure(
+        self,
+        *,
+        run: GenerationRunRecord,
+        source_kind: str,
+        task_id: str | None,
+        action_key: str | None,
+        now_ms: int,
+    ) -> bool:
         result = await self._connection.execute(
             update(generation_runs)
             .where(
@@ -420,11 +511,24 @@ class RunRepository:
                 generation_runs.c.id == run.id,
                 generation_runs.c.status == "failure_paused",
                 generation_runs.c.lock_version == run.lock_version,
+                generation_runs.c.failure_source_kind == source_kind,
+                (
+                    generation_runs.c.blocking_task_id.is_(None)
+                    if task_id is None
+                    else generation_runs.c.blocking_task_id == task_id
+                ),
+                (
+                    generation_runs.c.blocking_action_key.is_(None)
+                    if action_key is None
+                    else generation_runs.c.blocking_action_key == action_key
+                ),
             )
             .values(
                 status="running",
                 desired_state="running",
+                failure_source_kind=None,
                 blocking_task_id=None,
+                blocking_action_key=None,
                 failure_code=None,
                 failure_ref_id=None,
                 updated_at_ms=now_ms,

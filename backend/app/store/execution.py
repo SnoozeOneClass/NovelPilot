@@ -33,6 +33,21 @@ class SuccessfulTaskRecord:
     arc_baseline_id: str | None
     chapter_baseline_id: str | None
     canon_baseline_id: str
+    correction_lineage_id: str | None
+    correction_lineage_origin: str | None
+    automatic_correction_round: int | None
+    source_arc_parent_review_id: str | None
+    source_book_parent_review_id: str | None
+    source_arc_closure_review_id: str | None
+    source_book_boundary_review_id: str | None
+    source_chapter_arc_request_id: str | None
+    source_arc_book_request_id: str | None
+    source_arc_closure_id: str | None
+    source_feedback_id: str | None
+    evaluation_strategy_id: str | None
+    evaluation_strategy_version: int | None
+    rubric_id: str | None
+    rubric_version: int | None
     result_ref_id: str
     delivery_state: str
 
@@ -119,6 +134,21 @@ class ActionableTaskRecord:
     arc_baseline_id: str | None
     chapter_baseline_id: str | None
     canon_baseline_id: str
+    correction_lineage_id: str | None
+    correction_lineage_origin: str | None
+    automatic_correction_round: int | None
+    source_arc_parent_review_id: str | None
+    source_book_parent_review_id: str | None
+    source_arc_closure_review_id: str | None
+    source_book_boundary_review_id: str | None
+    source_chapter_arc_request_id: str | None
+    source_arc_book_request_id: str | None
+    source_arc_closure_id: str | None
+    source_feedback_id: str | None
+    evaluation_strategy_id: str | None
+    evaluation_strategy_version: int | None
+    rubric_id: str | None
+    rubric_version: int | None
     profile_id: str
     task_status: Literal["queued", "succeeded"]
     attempt_status: Literal["queued", "succeeded"]
@@ -218,6 +248,21 @@ class ExecutionRepository:
                     agent_tasks.c.arc_baseline_id,
                     agent_tasks.c.chapter_baseline_id,
                     agent_tasks.c.canon_baseline_id,
+                    agent_tasks.c.correction_lineage_id,
+                    agent_tasks.c.correction_lineage_origin,
+                    agent_tasks.c.automatic_correction_round,
+                    agent_tasks.c.source_arc_parent_review_id,
+                    agent_tasks.c.source_book_parent_review_id,
+                    agent_tasks.c.source_arc_closure_review_id,
+                    agent_tasks.c.source_book_boundary_review_id,
+                    agent_tasks.c.source_chapter_arc_request_id,
+                    agent_tasks.c.source_arc_book_request_id,
+                    agent_tasks.c.source_arc_closure_id,
+                    agent_tasks.c.source_feedback_id,
+                    agent_tasks.c.evaluation_strategy_id,
+                    agent_tasks.c.evaluation_strategy_version,
+                    agent_tasks.c.rubric_id,
+                    agent_tasks.c.rubric_version,
                     agent_tasks.c.profile_id,
                     agent_tasks.c.status.label("task_status"),
                     agent_task_attempts.c.status.label("attempt_status"),
@@ -277,6 +322,41 @@ class ExecutionRepository:
             arc_baseline_id=cast(str | None, row["arc_baseline_id"]),
             chapter_baseline_id=cast(str | None, row["chapter_baseline_id"]),
             canon_baseline_id=cast(str, row["canon_baseline_id"]),
+            correction_lineage_id=cast(str | None, row["correction_lineage_id"]),
+            correction_lineage_origin=cast(
+                str | None, row["correction_lineage_origin"]
+            ),
+            automatic_correction_round=cast(
+                int | None, row["automatic_correction_round"]
+            ),
+            source_arc_parent_review_id=cast(
+                str | None, row["source_arc_parent_review_id"]
+            ),
+            source_book_parent_review_id=cast(
+                str | None, row["source_book_parent_review_id"]
+            ),
+            source_arc_closure_review_id=cast(
+                str | None, row["source_arc_closure_review_id"]
+            ),
+            source_book_boundary_review_id=cast(
+                str | None, row["source_book_boundary_review_id"]
+            ),
+            source_chapter_arc_request_id=cast(
+                str | None, row["source_chapter_arc_request_id"]
+            ),
+            source_arc_book_request_id=cast(
+                str | None, row["source_arc_book_request_id"]
+            ),
+            source_arc_closure_id=cast(str | None, row["source_arc_closure_id"]),
+            source_feedback_id=cast(str | None, row["source_feedback_id"]),
+            evaluation_strategy_id=cast(
+                str | None, row["evaluation_strategy_id"]
+            ),
+            evaluation_strategy_version=cast(
+                int | None, row["evaluation_strategy_version"]
+            ),
+            rubric_id=cast(str | None, row["rubric_id"]),
+            rubric_version=cast(int | None, row["rubric_version"]),
             profile_id=cast(str, row["profile_id"]),
             task_status=cast(Literal["queued", "succeeded"], row["task_status"]),
             attempt_status=cast(Literal["queued", "succeeded"], row["attempt_status"]),
@@ -549,6 +629,17 @@ class ExecutionRepository:
                 arc_baseline_id=plan.arc_baseline_id,
                 chapter_baseline_id=plan.chapter_baseline_id,
                 canon_baseline_id=plan.canon_baseline_id,
+                correction_lineage_id=plan.correction_lineage_id,
+                correction_lineage_origin=plan.correction_lineage_origin,
+                automatic_correction_round=plan.automatic_correction_round,
+                source_arc_parent_review_id=plan.source_arc_parent_review_id,
+                source_book_parent_review_id=plan.source_book_parent_review_id,
+                source_arc_closure_review_id=plan.source_arc_closure_review_id,
+                source_book_boundary_review_id=plan.source_book_boundary_review_id,
+                source_chapter_arc_request_id=plan.source_chapter_arc_request_id,
+                source_arc_book_request_id=plan.source_arc_book_request_id,
+                source_arc_closure_id=plan.source_arc_closure_id,
+                source_feedback_id=plan.source_feedback_id,
                 task_plan_ref_id=refs.task_plan_ref_id,
                 input_manifest_ref_id=refs.input_manifest_ref_id,
                 input_messages_ref_id=refs.input_messages_ref_id,
@@ -561,6 +652,8 @@ class ExecutionRepository:
                 output_schema_id=plan.output_schema_id,
                 output_schema_version=plan.output_schema_version,
                 output_schema_fingerprint=plan.output_schema_fingerprint,
+                evaluation_strategy_id=plan.evaluation_strategy_id,
+                evaluation_strategy_version=plan.evaluation_strategy_version,
                 rubric_id=plan.rubric_id,
                 rubric_version=plan.rubric_version,
                 harness_policy_id=plan.harness_policy_id,
@@ -1171,6 +1264,21 @@ class ExecutionRepository:
                     agent_tasks.c.arc_baseline_id,
                     agent_tasks.c.chapter_baseline_id,
                     agent_tasks.c.canon_baseline_id,
+                    agent_tasks.c.correction_lineage_id,
+                    agent_tasks.c.correction_lineage_origin,
+                    agent_tasks.c.automatic_correction_round,
+                    agent_tasks.c.source_arc_parent_review_id,
+                    agent_tasks.c.source_book_parent_review_id,
+                    agent_tasks.c.source_arc_closure_review_id,
+                    agent_tasks.c.source_book_boundary_review_id,
+                    agent_tasks.c.source_chapter_arc_request_id,
+                    agent_tasks.c.source_arc_book_request_id,
+                    agent_tasks.c.source_arc_closure_id,
+                    agent_tasks.c.source_feedback_id,
+                    agent_tasks.c.evaluation_strategy_id,
+                    agent_tasks.c.evaluation_strategy_version,
+                    agent_tasks.c.rubric_id,
+                    agent_tasks.c.rubric_version,
                     agent_task_attempts.c.result_ref_id,
                     agent_tasks.c.delivery_state,
                 ).join(
@@ -1205,6 +1313,41 @@ class ExecutionRepository:
             arc_baseline_id=cast(str | None, row["arc_baseline_id"]),
             chapter_baseline_id=cast(str | None, row["chapter_baseline_id"]),
             canon_baseline_id=cast(str, row["canon_baseline_id"]),
+            correction_lineage_id=cast(str | None, row["correction_lineage_id"]),
+            correction_lineage_origin=cast(
+                str | None, row["correction_lineage_origin"]
+            ),
+            automatic_correction_round=cast(
+                int | None, row["automatic_correction_round"]
+            ),
+            source_arc_parent_review_id=cast(
+                str | None, row["source_arc_parent_review_id"]
+            ),
+            source_book_parent_review_id=cast(
+                str | None, row["source_book_parent_review_id"]
+            ),
+            source_arc_closure_review_id=cast(
+                str | None, row["source_arc_closure_review_id"]
+            ),
+            source_book_boundary_review_id=cast(
+                str | None, row["source_book_boundary_review_id"]
+            ),
+            source_chapter_arc_request_id=cast(
+                str | None, row["source_chapter_arc_request_id"]
+            ),
+            source_arc_book_request_id=cast(
+                str | None, row["source_arc_book_request_id"]
+            ),
+            source_arc_closure_id=cast(str | None, row["source_arc_closure_id"]),
+            source_feedback_id=cast(str | None, row["source_feedback_id"]),
+            evaluation_strategy_id=cast(
+                str | None, row["evaluation_strategy_id"]
+            ),
+            evaluation_strategy_version=cast(
+                int | None, row["evaluation_strategy_version"]
+            ),
+            rubric_id=cast(str | None, row["rubric_id"]),
+            rubric_version=cast(int | None, row["rubric_version"]),
             result_ref_id=cast(str, row["result_ref_id"]),
             delivery_state=cast(str, row["delivery_state"]),
         )
@@ -1258,3 +1401,49 @@ class ExecutionRepository:
             )
         )
         return result.rowcount == 1
+
+    async def supersede_queued_task(
+        self,
+        *,
+        project_id: str,
+        task_id: str,
+        attempt_id: str,
+        updated_at_ms: int,
+    ) -> bool:
+        """Atomically retire a frozen task before activation.
+
+        Deferred user feedback can invalidate a Task Plan after it was frozen but
+        before its queued attempt starts.  The attempt remains immutable execution
+        evidence and is terminalized as interrupted; the task itself becomes
+        superseded so reconciliation cannot reactivate it.
+        """
+        attempt_result = await self._connection.execute(
+            update(agent_task_attempts)
+            .where(
+                agent_task_attempts.c.project_id == project_id,
+                agent_task_attempts.c.task_id == task_id,
+                agent_task_attempts.c.id == attempt_id,
+                agent_task_attempts.c.status == "queued",
+            )
+            .values(
+                status="interrupted",
+                finished_at_ms=updated_at_ms,
+            )
+        )
+        if attempt_result.rowcount != 1:
+            return False
+        task_result = await self._connection.execute(
+            update(agent_tasks)
+            .where(
+                agent_tasks.c.project_id == project_id,
+                agent_tasks.c.id == task_id,
+                agent_tasks.c.status == "queued",
+                agent_tasks.c.successful_attempt_id.is_(None),
+                agent_tasks.c.delivery_state == "not_ready",
+            )
+            .values(
+                status="superseded",
+                updated_at_ms=updated_at_ms,
+            )
+        )
+        return task_result.rowcount == 1

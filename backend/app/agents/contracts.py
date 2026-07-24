@@ -171,6 +171,19 @@ class AgentTaskPlan(BaseModel):
     arc_baseline_id: str | None = None
     chapter_baseline_id: str | None = None
     canon_baseline_id: str
+    correction_lineage_id: str | None = None
+    correction_lineage_origin: Literal["review_initiated", "user_initiated"] | None = (
+        None
+    )
+    automatic_correction_round: Literal[0, 1] | None = None
+    source_arc_parent_review_id: str | None = None
+    source_book_parent_review_id: str | None = None
+    source_arc_closure_review_id: str | None = None
+    source_book_boundary_review_id: str | None = None
+    source_chapter_arc_request_id: str | None = None
+    source_arc_book_request_id: str | None = None
+    source_arc_closure_id: str | None = None
+    source_feedback_id: str | None = None
     semantic_goal: str
     prompt: str
     context_manifest: dict[str, JsonValue]
@@ -179,8 +192,11 @@ class AgentTaskPlan(BaseModel):
     output_schema_id: str
     output_schema_version: int = Field(ge=1)
     output_schema: dict[str, JsonValue]
+    evaluation_strategy_id: str | None = None
+    evaluation_strategy_version: int | None = Field(default=None, ge=1)
     rubric_id: str | None = None
     rubric_version: int | None = Field(default=None, ge=1)
+    rubric_text: str | None = None
     harness_policy_id: str = "novelpilot-domain-harness"
     harness_policy_version: int = Field(default=1, ge=1)
     toolset: tuple[str, ...] = ()
@@ -254,6 +270,53 @@ class AgentTaskPlan(BaseModel):
             raise ValueError("Scope IDs do not match scope_layer.")
         if (self.rubric_id is None) != (self.rubric_version is None):
             raise ValueError("rubric_id and rubric_version must be present together.")
+        if (self.evaluation_strategy_id is None) != (
+            self.evaluation_strategy_version is None
+        ):
+            raise ValueError(
+                "evaluation_strategy_id and evaluation_strategy_version "
+                "must be present together."
+            )
+        if self.rubric_id is None:
+            if self.rubric_text is not None:
+                raise ValueError("rubric_text requires a frozen rubric identity.")
+        elif self.rubric_text is None or not self.rubric_text.strip():
+            raise ValueError("Evaluator rubrics must freeze substantive rubric text.")
+        review_sources = (
+            self.source_arc_parent_review_id,
+            self.source_book_parent_review_id,
+            self.source_arc_closure_review_id,
+            self.source_book_boundary_review_id,
+        )
+        if sum(source is not None for source in review_sources) > 1:
+            raise ValueError("A Task Plan may bind at most one source review.")
+        authority_sources = (
+            self.source_chapter_arc_request_id,
+            self.source_arc_book_request_id,
+            self.source_arc_closure_id,
+        )
+        if sum(source is not None for source in authority_sources) > 1:
+            raise ValueError("A Task Plan may bind at most one source authority object.")
+        lineage_fields = (
+            self.correction_lineage_id,
+            self.correction_lineage_origin,
+            self.automatic_correction_round,
+        )
+        if all(value is None for value in lineage_fields):
+            if self.source_feedback_id is not None:
+                raise ValueError("Source feedback requires a correction lineage.")
+        elif any(value is None for value in lineage_fields):
+            raise ValueError("Correction lineage identity, origin, and round are atomic.")
+        elif (
+            self.correction_lineage_origin == "review_initiated"
+            and self.source_feedback_id is not None
+        ):
+            raise ValueError("Review-initiated correction cannot bind user feedback.")
+        elif (
+            self.correction_lineage_origin == "user_initiated"
+            and self.source_feedback_id is None
+        ):
+            raise ValueError("User-initiated correction must bind its feedback item.")
         if self.toolset:
             raise ValueError("O1 tasks cannot expose run-local or domain write tools.")
         if self.output_mode == "native_json_schema":
@@ -467,22 +530,38 @@ class BookDiscussionResult(BaseModel):
     )
 
 
-class BookProgressAssessment(BaseModel):
+class ArcStateTransition(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    decision: Literal["continue", "plan_final_arc", "complete", "needs_user"] = Field(
-        description="Semantic next step at the current safe Story Arc boundary.",
-    )
-    rationale: str = Field(
+    start_state: str = Field(
         min_length=1,
-        description="Evidence-based explanation for the completion decision.",
+        description="Authoritative stage state that the Arc begins from.",
     )
-    unresolved_requirements: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Completion-contract requirements still unresolved. Repeated wording is "
-            "allowed and must not be used as a hidden control signal."
-        ),
+    end_state: str = Field(
+        min_length=1,
+        description="Observable stage state that the Arc must establish at closure.",
+    )
+
+
+class ArcClosureSignal(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    signal_key: str = Field(
+        min_length=1,
+        pattern=r"^[a-z0-9][a-z0-9_.-]*$",
+        description="Stable semantic key used to match closure evidence.",
+    )
+    description: str = Field(
+        min_length=1,
+        description="Observable condition whose satisfaction can be evaluated.",
+    )
+    evidence_expectation: str = Field(
+        min_length=1,
+        description="What committed Chapter or Canon evidence can prove the signal.",
+    )
+    required: bool = Field(
+        default=True,
+        description="Whether Arc closure requires this signal to be satisfied.",
     )
 
 
@@ -492,20 +571,87 @@ class ArcPlanProposal(BaseModel):
     title: str = Field(min_length=1, description="Creator-facing title for this Story Arc.")
     purpose: str = Field(
         min_length=1,
-        description="How this Story Arc advances the approved Book contract.",
-    )
-    beats: list[str] = Field(
-        min_length=1,
         description=(
-            "Ordered semantic beats for this Story Arc. Similar or repeated wording is not "
-            "a protocol error; the Evaluator judges planning quality."
+            "The stage-level outcome this Story Arc owns within the approved "
+            "Book contract; never a Chapter-by-Chapter outline."
         ),
     )
-    target_chapter_count: int = Field(ge=1, le=30)
-    completion_signals: list[str] = Field(
+    desired_state_transition: ArcStateTransition
+    conflict_trajectory: list[str] = Field(
         min_length=1,
-        description="Observable semantic conditions that mean this Story Arc is complete.",
+        description=(
+            "Ordered stage-level escalation and resolution trajectory. Items are "
+            "not immutable Chapter slots."
+        ),
     )
+    pacing_trajectory: list[str] = Field(
+        min_length=1,
+        description="Stage-level pacing phases without prescribing every Chapter.",
+    )
+    character_obligations: list[str] = Field(
+        min_length=1,
+        description="Character or relationship changes this Arc must establish.",
+    )
+    foreshadowing_obligations: list[str] = Field(
+        default_factory=list,
+        description="Foreshadowing promises to plant, advance, or pay off in this Arc.",
+    )
+    prohibitions: list[str] = Field(
+        min_length=1,
+        description="Book constraints and outcomes this Arc must not violate.",
+    )
+    minimum_chapter_count: int = Field(ge=1, le=30)
+    recommended_closure_chapter_count: int = Field(ge=1, le=30)
+    maximum_chapter_count: int = Field(ge=1, le=30)
+    closure_chapter_count: int = Field(
+        ge=1,
+        le=30,
+        description=(
+            "Selected cumulative checkpoint for the first mandatory closure "
+            "evaluation. Reaching it does not complete the Arc."
+        ),
+    )
+    closure_signals: list[ArcClosureSignal] = Field(
+        min_length=1,
+        description="Observable contract used by the mandatory Arc closure evaluation.",
+    )
+    advisory_beats: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional planning hints only. They are neither Chapter identities nor "
+            "the authoritative closure checklist."
+        ),
+    )
+
+    @field_validator("closure_signals")
+    @classmethod
+    def _unique_closure_signals(
+        cls, value: list[ArcClosureSignal]
+    ) -> list[ArcClosureSignal]:
+        keys = [signal.signal_key for signal in value]
+        if len(keys) != len(set(keys)):
+            raise ValueError("Arc closure signal keys must be unique.")
+        if not any(signal.required for signal in value):
+            raise ValueError("An Arc contract needs at least one required closure signal.")
+        return value
+
+    @model_validator(mode="after")
+    def _chapter_range_contains_checkpoint(self) -> ArcPlanProposal:
+        if not (
+            self.minimum_chapter_count
+            <= self.recommended_closure_chapter_count
+            <= self.maximum_chapter_count
+        ):
+            raise ValueError(
+                "Arc Chapter range must satisfy minimum <= recommended <= maximum."
+            )
+        if not (
+            self.minimum_chapter_count
+            <= self.closure_chapter_count
+            <= self.maximum_chapter_count
+        ):
+            raise ValueError("Arc closure checkpoint must fall inside its Chapter range.")
+        return self
 
 
 class ChapterPlanProposal(BaseModel):
@@ -637,10 +783,11 @@ class EvaluationIssue(BaseModel):
 class LayerEvaluationResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    decision: Literal["pass", "local_repair", "cross_loop_escalation", "needs_user"] = Field(
+    decision: Literal["pass", "local_repair", "escalate_to_arc", "needs_user"] = Field(
         description=(
             "Use local_repair only for a bounded chapter repair; use "
-            "cross_loop_escalation only when an upstream Arc or Book decision must change."
+            "escalate_to_arc only for a specific evidence-bound concern about "
+            "the immediate parent Arc."
         ),
     )
     summary: str = Field(min_length=1, description="Evidence-based evaluation summary.")
@@ -651,13 +798,6 @@ class LayerEvaluationResult(BaseModel):
             "Required and non-empty only when decision is local_repair; otherwise empty."
         ),
     )
-    escalation_target: Literal["arc", "book"] | None = Field(
-        default=None,
-        description=(
-            "Required only when decision is cross_loop_escalation; otherwise null."
-        ),
-    )
-
     @model_validator(mode="after")
     def _decision_payload(self) -> LayerEvaluationResult:
         if self.decision == "local_repair" and not self.repair_scope:
@@ -666,10 +806,6 @@ class LayerEvaluationResult(BaseModel):
             raise ValueError("Only local_repair can carry repair_scope.")
         if len(self.repair_scope) != len(set(self.repair_scope)):
             raise ValueError("Chapter repair_scope components must be unique.")
-        if self.decision == "cross_loop_escalation" and self.escalation_target is None:
-            raise ValueError("cross_loop_escalation requires escalation_target.")
-        if self.decision != "cross_loop_escalation" and self.escalation_target is not None:
-            raise ValueError("Only cross_loop_escalation can carry escalation_target.")
         return self
 
 

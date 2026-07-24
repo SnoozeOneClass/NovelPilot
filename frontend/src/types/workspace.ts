@@ -98,6 +98,7 @@ export type CommandId =
   | "pause_run"
   | "resume_run"
   | "retry_failed_task"
+  | "retry_failed_action"
   | "send_book_input"
   | "approve_book"
   | "approve_arc"
@@ -125,7 +126,9 @@ export interface RunStateView {
   desired_state: string;
   lock_version: number;
   wait_reason_code: string | null;
+  failure_source_kind: "agent_task" | "harness_action" | null;
   blocking_task_id: string | null;
+  blocking_action_key: string | null;
   failure_code: string | null;
   failure_ref_id: string | null;
   started_at_ms: number | null;
@@ -173,6 +176,9 @@ export interface BookStateView {
   book_id: string;
   lifecycle_status: string;
   current_baseline_id: string | null;
+  latest_boundary_review_id: string | null;
+  current_progress_handoff_id: string | null;
+  current_completion_id: string | null;
   baseline_version: number | null;
   approved_title: string | null;
   minimum_chapter_count: number | null;
@@ -194,9 +200,13 @@ export interface ArcStateView {
   purpose: string;
   lifecycle_status: string;
   current_baseline_id: string | null;
+  latest_closure_review_id: string | null;
+  current_closure_id: string | null;
   baseline_version: number | null;
-  target_chapter_count: number | null;
-  recommended_target_chapter_count: number | null;
+  minimum_chapter_count: number | null;
+  recommended_closure_chapter_count: number | null;
+  maximum_chapter_count: number | null;
+  closure_chapter_count: number | null;
   committed_chapter_count: number;
   workspace_state: string;
   workspace_lock_version: number;
@@ -207,6 +217,8 @@ export interface ArcStateView {
   pending_review_decision: string | null;
   approval_gate_id: string | null;
   approval_gate_state: string | null;
+  revision_origin: string;
+  automatic_correction_round: number | null;
 }
 
 export interface ChapterStateView {
@@ -227,6 +239,49 @@ export interface ChapterStateView {
   pending_submission_id: string | null;
   pending_review_id: string | null;
   pending_review_decision: string | null;
+  revision_origin: string;
+  automatic_correction_round: number | null;
+}
+
+export interface CreatorInputNeed {
+  controlled_fact: string;
+  question: string;
+  evidence: string[];
+}
+
+export interface CreatorInputRequestView {
+  review_kind: "arc_parent" | "book_parent" | "arc_closure" | "book_boundary";
+  review_id: string;
+  route_layer: "book" | "arc";
+  book_id: string;
+  arc_id: string | null;
+  automatic_correction_round: 0 | 1;
+  question: CreatorInputNeed;
+}
+
+export interface FeedbackStateView {
+  feedback_id: string;
+  feedback_kind: "unsolicited" | "correction_wait_response";
+  status: "pending" | "routed" | "applied" | "dismissed";
+  content: string;
+  route_layer: "book" | "arc" | "chapter" | null;
+  book_id: string | null;
+  arc_id: string | null;
+  chapter_id: string | null;
+  captured_run_id: string;
+  captured_book_baseline_id: string | null;
+  captured_arc_baseline_id: string | null;
+  captured_chapter_baseline_id: string | null;
+  arc_parent_review_id: string | null;
+  book_parent_review_id: string | null;
+  arc_closure_review_id: string | null;
+  book_boundary_review_id: string | null;
+  resulting_correction_lineage_id: string | null;
+  dismiss_reason_code: string | null;
+  applied_command_id: string | null;
+  created_at_ms: number;
+  routed_at_ms: number | null;
+  applied_at_ms: number | null;
 }
 
 export interface AgentTaskStateView {
@@ -275,6 +330,8 @@ export interface ProjectStateView {
   book: BookStateView;
   current_arc: ArcStateView | null;
   current_chapter: ChapterStateView | null;
+  creator_input_request: CreatorInputRequestView | null;
+  recent_feedback: FeedbackStateView[];
   latest_event_sequence: number;
   commands: ExecutableCommand[];
   recent_tasks: AgentTaskStateView[];

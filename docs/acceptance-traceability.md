@@ -2,22 +2,25 @@
 
 ## 验收口径
 
-阶段 0～10 的离线门禁通过即构成重构工程验收。真实模型具有概率性和不可控 token 成本，因此四次 Grok 4.5 运行属于工程完成后的表现观测，不是成功条件。
+阶段 0～10 的离线门禁通过即构成重构工程验收。真实模型具有概率性和不可控 token 成本，因此四次真实模型运行属于工程完成后的表现观测，不是成功条件。
 
 | 能力 | 权威实现 | 主要离线证据 |
 | --- | --- | --- |
-| 单 SQLite、34 表、Alembic drift | `app.db` | `backend/tests/db`、`test_database_engine.py` |
+| 单 SQLite、39 表、Alembic drift | `app.db` | `backend/tests/db`、`test_database_engine.py` |
 | 项目内 CAS 与删除隔离 | `app.store.content`、复合 FK | `test_content.py`、`test_constraints.py` |
 | Book workspace/review/approval/baseline | `app.domain.book` | `test_book_discussion.py`、`test_book_lifecycle.py` |
-| Arc 滚动规划与双模式审批 | `app.domain.arc` | `test_arc_lifecycle.py`、整书 driver 参数化测试 |
+| 当前 Arc 契约、双模式审批与 formal closure | `app.domain.arc`、`domain.authority` | `test_arc_lifecycle.py`、`test_completion.py`、整书 driver 参数化测试 |
 | Chapter/Canon 原子提交 | `app.domain.chapter` | `test_chapter_lifecycle.py`、`test_revisions.py` |
+| Book > Arc > Chapter 直属上层审查 | `domain.change_requests/authority` | `test_change_requests.py`、`test_authority_feedback.py` |
+| AR1 与单轮向下纠正 lineage | `domain.authority`、`runtime.driver` | `test_authority_feedback.py`、`test_completion.py` |
+| Q1 顶端叙事修订与 evidence-only correction | `domain.chapter/feedback/authority` | `test_feedback.py`、`test_authority_feedback.py` |
 | Pydantic AI typed/text 输出与双流式线协议 | `app.agents.binding/transport` | `test_pydantic_ai_contract.py`、`test_binding.py`、`test_transport.py` |
 | Profile capability evidence 与无密钥快照 | `app.agents.probe`、`app.profiles` | `test_probe.py`、`test_profiles.py`、secret audit |
 | 5 次 transport retry、6 请求总预算、T1 | `agents.transport/contracts/executor`、DB check | `test_transport.py`、`test_executor.py`、schema tests |
 | 唯一 Run Engine、Pause/Retry/C1 | `app.runtime` | `backend/tests/runtime` |
 | 任务证据与 live delta 分离 | `agents.executor`、`runtime.live` | executor/live/routing tests |
-| 反馈、正式修订与跨层升级 | `domain.feedback/change_requests` | feedback/change/stale-rebase tests |
-| Completion、snapshot、Markdown | `domain.completion/snapshots/export` | completion/export/snapshot tests |
+| FIFO 延迟反馈、creator wait 与正式修订 | `domain.feedback/change_requests`、`api.workspace` | feedback/change/authority/API tests |
+| Arc closure、Book handoff/completion、snapshot、Markdown | `domain.authority/snapshots/export` | completion/export/snapshot tests |
 | 显式 API、幂等、SSE 不驱动流程 | `api.workspace`、新 React App | API tests、frontend tests/build |
 | 一致备份恢复 | `db.maintenance` | `test_maintenance.py` |
 | SQLite/备份/导出/报告密钥审计 | `security.audit` | `test_secret_audit.py` |
@@ -35,7 +38,9 @@ npm.cmd run acceptance
 
 - full-auto：20 个正式 Chapter、1 次 Book 批准、0 次 Arc 批准；
 - participatory：20 个正式 Chapter、1 次 Book 批准、10 次 Arc 批准；
-- 两者都到达正式 Book completion；
+- 两者都经过正式 Arc closure、Book boundary handoff，并到达正式 Book completion；
+- closure 由契约与已提交事实判定，章节数只负责触发检查；
+- 无 Arc 滚动复盘、无 Chapter-to-Book 直达变更、无按次数完成；
 - 浏览器、SSE 和真实 Provider 均不是推进条件。
 
 ## 真实观测
@@ -43,9 +48,10 @@ npm.cmd run acceptance
 离线工程验收后执行固定 series：
 
 ```powershell
-npm.cmd run observe:live-book-series -- --case benchmark-mother-natural-book-v1 --profile-id grok-4.5 --runs 4
+npm.cmd run profile:probe -- jemmy-gpt-5.6-terra
+npm.cmd run observe:live-book-series -- --case benchmark-mother-natural-book-v1 --profile-id jemmy-gpt-5.6-terra --runs 4
 ```
 
-每个 slot 只允许正常产品交互，不允许技术救援。报告保存：代码/Prompt/Profile/framework/Harness 指纹、项目 ID、模式、最终权威状态、章节/Arc/gate、全部 task attempt metadata、usage、retry/repair、类型化错误、completion identity 和导出 hash。
+当前冻结观测使用 OpenAI Responses Profile `jemmy-gpt-5.6-terra`（模型 `gpt-5.6-terra`，base URL `https://api.jemmy.icu/v1`）。每个 slot 只允许正常产品交互，不允许技术救援。报告保存：代码/Prompt/Profile/framework/Harness 指纹、项目 ID、模式、最终权威状态、章节/Arc/closure/handoff/gate、全部 task attempt metadata、usage、retry/repair、类型化错误、completion identity 和导出 hash。
 
 可能结果是 0～4 个 completed；failed 和 not_run 同样是有效观测记录。series 结束后不自动分析、不修改代码、不补跑，保留现场等待后续分析。

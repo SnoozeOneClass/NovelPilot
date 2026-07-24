@@ -266,6 +266,8 @@ class ProjectCommandService:
                     lifecycle_status="developing",
                     current_baseline_id=None,
                     current_completion_id=None,
+                    latest_boundary_review_id=None,
+                    current_progress_handoff_id=None,
                     created_at_ms=timestamp,
                     updated_at_ms=timestamp,
                 )

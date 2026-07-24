@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Literal
-
 import pytest
 from alembic import command
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.agents.contracts import ArcPlanProposal, LayerEvaluationResult
+from app.agents.contracts import (
+    ArcClosureSignal,
+    ArcPlanProposal,
+    ArcStateTransition,
+    LayerEvaluationResult,
+)
+from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
 from app.db.engine import create_sqlite_async_engine
 from app.db.maintenance import alembic_config
 from app.db.schema import (
@@ -18,9 +22,14 @@ from app.db.schema import (
     arc_workspaces,
     book_baselines,
     book_workspaces,
-    chapter_arc_change_requests,
-    chapter_book_change_requests,
     chapter_workspaces,
+    chapter_arc_change_requests,
+    metadata,
+)
+from app.domain.authority import (
+    LoopAuthorityCommandService,
+    RecordArcParentReviewRequest,
+    RecordBookParentReviewRequest,
 )
 from app.domain.arc.commands import ArcCommandService
 from app.domain.arc.contracts import (
@@ -35,7 +44,10 @@ from app.domain.book.contracts import (
     ApplyBookCandidateTaskRequest,
     ApproveBookRequest,
     BookCandidatePack,
+    BookCompletionRequirement,
+    BookCreativeConstraints,
     BookEvaluation,
+    BookRollingPlan,
     CompletionContract,
     RecordBookReviewRequest,
     SubmitBookRequest,
@@ -44,6 +56,11 @@ from app.domain.change_requests import (
     ActivateChangeRequest,
     ChangeRequestCommandService,
     RejectChangeRequest,
+)
+from app.domain.commands import CommandPreconditionError
+from app.domain.evaluation import (
+    ArcParentContractEvaluation,
+    BookParentContractEvaluation,
 )
 from app.store.command_bus import CommandBus
 from tests.domain.test_arc_lifecycle import _prepare_reviewed_arc
@@ -64,13 +81,36 @@ async def _commit_book_v2(
 ) -> str:
     candidate = BookCandidatePack(
         direction="The investigation now permits the explicitly escalated reveal.",
-        constraints={"pov": "limited-third", "history": "preserve-committed"},
+        constraints=BookCreativeConstraints(
+            genre_reader_promise="A fair-play speculative mystery.",
+            premise_story_engine="Each verified contradiction exposes a deeper memory edit.",
+            stable_world_invariants=["Physical evidence cannot be retroactively edited."],
+            stable_character_invariants=["Mara requires verifiable evidence."],
+            core_selling_points=["Escalating memory contradictions"],
+            prohibited_outcomes=["Do not erase committed history as a dream."],
+        ),
         selected_title="Echo Testimony",
-        rolling_plan={"strategy": "one-arc-at-a-time", "revision": suffix},
+        rolling_plan=BookRollingPlan(
+            long_term_character_directions=[
+                "Mara learns to trust evidence without surrendering judgment."
+            ],
+            high_level_phase_strategy=[
+                "Identify one edit source before exposing the wider system."
+            ],
+            whole_book_pacing_strategy="Escalate through evidence-bound Arc closures.",
+            ending_tendency="Resolve the central edit while preserving earned consequences.",
+            arc_planning_guidelines=["Each Arc must close an observable state transition."],
+        ),
         completion_contract=CompletionContract(
             minimum_chapter_count=1,
             maximum_chapter_count=12,
-            completion_requirements=["Resolve the central memory conflict"],
+            completion_requirements=[
+                BookCompletionRequirement(
+                    requirement_key="central_memory_conflict_resolved",
+                    description="Resolve the central memory conflict.",
+                    evidence_expectation="Committed Chapters prove the resolution.",
+                )
+            ],
         ),
     )
     task_id, attempt_id = await insert_successful_task(
@@ -132,8 +172,12 @@ async def _commit_book_v2(
             submission_id=submitted.result.submission_id,
             evaluator_task_id=evaluator_task,
             evaluator_attempt_id=evaluator_attempt,
-            rubric_id="book-rubric",
-            rubric_version=1,
+            rubric_id=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                "evaluate.book"
+            ).rubric_id,
+            rubric_version=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                "evaluate.book"
+            ).rubric_version,
             deterministic_precheck={"passed": True},
         ),
         idempotency_key=f"{suffix}:review-book-revise",
@@ -152,6 +196,112 @@ async def _commit_book_v2(
     return committed.result.baseline_id
 
 
+async def _record_arc_revision_authorization(
+    engine: AsyncEngine,
+    *,
+    project_id: str,
+    run_id: str,
+    book_id: str,
+    book_baseline_id: str,
+    arc_id: str,
+    arc_baseline_id: str,
+    canon_baseline_id: str,
+    request_id: str,
+    workspace_lock_version: int,
+    suffix: str,
+) -> str:
+    task_id, attempt_id = await insert_successful_task(
+        engine,
+        project_id=project_id,
+        run_id=run_id,
+        task_id=f"{suffix}:arc-parent-review",
+        attempt_id=f"{suffix}:arc-parent-review:attempt",
+        role="evaluator",
+        task_kind="evaluate.arc_parent_contract",
+        scope_layer="arc",
+        book_id=book_id,
+        book_baseline_id=book_baseline_id,
+        arc_id=arc_id,
+        arc_baseline_id=arc_baseline_id,
+        canon_baseline_id=canon_baseline_id,
+        workspace_lock_version=workspace_lock_version,
+        correction_lineage_id=f"{suffix}:arc-parent-lineage",
+        correction_lineage_origin="review_initiated",
+        automatic_correction_round=0,
+        source_chapter_arc_request_id=request_id,
+        result=ArcParentContractEvaluation(
+            arc_contract_judgment="revision_warranted",
+            book_review_concern="not_required",
+            chapter_evidence_concern="not_required",
+            summary="Arc authority confirms that its baseline requires revision.",
+        ),
+    )
+    recorded = await LoopAuthorityCommandService(CommandBus(engine)).record_arc_parent_review(
+        RecordArcParentReviewRequest(
+            project_id=project_id,
+            book_id=book_id,
+            arc_id=arc_id,
+            request_id=request_id,
+            task_id=task_id,
+            attempt_id=attempt_id,
+        ),
+        idempotency_key=f"{suffix}:record-arc-parent-review",
+    )
+    assert recorded.result.disposition == "arc_revision_warranted"
+    return recorded.result.review_id
+
+
+async def _record_book_revision_authorization(
+    engine: AsyncEngine,
+    *,
+    project_id: str,
+    run_id: str,
+    book_id: str,
+    book_baseline_id: str,
+    arc_baseline_id: str | None,
+    canon_baseline_id: str,
+    request_id: str,
+    workspace_lock_version: int,
+    suffix: str,
+) -> str:
+    task_id, attempt_id = await insert_successful_task(
+        engine,
+        project_id=project_id,
+        run_id=run_id,
+        task_id=f"{suffix}:book-parent-review",
+        attempt_id=f"{suffix}:book-parent-review:attempt",
+        role="evaluator",
+        task_kind="evaluate.book_parent_contract",
+        scope_layer="book",
+        book_id=book_id,
+        book_baseline_id=book_baseline_id,
+        arc_baseline_id=arc_baseline_id,
+        canon_baseline_id=canon_baseline_id,
+        workspace_lock_version=workspace_lock_version,
+        correction_lineage_id=f"{suffix}:book-parent-lineage",
+        correction_lineage_origin="review_initiated",
+        automatic_correction_round=0,
+        source_arc_book_request_id=request_id,
+        result=BookParentContractEvaluation(
+            book_contract_judgment="revision_warranted",
+            arc_evidence_concern="not_required",
+            summary="Book authority confirms that its baseline requires revision.",
+        ),
+    )
+    recorded = await LoopAuthorityCommandService(CommandBus(engine)).record_book_parent_review(
+        RecordBookParentReviewRequest(
+            project_id=project_id,
+            book_id=book_id,
+            request_id=request_id,
+            task_id=task_id,
+            attempt_id=attempt_id,
+        ),
+        idempotency_key=f"{suffix}:record-book-parent-review",
+    )
+    assert recorded.result.disposition == "book_revision_warranted"
+    return recorded.result.review_id
+
+
 def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
     tmp_path: Path,
 ) -> None:
@@ -167,9 +317,8 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                 target_chapter_count=2,
                 canon_change=False,
                 evaluation=LayerEvaluationResult(
-                    decision="cross_loop_escalation",
+                    decision="escalate_to_arc",
                     summary="The Arc contract must change before this Chapter can proceed.",
-                    escalation_target="arc",
                 ),
             )
             async with engine.connect() as connection:
@@ -185,6 +334,33 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                 )
             assert change_request_id is not None and arc_lock is not None
             bus = CommandBus(engine)
+            with pytest.raises(
+                CommandPreconditionError,
+                match="Chapter-to-Arc request is stale",
+            ):
+                await ChangeRequestCommandService(bus).activate(
+                    ActivateChangeRequest(
+                        project_id=ready.foundation.project_id,
+                        change_request_id=change_request_id,
+                        request_kind="chapter_to_arc",
+                        expected_target_baseline_id=ready.foundation.arc_baseline_id,
+                        expected_workspace_lock_version=arc_lock,
+                    ),
+                    idempotency_key="change:activate-without-authority",
+                )
+            await _record_arc_revision_authorization(
+                engine,
+                project_id=ready.foundation.project_id,
+                run_id=ready.foundation.run_id,
+                book_id=ready.foundation.book_id,
+                book_baseline_id=ready.foundation.book_baseline_id,
+                arc_id=ready.foundation.arc_id,
+                arc_baseline_id=ready.foundation.arc_baseline_id,
+                canon_baseline_id=ready.foundation.canon_baseline_id,
+                request_id=change_request_id,
+                workspace_lock_version=arc_lock,
+                suffix="change",
+            )
             activated = await ChangeRequestCommandService(bus).activate(
                 ActivateChangeRequest(
                     project_id=ready.foundation.project_id,
@@ -203,15 +379,39 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                             chapter_arc_change_requests.c.id == change_request_id
                         )
                     )
-                    == "open"
+                    == "reviewed"
                 )
 
             plan = ArcPlanProposal(
                 title="The First Contradiction, Revised",
                 purpose="Allow the Chapter to reveal a physical memory-edit trace.",
-                beats=["Witnesses disagree", "The revised evidence can now appear"],
-                target_chapter_count=2,
-                completion_signals=["The first edit source is identified"],
+                desired_state_transition=ArcStateTransition(
+                    start_state="The memory contradiction remains unexplained.",
+                    end_state="The edit source is identified through physical evidence.",
+                ),
+                conflict_trajectory=[
+                    "Witnesses disagree",
+                    "The revised evidence can now appear",
+                ],
+                pacing_trajectory=["Investigate", "Verify", "Close the stage"],
+                character_obligations=["Mara changes one belief through evidence."],
+                foreshadowing_obligations=["Leave one clue for the next Arc."],
+                prohibitions=["Do not contradict committed Canon."],
+                minimum_chapter_count=1,
+                recommended_closure_chapter_count=2,
+                maximum_chapter_count=3,
+                closure_chapter_count=2,
+                closure_signals=[
+                    ArcClosureSignal(
+                        signal_key="first_edit_identified",
+                        description="The first edit source is identified.",
+                        evidence_expectation="Committed observations identify the source.",
+                    )
+                ],
+                advisory_beats=[
+                    "Witnesses disagree",
+                    "The revised evidence can now appear",
+                ],
             )
             task_id, attempt_id = await insert_successful_task(
                 engine,
@@ -279,8 +479,12 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                     submission_id=submitted.result.submission_id,
                     evaluator_task_id=evaluator_task,
                     evaluator_attempt_id=evaluator_attempt,
-                    rubric_id="arc-rubric",
-                    rubric_version=1,
+                    rubric_id=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                        "evaluate.arc"
+                    ).rubric_id,
+                    rubric_version=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                        "evaluate.arc"
+                    ).rubric_version,
                     deterministic_precheck={"passed": True},
                 ),
                 idempotency_key="change:review-arc-revision",
@@ -341,9 +545,8 @@ def test_rejected_change_request_keeps_formal_baselines_and_blocks_source_for_us
                 target_chapter_count=2,
                 canon_change=False,
                 evaluation=LayerEvaluationResult(
-                    decision="cross_loop_escalation",
+                    decision="escalate_to_arc",
                     summary="The proposed reveal appears to require an Arc change.",
-                    escalation_target="arc",
                 ),
             )
             async with engine.connect() as connection:
@@ -374,7 +577,7 @@ def test_rejected_change_request_keeps_formal_baselines_and_blocks_source_for_us
                         chapter_workspaces.c.chapter_id == ready.chapter_id
                     )
                 )
-                assert request_status == "rejected"
+                assert request_status == "superseded"
                 assert workspace_state == "blocked_by_user"
                 assert (
                     await connection.scalar(select(func.count()).select_from(arc_baselines))
@@ -386,60 +589,39 @@ def test_rejected_change_request_keeps_formal_baselines_and_blocks_source_for_us
     asyncio.run(exercise())
 
 
-@pytest.mark.parametrize("request_kind", ["chapter_to_book", "arc_to_book"])
-def test_lower_to_book_request_resolves_only_when_book_v2_is_approved(
+def test_direct_chapter_to_book_authority_table_is_absent() -> None:
+    assert "chapter_book_change_requests" not in metadata.tables
+
+
+def test_arc_to_book_request_resolves_only_when_authorized_book_v2_is_approved(
     tmp_path: Path,
-    request_kind: Literal["chapter_to_book", "arc_to_book"],
 ) -> None:
-    database = tmp_path / f"{request_kind}.sqlite3"
+    database = tmp_path / "arc-to-book.sqlite3"
     command.upgrade(alembic_config(database), "head")
 
     async def exercise() -> None:
         engine = create_sqlite_async_engine(database)
         try:
-            project_id = f"{request_kind}-project"
-            if request_kind == "chapter_to_book":
-                ready = await _prepare_reviewed_chapter(
-                    engine,
-                    project_id=project_id,
-                    target_chapter_count=2,
-                    canon_change=False,
-                    evaluation=LayerEvaluationResult(
-                        decision="cross_loop_escalation",
-                        summary="The reveal requires a Book-level direction change.",
-                        escalation_target="book",
-                    ),
-                )
-                run_id = ready.foundation.run_id
-                book_id = ready.foundation.book_id
-                book_baseline_id = ready.foundation.book_baseline_id
-                canon_baseline_id = ready.foundation.canon_baseline_id
-                async with engine.connect() as connection:
-                    request_id = await connection.scalar(
-                        select(chapter_book_change_requests.c.id).where(
-                            chapter_book_change_requests.c.chapter_id == ready.chapter_id
-                        )
+            project_id = "arc-to-book-project"
+            reviewed_arc = await _prepare_reviewed_arc(
+                engine,
+                project_id=project_id,
+                operation_mode="full_auto",
+                evaluation=ArcEvaluation(
+                    decision="escalate_to_book",
+                    summary="The Arc requires a Book-level direction change.",
+                ),
+            )
+            run_id = reviewed_arc.book.run_id
+            book_id = reviewed_arc.book.book_id
+            book_baseline_id = reviewed_arc.book.book_baseline_id
+            canon_baseline_id = reviewed_arc.book.canon_baseline_id
+            async with engine.connect() as connection:
+                request_id = await connection.scalar(
+                    select(arc_book_change_requests.c.id).where(
+                        arc_book_change_requests.c.arc_id == reviewed_arc.arc_id
                     )
-            else:
-                reviewed_arc = await _prepare_reviewed_arc(
-                    engine,
-                    project_id=project_id,
-                    operation_mode="full_auto",
-                    evaluation=ArcEvaluation(
-                        decision="escalate_to_book",
-                        summary="The Arc requires a Book-level direction change.",
-                    ),
                 )
-                run_id = reviewed_arc.book.run_id
-                book_id = reviewed_arc.book.book_id
-                book_baseline_id = reviewed_arc.book.book_baseline_id
-                canon_baseline_id = reviewed_arc.book.canon_baseline_id
-                async with engine.connect() as connection:
-                    request_id = await connection.scalar(
-                        select(arc_book_change_requests.c.id).where(
-                            arc_book_change_requests.c.arc_id == reviewed_arc.arc_id
-                        )
-                    )
             assert request_id is not None
             async with engine.connect() as connection:
                 book_lock = await connection.scalar(
@@ -449,17 +631,45 @@ def test_lower_to_book_request_resolves_only_when_book_v2_is_approved(
                 )
             assert book_lock is not None
 
-            activated = await ChangeRequestCommandService(CommandBus(engine)).activate(
+            service = ChangeRequestCommandService(CommandBus(engine))
+            with pytest.raises(
+                CommandPreconditionError,
+                match="Book change request is stale",
+            ):
+                await service.activate(
+                    ActivateChangeRequest(
+                        project_id=project_id,
+                        change_request_id=request_id,
+                        request_kind="arc_to_book",
+                        expected_target_baseline_id=book_baseline_id,
+                        expected_workspace_lock_version=book_lock,
+                    ),
+                    idempotency_key="arc-to-book:activate-without-authority",
+                )
+            await _record_book_revision_authorization(
+                engine,
+                project_id=project_id,
+                run_id=run_id,
+                book_id=book_id,
+                book_baseline_id=book_baseline_id,
+                arc_baseline_id=None,
+                canon_baseline_id=canon_baseline_id,
+                request_id=request_id,
+                workspace_lock_version=book_lock,
+                suffix="arc-to-book",
+            )
+            activated = await service.activate(
                 ActivateChangeRequest(
                     project_id=project_id,
                     change_request_id=request_id,
-                    request_kind=request_kind,
+                    request_kind="arc_to_book",
                     expected_target_baseline_id=book_baseline_id,
                     expected_workspace_lock_version=book_lock,
                 ),
-                idempotency_key=f"{request_kind}:activate",
+                idempotency_key="arc-to-book:activate",
             )
             assert activated.result.target_layer == "book"
+            assert activated.result.workspace_lock_version is not None
             new_baseline_id = await _commit_book_v2(
                 engine,
                 project_id=project_id,
@@ -468,44 +678,26 @@ def test_lower_to_book_request_resolves_only_when_book_v2_is_approved(
                 book_baseline_id=book_baseline_id,
                 canon_baseline_id=canon_baseline_id,
                 workspace_lock_version=activated.result.workspace_lock_version,
-                suffix=request_kind,
+                suffix="arc-to-book",
             )
 
             async with engine.connect() as connection:
-                if request_kind == "chapter_to_book":
-                    request_row = (
-                        await connection.execute(
-                            select(
-                                chapter_book_change_requests.c.status,
-                                chapter_book_change_requests.c.resolved_by_book_baseline_id,
-                            ).where(chapter_book_change_requests.c.id == request_id)
-                        )
-                    ).one()
-                    source_row = (
-                        await connection.execute(
-                            select(
-                                chapter_workspaces.c.state,
-                                chapter_workspaces.c.stale_reason_code,
-                            ).where(chapter_workspaces.c.chapter_id == ready.chapter_id)
-                        )
-                    ).one()
-                else:
-                    request_row = (
-                        await connection.execute(
-                            select(
-                                arc_book_change_requests.c.status,
-                                arc_book_change_requests.c.resolved_by_book_baseline_id,
-                            ).where(arc_book_change_requests.c.id == request_id)
-                        )
-                    ).one()
-                    source_row = (
-                        await connection.execute(
-                            select(
-                                arc_workspaces.c.state,
-                                arc_workspaces.c.stale_reason_code,
-                            ).where(arc_workspaces.c.arc_id == reviewed_arc.arc_id)
-                        )
-                    ).one()
+                request_row = (
+                    await connection.execute(
+                        select(
+                            arc_book_change_requests.c.status,
+                            arc_book_change_requests.c.resolved_by_book_baseline_id,
+                        ).where(arc_book_change_requests.c.id == request_id)
+                    )
+                ).one()
+                source_row = (
+                    await connection.execute(
+                        select(
+                            arc_workspaces.c.state,
+                            arc_workspaces.c.stale_reason_code,
+                        ).where(arc_workspaces.c.arc_id == reviewed_arc.arc_id)
+                    )
+                ).one()
                 assert tuple(request_row) == ("resolved", new_baseline_id)
                 assert tuple(source_row) == ("stale", "upstream_book_revised")
                 assert (

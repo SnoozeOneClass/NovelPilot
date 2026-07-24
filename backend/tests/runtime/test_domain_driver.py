@@ -38,7 +38,10 @@ from app.domain.book.commands import BookCommandService
 from app.domain.book.contracts import ApproveBookRequest
 from app.domain.book.contracts import (
     BookCandidatePack,
+    BookCompletionRequirement,
+    BookCreativeConstraints,
     BookDiscussionState,
+    BookRollingPlan,
     CompletionContract,
     RecordBookUserInputRequest,
 )
@@ -46,6 +49,7 @@ from app.domain.commands import CommandPreconditionError
 from app.domain.projects import CreateProjectRequest, ProjectCommandService
 from app.profiles import ProfileCatalog, profile_configuration_fingerprint
 from app.runtime.control import (
+    RetryFailedActionRequest,
     RetryFailedTaskRequest,
     RunControlRequest,
     RunControlService,
@@ -191,16 +195,38 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
         return {
             "direction": "调查员逐步揭开城市记忆篡改系统，并为恢复真相付出私人代价。",
             "constraints": {
-                "pov": "limited-third",
-                "tone": "suspense",
-                "continuity": "每章线索必须可回溯",
+                "genre_reader_promise": "一部证据不断反转、最终能够闭合真相的悬疑长篇。",
+                "premise_story_engine": "调查员用不受记忆篡改影响的物证追查被改写的证词。",
+                "stable_world_invariants": ["物证不会随人的记忆一同改变。"],
+                "stable_character_invariants": ["主角始终主动追查真相并承担选择代价。"],
+                "core_selling_points": ["证词与物证之间持续出现可验证的矛盾。"],
+                "prohibited_outcomes": ["不得用梦境或幻觉否定已经提交的事实。"],
             },
             "selected_title": "《回声证词》",
-            "rolling_plan": {"strategy": "one-arc-at-a-time", "arc_chapters": 2},
+            "rolling_plan": {
+                "long_term_character_directions": ["主角从相信记忆转为相信可复核证据。"],
+                "high_level_phase_strategy": ["发现篡改机制", "追踪操作者并完成最终选择"],
+                "whole_book_pacing_strategy": "前半建立机制，后半集中回收线索。",
+                "ending_tendency": "主角公开真相并承担私人记忆受损的代价。",
+                "arc_planning_guidelines": ["每个故事弧都必须留下可供上层验证的正式证据。"],
+            },
             "completion_contract": {
                 "minimum_chapter_count": 18,
                 "maximum_chapter_count": 22,
-                "completion_requirements": ["揭示篡改源头", "主角承担最终选择的后果"],
+                "completion_requirements": [
+                    {
+                        "requirement_key": "truth_exposed",
+                        "description": "揭示记忆篡改的来源与运作方式。",
+                        "evidence_expectation": "正式章节和 Canon 中存在完整揭示。",
+                        "required": True,
+                    },
+                    {
+                        "requirement_key": "cost_paid",
+                        "description": "主角完成最终选择并承担其后果。",
+                        "evidence_expectation": "终局章节明确写出选择及不可撤销代价。",
+                        "required": True,
+                    },
+                ],
             },
         }
     if task_kind == "book.repair":
@@ -225,9 +251,28 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
         return {
             "title": f"第{ordinal}故事弧",
             "purpose": f"推进第{ordinal}阶段调查并留下可验证的新证据。",
-            "beats": ["发现矛盾证词", "验证物证", "确认下一层责任人"],
-            "target_chapter_count": 2,
-            "completion_signals": ["本弧核心证据得到解释"],
+            "desired_state_transition": {
+                "start_state": f"第{ordinal}阶段关键证据尚未闭合。",
+                "end_state": f"第{ordinal}阶段关键证据已经形成可复核结论。",
+            },
+            "conflict_trajectory": ["发现矛盾证词", "用物证加压", "锁定阶段责任人"],
+            "pacing_trajectory": ["建立疑点", "连续验证", "阶段收束"],
+            "character_obligations": ["主角必须因调查结果改变一个重要判断。"],
+            "foreshadowing_obligations": ["留下通往下一阶段或终局的可验证线索。"],
+            "prohibitions": ["不得推翻既有正式 Canon。"],
+            "minimum_chapter_count": 8,
+            "recommended_closure_chapter_count": 10,
+            "maximum_chapter_count": 12,
+            "closure_chapter_count": 10,
+            "closure_signals": [
+                {
+                    "signal_key": "stage_complete",
+                    "description": "本阶段核心证据得到解释并形成可复核结论。",
+                    "evidence_expectation": "本 Arc 的正式章节观察中存在阶段结论。",
+                    "required": True,
+                }
+            ],
+            "advisory_beats": ["发现矛盾证词", "验证物证", "确认阶段责任人"],
         }
     if task_kind == "arc.repair":
         return {
@@ -285,21 +330,59 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
             "summary": "章节计划、正文、观察与上游合同一致。",
             "issues": [],
             "repair_scope": [],
-            "escalation_target": None,
         }
-    if task_kind == "book.assess_progress_or_completion":
+    if task_kind == "evaluate.arc_closure":
+        return {
+            "signal_statuses": [
+                {
+                    "signal_key": "stage_complete",
+                    "status": "satisfied",
+                    "evidence": ["当前 Arc 的十个正式章节已经形成阶段结论。"],
+                    "rationale": "冻结章节观察共同满足阶段收束信号。",
+                }
+            ],
+            "arc_contract_judgment": "remains_applicable",
+            "book_review_concern": "not_required",
+            "chapter_evidence_concern": "not_required",
+            "summary": "当前 Arc 契约的必需收束信号均已有正式证据。",
+            "issues": [],
+            "creator_input_need": None,
+        }
+    if task_kind == "evaluate.book_boundary":
         count_match = re.search(r'"committed_chapter_count":(\d+)', prompt)
         count = int(count_match.group(1)) if count_match else 0
         if count >= 20:
             return {
-                "decision": "complete",
-                "rationale": "二十章已经满足完成合同，主谜题和人物代价均已闭合。",
-                "unresolved_requirements": [],
+                "requirement_statuses": [
+                    {
+                        "requirement_key": key,
+                        "status": "satisfied",
+                        "evidence": ["二十章正式历史已经完成该要求。"],
+                        "rationale": "终局 Arc 的正式收束证据足以支持完成。",
+                    }
+                    for key in ("truth_exposed", "cost_paid")
+                ],
+                "ending_trajectory_judgment": "completion_ready",
+                "book_contract_judgment": "remains_applicable",
+                "summary": "全书要求和终局方向均已满足。",
+                "issues": [],
+                "creator_input_need": None,
             }
         return {
-            "decision": "continue",
-            "rationale": "尚未达到二十章稳定收束点，继续规划下一故事弧。",
-            "unresolved_requirements": ["继续推进至二十章并闭合最终选择"],
+            "requirement_statuses": [
+                {
+                    "requirement_key": key,
+                    "status": "unresolved",
+                    "evidence": ["第一 Arc 只完成了阶段性证据链。"],
+                    "rationale": "需要一个 final Arc 才能完成终局要求。",
+                }
+                for key in ("truth_exposed", "cost_paid")
+            ],
+            "ending_trajectory_judgment": "final_arc_ready",
+            "book_contract_judgment": "remains_applicable",
+            "summary": "当前阶段已收束，正式终局 Arc 可以开始。",
+            "issues": [],
+            "creator_input_need": None,
         }
     raise AssertionError(f"Unhandled offline task kind: {task_kind}")
 
@@ -567,14 +650,40 @@ def test_rejected_domain_delivery_failure_pauses_once_and_requires_explicit_retr
                 book_id=created.result.book_id,
                 canon_baseline_id=created.result.canon_baseline_id,
                 workspace_lock_version=1,
-                result=BookCandidatePack(
-                    direction="A direction that will be rejected by the delivery stub.",
-                    constraints={},
-                    selected_title="Rejected Delivery",
-                    rolling_plan={},
+                    result=BookCandidatePack(
+                        direction="A direction that will be rejected by the delivery stub.",
+                        constraints=BookCreativeConstraints(
+                            genre_reader_promise="A deterministic test mystery.",
+                            premise_story_engine="Evidence exposes a controlled contradiction.",
+                            stable_world_invariants=["Committed evidence remains stable."],
+                            stable_character_invariants=["The investigator follows evidence."],
+                            core_selling_points=["Deterministic delivery behavior"],
+                            prohibited_outcomes=["Do not erase committed facts."],
+                        ),
+                        selected_title="Rejected Delivery",
+                        rolling_plan=BookRollingPlan(
+                            long_term_character_directions=[
+                                "The investigator learns from verified evidence."
+                            ],
+                            high_level_phase_strategy=["Reach the fixture ending."],
+                            whole_book_pacing_strategy="Use one bounded fixture Arc.",
+                            ending_tendency="End at the deterministic assertion.",
+                            arc_planning_guidelines=[
+                                "Close only after committed evidence."
+                            ],
+                        ),
                     completion_contract=CompletionContract(
                         minimum_chapter_count=1,
                         maximum_chapter_count=2,
+                        completion_requirements=[
+                            BookCompletionRequirement(
+                                requirement_key="delivery_failure_fixture",
+                                description="Reach the deterministic fixture ending.",
+                                evidence_expectation=(
+                                    "A committed final Chapter proves the fixture ending."
+                                ),
+                            )
+                        ],
                     ),
                 ),
             )
@@ -743,6 +852,135 @@ def test_rejected_domain_delivery_failure_pauses_once_and_requires_explicit_retr
     asyncio.run(exercise())
 
 
+def test_context_assembly_failure_binds_real_harness_action_and_requires_action_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "context-action-failure.sqlite3"
+    profile_path = tmp_path / "profiles.local.json"
+    command.upgrade(alembic_config(database), "head")
+    _write_profile(profile_path)
+
+    async def exercise() -> None:
+        engine = create_sqlite_async_engine(database)
+        try:
+            bus = CommandBus(engine)
+            created = await ProjectCommandService(bus).create_project(
+                CreateProjectRequest(
+                    project_id="project-context-action-failure",
+                    creator_brief="A pre-task context assembly failure test.",
+                    operation_mode="full_auto",
+                    default_profile_id="offline-profile",
+                ),
+                idempotency_key="create-context-action-failure-project",
+            )
+            started = await RunControlService(bus).start(
+                RunControlRequest(
+                    project_id=created.result.project_id,
+                    run_id=created.result.generation_run_id,
+                    expected_lock_version=1,
+                ),
+                idempotency_key="start-context-action-failure-run",
+            )
+            driver = DomainRunDriver(
+                engine,
+                profile_catalog=ProfileCatalog(profile_path),
+                now_ms=lambda: 100,
+            )
+
+            async def reject_context(**_kwargs: object) -> object:
+                raise LookupError("fixture deliberately removed one authority input")
+
+            monkeypatch.setattr(driver._context, "build", reject_context)
+            run_engine = RunEngine(
+                engine,
+                driver=driver,
+                reconciler=ReconcileService(engine, bus, now_ms=lambda: 100),
+                instance_id="context-action-failure-engine",
+                now_ms=lambda: 100,
+            )
+
+            assert await run_engine.run_once()
+            assert not await run_engine.run_once()
+
+            async with engine.connect() as connection:
+                run = (
+                    await connection.execute(
+                        select(
+                            generation_runs.c.status,
+                            generation_runs.c.failure_source_kind,
+                            generation_runs.c.blocking_task_id,
+                            generation_runs.c.blocking_action_key,
+                            generation_runs.c.failure_code,
+                            generation_runs.c.failure_ref_id,
+                            generation_runs.c.lock_version,
+                        ).where(
+                            generation_runs.c.id
+                            == created.result.generation_run_id
+                        )
+                    )
+                ).one()
+                task_count = (
+                    await connection.execute(
+                        select(func.count()).select_from(agent_tasks).where(
+                            agent_tasks.c.run_id
+                            == created.result.generation_run_id
+                        )
+                    )
+                ).scalar_one()
+
+            assert run.status == "failure_paused"
+            assert run.failure_source_kind == "harness_action"
+            assert run.blocking_task_id is None
+            assert run.blocking_action_key.startswith("freeze-task:book.discuss:")
+            assert run.failure_code == "context_assembly_invalid"
+            assert run.failure_ref_id is not None
+            assert task_count == 0
+
+            with pytest.raises(CommandPreconditionError):
+                await RunControlService(bus).retry_failed_task(
+                    RetryFailedTaskRequest(
+                        project_id=created.result.project_id,
+                        run_id=created.result.generation_run_id,
+                        expected_lock_version=run.lock_version,
+                        task_id="not-a-real-task",
+                    ),
+                    idempotency_key="wrong-source-task-retry",
+                )
+
+            retried = await RunControlService(bus).retry_failed_action(
+                RetryFailedActionRequest(
+                    project_id=created.result.project_id,
+                    run_id=created.result.generation_run_id,
+                    expected_lock_version=run.lock_version,
+                    action_key=run.blocking_action_key,
+                ),
+                idempotency_key="retry-context-action-failure",
+            )
+            assert retried.result.status == "running"
+            assert retried.result.lock_version == started.result.lock_version + 2
+            async with engine.connect() as connection:
+                resumed = (
+                    await connection.execute(
+                        select(
+                            generation_runs.c.failure_source_kind,
+                            generation_runs.c.blocking_task_id,
+                            generation_runs.c.blocking_action_key,
+                            generation_runs.c.failure_code,
+                            generation_runs.c.failure_ref_id,
+                        ).where(
+                            generation_runs.c.id
+                            == created.result.generation_run_id
+                        )
+                    )
+                ).one()
+            assert tuple(resumed) == (None, None, None, None, None)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize("operation_mode", ["full_auto", "participatory"])
 def test_driver_completes_twenty_chapter_book_with_only_product_gates(
     tmp_path: Path,
@@ -862,7 +1100,7 @@ def test_driver_completes_twenty_chapter_book_with_only_product_gates(
                                 submission_id=pending.id,
                                 review_id=review.id,
                                 approval_gate_id=gate.id,
-                                target_chapter_count=pending.recommended_target_chapter_count,
+                                closure_chapter_count=pending.recommended_closure_chapter_count,
                                 expected_current_baseline_id=arc.current_baseline_id,
                             )
                             action = ("arc", arc_request)
@@ -925,5 +1163,5 @@ def test_driver_completes_twenty_chapter_book_with_only_product_gates(
     chapter_count, book_gates, arc_gates, project_status = asyncio.run(exercise())
     assert chapter_count == 20
     assert book_gates == 1
-    assert arc_gates == (0 if operation_mode == "full_auto" else 10)
+    assert arc_gates == (0 if operation_mode == "full_auto" else 2)
     assert project_status == "completed"

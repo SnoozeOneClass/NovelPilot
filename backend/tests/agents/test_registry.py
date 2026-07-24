@@ -21,7 +21,10 @@ from app.agents.contracts import (
     ProfileCapabilities,
     ProfileSnapshot,
 )
-from app.agents.registry import DEFAULT_TASK_REGISTRY
+from app.agents.registry import (
+    DEFAULT_EVALUATION_STRATEGY_REGISTRY,
+    DEFAULT_TASK_REGISTRY,
+)
 from app.agents.roles import build_agent
 
 
@@ -202,10 +205,9 @@ def test_cross_field_semantic_rules_are_present_in_model_visible_contracts() -> 
     assert "repair_scope contains at least one" in arc_evaluation.task_instructions
 
     chapter_properties = chapter_evaluation.output_schema["properties"]
-    assert "only when decision is cross_loop_escalation" in (
-        chapter_properties["escalation_target"]["description"]
-    )
-    assert "cross_loop_escalation exactly when" in chapter_evaluation.task_instructions
+    assert "escalation_target" not in chapter_properties
+    assert "escalate_to_arc" in chapter_properties["decision"]["description"]
+    assert "Never judge or route directly to Book" in chapter_evaluation.task_instructions
 
 
 def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
@@ -229,7 +231,19 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
 
     expected_components = {
         "book": {"direction", "constraints", "rolling_plan", "completion_contract"},
-        "arc": {"title", "purpose", "beats", "target_chapter_count", "completion_signals"},
+        "arc": {
+            "title",
+            "purpose",
+            "desired_state_transition",
+            "conflict_trajectory",
+            "pacing_trajectory",
+            "character_obligations",
+            "foreshadowing_obligations",
+            "prohibitions",
+            "chapter_range",
+            "closure_signals",
+            "advisory_beats",
+        },
         "chapter": {"observations", "canon"},
     }
     for layer, definition in definitions.items():
@@ -268,8 +282,8 @@ def test_local_repair_patch_contracts_reject_empty_and_duplicate_changes() -> No
             "arc_planner",
             "arc.repair",
             [
-                {"component": "beats", "value": ["First beat"]},
-                {"component": "beats", "value": ["Second beat"]},
+                {"component": "conflict_trajectory", "value": ["First trajectory"]},
+                {"component": "conflict_trajectory", "value": ["Second trajectory"]},
             ],
         ),
         (
@@ -300,3 +314,81 @@ def test_local_repair_patch_contracts_reject_empty_and_duplicate_changes() -> No
             definition.output_model.model_validate({"changes": []})
         with pytest.raises(ValidationError, match="change each component"):
             definition.output_model.model_validate({"changes": duplicate_changes})
+
+
+def test_every_evaluator_task_freezes_one_complete_purpose_specific_strategy() -> None:
+    evaluator_definitions = [
+        definition for definition in DEFAULT_TASK_REGISTRY if definition.role == "evaluator"
+    ]
+
+    assert {definition.task_kind for definition in evaluator_definitions} == {
+        strategy.task_kind for strategy in DEFAULT_EVALUATION_STRATEGY_REGISTRY
+    }
+    for definition in evaluator_definitions:
+        strategy = DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(definition.task_kind)
+        assert definition.evaluation_strategy_id == strategy.strategy_id
+        assert definition.evaluation_strategy_version == strategy.strategy_version
+        assert definition.context_policy_id == strategy.context_policy_id
+        assert definition.rubric_id == strategy.rubric_id
+        assert definition.rubric_text == strategy.rubric_text
+        assert strategy.rubric_text in definition.task_instructions
+        assert strategy.context_includes
+        assert strategy.context_excludes
+        assert strategy.deterministic_prechecks
+        assert strategy.legal_semantic_signals
+
+
+def test_frozen_evaluator_plan_contains_concrete_rubric_and_strategy_identity() -> None:
+    plan = DEFAULT_TASK_REGISTRY.freeze_plan(
+        task_id="task-closure",
+        project_id="project-a",
+        run_id="run-a",
+        task_key="arc:closure:1",
+        action_key="evaluate.arc_closure:arc-a",
+        role="evaluator",
+        task_kind="evaluate.arc_closure",
+        contract_version=1,
+        book_id="book-a",
+        arc_id="arc-a",
+        workspace_lock_version=3,
+        book_baseline_id="book-baseline-a",
+        arc_baseline_id="arc-baseline-a",
+        canon_baseline_id="canon-a",
+        semantic_goal="Judge the frozen Arc closure boundary.",
+        prompt="Evaluate the supplied semantic closure evidence.",
+        context_manifest={"schema_id": "test-context"},
+        profile_snapshot=_profile(),
+        correction_lineage_id="lineage-a",
+        correction_lineage_origin="review_initiated",
+        automatic_correction_round=0,
+    )
+
+    assert plan.evaluation_strategy_id == "evaluate.arc_closure-strategy"
+    assert plan.evaluation_strategy_version == 1
+    assert plan.rubric_id == "arc-closure-rubric-v1"
+    assert plan.rubric_text
+    assert "Reaching the Chapter checkpoint is not semantic completion" in plan.rubric_text
+
+
+def test_route_c_arc_contract_exposes_range_checkpoint_and_no_fixed_chapter_map() -> None:
+    definition = DEFAULT_TASK_REGISTRY.get(
+        role="arc_planner",
+        task_kind="arc.plan",
+        contract_version=1,
+    )
+    properties = definition.output_schema["properties"]
+
+    assert {
+        "desired_state_transition",
+        "conflict_trajectory",
+        "pacing_trajectory",
+        "minimum_chapter_count",
+        "recommended_closure_chapter_count",
+        "maximum_chapter_count",
+        "closure_chapter_count",
+        "closure_signals",
+        "advisory_beats",
+    }.issubset(properties)
+    assert "beats" not in properties
+    assert "target_chapter_count" not in properties
+    assert "not Chapter slots" in definition.task_instructions

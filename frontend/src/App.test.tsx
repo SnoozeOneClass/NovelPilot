@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProjectStateView } from "./types/workspace";
 import { ThemeProvider } from "./app/theme";
@@ -74,7 +74,9 @@ function failureState(): ProjectStateView {
       desired_state: "running",
       lock_version: 3,
       wait_reason_code: "agent_task_failed",
+      failure_source_kind: "agent_task",
       blocking_task_id: "task-a",
+      blocking_action_key: null,
       failure_code: "typed_output_invalid",
       failure_ref_id: "error-ref",
       started_at_ms: 1,
@@ -84,6 +86,9 @@ function failureState(): ProjectStateView {
       book_id: "book-a",
       lifecycle_status: "planning",
       current_baseline_id: null,
+      latest_boundary_review_id: null,
+      current_progress_handoff_id: null,
+      current_completion_id: null,
       baseline_version: null,
       approved_title: null,
       minimum_chapter_count: null,
@@ -116,12 +121,15 @@ function failureState(): ProjectStateView {
     },
     current_arc: null,
     current_chapter: null,
+    creator_input_request: null,
+    recent_feedback: [],
     latest_event_sequence: 7,
     commands: [
       { command_id: "start_run", enabled: false, reason: "已开始" },
       { command_id: "pause_run", enabled: false, reason: "失败" },
       { command_id: "resume_run", enabled: false, reason: "失败不可继续" },
       { command_id: "retry_failed_task", enabled: true, reason: "显式重试" },
+      { command_id: "retry_failed_action", enabled: false, reason: "失败来源不匹配" },
       { command_id: "send_book_input", enabled: false, reason: "失败" },
       { command_id: "approve_book", enabled: false, reason: "失败" },
       { command_id: "approve_arc", enabled: false, reason: "失败" },
@@ -129,6 +137,47 @@ function failureState(): ProjectStateView {
       { command_id: "export_markdown", enabled: false, reason: "未完成" }
     ],
     recent_tasks: []
+  };
+}
+
+function creatorWaitState(): ProjectStateView {
+  const state = failureState();
+  return {
+    ...state,
+    project: {
+      ...state.project,
+      run_status: "waiting_for_user",
+      wait_reason_code: "arc_parent_review_needs_user"
+    },
+    run: {
+      ...state.run,
+      status: "waiting_for_user",
+      wait_reason_code: "arc_parent_review_needs_user",
+      failure_source_kind: null,
+      blocking_task_id: null,
+      failure_code: null,
+      failure_ref_id: null
+    },
+    creator_input_request: {
+      review_kind: "arc_parent",
+      review_id: "arc-parent-review-a",
+      route_layer: "arc",
+      book_id: "book-a",
+      arc_id: "arc-a",
+      automatic_correction_round: 0,
+      question: {
+        controlled_fact: "Whether the witness knowingly concealed the statement.",
+        question: "Did the witness knowingly conceal the altered statement?",
+        evidence: ["Committed evidence cannot establish the witness's private intent."]
+      }
+    },
+    commands: state.commands.map((item) => (
+      item.command_id === "submit_feedback"
+        ? { ...item, enabled: true, reason: "Answer the creator-owned question." }
+        : item.command_id === "retry_failed_task"
+          ? { ...item, enabled: false, reason: "This is not a task failure." }
+          : item
+    ))
   };
 }
 
@@ -197,5 +246,71 @@ describe("App authoritative workspace", () => {
 
     source?.emit("agent_live", { ...base, kind: "prose_delta", delta: "replacement prose" });
     expect(await screen.findByText("replacement prose")).toBeInTheDocument();
+  });
+
+  it("renders an owning-layer creator question and submits a deferred answer", async () => {
+    const state = creatorWaitState();
+    state.recent_feedback = [{
+      feedback_id: "queued-feedback-a",
+      feedback_kind: "unsolicited",
+      status: "routed",
+      content: "Preserve the witness's ambiguity.",
+      route_layer: "arc",
+      book_id: "book-a",
+      arc_id: "arc-a",
+      chapter_id: null,
+      captured_run_id: "run-a",
+      captured_book_baseline_id: "book-baseline-a",
+      captured_arc_baseline_id: "arc-baseline-a",
+      captured_chapter_baseline_id: null,
+      arc_parent_review_id: null,
+      book_parent_review_id: null,
+      arc_closure_review_id: null,
+      book_boundary_review_id: null,
+      resulting_correction_lineage_id: null,
+      dismiss_reason_code: null,
+      applied_command_id: null,
+      created_at_ms: 3,
+      routed_at_ms: 3,
+      applied_at_ms: null
+    }];
+    api.getProject.mockResolvedValue(state);
+    api.submitFeedback.mockResolvedValue({
+      receipt_id: "feedback-receipt",
+      replayed: false,
+      state
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <ThemeProvider><App /></ThemeProvider>
+      </QueryClientProvider>
+    );
+
+    expect(
+      await screen.findByText("Did the witness knowingly conceal the altered statement?")
+    ).toBeInTheDocument();
+    expect(screen.getByText("Preserve the witness's ambiguity.")).toBeInTheDocument();
+    expect(screen.getByText("已排队；当前原子动作不受影响")).toBeInTheDocument();
+    const layer = screen.getAllByRole("combobox").find(
+      (item) => (item as HTMLSelectElement).value === "arc"
+    );
+    expect(layer).toBeDefined();
+    expect(layer).toBeDisabled();
+    const answer = screen.getByPlaceholderText(
+      "回答上面的创作者问题。输入会在当前原子动作结束后注入。"
+    );
+    fireEvent.change(answer, {
+      target: { value: "Yes. The witness concealed it to protect Mara." }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提交回答" }));
+    await waitFor(() => expect(api.submitFeedback).toHaveBeenCalledWith(
+      "project-a",
+      {
+        content: "Yes. The witness concealed it to protect Mara.",
+        route_layer: "arc"
+      },
+      expect.any(String)
+    ));
   });
 });

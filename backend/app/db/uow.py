@@ -5,14 +5,22 @@ from typing import Literal
 
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncTransaction
 
-from app.store.content import ContentRepository
-from app.store.commands import CommandRepository
-from app.store.completion import CompletionRepository
 from app.store.arcs import ArcRepository
+from app.store.authority import (
+    ArcClosureRepository,
+    ArcClosureReviewRepository,
+    ArcParentReviewRepository,
+    BookBoundaryReviewRepository,
+    BookParentReviewRepository,
+    BookProgressHandoffRepository,
+)
 from app.store.books import BookRepository
 from app.store.canon import CanonRepository
 from app.store.change_requests import ChangeRequestRepository
 from app.store.chapters import ChapterRepository
+from app.store.commands import CommandRepository
+from app.store.completion import CompletionRepository
+from app.store.content import ContentRepository
 from app.store.execution import ExecutionRepository
 from app.store.feedback import FeedbackRepository
 from app.store.projects import ProjectRepository
@@ -29,10 +37,16 @@ class StoreSession:
         self._connection = connection
         self.content = ContentRepository(connection)
         self.arcs = ArcRepository(connection)
+        self.arc_parent_reviews = ArcParentReviewRepository(connection)
+        self.arc_closure_reviews = ArcClosureReviewRepository(connection)
+        self.arc_closures = ArcClosureRepository(connection)
         self.commands = CommandRepository(connection)
         self.completion = CompletionRepository(connection)
         self.projects = ProjectRepository(connection)
         self.books = BookRepository(connection)
+        self.book_parent_reviews = BookParentReviewRepository(connection)
+        self.book_boundary_reviews = BookBoundaryReviewRepository(connection)
+        self.book_progress_handoffs = BookProgressHandoffRepository(connection)
         self.canon = CanonRepository(connection)
         self.changes = ChangeRequestRepository(connection)
         self.chapters = ChapterRepository(connection)

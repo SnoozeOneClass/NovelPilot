@@ -28,6 +28,8 @@ class ArcRecord:
     purpose: str
     lifecycle_status: str
     current_baseline_id: str | None
+    latest_closure_review_id: str | None
+    current_closure_id: str | None
     created_at_ms: int
     updated_at_ms: int
     completed_at_ms: int | None
@@ -44,10 +46,23 @@ class ArcWorkspaceRecord:
     base_arc_baseline_id: str | None
     book_baseline_id: str
     canon_baseline_id: str
+    book_progress_handoff_id: str | None
     prior_arc_id: str | None
     prior_arc_baseline_id: str | None
+    revision_origin: str
+    source_arc_parent_review_id: str | None
+    source_arc_closure_review_id: str | None
+    source_book_parent_review_id: str | None
+    source_book_boundary_review_id: str | None
+    source_feedback_id: str | None
+    correction_lineage_id: str | None
+    correction_lineage_origin: str | None
+    automatic_correction_round: int | None
     plan_ref_id: str | None
-    recommended_target_chapter_count: int | None
+    minimum_chapter_count: int | None
+    recommended_closure_chapter_count: int | None
+    maximum_chapter_count: int | None
+    closure_chapter_count: int | None
     repair_policy_id: str
     semantic_repair_count: int
     semantic_repair_limit: int
@@ -73,7 +88,10 @@ class ArcSubmissionRecord:
     prior_arc_baseline_id: str | None
     purpose: str
     plan_ref_id: str
-    recommended_target_chapter_count: int
+    minimum_chapter_count: int
+    recommended_closure_chapter_count: int
+    maximum_chapter_count: int
+    closure_chapter_count: int
     content_manifest_ref_id: str
     content_fingerprint: str
     disposition: str
@@ -124,7 +142,7 @@ class ArcApprovalRecord:
     submission_id: str
     review_id: str
     decision: str
-    target_chapter_count: int | None
+    closure_chapter_count: int | None
     created_at_ms: int
 
 
@@ -140,12 +158,16 @@ class ArcBaselineRecord:
     review_id: str
     book_baseline_id: str
     canon_baseline_id: str
+    book_progress_handoff_id: str | None
     prior_arc_id: str | None
     prior_arc_baseline_id: str | None
     purpose: str
     plan_ref_id: str
-    recommended_target_chapter_count: int
-    target_chapter_count: int
+    minimum_chapter_count: int
+    recommended_closure_chapter_count: int
+    maximum_chapter_count: int
+    closure_chapter_count: int
+    revision_origin: str
     authorization_kind: str
     approval_gate_id: str | None
     approval_id: str | None
@@ -158,8 +180,10 @@ class ArcBookChangeRequestRecord:
     project_id: str
     book_id: str
     arc_id: str
-    source_submission_id: str
-    source_review_id: str
+    source_candidate_submission_id: str | None
+    source_candidate_review_id: str | None
+    source_arc_parent_review_id: str | None
+    source_arc_closure_review_id: str | None
     target_book_baseline_id: str
     evidence_ref_id: str
     status: str
@@ -175,6 +199,10 @@ def _arc_record(row: RowMapping) -> ArcRecord:
         purpose=cast(str, row["purpose"]),
         lifecycle_status=cast(str, row["lifecycle_status"]),
         current_baseline_id=cast(str | None, row["current_baseline_id"]),
+        latest_closure_review_id=cast(
+            str | None, row["latest_closure_review_id"]
+        ),
+        current_closure_id=cast(str | None, row["current_closure_id"]),
         created_at_ms=cast(int, row["created_at_ms"]),
         updated_at_ms=cast(int, row["updated_at_ms"]),
         completed_at_ms=cast(int | None, row["completed_at_ms"]),
@@ -192,12 +220,39 @@ def _workspace_record(row: RowMapping) -> ArcWorkspaceRecord:
         base_arc_baseline_id=cast(str | None, row["base_arc_baseline_id"]),
         book_baseline_id=cast(str, row["book_baseline_id"]),
         canon_baseline_id=cast(str, row["canon_baseline_id"]),
+        book_progress_handoff_id=cast(
+            str | None, row["book_progress_handoff_id"]
+        ),
         prior_arc_id=cast(str | None, row["prior_arc_id"]),
         prior_arc_baseline_id=cast(str | None, row["prior_arc_baseline_id"]),
-        plan_ref_id=cast(str | None, row["plan_ref_id"]),
-        recommended_target_chapter_count=cast(
-            int | None, row["recommended_target_chapter_count"]
+        revision_origin=cast(str, row["revision_origin"]),
+        source_arc_parent_review_id=cast(
+            str | None, row["source_arc_parent_review_id"]
         ),
+        source_arc_closure_review_id=cast(
+            str | None, row["source_arc_closure_review_id"]
+        ),
+        source_book_parent_review_id=cast(
+            str | None, row["source_book_parent_review_id"]
+        ),
+        source_book_boundary_review_id=cast(
+            str | None, row["source_book_boundary_review_id"]
+        ),
+        source_feedback_id=cast(str | None, row["source_feedback_id"]),
+        correction_lineage_id=cast(str | None, row["correction_lineage_id"]),
+        correction_lineage_origin=cast(
+            str | None, row["correction_lineage_origin"]
+        ),
+        automatic_correction_round=cast(
+            int | None, row["automatic_correction_round"]
+        ),
+        plan_ref_id=cast(str | None, row["plan_ref_id"]),
+        minimum_chapter_count=cast(int | None, row["minimum_chapter_count"]),
+        recommended_closure_chapter_count=cast(
+            int | None, row["recommended_closure_chapter_count"]
+        ),
+        maximum_chapter_count=cast(int | None, row["maximum_chapter_count"]),
+        closure_chapter_count=cast(int | None, row["closure_chapter_count"]),
         repair_policy_id=cast(str, row["repair_policy_id"]),
         semantic_repair_count=cast(int, row["semantic_repair_count"]),
         semantic_repair_limit=cast(int, row["semantic_repair_limit"]),
@@ -224,9 +279,12 @@ def _submission_record(row: RowMapping) -> ArcSubmissionRecord:
         prior_arc_baseline_id=cast(str | None, row["prior_arc_baseline_id"]),
         purpose=cast(str, row["purpose"]),
         plan_ref_id=cast(str, row["plan_ref_id"]),
-        recommended_target_chapter_count=cast(
-            int, row["recommended_target_chapter_count"]
+        minimum_chapter_count=cast(int, row["minimum_chapter_count"]),
+        recommended_closure_chapter_count=cast(
+            int, row["recommended_closure_chapter_count"]
         ),
+        maximum_chapter_count=cast(int, row["maximum_chapter_count"]),
+        closure_chapter_count=cast(int, row["closure_chapter_count"]),
         content_manifest_ref_id=cast(str, row["content_manifest_ref_id"]),
         content_fingerprint=cast(str, row["content_fingerprint"]),
         disposition=cast(str, row["disposition"]),
@@ -282,14 +340,20 @@ def _baseline_record(row: RowMapping) -> ArcBaselineRecord:
         review_id=cast(str, row["review_id"]),
         book_baseline_id=cast(str, row["book_baseline_id"]),
         canon_baseline_id=cast(str, row["canon_baseline_id"]),
+        book_progress_handoff_id=cast(
+            str | None, row["book_progress_handoff_id"]
+        ),
         prior_arc_id=cast(str | None, row["prior_arc_id"]),
         prior_arc_baseline_id=cast(str | None, row["prior_arc_baseline_id"]),
         purpose=cast(str, row["purpose"]),
         plan_ref_id=cast(str, row["plan_ref_id"]),
-        recommended_target_chapter_count=cast(
-            int, row["recommended_target_chapter_count"]
+        minimum_chapter_count=cast(int, row["minimum_chapter_count"]),
+        recommended_closure_chapter_count=cast(
+            int, row["recommended_closure_chapter_count"]
         ),
-        target_chapter_count=cast(int, row["target_chapter_count"]),
+        maximum_chapter_count=cast(int, row["maximum_chapter_count"]),
+        closure_chapter_count=cast(int, row["closure_chapter_count"]),
+        revision_origin=cast(str, row["revision_origin"]),
         authorization_kind=cast(str, row["authorization_kind"]),
         approval_gate_id=cast(str | None, row["approval_gate_id"]),
         approval_id=cast(str | None, row["approval_id"]),
@@ -336,7 +400,9 @@ class ArcRepository:
                 select(story_arcs).where(
                     story_arcs.c.project_id == project_id,
                     story_arcs.c.book_id == book_id,
-                    story_arcs.c.lifecycle_status.in_(("planning", "active")),
+                    story_arcs.c.lifecycle_status.in_(
+                        ("planning", "active", "closing")
+                    ),
                 )
             )
         ).mappings().one_or_none()
@@ -647,10 +713,13 @@ class ArcRepository:
                 story_arcs.c.project_id == project_id,
                 story_arcs.c.id == arc_id,
                 expected,
+                story_arcs.c.lifecycle_status.in_(("planning", "active", "closing")),
             )
             .values(
                 lifecycle_status=lifecycle_status,
                 current_baseline_id=new_baseline_id,
+                latest_closure_review_id=None,
+                current_closure_id=None,
                 completed_at_ms=completed_at_ms,
                 updated_at_ms=updated_at_ms,
             )
@@ -665,14 +734,26 @@ class ArcRepository:
         )
         return cast(int, value)
 
+    async def has_automatic_recovery_baseline(self, *, arc_id: str) -> bool:
+        baseline_id = await self._connection.scalar(
+            select(arc_baselines.c.id)
+            .where(
+                arc_baselines.c.arc_id == arc_id,
+                arc_baselines.c.revision_origin == "automatic_arc_recovery",
+            )
+            .limit(1)
+        )
+        return baseline_id is not None
+
     async def insert_book_change_request(
         self, record: ArcBookChangeRequestRecord
     ) -> None:
         await self._connection.execute(
             arc_book_change_requests.insert().values(
                 **asdict(record),
+                latest_parent_review_id=None,
                 resolved_by_book_baseline_id=None,
-                close_reason_code=None,
+                resolution_code=None,
                 closed_at_ms=None,
             )
         )

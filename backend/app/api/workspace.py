@@ -19,11 +19,9 @@ from app.domain.book.contracts import ApproveBookRequest, RecordBookUserInputReq
 from app.domain.commands import CommandExecution, CommandPreconditionError
 from app.domain.export import ManuscriptExportResult, ManuscriptExportService
 from app.domain.feedback import (
-    ApplyFeedbackRequest,
     FeedbackCommandService,
     FeedbackLayer,
-    RouteFeedbackRequest,
-    SubmitFeedbackRequest,
+    QueueFeedbackRequest,
 )
 from app.domain.project_state import (
     ProjectDiagnosticsView,
@@ -40,7 +38,11 @@ from app.domain.projects import (
 )
 from app.domain.snapshots import ProjectSnapshotManifest, SnapshotQueryService
 from app.profiles import PublicProfile
-from app.runtime.control import RetryFailedTaskRequest, RunControlRequest
+from app.runtime.control import (
+    RetryFailedActionRequest,
+    RetryFailedTaskRequest,
+    RunControlRequest,
+)
 from app.runtime.resources import ApplicationResources
 from app.store.command_bus import CommandBus
 from app.store.commands import DomainEventRecord
@@ -95,7 +97,7 @@ class BookInputBody(BaseModel):
 class ArcApprovalBody(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    target_chapter_count: int | None = Field(default=None, ge=1, le=30)
+    closure_chapter_count: int | None = Field(default=None, ge=1, le=30)
 
 
 class FeedbackBody(BaseModel):
@@ -103,7 +105,6 @@ class FeedbackBody(BaseModel):
 
     content: str
     route_layer: FeedbackLayer
-    expected_workspace_lock_version: int = Field(ge=1)
 
 
 class MutationResponse(BaseModel):
@@ -373,6 +374,34 @@ async def retry_failed_task(
     return _mutation(execution, await _state(resources, project_id))
 
 
+@router.post(
+    "/projects/{project_id}/run/retry-action",
+    response_model=MutationResponse,
+)
+async def retry_failed_action(
+    project_id: str,
+    body: RunControlBody,
+    request: Request,
+    idempotency_key: IdempotencyKey,
+) -> MutationResponse:
+    resources = _resources(request)
+    state = await _state(resources, project_id)
+    if state.run.blocking_action_key is None:
+        raise CommandPreconditionError(
+            "The Run has no failed Harness action to retry."
+        )
+    execution = await resources.run_control.retry_failed_action(
+        RetryFailedActionRequest(
+            project_id=project_id,
+            run_id=state.run.run_id,
+            expected_lock_version=body.expected_lock_version,
+            action_key=state.run.blocking_action_key,
+        ),
+        idempotency_key=idempotency_key,
+    )
+    return _mutation(execution, await _state(resources, project_id))
+
+
 @router.post("/projects/{project_id}/book/input", response_model=MutationResponse)
 async def record_book_input(
     project_id: str,
@@ -439,9 +468,9 @@ async def approve_arc(
         or arc.approval_gate_id is None
     ):
         raise CommandPreconditionError("The current Story Arc has no approval gate.")
-    target = body.target_chapter_count or arc.recommended_target_chapter_count
-    if target is None:
-        raise CommandPreconditionError("The Story Arc has no target chapter count.")
+    checkpoint = body.closure_chapter_count or arc.closure_chapter_count
+    if checkpoint is None:
+        raise CommandPreconditionError("The Story Arc has no closure checkpoint.")
     execution = await ArcCommandService(
         CommandBus(resources.database_engine)
     ).approve_and_commit(
@@ -452,7 +481,7 @@ async def approve_arc(
             submission_id=arc.pending_submission_id,
             review_id=arc.pending_review_id,
             approval_gate_id=arc.approval_gate_id,
-            target_chapter_count=target,
+            closure_chapter_count=checkpoint,
             expected_current_baseline_id=arc.current_baseline_id,
         ),
         idempotency_key=idempotency_key,
@@ -470,39 +499,70 @@ async def submit_feedback(
 ) -> MutationResponse:
     resources = _resources(request)
     state = await _state(resources, project_id)
-    arc_id = None if state.current_arc is None else state.current_arc.arc_id
-    chapter_id = None if state.current_chapter is None else state.current_chapter.chapter_id
+    creator_request = state.creator_input_request
+    if (
+        creator_request is not None
+        and body.route_layer != creator_request.route_layer
+    ):
+        raise CommandPreconditionError(
+            "The current creator question must be answered at its owning layer."
+        )
+    arc_id = (
+        creator_request.arc_id
+        if creator_request is not None
+        else None if state.current_arc is None else state.current_arc.arc_id
+    )
+    chapter_id = (
+        None if state.current_chapter is None else state.current_chapter.chapter_id
+    )
     if body.route_layer in {"arc", "chapter"} and arc_id is None:
         raise CommandPreconditionError("The selected feedback layer has no current Story Arc.")
     if body.route_layer == "chapter" and chapter_id is None:
         raise CommandPreconditionError("The selected feedback layer has no current Chapter.")
-    service = FeedbackCommandService(CommandBus(resources.database_engine))
-    submitted = await service.submit(
-        SubmitFeedbackRequest(project_id=project_id, content=body.content),
-        idempotency_key=f"{idempotency_key}:submit",
-    )
-    feedback_id = submitted.result.feedback_id
-    await service.route(
-        RouteFeedbackRequest(
+    queued = await FeedbackCommandService(
+        CommandBus(resources.database_engine)
+    ).queue(
+        QueueFeedbackRequest(
             project_id=project_id,
-            feedback_id=feedback_id,
+            content=body.content,
             route_layer=body.route_layer,
             book_id=state.book.book_id,
             arc_id=arc_id if body.route_layer in {"arc", "chapter"} else None,
             chapter_id=chapter_id if body.route_layer == "chapter" else None,
+            feedback_kind=(
+                "correction_wait_response"
+                if creator_request is not None
+                else "unsolicited"
+            ),
+            arc_parent_review_id=(
+                creator_request.review_id
+                if creator_request is not None
+                and creator_request.review_kind == "arc_parent"
+                else None
+            ),
+            book_parent_review_id=(
+                creator_request.review_id
+                if creator_request is not None
+                and creator_request.review_kind == "book_parent"
+                else None
+            ),
+            arc_closure_review_id=(
+                creator_request.review_id
+                if creator_request is not None
+                and creator_request.review_kind == "arc_closure"
+                else None
+            ),
+            book_boundary_review_id=(
+                creator_request.review_id
+                if creator_request is not None
+                and creator_request.review_kind == "book_boundary"
+                else None
+            ),
         ),
-        idempotency_key=f"{idempotency_key}:route",
-    )
-    applied = await service.apply(
-        ApplyFeedbackRequest(
-            project_id=project_id,
-            feedback_id=feedback_id,
-            expected_workspace_lock_version=body.expected_workspace_lock_version,
-        ),
-        idempotency_key=f"{idempotency_key}:apply",
+        idempotency_key=idempotency_key,
     )
     resources.run_engine.wake()
-    return _mutation(applied, await _state(resources, project_id))
+    return _mutation(queued, await _state(resources, project_id))
 
 
 @router.post("/projects/{project_id}/export", response_model=ManuscriptExportResult)

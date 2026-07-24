@@ -16,6 +16,7 @@ from app.agents.contracts import (
     ChapterPlanProposal,
     LayerEvaluationResult,
 )
+from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
 from app.db.uow import StoreSession
 from app.domain.chapter.canon import (
     CANON_CATEGORIES,
@@ -51,6 +52,7 @@ from app.domain.commands import (
     CommandPreconditionError,
     EventDraft,
 )
+from app.domain.evaluation import ChapterEvidenceCorrectionEvaluation
 from app.store.canon import CanonBaselineRecord
 from app.store.chapters import (
     ChapterBaselineRecord,
@@ -67,6 +69,10 @@ from app.store.execution import SuccessfulTaskRecord
 
 class ChapterNotFoundError(LookupError):
     pass
+
+
+class ChapterEvidenceVerificationFailure(RuntimeError):
+    """An evidence-only correction failed its one non-recursive verification."""
 
 
 ComponentMutator = Callable[
@@ -181,8 +187,10 @@ class ChapterCommandService:
             ):
                 raise CommandPreconditionError("Chapter dependencies are no longer current.")
             committed = await session.chapters.count_committed(arc_id=request.arc_id)
-            if committed >= context.target_chapter_count:
-                raise CommandPreconditionError("The current Arc has reached its Chapter target.")
+            if committed >= context.closure_chapter_count:
+                raise CommandPreconditionError(
+                    "The current Arc reached its frozen closure checkpoint."
+                )
             book_ordinal, arc_ordinal = await session.chapters.next_ordinals(
                 book_id=request.book_id,
                 arc_id=request.arc_id,
@@ -215,6 +223,13 @@ class ChapterCommandService:
                     book_baseline_id=context.book_baseline_id,
                     arc_baseline_id=context.arc_baseline_id,
                     canon_baseline_id=context.canon_baseline_id,
+                    revision_origin="initial",
+                    source_arc_parent_review_id=None,
+                    source_arc_closure_review_id=None,
+                    source_feedback_id=None,
+                    correction_lineage_id=None,
+                    correction_lineage_origin=None,
+                    automatic_correction_round=None,
                     plan_ref_id=None,
                     draft_ref_id=None,
                     observations_ref_id=None,
@@ -983,15 +998,23 @@ class ChapterCommandService:
                 project_id=request.project_id,
                 chapter_id=request.chapter_id,
             )
+            arc = await session.arcs.get(
+                project_id=request.project_id,
+                arc_id=workspace.arc_id,
+            )
             if current != workspace:
                 raise CommandPreconditionError("Chapter workspace changed during submission.")
             context = await session.chapters.get_active_arc_context(
                 project_id=request.project_id,
                 book_id=workspace.book_id,
                 arc_id=workspace.arc_id,
+                allow_completed=workspace.base_chapter_baseline_id is not None,
             )
             if (
                 context is None
+                or arc is None
+                or arc.current_closure_id is not None
+                or arc.lifecycle_status == "completed"
                 or context.book_baseline_id != workspace.book_baseline_id
                 or context.arc_baseline_id != workspace.arc_baseline_id
                 or context.canon_baseline_id != workspace.canon_baseline_id
@@ -1147,9 +1170,19 @@ class ChapterCommandService:
                 if workspace is not None and workspace.semantic_repair_count > 0
                 else "evaluate.chapter"
             )
+            strategy = DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                expected_task_kind
+            )
             if (
                 task != current_task
                 or task.task_kind != expected_task_kind
+                or task.evaluation_strategy_id != strategy.strategy_id
+                or task.evaluation_strategy_version
+                != strategy.strategy_version
+                or task.rubric_id != strategy.rubric_id
+                or task.rubric_version != strategy.rubric_version
+                or request.rubric_id != strategy.rubric_id
+                or request.rubric_version != strategy.rubric_version
                 or task.delivery_state != "pending"
                 or submission is None
                 or current_submission != submission
@@ -1226,7 +1259,7 @@ class ChapterCommandService:
                 ):
                     raise CommandPreconditionError("Chapter submission changed before rejection.")
                 state = "active" if decision == "local_repair" else "blocked_by_user"
-                if decision in {"escalate_to_arc", "escalate_to_book"}:
+                if decision == "escalate_to_arc":
                     state = "blocked_by_upstream"
                     change_record = ChapterChangeRequestRecord(
                         id=change_request_id,
@@ -1236,19 +1269,12 @@ class ChapterCommandService:
                         chapter_id=request.chapter_id,
                         source_submission_id=submission.id,
                         source_review_id=review_id,
-                        target_baseline_id=(
-                            submission.arc_baseline_id
-                            if decision == "escalate_to_arc"
-                            else submission.book_baseline_id
-                        ),
+                        target_baseline_id=submission.arc_baseline_id,
                         evidence_ref_id=detail_ref.id,
                         status="open",
                         created_at_ms=timestamp,
                     )
-                    if decision == "escalate_to_arc":
-                        await session.chapters.insert_arc_change_request(change_record)
-                    else:
-                        await session.chapters.insert_book_change_request(change_record)
+                    await session.chapters.insert_arc_change_request(change_record)
                     events.append(
                         EventDraft(
                             event_type="change_request.opened",
@@ -1256,7 +1282,7 @@ class ChapterCommandService:
                             aggregate_id=request.chapter_id,
                             payload={
                                 "change_request_id": change_request_id,
-                                "target_layer": decision.removeprefix("escalate_to_"),
+                                "target_layer": "arc",
                             },
                         )
                     )
@@ -1285,7 +1311,7 @@ class ChapterCommandService:
                         ref_id=failure_ref_id,
                         created_at_ms=timestamp,
                     )
-                    if not await session.runs.failure_pause(
+                    if not await session.runs.failure_pause_for_task(
                         run_id=task.run_id,
                         task_id=task.task_id,
                         failure_code="semantic_repair_exhausted",
@@ -1331,6 +1357,303 @@ class ChapterCommandService:
                 ),
             )
             return CommandEffect(result=result, events=tuple(events))
+
+        return await self._command_bus.execute(
+            envelope=envelope,
+            result_type=RecordChapterReviewResult,
+            handler=handler,
+        )
+
+    async def record_evidence_review(
+        self,
+        request: RecordChapterReviewRequest,
+        *,
+        idempotency_key: str,
+    ) -> CommandExecution[RecordChapterReviewResult]:
+        """Accept one evidence-only correction or fail without opening another repair."""
+        timestamp = self._now_ms()
+        review_id = self._id_factory()
+        precheck_ref_id = self._id_factory()
+        detail_ref_id = self._id_factory()
+        strategy = DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+            "verify_evidence.chapter"
+        )
+        async with self._command_bus.read_unit_of_work() as session:
+            task = await session.execution.get_successful_task(
+                project_id=request.project_id,
+                task_id=request.evaluator_task_id,
+                attempt_id=request.evaluator_attempt_id,
+            )
+            submission = await session.chapters.get_submission(
+                project_id=request.project_id,
+                submission_id=request.submission_id,
+            )
+            chapter = await session.chapters.get(
+                project_id=request.project_id,
+                chapter_id=request.chapter_id,
+            )
+            workspace = await session.chapters.get_workspace(
+                project_id=request.project_id,
+                chapter_id=request.chapter_id,
+            )
+            arc = (
+                None
+                if chapter is None
+                else await session.arcs.get(
+                    project_id=request.project_id,
+                    arc_id=chapter.arc_id,
+                )
+            )
+            baseline = (
+                None
+                if submission is None
+                or submission.base_chapter_baseline_id is None
+                else await session.chapters.get_baseline(
+                    project_id=request.project_id,
+                    chapter_id=request.chapter_id,
+                    baseline_id=submission.base_chapter_baseline_id,
+                )
+            )
+            if (
+                task is None
+                or submission is None
+                or chapter is None
+                or workspace is None
+                or arc is None
+                or baseline is None
+            ):
+                raise CommandPreconditionError(
+                    "Evidence correction review facts are incomplete."
+                )
+            result_bytes = (
+                await session.content.get_packed(
+                    project_id=request.project_id,
+                    ref_id=task.result_ref_id,
+                )
+            ).unpack_and_verify()
+            evaluation = ChapterEvidenceCorrectionEvaluation.model_validate_json(
+                result_bytes
+            )
+            base_plan = await session.content.get_packed(
+                project_id=request.project_id,
+                ref_id=baseline.plan_ref_id,
+            )
+            submitted_plan = await session.content.get_packed(
+                project_id=request.project_id,
+                ref_id=submission.plan_ref_id,
+            )
+            base_prose = await session.content.get_packed(
+                project_id=request.project_id,
+                ref_id=baseline.prose_ref_id,
+            )
+            submitted_prose = await session.content.get_packed(
+                project_id=request.project_id,
+                ref_id=submission.draft_ref_id,
+            )
+            committed = await session.chapters.list_committed_baselines(
+                project_id=request.project_id,
+                book_id=chapter.book_id,
+            )
+
+        if not (
+            evaluation.observations_supported_by_frozen_prose
+            and evaluation.canon_intent_supported_by_frozen_prose
+            and evaluation.descendant_facts_remain_consistent
+        ):
+            raise ChapterEvidenceVerificationFailure(
+                "The one-shot evidence correction verification did not pass; "
+                "automatic Chapter repair is not authorized."
+            )
+        if (
+            task.role != "evaluator"
+            or task.task_kind != "verify_evidence.chapter"
+            or task.scope_layer != "chapter"
+            or task.chapter_id != request.chapter_id
+            or task.book_id != submission.book_id
+            or task.arc_id != submission.arc_id
+            or task.workspace_lock_version != submission.workspace_lock_version
+            or task.book_baseline_id != submission.book_baseline_id
+            or task.arc_baseline_id != submission.arc_baseline_id
+            or task.chapter_baseline_id != submission.base_chapter_baseline_id
+            or task.canon_baseline_id != submission.canon_before_id
+            or task.evaluation_strategy_id != strategy.strategy_id
+            or task.evaluation_strategy_version != strategy.strategy_version
+            or task.rubric_id != strategy.rubric_id
+            or task.rubric_version != strategy.rubric_version
+            or request.rubric_id != strategy.rubric_id
+            or request.rubric_version != strategy.rubric_version
+            or task.automatic_correction_round != 1
+            or task.correction_lineage_id != workspace.correction_lineage_id
+            or (
+                task.source_arc_parent_review_id
+                != workspace.source_arc_parent_review_id
+            )
+            or (
+                task.source_arc_closure_review_id
+                != workspace.source_arc_closure_review_id
+            )
+            or (task.source_arc_parent_review_id is None)
+            == (task.source_arc_closure_review_id is None)
+        ):
+            raise CommandPreconditionError(
+                "Evidence correction task does not match its frozen authority."
+            )
+        plan_unchanged = (
+            base_plan.reference.blob_sha256
+            == submitted_plan.reference.blob_sha256
+        )
+        prose_unchanged = (
+            base_prose.reference.blob_sha256
+            == submitted_prose.reference.blob_sha256
+        )
+        formal_arc_not_closed = (
+            arc.current_closure_id is None
+            and arc.lifecycle_status in {"active", "closing"}
+        )
+        if (
+            not plan_unchanged
+            or not prose_unchanged
+            or not formal_arc_not_closed
+            or chapter.current_baseline_id != baseline.id
+            or workspace.revision_origin
+            not in {"arc_evidence_correction", "user_initiated"}
+        ):
+            raise CommandPreconditionError(
+                "Evidence correction violated its byte-frozen Chapter boundary."
+            )
+        descendant_count = sum(
+            item.chapter_id != chapter.id
+            and item.created_at_ms >= baseline.created_at_ms
+            for item in committed
+        )
+        prepared_precheck = prepare_canonical_json(
+            {
+                "schema_id": "chapter-evidence-precheck-v1",
+                "passed": True,
+                "plan_bytes_unchanged": True,
+                "prose_bytes_unchanged": True,
+                "formal_arc_not_closed": True,
+                "descendant_context_count": descendant_count,
+            }
+        )
+        prepared_detail = prepare_canonical_json(evaluation)
+        envelope = self._envelope(
+            request=request,
+            project_id=request.project_id,
+            idempotency_key=idempotency_key,
+            command_kind="record_chapter_evidence_review",
+            actor="engine",
+            source_task_id=request.evaluator_task_id,
+            created_at_ms=timestamp,
+        )
+
+        async def handler(
+            session: StoreSession,
+        ) -> CommandEffect[RecordChapterReviewResult]:
+            current_task = await session.execution.get_successful_task(
+                project_id=request.project_id,
+                task_id=request.evaluator_task_id,
+                attempt_id=request.evaluator_attempt_id,
+            )
+            current_submission = await session.chapters.get_submission(
+                project_id=request.project_id,
+                submission_id=request.submission_id,
+            )
+            current_chapter = await session.chapters.get(
+                project_id=request.project_id,
+                chapter_id=request.chapter_id,
+            )
+            current_workspace = await session.chapters.get_workspace(
+                project_id=request.project_id,
+                chapter_id=request.chapter_id,
+            )
+            current_arc = await session.arcs.get(
+                project_id=request.project_id,
+                arc_id=submission.arc_id,
+            )
+            if (
+                current_task != task
+                or task.delivery_state != "pending"
+                or current_submission != submission
+                or submission.disposition != "pending"
+                or current_chapter != chapter
+                or current_workspace != workspace
+                or current_arc != arc
+                or chapter.current_baseline_id != baseline.id
+            ):
+                raise CommandPreconditionError(
+                    "Evidence correction authority changed before delivery."
+                )
+            precheck_ref = await session.content.put(
+                project_id=request.project_id,
+                prepared=prepared_precheck,
+                semantic_kind="chapter.evidence_precheck",
+                media_type="application/json",
+                schema_id="chapter-evidence-precheck",
+                schema_version=1,
+                ref_id=precheck_ref_id,
+                created_at_ms=timestamp,
+            )
+            detail_ref = await session.content.put(
+                project_id=request.project_id,
+                prepared=prepared_detail,
+                semantic_kind="chapter.evidence_review_detail",
+                media_type="application/json",
+                schema_id="chapter-evidence-correction-evaluation",
+                schema_version=1,
+                ref_id=detail_ref_id,
+                created_at_ms=timestamp,
+            )
+            await session.chapters.insert_review(
+                ChapterReviewRecord(
+                    id=review_id,
+                    project_id=request.project_id,
+                    book_id=submission.book_id,
+                    arc_id=submission.arc_id,
+                    chapter_id=request.chapter_id,
+                    submission_id=submission.id,
+                    evaluator_task_id=request.evaluator_task_id,
+                    evaluator_attempt_id=request.evaluator_attempt_id,
+                    decision="pass",
+                    rubric_id=request.rubric_id,
+                    rubric_version=request.rubric_version,
+                    precheck_ref_id=precheck_ref.id,
+                    detail_ref_id=detail_ref.id,
+                    repair_contract_ref_id=None,
+                    created_at_ms=timestamp,
+                )
+            )
+            if not await session.execution.mark_delivery_applied(
+                project_id=request.project_id,
+                task_id=request.evaluator_task_id,
+                attempt_id=request.evaluator_attempt_id,
+                command_id=envelope.command_id,
+                updated_at_ms=timestamp,
+            ):
+                raise CommandPreconditionError(
+                    "Evidence evaluator delivery changed concurrently."
+                )
+            return CommandEffect(
+                result=RecordChapterReviewResult(
+                    project_id=request.project_id,
+                    chapter_id=request.chapter_id,
+                    submission_id=submission.id,
+                    review_id=review_id,
+                    decision="pass",
+                ),
+                events=(
+                    EventDraft(
+                        event_type="chapter.evidence_reviewed",
+                        aggregate_type="chapter",
+                        aggregate_id=request.chapter_id,
+                        payload={
+                            "submission_id": submission.id,
+                            "review_id": review_id,
+                            "decision": "pass",
+                        },
+                    ),
+                ),
+            )
 
         return await self._command_bus.execute(
             envelope=envelope,
@@ -1455,6 +1778,14 @@ class ChapterCommandService:
                     ),
                 )
             )
+            current_arc = (
+                None
+                if chapter is None
+                else await session.arcs.get(
+                    project_id=request.project_id,
+                    arc_id=chapter.arc_id,
+                )
+            )
             if (
                 project is None
                 or chapter is None
@@ -1472,11 +1803,85 @@ class ChapterCommandService:
                 or workspace.id != submission.workspace_id
                 or workspace.lock_version != submission.workspace_lock_version
                 or context is None
+                or current_arc is None
+                or current_arc.current_closure_id is not None
+                or current_arc.lifecycle_status == "completed"
                 or context.book_baseline_id != submission.book_baseline_id
                 or context.arc_baseline_id != submission.arc_baseline_id
                 or context.canon_baseline_id != submission.canon_before_id
             ):
                 raise CommandPreconditionError("Chapter commit facts are stale or unapproved.")
+            evidence_only = False
+            if workspace.source_arc_parent_review_id is not None:
+                source_arc_review = await session.arc_parent_reviews.get(
+                    project_id=request.project_id,
+                    review_id=workspace.source_arc_parent_review_id,
+                )
+                evidence_only = (
+                    source_arc_review is not None
+                    and source_arc_review.disposition
+                    == "chapter_evidence_review_required"
+                )
+            elif workspace.source_arc_closure_review_id is not None:
+                source_closure_review = await session.arc_closure_reviews.get(
+                    project_id=request.project_id,
+                    review_id=workspace.source_arc_closure_review_id,
+                )
+                evidence_only = (
+                    source_closure_review is not None
+                    and source_closure_review.disposition
+                    == "chapter_evidence_review_required"
+                )
+            if request.expected_current_chapter_baseline_id is not None:
+                if evidence_only:
+                    frozen_baseline = await session.chapters.get_baseline(
+                        project_id=request.project_id,
+                        chapter_id=chapter.id,
+                        baseline_id=request.expected_current_chapter_baseline_id,
+                    )
+                    if frozen_baseline is None:
+                        raise CommandPreconditionError(
+                            "Evidence correction lost its frozen Chapter baseline."
+                        )
+                    frozen_plan = await session.content.get_packed(
+                        project_id=request.project_id,
+                        ref_id=frozen_baseline.plan_ref_id,
+                    )
+                    submitted_plan = await session.content.get_packed(
+                        project_id=request.project_id,
+                        ref_id=submission.plan_ref_id,
+                    )
+                    frozen_prose = await session.content.get_packed(
+                        project_id=request.project_id,
+                        ref_id=frozen_baseline.prose_ref_id,
+                    )
+                    submitted_prose = await session.content.get_packed(
+                        project_id=request.project_id,
+                        ref_id=submission.draft_ref_id,
+                    )
+                    if (
+                        frozen_plan.reference.blob_sha256
+                        != submitted_plan.reference.blob_sha256
+                        or frozen_prose.reference.blob_sha256
+                        != submitted_prose.reference.blob_sha256
+                    ):
+                        raise CommandPreconditionError(
+                            "Evidence correction changed byte-frozen plan or prose."
+                        )
+                else:
+                    historical_blocker = (
+                        await session.chapters.narrative_replacement_blocker(
+                            project_id=request.project_id,
+                            book_id=chapter.book_id,
+                            arc_id=chapter.arc_id,
+                            chapter_id=chapter.id,
+                        )
+                    )
+                    if historical_blocker is not None:
+                        raise CommandPreconditionError(
+                            "Narrative replacement is no longer at the current "
+                            f"lineage tip: {historical_blocker}."
+                        )
             chapter_version = await session.chapters.next_baseline_version(
                 chapter_id=request.chapter_id
             )
@@ -1499,8 +1904,10 @@ class ChapterCommandService:
                 if chapter.lifecycle_status == "drafting"
                 else committed_before
             )
-            if effective_count > context.target_chapter_count:
-                raise CommandPreconditionError("Chapter commit exceeds the Arc target count.")
+            if effective_count > context.closure_chapter_count:
+                raise CommandPreconditionError(
+                    "Chapter commit exceeds the frozen Arc closure checkpoint."
+                )
 
             for category in applied.changed_categories:
                 reference = await session.content.put(
@@ -1533,6 +1940,9 @@ class ChapterCommandService:
                     arc_baseline_id=submission.arc_baseline_id,
                     canon_before_id=canon_before.id,
                     canon_after_id=canon_after_id,
+                    revision_origin=workspace.revision_origin,
+                    source_arc_parent_review_id=workspace.source_arc_parent_review_id,
+                    source_arc_closure_review_id=workspace.source_arc_closure_review_id,
                     plan_ref_id=submission.plan_ref_id,
                     prose_ref_id=submission.draft_ref_id,
                     observations_ref_id=submission.observations_ref_id,
@@ -1608,17 +2018,19 @@ class ChapterCommandService:
             committed_after = await session.chapters.count_committed(arc_id=chapter.arc_id)
             if committed_after != effective_count:
                 raise CommandPreconditionError("Committed Chapter count changed concurrently.")
-            if chapter.lifecycle_status == "committed":
-                arc_completed = committed_after == context.target_chapter_count
-            else:
-                arc_completed = await session.chapters.complete_arc_if_target_reached(
+            arc_closure_due = committed_after == context.closure_chapter_count
+            if chapter.lifecycle_status != "committed" and arc_closure_due:
+                if not await session.chapters.begin_arc_closure_review(
                     project_id=request.project_id,
                     arc_id=chapter.arc_id,
                     arc_baseline_id=context.arc_baseline_id,
                     committed_count=committed_after,
-                    target_chapter_count=context.target_chapter_count,
+                    closure_chapter_count=context.closure_chapter_count,
                     now_ms=timestamp,
-                )
+                ):
+                    raise CommandPreconditionError(
+                        "Arc could not enter its planned closure review boundary."
+                    )
             result = CommitChapterResult(
                 project_id=request.project_id,
                 chapter_id=chapter.id,
@@ -1627,7 +2039,7 @@ class ChapterCommandService:
                 canon_before_id=canon_before.id,
                 canon_after_id=canon_after_id,
                 canon_changed=prepared_commit.applied.changed,
-                arc_completed=arc_completed,
+                arc_closure_due=arc_closure_due,
             )
             events = [
                 EventDraft(
@@ -1639,7 +2051,7 @@ class ChapterCommandService:
                         "baseline_version": chapter_version,
                         "canon_before_id": canon_before.id,
                         "canon_after_id": canon_after_id,
-                        "arc_completed": arc_completed,
+                        "arc_closure_due": arc_closure_due,
                     },
                 )
             ]
@@ -1689,13 +2101,7 @@ def _task_matches_workspace(
 def _chapter_review_decision(
     evaluation: LayerEvaluationResult,
 ) -> ChapterReviewDecision:
-    if evaluation.decision != "cross_loop_escalation":
-        return evaluation.decision
-    if evaluation.escalation_target == "arc":
-        return "escalate_to_arc"
-    if evaluation.escalation_target == "book":
-        return "escalate_to_book"
-    raise ValueError("Chapter escalation has no valid target.")
+    return evaluation.decision
 
 
 def _canon_ref_ids(baseline: CanonBaselineRecord) -> dict[CanonCategory, str]:
