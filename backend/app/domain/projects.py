@@ -294,28 +294,28 @@ class ProjectCommandService:
                     "canon.characters",
                     "application/json",
                     "canon-characters",
-                    1,
+                    2,
                 ),
                 (
                     assets.canon_relationships,
                     "canon.relationships",
                     "application/json",
                     "canon-relationships",
-                    1,
+                    2,
                 ),
                 (
                     assets.canon_world_facts,
                     "canon.world_facts",
                     "application/json",
                     "canon-world-facts",
-                    1,
+                    2,
                 ),
                 (
                     assets.canon_foreshadowing,
                     "canon.foreshadowing",
                     "application/json",
                     "canon-foreshadowing",
-                    1,
+                    2,
                 ),
             )
             references = [

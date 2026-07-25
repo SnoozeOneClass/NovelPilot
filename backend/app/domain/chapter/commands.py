@@ -604,7 +604,7 @@ class ChapterCommandService:
                     "chapter.candidate_canon_patch",
                     "application/json",
                     "chapter-canon-patch",
-                    1,
+                    2,
                 ),
             ),
             mutate=mutate,
@@ -730,7 +730,7 @@ class ChapterCommandService:
                     "chapter.candidate_canon_patch",
                     "application/json",
                     "chapter-canon-patch",
-                    1,
+                    2,
                 ),
             )
 
@@ -1915,8 +1915,8 @@ class ChapterCommandService:
                     prepared=prepared_commit.prepared_categories[category],
                     semantic_kind=f"canon.{category}",
                     media_type="application/json",
-                    schema_id=f"canon-{category}",
-                    schema_version=1,
+                    schema_id=f"canon-{category.replace('_', '-')}",
+                    schema_version=2,
                     ref_id=new_ref_ids[category],
                     created_at_ms=timestamp,
                 )

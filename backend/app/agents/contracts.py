@@ -687,7 +687,10 @@ class SemanticCanonProposal(BaseModel):
     )
     evidence_hint: str = Field(
         min_length=1,
-        description="Human-readable location or fact in the frozen prose supporting the proposal.",
+        description=(
+            "Human-readable semantic fact or rationale from the frozen prose. Summarize "
+            "naturally; do not copy an exact quote, offset, locator, or stored source string."
+        ),
     )
 
 
@@ -704,7 +707,10 @@ class ChapterObservationResult(BaseModel):
     )
     canon_proposals: list[SemanticCanonProposal] = Field(
         default_factory=list,
-        description="Semantic proposals only; the Harness resolves IDs and commits accepted facts.",
+        description=(
+            "Semantic proposals only; the Harness resolves IDs and optional exact evidence "
+            "spans, then commits accepted facts."
+        ),
     )
 
 

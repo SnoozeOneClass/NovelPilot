@@ -39,6 +39,7 @@ from app.db.schema import (
     generation_runs,
 )
 from app.domain.chapter.commands import ChapterCommandService
+from app.domain.chapter.canon import CanonCategory, CanonEntry
 from app.domain.chapter.contracts import (
     ApplyChapterTaskRequest,
     CommitChapterRequest,
@@ -78,6 +79,8 @@ async def _prepare_reviewed_chapter(
     arc_purpose: Literal["regular", "final"] = "regular",
     foundation: ApprovedFoundation | None = None,
     idempotency_suffix: str = "",
+    canon_evidence_hint: str = "The blue ink changed while she watched",
+    canon_category: CanonCategory = "characters",
 ) -> ReviewedChapter:
     if foundation is None:
         foundation = await seed_approved_book_and_arc(
@@ -173,11 +176,11 @@ async def _prepare_reviewed_chapter(
     proposals = (
         [
             SemanticCanonProposal(
-                category="characters",
+                category=canon_category,
                 operation="add",
                 subject="Mara",
                 semantic_change="Mara directly witnesses written memory evidence changing.",
-                evidence_hint="The blue ink changed while she watched",
+                evidence_hint=canon_evidence_hint,
             )
         ]
         if canon_change
@@ -277,7 +280,7 @@ async def _prepare_reviewed_chapter(
             rubric_version=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
                 evaluator_task_kind
             ).rubric_version,
-            deterministic_precheck={"passed": True, "checks": ["exact_evidence"]},
+            deterministic_precheck={"passed": True, "checks": ["canon_evidence"]},
         ),
         idempotency_key=f"{chapter_id}:review",
     )
@@ -383,6 +386,74 @@ def test_chapter_and_changed_canon_commit_atomically_and_open_arc_closure(
             )
             assert text.chapter_title == "The Witness Who Remembered Twice"
             assert "The blue ink changed" in text.prose
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+def test_paraphrased_canon_evidence_commits_without_exact_copy(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "chapter-semantic-evidence.sqlite3"
+    command.upgrade(alembic_config(database), "head")
+
+    async def exercise() -> None:
+        engine = create_sqlite_async_engine(database)
+        try:
+            semantic_hint = (
+                "Mara sees documentary evidence rewrite itself in real time."
+            )
+            ready = await _prepare_reviewed_chapter(
+                engine,
+                project_id="project-semantic-evidence",
+                target_chapter_count=1,
+                canon_change=True,
+                canon_evidence_hint=semantic_hint,
+                canon_category="world_facts",
+            )
+            committed = await ChapterCommandService(
+                CommandBus(engine)
+            ).commit_chapter_and_canon(
+                CommitChapterRequest(
+                    project_id=ready.foundation.project_id,
+                    chapter_id=ready.chapter_id,
+                    submission_id=ready.submission_id,
+                    review_id=ready.review_id,
+                    expected_canon_baseline_id=ready.foundation.canon_baseline_id,
+                ),
+                idempotency_key=f"{ready.chapter_id}:commit-semantic-evidence",
+            )
+            assert committed.result.canon_changed
+
+            async with engine.connect() as connection:
+                world_facts_ref_id = await connection.scalar(
+                    select(canon_baselines.c.world_facts_ref_id).where(
+                        canon_baselines.c.id == committed.result.canon_after_id
+                    )
+                )
+                assert world_facts_ref_id is not None
+                schema = (
+                    await connection.execute(
+                        select(
+                            content_refs.c.schema_id,
+                            content_refs.c.schema_version,
+                        ).where(content_refs.c.id == world_facts_ref_id)
+                    )
+                ).one()
+                packed = await ContentRepository(connection).get_packed(
+                    project_id=ready.foundation.project_id,
+                    ref_id=world_facts_ref_id,
+                )
+                entries = [
+                    CanonEntry.model_validate(item)
+                    for item in json.loads(packed.unpack_and_verify())
+                ]
+
+            assert tuple(schema) == ("canon-world-facts", 2)
+            assert len(entries) == 1
+            assert entries[0].evidence.hint == semantic_hint
+            assert entries[0].evidence.exact_span is None
         finally:
             await engine.dispose()
 

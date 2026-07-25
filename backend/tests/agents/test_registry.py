@@ -255,8 +255,29 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
         assert "subset" in definition.task_instructions
         assert "Harness preserves" in definition.task_instructions
 
+    for layer in ("book", "arc"):
+        assert "unchanged replacement is rejected as a no-op" in (
+            definitions[layer].task_instructions
+        )
+        assert "must differ from" in str(
+            definitions[layer].output_schema["properties"]["changes"]["description"]
+        )
+
     book_schema_text = str(definitions["book"].output_schema)
     assert "selected_title" not in book_schema_text
+
+    chapter_observation = DEFAULT_TASK_REGISTRY.get(
+        role="chapter_writer",
+        task_kind="chapter.observe",
+        contract_version=1,
+    )
+    evidence_description = chapter_observation.output_schema["$defs"][
+        "SemanticCanonProposal"
+    ]["properties"]["evidence_hint"]["description"]
+    assert "do not copy an exact quote" in evidence_description
+    assert "Harness owns optional exact-span binding" in (
+        chapter_observation.task_instructions
+    )
 
     chapter_evaluation = DEFAULT_TASK_REGISTRY.get(
         role="evaluator",

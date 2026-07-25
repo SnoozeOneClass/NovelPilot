@@ -15,6 +15,7 @@ from app.db.schema import (
     canon_baselines,
     command_receipts,
     content_blobs,
+    content_refs,
     domain_events,
     generation_runs,
     projects,
@@ -80,6 +81,23 @@ def test_create_project_is_atomic_idempotent_and_emits_one_event(tmp_path: Path)
                 assert (
                     await connection.scalar(select(func.count()).select_from(content_blobs)) == 4
                 )
+                canon_schemas = (
+                    await connection.execute(
+                        select(
+                            content_refs.c.schema_id,
+                            content_refs.c.schema_version,
+                        )
+                        .where(content_refs.c.semantic_kind.like("canon.%"))
+                        .order_by(content_refs.c.schema_id)
+                    )
+                ).all()
+                assert len(canon_schemas) == 4
+                assert {tuple(row) for row in canon_schemas} == {
+                    ("canon-characters", 2),
+                    ("canon-foreshadowing", 2),
+                    ("canon-relationships", 2),
+                    ("canon-world-facts", 2),
+                }
 
             conflicting = request.model_copy(update={"creator_brief": "different bytes"})
             with pytest.raises(IdempotencyConflictError):

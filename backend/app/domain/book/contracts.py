@@ -294,6 +294,7 @@ class BookRepairPatch(BaseModel):
         max_length=4,
         description=(
             "Only Book components authorized by the repair contract in frozen context. "
+            "Every returned replacement must differ from its current value. "
             "Omitted components are preserved by the Harness and must not be repeated."
         ),
     )

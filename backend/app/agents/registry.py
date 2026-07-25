@@ -861,7 +861,9 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
                 "Return only a semantic patch whose change components are a subset of the "
                 "evaluator-authorized Book repair contract in frozen context. Do not return "
                 "selected_title or repeat any omitted Book component; the Harness preserves "
-                "omitted content. Do not invent storage IDs, approval state, routes, or commands."
+                "omitted content. Every returned replacement must actually differ from the "
+                "current component; an unchanged replacement is rejected as a no-op. Do not "
+                "invent storage IDs, approval state, routes, or commands."
             ),
             output_schema_version=2,
         ),
@@ -900,8 +902,10 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             instructions=(
                 "Return only a semantic patch whose change components are a subset of the "
                 "evaluator-authorized Arc repair scope in frozen context. Do not repeat omitted "
-                "Arc components; the Harness preserves them exactly. Do not invent storage IDs, "
-                "approval state, routes, or commands."
+                "Arc components; the Harness preserves them exactly. Every returned replacement "
+                "must actually differ from the current component; an unchanged replacement is "
+                "rejected as a no-op. Do not invent storage IDs, approval state, routes, or "
+                "commands."
             ),
             output_schema_version=2,
         ),
@@ -935,7 +939,12 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             "chapter",
             ChapterObservationResult,
             context_policy_id="chapter-observation-context-v1",
-            instructions="Observe the frozen prose and propose semantic Canon changes without inventing IDs.",
+            instructions=(
+                "Observe the frozen prose and propose semantic Canon changes without inventing "
+                "IDs. Write evidence_hint as a natural semantic rationale; do not copy exact "
+                "quotes, offsets, locators, or stored source strings. The Harness owns optional "
+                "exact-span binding."
+            ),
         ),
         _native(
             "chapter_writer",
@@ -943,7 +952,11 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             "chapter",
             ChapterObservationResult,
             context_policy_id="chapter-revision-observation-context-v1",
-            instructions="Re-observe the revised prose and propose only evidence-bound Canon changes.",
+            instructions=(
+                "Re-observe the revised prose and propose only semantically evidence-bound Canon "
+                "changes. Write evidence_hint as a natural rationale, not an exact quote, offset, "
+                "locator, or stored source string; the Harness owns optional exact-span binding."
+            ),
         ),
         _text(
             "chapter.repair.prose",
@@ -959,7 +972,9 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
                 "Return only a semantic patch whose change components are a subset of the "
                 "authorized Chapter repair scope in frozen context. Use observations for the "
                 "summary and continuity observations, and canon for Canon proposals. Do not "
-                "repeat omitted components; the Harness preserves them."
+                "repeat omitted components; the Harness preserves them. Canon evidence_hint is "
+                "a natural semantic rationale, never an exact quote, offset, locator, or stored "
+                "source string."
             ),
             output_schema_version=2,
         ),

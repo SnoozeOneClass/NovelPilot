@@ -1431,13 +1431,26 @@ class DomainRunDriver:
             )
         )
         if latest_review is not None and latest_review.decision == "local_repair":
-            return _TaskInstruction(
-                role="book_strategist",
+            repaired = await execution.has_applied_task(
+                project_id=project_id,
+                run_id=run.id,
                 task_kind="book.repair",
                 book_id=book_id,
-                workspace_lock_version=lock_version,
                 book_baseline_id=current_baseline,
+                created_after_ms=latest_review.created_at_ms,
             )
+            if not repaired:
+                return _TaskInstruction(
+                    role="book_strategist",
+                    task_kind="book.repair",
+                    book_id=book_id,
+                    workspace_lock_version=lock_version,
+                    book_baseline_id=current_baseline,
+                )
+            if not candidate_ready:
+                raise HarnessInvariantError(
+                    "Applied Book repair lost the complete candidate."
+                )
         if current_baseline is None and not candidate_ready:
             return _TaskInstruction(
                 role="book_strategist",
@@ -1754,15 +1767,30 @@ class DomainRunDriver:
             raise HarnessInvariantError("Blocked Story Arc workspace remained runnable.")
         if workspace.state == "active":
             if latest_review is not None and latest_review.decision == "local_repair":
-                return _TaskInstruction(
-                    role="arc_planner",
+                repaired = await execution.has_applied_task(
+                    project_id=project_id,
+                    run_id=run.id,
                     task_kind="arc.repair",
                     book_id=book_id,
                     arc_id=arc.id,
-                    workspace_lock_version=workspace.lock_version,
                     book_baseline_id=workspace.book_baseline_id,
                     arc_baseline_id=workspace.base_arc_baseline_id,
+                    created_after_ms=latest_review.created_at_ms,
                 )
+                if not repaired:
+                    return _TaskInstruction(
+                        role="arc_planner",
+                        task_kind="arc.repair",
+                        book_id=book_id,
+                        arc_id=arc.id,
+                        workspace_lock_version=workspace.lock_version,
+                        book_baseline_id=workspace.book_baseline_id,
+                        arc_baseline_id=workspace.base_arc_baseline_id,
+                    )
+                if workspace.plan_ref_id is None:
+                    raise HarnessInvariantError(
+                        "Applied Story Arc repair lost the complete plan."
+                    )
             if workspace.base_arc_baseline_id is not None:
                 revised = await execution.has_applied_task(
                     project_id=project_id,

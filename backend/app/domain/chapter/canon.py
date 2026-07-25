@@ -26,6 +26,21 @@ class ExactEvidenceSpan(BaseModel):
     end: int = Field(ge=0)
 
 
+class CanonEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    hint: str = Field(
+        description="Model-authored semantic evidence rationale; never an authority locator."
+    )
+    exact_span: ExactEvidenceSpan | None = Field(
+        default=None,
+        description=(
+            "Optional exact prose span derived by the Harness only when the hint has one "
+            "unambiguous match."
+        ),
+    )
+
+
 class BoundCanonOperation(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -35,13 +50,13 @@ class BoundCanonOperation(BaseModel):
     operation: Literal["add", "update", "resolve"]
     subject: str
     semantic_change: str
-    evidence: ExactEvidenceSpan
+    evidence: CanonEvidence
 
 
 class BoundCanonPatch(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_id: Literal["chapter-canon-patch-v1"] = "chapter-canon-patch-v1"
+    schema_id: Literal["chapter-canon-patch-v2"] = "chapter-canon-patch-v2"
     chapter_id: str
     operations: list[BoundCanonOperation]
 
@@ -54,7 +69,7 @@ class CanonEntry(BaseModel):
     semantic_state: str
     resolved: bool
     source_chapter_id: str
-    evidence: ExactEvidenceSpan
+    evidence: CanonEvidence
 
 
 class AppliedCanonPatch(BaseModel):
@@ -68,10 +83,6 @@ class AppliedCanonPatch(BaseModel):
         return bool(self.changed_categories)
 
 
-class CanonPatchBindingError(ValueError):
-    """A semantic proposal cannot be deterministically bound to exact prose evidence."""
-
-
 class CanonPatchConflictError(ValueError):
     """A semantic operation conflicts with the frozen Canon baseline."""
 
@@ -82,13 +93,18 @@ def bind_canon_patch(
     prose: str,
     observations: ChapterObservationResult,
 ) -> BoundCanonPatch:
-    operations = [
-        _bind_operation(chapter_id=chapter_id, prose=prose, proposal=proposal)
-        for proposal in observations.canon_proposals
-    ]
-    operation_ids = [operation.operation_id for operation in operations]
-    if len(operation_ids) != len(set(operation_ids)):
-        raise CanonPatchBindingError("Canon proposals contain a duplicate semantic operation.")
+    operations: list[BoundCanonOperation] = []
+    seen_operation_ids: set[str] = set()
+    for proposal in observations.canon_proposals:
+        operation = _bind_operation(
+            chapter_id=chapter_id,
+            prose=prose,
+            proposal=proposal,
+        )
+        if operation.operation_id in seen_operation_ids:
+            continue
+        seen_operation_ids.add(operation.operation_id)
+        operations.append(operation)
     return BoundCanonPatch(chapter_id=chapter_id, operations=operations)
 
 
@@ -175,8 +191,12 @@ def _bind_operation(
     prose: str,
     proposal: SemanticCanonProposal,
 ) -> BoundCanonOperation:
-    start, end = _find_exact_span(prose, proposal.evidence_hint)
-    evidence = ExactEvidenceSpan(text=prose[start:end], start=start, end=end)
+    evidence_hint = proposal.evidence_hint.strip()
+    semantic_change = proposal.semantic_change.strip()
+    evidence = CanonEvidence(
+        hint=evidence_hint,
+        exact_span=_find_unique_exact_span(prose, evidence_hint),
+    )
     entity_id = canon_entity_id(proposal.category, proposal.subject)
     operation_id = hashlib.sha256(
         canonical_json_bytes(
@@ -184,9 +204,7 @@ def _bind_operation(
                 "chapter_id": chapter_id,
                 "entity_id": entity_id,
                 "operation": proposal.operation,
-                "semantic_change": proposal.semantic_change,
-                "evidence_start": start,
-                "evidence_end": end,
+                "semantic_change": semantic_change,
             }
         )
     ).hexdigest()
@@ -196,26 +214,26 @@ def _bind_operation(
         category=proposal.category,
         operation=proposal.operation,
         subject=proposal.subject.strip(),
-        semantic_change=proposal.semantic_change.strip(),
+        semantic_change=semantic_change,
         evidence=evidence,
     )
 
 
-def _find_exact_span(prose: str, hint: str) -> tuple[int, int]:
+def _find_unique_exact_span(prose: str, hint: str) -> ExactEvidenceSpan | None:
     stripped = hint.strip()
-    direct = prose.find(stripped)
-    if direct >= 0:
-        return direct, direct + len(stripped)
     tokens = stripped.split()
     if not tokens:
-        raise CanonPatchBindingError("Canon evidence hint is blank.")
+        return None
     pattern = r"\s+".join(re.escape(token) for token in tokens)
-    match = re.search(pattern, prose, flags=re.IGNORECASE)
-    if match is None:
-        raise CanonPatchBindingError(
-            "Canon evidence hint cannot be bound to an exact span in the frozen prose."
-        )
-    return match.start(), match.end()
+    matches = list(re.finditer(pattern, prose, flags=re.IGNORECASE))
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    return ExactEvidenceSpan(
+        text=prose[match.start() : match.end()],
+        start=match.start(),
+        end=match.end(),
+    )
 
 
 def _entry(

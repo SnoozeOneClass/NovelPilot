@@ -151,6 +151,7 @@ class ArcRepairPatch(BaseModel):
         max_length=5,
         description=(
             "Only Story Arc components authorized by the repair contract in frozen context. "
+            "Every returned replacement must differ from its current value. "
             "Omitted components are preserved by the Harness and must not be repeated."
         ),
     )

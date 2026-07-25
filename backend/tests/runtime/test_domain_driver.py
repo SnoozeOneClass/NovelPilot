@@ -5,6 +5,8 @@ import json
 import re
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from alembic import command
@@ -132,6 +134,163 @@ def test_delivery_validation_failure_diagnostics_do_not_copy_model_input() -> No
     serialized_details = json.dumps(normalized.details, ensure_ascii=False)
     assert secret_model_input not in serialized_details
     assert '"input"' not in serialized_details
+
+
+def test_book_local_repair_review_is_consumed_once_before_verification() -> None:
+    async def exercise() -> None:
+        review = SimpleNamespace(
+            decision="local_repair",
+            submission_id="reviewed-submission",
+            created_at_ms=700,
+        )
+        pending = SimpleNamespace(
+            id="repaired-submission",
+            base_book_baseline_id=None,
+        )
+        books = SimpleNamespace(
+            find_pending_submission=AsyncMock(return_value=None),
+            get_latest_review=AsyncMock(return_value=review),
+        )
+        execution = SimpleNamespace(
+            has_applied_task=AsyncMock(side_effect=(False, True))
+        )
+        discussion = BookDiscussionState(
+            turn_count=1,
+            direction_draft="A stable whole-book direction.",
+            discussion_summary="The creator decisions are complete.",
+            selected_title="The Echo Ledger",
+            selected_title_source="custom",
+            readiness_status="ready",
+            readiness_reason="The Book contract can be synthesized and reviewed.",
+        )
+        content = SimpleNamespace(
+            get_packed=AsyncMock(
+                return_value=SimpleNamespace(
+                    unpack_and_verify=lambda: discussion.model_dump_json().encode()
+                )
+            )
+        )
+        store = SimpleNamespace(books=books, execution=execution, content=content)
+        workspace = SimpleNamespace(
+            lock_version=9,
+            state="active",
+            semantic_repair_count=1,
+            discussion_state_ref_id="discussion-ref",
+            candidate_constraints_ref_id="constraints-ref",
+            candidate_titles_ref_id="titles-ref",
+            candidate_rolling_plan_ref_id="rolling-ref",
+            candidate_completion_contract_ref_id="completion-ref",
+        )
+        driver = object.__new__(DomainRunDriver)
+        arguments = {
+            "store": store,
+            "run": SimpleNamespace(id="run-book"),
+            "project": SimpleNamespace(id="project-book"),
+            "book": SimpleNamespace(id="book", current_baseline_id=None),
+            "workspace": workspace,
+            "has_open_book_change": False,
+        }
+
+        first = await driver._decide_book(**arguments)
+        assert first is not None
+        assert first.task_kind == "book.repair"
+
+        second = await driver._decide_book(**arguments)
+        assert second is not None
+        assert second.kind == "submit_book"
+        execution.has_applied_task.assert_awaited_with(
+            project_id="project-book",
+            run_id="run-book",
+            task_kind="book.repair",
+            book_id="book",
+            book_baseline_id=None,
+            created_after_ms=700,
+        )
+
+        books.find_pending_submission.return_value = pending
+        third = await driver._decide_book(**arguments)
+        assert third is not None
+        assert third.task_kind == "verify_repair.book"
+
+    asyncio.run(exercise())
+
+
+def test_arc_local_repair_review_is_consumed_once_before_verification() -> None:
+    async def exercise() -> None:
+        review = SimpleNamespace(
+            decision="local_repair",
+            submission_id="reviewed-submission",
+            created_at_ms=900,
+        )
+        pending = SimpleNamespace(
+            id="repaired-submission",
+            book_baseline_id="book-baseline",
+            base_arc_baseline_id=None,
+        )
+        arc = SimpleNamespace(
+            id="arc",
+            lifecycle_status="active",
+            current_baseline_id=None,
+            current_closure_id=None,
+        )
+        workspace = SimpleNamespace(
+            state="active",
+            lock_version=11,
+            semantic_repair_count=1,
+            book_baseline_id="book-baseline",
+            base_arc_baseline_id=None,
+            plan_ref_id="arc-plan-ref",
+        )
+        arcs = SimpleNamespace(
+            get_unfinished_for_book=AsyncMock(return_value=arc),
+            get_workspace=AsyncMock(return_value=workspace),
+            find_pending_submission=AsyncMock(return_value=None),
+            get_latest_review=AsyncMock(return_value=review),
+        )
+        execution = SimpleNamespace(
+            has_applied_task=AsyncMock(side_effect=(False, True))
+        )
+        store = SimpleNamespace(arcs=arcs, execution=execution)
+        driver = object.__new__(DomainRunDriver)
+        arguments = {
+            "store": store,
+            "run": SimpleNamespace(id="run-arc"),
+            "project": SimpleNamespace(
+                id="project-arc",
+                current_canon_baseline_id="canon-baseline",
+                operation_mode="full_auto",
+            ),
+            "book": SimpleNamespace(
+                id="book",
+                current_baseline_id="book-baseline",
+            ),
+            "book_workspace": SimpleNamespace(id="book-workspace", lock_version=3),
+        }
+
+        first = await driver._decide_arc(**arguments)
+        assert first is not None
+        assert first.task_kind == "arc.repair"
+
+        second = await driver._decide_arc(**arguments)
+        assert second is not None
+        assert second.kind == "submit_arc"
+        execution.has_applied_task.assert_awaited_with(
+            project_id="project-arc",
+            run_id="run-arc",
+            task_kind="arc.repair",
+            book_id="book",
+            arc_id="arc",
+            book_baseline_id="book-baseline",
+            arc_baseline_id=None,
+            created_after_ms=900,
+        )
+
+        arcs.find_pending_submission.return_value = pending
+        third = await driver._decide_arc(**arguments)
+        assert third is not None
+        assert third.task_kind == "verify_repair.arc"
+
+    asyncio.run(exercise())
 
 
 def _message_text(messages: list[object]) -> str:
