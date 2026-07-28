@@ -102,8 +102,8 @@ class ArcClosureReviewRecord:
     canon_baseline_id: str
     terminal_chapter_id: str
     terminal_chapter_baseline_id: str
-    committed_chapter_count: int
-    closure_chapter_count: int
+    cumulative_committed_chapter_count: int
+    closure_cumulative_chapter_count: int
     chapter_set_fingerprint: str
     chapter_set_manifest_ref_id: str
     source_task_id: str
@@ -145,7 +145,7 @@ class ArcClosureRecord:
     canon_baseline_id: str
     terminal_chapter_id: str
     terminal_chapter_baseline_id: str
-    committed_chapter_count: int
+    cumulative_committed_chapter_count: int
     chapter_set_fingerprint: str
     chapter_set_manifest_ref_id: str
     normalized_result_ref_id: str

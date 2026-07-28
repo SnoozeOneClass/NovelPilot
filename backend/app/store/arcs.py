@@ -59,10 +59,10 @@ class ArcWorkspaceRecord:
     correction_lineage_origin: str | None
     automatic_correction_round: int | None
     plan_ref_id: str | None
-    minimum_chapter_count: int | None
-    recommended_closure_chapter_count: int | None
-    maximum_chapter_count: int | None
-    closure_chapter_count: int | None
+    minimum_cumulative_chapter_count: int | None
+    recommended_closure_cumulative_chapter_count: int | None
+    maximum_cumulative_chapter_count: int | None
+    closure_cumulative_chapter_count: int | None
     repair_policy_id: str
     semantic_repair_count: int
     semantic_repair_limit: int
@@ -88,10 +88,10 @@ class ArcSubmissionRecord:
     prior_arc_baseline_id: str | None
     purpose: str
     plan_ref_id: str
-    minimum_chapter_count: int
-    recommended_closure_chapter_count: int
-    maximum_chapter_count: int
-    closure_chapter_count: int
+    minimum_cumulative_chapter_count: int
+    recommended_closure_cumulative_chapter_count: int
+    maximum_cumulative_chapter_count: int
+    closure_cumulative_chapter_count: int
     content_manifest_ref_id: str
     content_fingerprint: str
     disposition: str
@@ -142,7 +142,7 @@ class ArcApprovalRecord:
     submission_id: str
     review_id: str
     decision: str
-    closure_chapter_count: int | None
+    closure_cumulative_chapter_count: int | None
     created_at_ms: int
 
 
@@ -163,10 +163,10 @@ class ArcBaselineRecord:
     prior_arc_baseline_id: str | None
     purpose: str
     plan_ref_id: str
-    minimum_chapter_count: int
-    recommended_closure_chapter_count: int
-    maximum_chapter_count: int
-    closure_chapter_count: int
+    minimum_cumulative_chapter_count: int
+    recommended_closure_cumulative_chapter_count: int
+    maximum_cumulative_chapter_count: int
+    closure_cumulative_chapter_count: int
     revision_origin: str
     authorization_kind: str
     approval_gate_id: str | None
@@ -247,12 +247,18 @@ def _workspace_record(row: RowMapping) -> ArcWorkspaceRecord:
             int | None, row["automatic_correction_round"]
         ),
         plan_ref_id=cast(str | None, row["plan_ref_id"]),
-        minimum_chapter_count=cast(int | None, row["minimum_chapter_count"]),
-        recommended_closure_chapter_count=cast(
-            int | None, row["recommended_closure_chapter_count"]
+        minimum_cumulative_chapter_count=cast(
+            int | None, row["minimum_cumulative_chapter_count"]
         ),
-        maximum_chapter_count=cast(int | None, row["maximum_chapter_count"]),
-        closure_chapter_count=cast(int | None, row["closure_chapter_count"]),
+        recommended_closure_cumulative_chapter_count=cast(
+            int | None, row["recommended_closure_cumulative_chapter_count"]
+        ),
+        maximum_cumulative_chapter_count=cast(
+            int | None, row["maximum_cumulative_chapter_count"]
+        ),
+        closure_cumulative_chapter_count=cast(
+            int | None, row["closure_cumulative_chapter_count"]
+        ),
         repair_policy_id=cast(str, row["repair_policy_id"]),
         semantic_repair_count=cast(int, row["semantic_repair_count"]),
         semantic_repair_limit=cast(int, row["semantic_repair_limit"]),
@@ -279,12 +285,18 @@ def _submission_record(row: RowMapping) -> ArcSubmissionRecord:
         prior_arc_baseline_id=cast(str | None, row["prior_arc_baseline_id"]),
         purpose=cast(str, row["purpose"]),
         plan_ref_id=cast(str, row["plan_ref_id"]),
-        minimum_chapter_count=cast(int, row["minimum_chapter_count"]),
-        recommended_closure_chapter_count=cast(
-            int, row["recommended_closure_chapter_count"]
+        minimum_cumulative_chapter_count=cast(
+            int, row["minimum_cumulative_chapter_count"]
         ),
-        maximum_chapter_count=cast(int, row["maximum_chapter_count"]),
-        closure_chapter_count=cast(int, row["closure_chapter_count"]),
+        recommended_closure_cumulative_chapter_count=cast(
+            int, row["recommended_closure_cumulative_chapter_count"]
+        ),
+        maximum_cumulative_chapter_count=cast(
+            int, row["maximum_cumulative_chapter_count"]
+        ),
+        closure_cumulative_chapter_count=cast(
+            int, row["closure_cumulative_chapter_count"]
+        ),
         content_manifest_ref_id=cast(str, row["content_manifest_ref_id"]),
         content_fingerprint=cast(str, row["content_fingerprint"]),
         disposition=cast(str, row["disposition"]),
@@ -347,12 +359,18 @@ def _baseline_record(row: RowMapping) -> ArcBaselineRecord:
         prior_arc_baseline_id=cast(str | None, row["prior_arc_baseline_id"]),
         purpose=cast(str, row["purpose"]),
         plan_ref_id=cast(str, row["plan_ref_id"]),
-        minimum_chapter_count=cast(int, row["minimum_chapter_count"]),
-        recommended_closure_chapter_count=cast(
-            int, row["recommended_closure_chapter_count"]
+        minimum_cumulative_chapter_count=cast(
+            int, row["minimum_cumulative_chapter_count"]
         ),
-        maximum_chapter_count=cast(int, row["maximum_chapter_count"]),
-        closure_chapter_count=cast(int, row["closure_chapter_count"]),
+        recommended_closure_cumulative_chapter_count=cast(
+            int, row["recommended_closure_cumulative_chapter_count"]
+        ),
+        maximum_cumulative_chapter_count=cast(
+            int, row["maximum_cumulative_chapter_count"]
+        ),
+        closure_cumulative_chapter_count=cast(
+            int, row["closure_cumulative_chapter_count"]
+        ),
         revision_origin=cast(str, row["revision_origin"]),
         authorization_kind=cast(str, row["authorization_kind"]),
         approval_gate_id=cast(str | None, row["approval_gate_id"]),

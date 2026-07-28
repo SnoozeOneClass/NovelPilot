@@ -14,6 +14,7 @@ from app.agents.contracts import (
     BookDiscussionResult,
     BookDiscussionSuggestion,
     BookSupersededDecisionProposal,
+    ChapterPlanProposal,
     CONNECT_TIMEOUT_MS,
     POOL_TIMEOUT_MS,
     READ_TIMEOUT_MS,
@@ -246,8 +247,9 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
         },
         "chapter": {"observations", "canon"},
     }
+    expected_versions = {"book": 2, "arc": 3, "chapter": 3}
     for layer, definition in definitions.items():
-        assert definition.output_schema_version == 2
+        assert definition.output_schema_version == expected_versions[layer]
         assert set(definition.output_schema["properties"]) == {"changes"}
         changes = definition.output_schema["properties"]["changes"]
         assert changes["items"]["discriminator"]["propertyName"] == "component"
@@ -275,18 +277,74 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
         "SemanticCanonProposal"
     ]["properties"]["evidence_hint"]["description"]
     assert "do not copy an exact quote" in evidence_description
-    assert "Harness owns optional exact-span binding" in (
+    assert "Harness owns subject upsert" in (
         chapter_observation.task_instructions
     )
+    canon_properties = chapter_observation.output_schema["$defs"][
+        "SemanticCanonProposal"
+    ]["properties"]
+    assert "operation" not in canon_properties
+    assert "resolved" in canon_properties
+    assert chapter_observation.output_schema_version == 2
 
     chapter_evaluation = DEFAULT_TASK_REGISTRY.get(
         role="evaluator",
         task_kind="evaluate.chapter",
         contract_version=1,
     )
+    chapter_issue_properties = chapter_evaluation.output_schema["$defs"][
+        "ChapterEvaluationIssue"
+    ]["properties"]
     assert set(
-        chapter_evaluation.output_schema["properties"]["repair_scope"]["items"]["enum"]
-    ) == {"prose", "observations", "canon"}
+        chapter_issue_properties["affected_components"]["items"]["enum"]
+    ) == {"plan", "prose", "observations", "canon"}
+    assert "repair_scope" not in chapter_evaluation.output_schema["properties"]
+    assert set(chapter_issue_properties["recurrence"]["enum"]) == {
+        "new",
+        "persists_after_authorized_repair",
+    }
+    assert "needs_user" not in (
+        chapter_evaluation.output_schema["properties"]["decision"]["enum"]
+    )
+    assert "absence of an explicit prior negation" in chapter_evaluation.task_instructions
+    assert "history need not separately prove the non-recording" in (
+        chapter_evaluation.task_instructions
+    )
+    assert "Harness derives" in chapter_evaluation.task_instructions
+    assert chapter_evaluation.output_schema_version == 3
+    assert chapter_evaluation.evaluation_strategy_version == 3
+    assert chapter_evaluation.rubric_id == "chapter-candidate-rubric-v4"
+    assert chapter_evaluation.context_policy_id == "chapter-evaluator-context-v3"
+
+    chapter_repair_evaluation = DEFAULT_TASK_REGISTRY.get(
+        role="evaluator",
+        task_kind="verify_repair.chapter",
+        contract_version=1,
+    )
+    chapter_repair_strategy = DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+        "verify_repair.chapter"
+    )
+    assert chapter_repair_evaluation.output_schema_version == 3
+    assert chapter_repair_evaluation.evaluation_strategy_version == 3
+    assert chapter_repair_evaluation.rubric_id == "chapter-repair-rubric-v4"
+    assert (
+        chapter_repair_evaluation.context_policy_id
+        == "chapter-repair-verification-context-v3"
+    )
+    assert set(chapter_repair_strategy.legal_semantic_signals) == {
+        "pass",
+        "local_repair",
+        "escalate_to_arc",
+    }
+
+    chapter_plan_repair = DEFAULT_TASK_REGISTRY.get(
+        role="chapter_writer",
+        task_kind="chapter.repair.plan",
+        contract_version=1,
+    )
+    assert chapter_plan_repair.output_model is ChapterPlanProposal
+    assert "complete replacement" in chapter_plan_repair.task_instructions
+    assert "invalidates and regenerates" in chapter_plan_repair.task_instructions
 
 
 def test_local_repair_patch_contracts_reject_empty_and_duplicate_changes() -> None:
@@ -403,10 +461,10 @@ def test_route_c_arc_contract_exposes_range_checkpoint_and_no_fixed_chapter_map(
         "desired_state_transition",
         "conflict_trajectory",
         "pacing_trajectory",
-        "minimum_chapter_count",
-        "recommended_closure_chapter_count",
-        "maximum_chapter_count",
-        "closure_chapter_count",
+        "minimum_cumulative_chapter_count",
+        "recommended_closure_cumulative_chapter_count",
+        "maximum_cumulative_chapter_count",
+        "closure_cumulative_chapter_count",
         "closure_signals",
         "advisory_beats",
     }.issubset(properties)

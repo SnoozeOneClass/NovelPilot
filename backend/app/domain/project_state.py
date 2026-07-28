@@ -80,11 +80,12 @@ class ArcStateView(BaseModel):
     latest_closure_review_id: str | None
     current_closure_id: str | None
     baseline_version: int | None
-    minimum_chapter_count: int | None
-    recommended_closure_chapter_count: int | None
-    maximum_chapter_count: int | None
-    closure_chapter_count: int | None
-    committed_chapter_count: int
+    minimum_cumulative_chapter_count: int | None
+    recommended_closure_cumulative_chapter_count: int | None
+    maximum_cumulative_chapter_count: int | None
+    closure_cumulative_chapter_count: int | None
+    cumulative_committed_chapter_count: int
+    arc_committed_chapter_count: int
     workspace_state: str
     workspace_lock_version: int
     semantic_repair_count: int
@@ -506,25 +507,35 @@ class ProjectStateQuery:
                         baseline_version=(
                             None if arc_baseline is None else arc_baseline.baseline_version
                         ),
-                        minimum_chapter_count=(
-                            arc_workspace.minimum_chapter_count
+                        minimum_cumulative_chapter_count=(
+                            arc_workspace.minimum_cumulative_chapter_count
                             if arc_baseline is None
-                            else arc_baseline.minimum_chapter_count
+                            else arc_baseline.minimum_cumulative_chapter_count
                         ),
-                        recommended_closure_chapter_count=(
-                            arc_workspace.recommended_closure_chapter_count
-                        ),
-                        maximum_chapter_count=(
-                            arc_workspace.maximum_chapter_count
+                        recommended_closure_cumulative_chapter_count=(
+                            arc_workspace.recommended_closure_cumulative_chapter_count
                             if arc_baseline is None
-                            else arc_baseline.maximum_chapter_count
+                            else (
+                                arc_baseline
+                                .recommended_closure_cumulative_chapter_count
+                            )
                         ),
-                        closure_chapter_count=(
-                            arc_workspace.closure_chapter_count
+                        maximum_cumulative_chapter_count=(
+                            arc_workspace.maximum_cumulative_chapter_count
                             if arc_baseline is None
-                            else arc_baseline.closure_chapter_count
+                            else arc_baseline.maximum_cumulative_chapter_count
                         ),
-                        committed_chapter_count=await store.chapters.count_committed(
+                        closure_cumulative_chapter_count=(
+                            arc_workspace.closure_cumulative_chapter_count
+                            if arc_baseline is None
+                            else arc_baseline.closure_cumulative_chapter_count
+                        ),
+                        cumulative_committed_chapter_count=(
+                            await store.chapters.count_committed_for_book(
+                                book_id=book.id
+                            )
+                        ),
+                        arc_committed_chapter_count=await store.chapters.count_committed(
                             arc_id=arc.id
                         ),
                         workspace_state=arc_workspace.state,

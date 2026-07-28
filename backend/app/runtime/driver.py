@@ -67,6 +67,7 @@ from app.runtime.failures import (
     DeliveryFailureService,
     HarnessActionFailureService,
     NormalizedDeliveryFailure,
+    normalize_harness_action_details,
 )
 from app.store.agent_tasks import AgentTaskStore
 from app.store.command_bus import CommandBus
@@ -237,6 +238,9 @@ _SEMANTIC_GOALS: dict[str, str] = {
     "chapter.revise.draft": "Write the complete revised Chapter prose from the revised plan.",
     "chapter.observe": "Observe the Chapter prose and propose evidence-bound Canon changes.",
     "chapter.revise.observe": "Re-observe revised Chapter prose and propose evidence-bound Canon changes.",
+    "chapter.repair.plan": (
+        "Replace the invalid mutable Chapter plan within the same frozen Arc and Canon."
+    ),
     "chapter.repair.prose": "Repair the complete Chapter prose only within the authorized scope.",
     "chapter.repair.observation": (
         "Repair the Chapter observations and Canon proposals only within the authorized scope."
@@ -429,9 +433,11 @@ class DomainRunDriver:
             action_key,
             exc_info=error,
         )
-        details: dict[str, object] = {"phase": phase}
-        if task_kind is not None:
-            details["task_kind"] = task_kind
+        details = normalize_harness_action_details(
+            error,
+            phase=phase,
+            task_kind=task_kind,
+        )
         await self._harness_action_failures.failure_pause(
             run=run,
             action_key=action_key,
@@ -760,6 +766,7 @@ class DomainRunDriver:
             "chapter.revise.draft",
             "chapter.observe",
             "chapter.revise.observe",
+            "chapter.repair.plan",
             "chapter.repair.prose",
             "chapter.repair.observation",
         }:
@@ -784,10 +791,6 @@ class DomainRunDriver:
                     evaluator_attempt_id=task.attempt_id,
                     rubric_id=self._required_task_rubric_id(task),
                     rubric_version=self._required_task_rubric_version(task),
-                    deterministic_precheck={
-                        "passed": True,
-                        "manifest": "chapter-submission-v1",
-                    },
                 ),
                 idempotency_key=key,
             )
@@ -815,9 +818,6 @@ class DomainRunDriver:
                     evaluator_attempt_id=task.attempt_id,
                     rubric_id=self._required_task_rubric_id(task),
                     rubric_version=self._required_task_rubric_version(task),
-                    deterministic_precheck={
-                        "manifest": "chapter-evidence-submission-v1",
-                    },
                 ),
                 idempotency_key=key,
             )
@@ -917,6 +917,7 @@ class DomainRunDriver:
             "chapter.revise.draft": self._chapters.apply_revision_draft_result,
             "chapter.observe": self._chapters.apply_observation_result,
             "chapter.revise.observe": self._chapters.apply_revision_observation_result,
+            "chapter.repair.plan": self._chapters.apply_repair_result,
             "chapter.repair.prose": self._chapters.apply_repair_result,
             "chapter.repair.observation": self._chapters.apply_repair_result,
         }
@@ -2022,6 +2023,7 @@ class DomainRunDriver:
     ) -> _Instruction:
         chapters = getattr(store, "chapters")
         arcs = getattr(store, "arcs")
+        books = getattr(store, "books")
         content = getattr(store, "content")
         execution = getattr(store, "execution")
         arc_id = cast(str, getattr(arc, "id"))
@@ -2037,8 +2039,25 @@ class DomainRunDriver:
             )
             if baseline is None:
                 raise HarnessInvariantError("Current Story Arc baseline does not exist.")
-            committed = await chapters.count_committed(arc_id=arc_id)
-            if committed < baseline.closure_chapter_count:
+            book_baseline = await books.get_baseline(
+                project_id=project_id,
+                book_id=book_id,
+                baseline_id=book_baseline_id,
+            )
+            if book_baseline is None:
+                raise HarnessInvariantError("Current Book baseline does not exist.")
+            cumulative_committed = await chapters.count_committed_for_book(
+                book_id=book_id
+            )
+            if cumulative_committed >= book_baseline.maximum_chapter_count:
+                raise HarnessInvariantError(
+                    "Book reached its approved maximum without a legal closure "
+                    "or revision route."
+                )
+            if (
+                cumulative_committed
+                < baseline.closure_cumulative_chapter_count
+            ):
                 return _CommandInstruction(
                     kind="create_chapter",
                     request=CreateChapterRequest(
@@ -2050,12 +2069,14 @@ class DomainRunDriver:
                         expected_canon_baseline_id=canon_baseline_id,
                     ),
                     idempotency_key=(
-                        f"engine:create-chapter:{arc_id}:{committed + 1}:{arc_baseline_id}:"
+                        f"engine:create-chapter:{arc_id}:{cumulative_committed + 1}:"
+                        f"{arc_baseline_id}:"
                         f"{canon_baseline_id}"
                     ),
                 )
             raise HarnessInvariantError(
-                "Story Arc reached its closure checkpoint without entering closure review."
+                "Story Arc reached its cumulative closure checkpoint without "
+                "entering closure review."
             )
 
         chapter, workspace = active
@@ -2219,7 +2240,19 @@ class DomainRunDriver:
                     )
                 ).unpack_and_verify()
             )
-            scope = set(repair.get("repair_scope", []))
+            scope = set(repair.get("authorized_components", []))
+            plan_repaired = await execution.has_applied_task(
+                project_id=project_id,
+                run_id=run.id,
+                task_kind="chapter.repair.plan",
+                book_id=book_id,
+                arc_id=arc_id,
+                chapter_id=chapter.id,
+                book_baseline_id=workspace.book_baseline_id,
+                arc_baseline_id=workspace.arc_baseline_id,
+                chapter_baseline_id=workspace.base_chapter_baseline_id,
+                created_after_ms=latest_review.created_at_ms,
+            )
             prose_repaired = await execution.has_applied_task(
                 project_id=project_id,
                 run_id=run.id,
@@ -2244,10 +2277,23 @@ class DomainRunDriver:
                 chapter_baseline_id=workspace.base_chapter_baseline_id,
                 created_after_ms=latest_review.created_at_ms,
             )
+            if "plan" in scope and not plan_repaired:
+                return self._chapter_task("chapter.repair.plan", chapter, workspace)
             if "prose" in scope and not prose_repaired:
                 return self._chapter_task("chapter.repair.prose", chapter, workspace)
             if scope.intersection({"observations", "canon"}) and not observations_repaired:
                 return self._chapter_task("chapter.repair.observation", chapter, workspace)
+            if workspace.draft_ref_id is None:
+                if "plan" not in scope:
+                    raise HarnessInvariantError(
+                        "Chapter repair lost prose without a plan replacement."
+                    )
+                draft_kind = (
+                    "chapter.revise.draft"
+                    if workspace.base_chapter_baseline_id is not None
+                    else "chapter.draft"
+                )
+                return self._chapter_task(draft_kind, chapter, workspace)
             if workspace.observations_ref_id is None:
                 observe_kind = (
                     "chapter.revise.observe"

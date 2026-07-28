@@ -7,10 +7,11 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import cast
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from app.agents.contracts import (
     ChapterDraftResult,
+    ChapterEvaluationIssue,
     ChapterObservationRepairPatch,
     ChapterObservationResult,
     ChapterPlanProposal,
@@ -24,6 +25,7 @@ from app.domain.chapter.canon import (
     BoundCanonPatch,
     CanonCategory,
     CanonEntry,
+    CanonPatchConflictError,
     apply_canon_patch,
     bind_canon_patch,
     canon_manifest_fingerprint,
@@ -120,6 +122,34 @@ def _merge_chapter_observation_repair(
     return observations
 
 
+_CHAPTER_REPAIR_COMPONENT_ORDER = ("plan", "prose", "observations", "canon")
+
+
+def _chapter_repair_scope(evaluation: LayerEvaluationResult) -> list[str]:
+    affected = {
+        component
+        for issue in evaluation.issues
+        for component in issue.affected_components
+    }
+    return [
+        component
+        for component in _CHAPTER_REPAIR_COMPONENT_ORDER
+        if component in affected
+    ]
+
+
+def _chapter_issue_fingerprint(issue: ChapterEvaluationIssue) -> str:
+    def normalize(value: str) -> str:
+        return " ".join(value.casefold().split())
+
+    return prepare_canonical_json(
+        {
+            "code": normalize(issue.code),
+            "subject": normalize(issue.subject),
+        }
+    ).sha256
+
+
 class ChapterCommandService:
     def __init__(
         self,
@@ -186,10 +216,21 @@ class ChapterCommandService:
                 or context.canon_baseline_id != request.expected_canon_baseline_id
             ):
                 raise CommandPreconditionError("Chapter dependencies are no longer current.")
-            committed = await session.chapters.count_committed(arc_id=request.arc_id)
-            if committed >= context.closure_chapter_count:
+            cumulative_committed = (
+                await session.chapters.count_committed_for_book(
+                    book_id=request.book_id
+                )
+            )
+            if cumulative_committed >= context.book_maximum_chapter_count:
                 raise CommandPreconditionError(
-                    "The current Arc reached its frozen closure checkpoint."
+                    "The approved Book Chapter maximum has been reached."
+                )
+            if (
+                cumulative_committed
+                >= context.closure_cumulative_chapter_count
+            ):
+                raise CommandPreconditionError(
+                    "The current Arc reached its frozen cumulative closure checkpoint."
                 )
             book_ordinal, arc_ordinal = await session.chapters.next_ordinals(
                 book_id=request.book_id,
@@ -598,13 +639,13 @@ class ChapterCommandService:
                     "chapter.observations",
                     "application/json",
                     "chapter-observations",
-                    1,
+                    2,
                 ),
                 (
                     "chapter.candidate_canon_patch",
                     "application/json",
                     "chapter-canon-patch",
-                    2,
+                    3,
                 ),
             ),
             mutate=mutate,
@@ -642,17 +683,47 @@ class ChapterCommandService:
                     )
                 ).unpack_and_verify()
             )
-        scope = repair_contract.get("repair_scope")
+        scope = repair_contract.get("authorized_components")
         if not isinstance(scope, list) or any(not isinstance(item, str) for item in scope):
             raise CommandPreconditionError("Chapter repair contract has an invalid scope.")
         allowed_scope = set(scope)
         prepared: Sequence[PreparedContent]
         descriptors: Sequence[tuple[str, str, str | None, int | None]]
-        if task.task_kind == "chapter.repair.prose":
+        if task.task_kind == "chapter.repair.plan":
+            if allowed_scope != {"plan"}:
+                raise CommandPreconditionError(
+                    "A Chapter plan repair must be the only authorized component."
+                )
+            plan = ChapterPlanProposal.model_validate_json(raw)
+            component: ChapterComponent = "repair_plan"
+            prepared = (prepare_canonical_json(plan),)
+            descriptors = (
+                ("chapter.plan", "application/json", "chapter-plan", 1),
+            )
+
+            def mutate(
+                workspace: ChapterWorkspaceRecord,
+                refs: Sequence[str],
+                timestamp: int,
+            ) -> ChapterWorkspaceRecord:
+                _require_repair_budget(workspace)
+                return replace(
+                    workspace,
+                    state="active",
+                    lock_version=workspace.lock_version + 1,
+                    plan_ref_id=refs[0],
+                    draft_ref_id=None,
+                    observations_ref_id=None,
+                    candidate_canon_patch_ref_id=None,
+                    semantic_repair_count=workspace.semantic_repair_count + 1,
+                    updated_at_ms=timestamp,
+                )
+
+        elif task.task_kind == "chapter.repair.prose":
             if "prose" not in allowed_scope:
                 raise CommandPreconditionError("Repair contract does not authorize prose changes.")
             draft = ChapterDraftResult.model_validate_json(raw)
-            component: ChapterComponent = "repair_prose"
+            component = "repair_prose"
             prepared = (prepare_exact_text(draft.prose),)
             descriptors = (("chapter.prose", "text/plain; charset=utf-8", None, None),)
 
@@ -724,13 +795,13 @@ class ChapterCommandService:
                     "chapter.observations",
                     "application/json",
                     "chapter-observations",
-                    1,
+                    2,
                 ),
                 (
                     "chapter.candidate_canon_patch",
                     "application/json",
                     "chapter-canon-patch",
-                    2,
+                    3,
                 ),
             )
 
@@ -1085,12 +1156,106 @@ class ChapterCommandService:
             handler=handler,
         )
 
+    async def build_submission_precheck(
+        self,
+        *,
+        project_id: str,
+        submission_id: str,
+    ) -> dict[str, object]:
+        """Validate one frozen Chapter/Canon submission without mutating authority."""
+        async with self._command_bus.read_unit_of_work() as session:
+            submission = await session.chapters.get_submission(
+                project_id=project_id,
+                submission_id=submission_id,
+            )
+            if submission is None:
+                raise CommandPreconditionError(
+                    "Chapter deterministic precheck has no frozen submission."
+                )
+            canon_before = await session.canon.get_baseline(
+                project_id=project_id,
+                baseline_id=submission.canon_before_id,
+            )
+            if canon_before is None:
+                raise CommandPreconditionError(
+                    "Chapter deterministic precheck lost its Canon baseline."
+                )
+            patch = BoundCanonPatch.model_validate_json(
+                (
+                    await session.content.get_packed(
+                        project_id=project_id,
+                        ref_id=submission.candidate_canon_patch_ref_id,
+                    )
+                ).unpack_and_verify()
+            )
+            current_categories = await _load_canon_categories(
+                session,
+                project_id=project_id,
+                baseline=canon_before,
+            )
+        try:
+            apply_canon_patch(
+                chapter_id=submission.chapter_id,
+                current=current_categories,
+                patch=patch,
+            )
+        except CanonPatchConflictError as error:
+            if error.code != "canon_subject_assertion_conflict":
+                raise CommandPreconditionError(
+                    "Chapter Canon precheck found a non-repairable binding defect."
+                ) from error
+            operation = error.operation
+            return {
+                "schema_id": "chapter-submission-precheck-v3",
+                "passed": False,
+                "checks": {
+                    "frozen_submission_loaded": True,
+                    "canon_baseline_loaded": True,
+                    "canon_patch_applicable": False,
+                },
+                "issues": [
+                    {
+                        "code": error.code,
+                        "subject": (
+                            "candidate Canon assertion"
+                            if operation is None
+                            else operation.subject
+                        ),
+                        "summary": str(error),
+                        "evidence_hint": (
+                            None
+                            if operation is None
+                            else (
+                                f"{operation.category} subject "
+                                f"{operation.subject!r} has incompatible assertions."
+                            )
+                        ),
+                        "affected_components": ["canon"],
+                        "recurrence": "new",
+                    }
+                ],
+            }
+        return {
+            "schema_id": "chapter-submission-precheck-v3",
+            "passed": True,
+            "checks": {
+                "frozen_submission_loaded": True,
+                "canon_baseline_loaded": True,
+                "canon_patch_applicable": True,
+            },
+            "issues": [],
+        }
+
     async def record_review(
         self,
         request: RecordChapterReviewRequest,
         *,
         idempotency_key: str,
     ) -> CommandExecution[RecordChapterReviewResult]:
+        deterministic_precheck = await self.build_submission_precheck(
+            project_id=request.project_id,
+            submission_id=request.submission_id,
+        )
         timestamp = self._now_ms()
         review_id = self._id_factory()
         precheck_ref_id = self._id_factory()
@@ -1098,6 +1263,7 @@ class ChapterCommandService:
         repair_ref_id = self._id_factory()
         change_request_id = self._id_factory()
         failure_ref_id = self._id_factory()
+        previous_repair_contract: dict[str, object] | None = None
         async with self._command_bus.read_unit_of_work() as session:
             task = await session.execution.get_successful_task(
                 project_id=request.project_id,
@@ -1108,6 +1274,10 @@ class ChapterCommandService:
                 project_id=request.project_id,
                 submission_id=request.submission_id,
             )
+            previous_review = await session.chapters.get_latest_review(
+                project_id=request.project_id,
+                chapter_id=request.chapter_id,
+            )
             if task is None:
                 raise CommandPreconditionError("Evaluator task has no successful result.")
             result_bytes = (
@@ -1116,17 +1286,77 @@ class ChapterCommandService:
                     ref_id=task.result_ref_id,
                 )
             ).unpack_and_verify()
-        evaluation = LayerEvaluationResult.model_validate_json(result_bytes)
+            if task.task_kind == "verify_repair.chapter":
+                if (
+                    previous_review is None
+                    or previous_review.decision != "local_repair"
+                    or previous_review.repair_contract_ref_id is None
+                ):
+                    raise CommandPreconditionError(
+                        "Chapter repair verification lost its source repair contract."
+                    )
+                previous_repair_contract = json.loads(
+                    (
+                        await session.content.get_packed(
+                            project_id=request.project_id,
+                            ref_id=previous_review.repair_contract_ref_id,
+                        )
+                    ).unpack_and_verify()
+                )
+        evaluation = _apply_chapter_precheck(
+            LayerEvaluationResult.model_validate_json(result_bytes),
+            deterministic_precheck,
+        )
         decision = _chapter_review_decision(evaluation)
-        if decision == "pass" and request.deterministic_precheck.get("passed") is not True:
-            raise CommandPreconditionError("Chapter deterministic prechecks did not pass.")
-        prepared_precheck = prepare_canonical_json(request.deterministic_precheck)
+        if task.task_kind == "evaluate.chapter" and any(
+            issue.recurrence == "persists_after_authorized_repair"
+            for issue in evaluation.issues
+        ):
+            raise CommandPreconditionError(
+                "An initial Chapter evaluation cannot report repair recurrence."
+            )
+        repair_scope = _chapter_repair_scope(evaluation)
+        issue_fingerprints = [
+            _chapter_issue_fingerprint(issue) for issue in evaluation.issues
+        ]
+        previous_issue_fingerprints: set[str] = set()
+        if previous_repair_contract is not None:
+            raw_fingerprints = previous_repair_contract.get("issue_fingerprints")
+            if not isinstance(raw_fingerprints, list) or any(
+                not isinstance(value, str) for value in raw_fingerprints
+            ):
+                raise CommandPreconditionError(
+                    "Chapter repair verification source has invalid issue fingerprints."
+                )
+            previous_issue_fingerprints = set(raw_fingerprints)
+        stalled_issue_fingerprints = sorted(
+            {
+                fingerprint
+                for fingerprint, issue in zip(
+                    issue_fingerprints,
+                    evaluation.issues,
+                    strict=True,
+                )
+                if (
+                    issue.recurrence == "persists_after_authorized_repair"
+                    or fingerprint in previous_issue_fingerprints
+                )
+            }
+        )
+        semantic_repair_stalled = (
+            task.task_kind == "verify_repair.chapter"
+            and decision == "local_repair"
+            and bool(stalled_issue_fingerprints)
+        )
+        prepared_precheck = prepare_canonical_json(deterministic_precheck)
         prepared_detail = prepare_canonical_json(evaluation)
         repair_contract = (
             {
-                "schema": "chapter-repair-contract-v1",
-                "repair_scope": evaluation.repair_scope,
+                "schema": "chapter-repair-contract-v3",
+                "authorized_components": repair_scope,
                 "issues": [issue.model_dump(mode="json") for issue in evaluation.issues],
+                "issue_fingerprints": issue_fingerprints,
+                "stalled_issue_fingerprints": stalled_issue_fingerprints,
             }
             if decision == "local_repair"
             else None
@@ -1136,9 +1366,19 @@ class ChapterCommandService:
         )
         prepared_failure = prepare_canonical_json(
             {
-                "code": "semantic_repair_exhausted",
-                "message": "Chapter semantic repair limit of five has been exhausted.",
+                "code": (
+                    "semantic_repair_stalled"
+                    if semantic_repair_stalled
+                    else "semantic_repair_exhausted"
+                ),
+                "message": (
+                    "The same Chapter semantic issue persisted after its one "
+                    "authorized correction."
+                    if semantic_repair_stalled
+                    else "Chapter semantic repair limit of five has been exhausted."
+                ),
                 "chapter_id": request.chapter_id,
+                "issue_fingerprints": stalled_issue_fingerprints,
             }
         )
         envelope = self._envelope(
@@ -1162,6 +1402,10 @@ class ChapterCommandService:
                 submission_id=request.submission_id,
             )
             workspace = await session.chapters.get_workspace(
+                project_id=request.project_id,
+                chapter_id=request.chapter_id,
+            )
+            current_previous_review = await session.chapters.get_latest_review(
                 project_id=request.project_id,
                 chapter_id=request.chapter_id,
             )
@@ -1195,6 +1439,7 @@ class ChapterCommandService:
                 or workspace is None
                 or workspace.id != submission.workspace_id
                 or workspace.lock_version != submission.workspace_lock_version
+                or current_previous_review != previous_review
             ):
                 raise CommandPreconditionError("Chapter evaluation facts are stale or mismatched.")
             precheck_ref = await session.content.put(
@@ -1203,7 +1448,7 @@ class ChapterCommandService:
                 semantic_kind="chapter.deterministic_precheck",
                 media_type="application/json",
                 schema_id="chapter-precheck",
-                schema_version=1,
+                schema_version=3,
                 ref_id=precheck_ref_id,
                 created_at_ms=timestamp,
             )
@@ -1213,7 +1458,7 @@ class ChapterCommandService:
                 semantic_kind="chapter.review_detail",
                 media_type="application/json",
                 schema_id="chapter-evaluation-result",
-                schema_version=1,
+                schema_version=3,
                 ref_id=detail_ref_id,
                 created_at_ms=timestamp,
             )
@@ -1225,7 +1470,7 @@ class ChapterCommandService:
                     semantic_kind="chapter.repair_contract",
                     media_type="application/json",
                     schema_id="chapter-repair-contract",
-                    schema_version=1,
+                    schema_version=3,
                     ref_id=repair_ref_id,
                     created_at_ms=timestamp,
                 )
@@ -1258,9 +1503,12 @@ class ChapterCommandService:
                     closed_at_ms=timestamp,
                 ):
                     raise CommandPreconditionError("Chapter submission changed before rejection.")
-                state = "active" if decision == "local_repair" else "blocked_by_user"
+                state = (
+                    "active"
+                    if decision == "local_repair"
+                    else "blocked_by_upstream"
+                )
                 if decision == "escalate_to_arc":
-                    state = "blocked_by_upstream"
                     change_record = ChapterChangeRequestRecord(
                         id=change_request_id,
                         project_id=request.project_id,
@@ -1299,14 +1547,22 @@ class ChapterCommandService:
                     raise CommandPreconditionError("Chapter review workspace CAS failed.")
                 if (
                     decision == "local_repair"
-                    and workspace.semantic_repair_count >= workspace.semantic_repair_limit
+                    and (
+                        semantic_repair_stalled
+                        or workspace.semantic_repair_count
+                        >= workspace.semantic_repair_limit
+                    )
                 ):
                     failure_ref = await session.content.put(
                         project_id=request.project_id,
                         prepared=prepared_failure,
                         semantic_kind="agent_error_summary",
                         media_type="application/json",
-                        schema_id="semantic-repair-exhausted",
+                        schema_id=(
+                            "semantic-repair-stalled"
+                            if semantic_repair_stalled
+                            else "semantic-repair-exhausted"
+                        ),
                         schema_version=1,
                         ref_id=failure_ref_id,
                         created_at_ms=timestamp,
@@ -1314,19 +1570,16 @@ class ChapterCommandService:
                     if not await session.runs.failure_pause_for_task(
                         run_id=task.run_id,
                         task_id=task.task_id,
-                        failure_code="semantic_repair_exhausted",
+                        failure_code=(
+                            "semantic_repair_stalled"
+                            if semantic_repair_stalled
+                            else "semantic_repair_exhausted"
+                        ),
                         failure_ref_id=failure_ref.id,
                         now_ms=timestamp,
                     ):
-                        raise CommandPreconditionError("Run cannot pause at repair exhaustion.")
-                if decision == "needs_user":
-                    if not await session.runs.ensure_wait_for_user(
-                        run_id=task.run_id,
-                        reason_code="chapter_review_needs_user",
-                        now_ms=timestamp,
-                    ):
                         raise CommandPreconditionError(
-                            "Run could not enter the Chapter review wait."
+                            "Run cannot pause at the Chapter repair terminal boundary."
                         )
             if not await session.execution.mark_delivery_applied(
                 project_id=request.project_id,
@@ -1704,17 +1957,11 @@ class ChapterCommandService:
                 )
             ).unpack_and_verify()
             ref_by_category = _canon_ref_ids(canon_before)
-            current_categories = {
-                category: TypeAdapter(list[CanonEntry]).validate_json(
-                    (
-                        await session.content.get_packed(
-                            project_id=request.project_id,
-                            ref_id=ref_by_category[category],
-                        )
-                    ).unpack_and_verify()
-                )
-                for category in CANON_CATEGORIES
-            }
+            current_categories = await _load_canon_categories(
+                session,
+                project_id=request.project_id,
+                baseline=canon_before,
+            )
         plan = ChapterPlanProposal.model_validate_json(plan_bytes)
         prose = prose_bytes.decode("utf-8")
         patch = BoundCanonPatch.model_validate_json(patch_bytes)
@@ -1898,15 +2145,26 @@ class ChapterCommandService:
                 expected_version = current_version + 1
             if chapter_version != expected_version:
                 raise CommandPreconditionError("Chapter baseline version is not contiguous.")
-            committed_before = await session.chapters.count_committed(arc_id=chapter.arc_id)
-            effective_count = (
-                committed_before + 1
-                if chapter.lifecycle_status == "drafting"
-                else committed_before
+            cumulative_committed_before = (
+                await session.chapters.count_committed_for_book(
+                    book_id=chapter.book_id
+                )
             )
-            if effective_count > context.closure_chapter_count:
+            effective_cumulative_count = (
+                cumulative_committed_before + 1
+                if chapter.lifecycle_status == "drafting"
+                else cumulative_committed_before
+            )
+            if effective_cumulative_count > context.book_maximum_chapter_count:
                 raise CommandPreconditionError(
-                    "Chapter commit exceeds the frozen Arc closure checkpoint."
+                    "Chapter commit exceeds the approved Book Chapter maximum."
+                )
+            if (
+                effective_cumulative_count
+                > context.closure_cumulative_chapter_count
+            ):
+                raise CommandPreconditionError(
+                    "Chapter commit exceeds the frozen Arc cumulative closure checkpoint."
                 )
 
             for category in applied.changed_categories:
@@ -2015,17 +2273,28 @@ class ChapterCommandService:
                 expected_lock_version=workspace.lock_version,
             ):
                 raise CommandPreconditionError("Chapter workspace finalization CAS failed.")
-            committed_after = await session.chapters.count_committed(arc_id=chapter.arc_id)
-            if committed_after != effective_count:
-                raise CommandPreconditionError("Committed Chapter count changed concurrently.")
-            arc_closure_due = committed_after == context.closure_chapter_count
+            cumulative_committed_after = (
+                await session.chapters.count_committed_for_book(
+                    book_id=chapter.book_id
+                )
+            )
+            if cumulative_committed_after != effective_cumulative_count:
+                raise CommandPreconditionError(
+                    "Whole-Book committed Chapter count changed concurrently."
+                )
+            arc_closure_due = (
+                cumulative_committed_after
+                == context.closure_cumulative_chapter_count
+            )
             if chapter.lifecycle_status != "committed" and arc_closure_due:
                 if not await session.chapters.begin_arc_closure_review(
                     project_id=request.project_id,
                     arc_id=chapter.arc_id,
                     arc_baseline_id=context.arc_baseline_id,
-                    committed_count=committed_after,
-                    closure_chapter_count=context.closure_chapter_count,
+                    cumulative_committed_count=cumulative_committed_after,
+                    closure_cumulative_chapter_count=(
+                        context.closure_cumulative_chapter_count
+                    ),
                     now_ms=timestamp,
                 ):
                     raise CommandPreconditionError(
@@ -2104,12 +2373,75 @@ def _chapter_review_decision(
     return evaluation.decision
 
 
+def _apply_chapter_precheck(
+    evaluation: LayerEvaluationResult,
+    precheck: dict[str, object],
+) -> LayerEvaluationResult:
+    passed = precheck.get("passed")
+    if passed is True:
+        return evaluation
+    if passed is not False:
+        raise CommandPreconditionError(
+            "Chapter deterministic precheck has no explicit pass/fail result."
+        )
+    raw_issues = precheck.get("issues")
+    if not isinstance(raw_issues, list) or not raw_issues:
+        raise CommandPreconditionError(
+            "A failed Chapter deterministic precheck requires typed issues."
+        )
+    try:
+        precheck_issues = [
+            ChapterEvaluationIssue.model_validate(issue) for issue in raw_issues
+        ]
+    except ValidationError as error:
+        raise CommandPreconditionError(
+            "Chapter deterministic precheck issues are invalid."
+        ) from error
+    if (
+        evaluation.decision == "local_repair"
+        and "plan" in _chapter_repair_scope(evaluation)
+    ):
+        # Replacing the cohesive plan invalidates and regenerates the downstream
+        # observations/Canon candidate, so the stale patch is not a second repair
+        # component in this review.
+        return evaluation
+
+    return LayerEvaluationResult(
+        decision="local_repair",
+        summary=(
+            "Deterministic Chapter/Canon precheck requires a bounded repair. "
+            f"{evaluation.summary}"
+        ),
+        issues=[*evaluation.issues, *precheck_issues],
+    )
+
+
 def _canon_ref_ids(baseline: CanonBaselineRecord) -> dict[CanonCategory, str]:
     return {
         "characters": baseline.characters_ref_id,
         "relationships": baseline.relationships_ref_id,
         "world_facts": baseline.world_facts_ref_id,
         "foreshadowing": baseline.foreshadowing_ref_id,
+    }
+
+
+async def _load_canon_categories(
+    session: StoreSession,
+    *,
+    project_id: str,
+    baseline: CanonBaselineRecord,
+) -> dict[CanonCategory, list[CanonEntry]]:
+    ref_by_category = _canon_ref_ids(baseline)
+    return {
+        category: TypeAdapter(list[CanonEntry]).validate_json(
+            (
+                await session.content.get_packed(
+                    project_id=project_id,
+                    ref_id=ref_by_category[category],
+                )
+            ).unpack_and_verify()
+        )
+        for category in CANON_CATEGORIES
     }
 
 

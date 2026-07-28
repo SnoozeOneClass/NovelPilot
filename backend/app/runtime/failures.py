@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from collections.abc import Callable
@@ -21,6 +22,79 @@ class NormalizedDeliveryFailure:
     message: str
     exception_type: str
     details: dict[str, object] | None = None
+
+
+_SAFE_INVARIANT = re.compile(r"^[a-z][a-z0-9_.:-]{0,199}$")
+_SENSITIVE_HEADER = re.compile(
+    r"(?im)\b(?:authorization|proxy-authorization|cookie|set-cookie|"
+    r"x-api-key|anthropic-api-key)\s*:\s*[^\r\n]+"
+)
+_SENSITIVE_ASSIGNMENT = re.compile(
+    r"(?i)\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password)"
+    r"\s*[:=]\s*(?:\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^\s,;]+)"
+)
+_BEARER_TOKEN = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+_SENSITIVE_QUERY_VALUE = re.compile(
+    r"(?i)([?&](?:api[_-]?key|access[_-]?token|token|signature|sig|"
+    r"x-amz-signature)=)[^&#\s]+"
+)
+_MODEL_PAYLOAD = re.compile(
+    r"(?i)(\b(?:prompt|context(?:_manifest)?|prose|hidden[_-]?thinking)"
+    r"\b\s*[:=]\s*)"
+    r"(?:\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^\r\n;]+)"
+)
+
+
+def _sanitize_harness_message(message: str) -> str:
+    """Redact protocol secrets and model payloads from durable Harness evidence."""
+    sanitized = _SENSITIVE_HEADER.sub("[REDACTED_HEADER]", message)
+    sanitized = _MODEL_PAYLOAD.sub(r"\1[REDACTED_PAYLOAD]", sanitized)
+    sanitized = _SENSITIVE_ASSIGNMENT.sub("[REDACTED_SECRET]", sanitized)
+    sanitized = _BEARER_TOKEN.sub("Bearer [REDACTED]", sanitized)
+    sanitized = _SENSITIVE_QUERY_VALUE.sub(r"\1[REDACTED]", sanitized)
+    return sanitized
+
+
+def normalize_harness_action_details(
+    error: Exception,
+    *,
+    phase: str,
+    task_kind: str | None = None,
+) -> dict[str, object]:
+    """Build bounded, secret-safe evidence without storing traceback or model content."""
+    details: dict[str, object] = {"phase": phase}
+    if task_kind is not None:
+        details["task_kind"] = task_kind
+
+    cause_chain: list[dict[str, str]] = []
+    failed_invariant: str | None = None
+    current: BaseException | None = error
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        entry = {
+            "exception_type": type(current).__name__,
+            "message": _sanitize_harness_message(str(current)),
+        }
+        invariant = getattr(current, "invariant", None)
+        if isinstance(invariant, str) and _SAFE_INVARIANT.fullmatch(invariant):
+            entry["invariant"] = invariant
+            failed_invariant = invariant
+        cause_chain.append(entry)
+        current = (
+            current.__cause__
+            if current.__cause__ is not None
+            else (
+                None
+                if current.__suppress_context__
+                else current.__context__
+            )
+        )
+
+    details["cause_chain"] = cause_chain
+    if failed_invariant is not None:
+        details["failed_invariant"] = failed_invariant
+    return details
 
 
 class RecordDeliveryFailureRequest(BaseModel):
@@ -232,7 +306,7 @@ class HarnessActionFailureService:
         )
         prepared_failure = prepare_canonical_json(
             {
-                "schema_id": "harness-action-failure-v1",
+                "schema_id": "harness-action-failure-v2",
                 "code": failure_code,
                 "message": message,
                 "exception_type": exception_type,
@@ -246,7 +320,7 @@ class HarnessActionFailureService:
                 f"failure-pause-action:{run.id}:{run.lock_version}:{action_key}"
             ),
             command_kind="failure_pause_for_harness_action",
-            request_schema="failure_pause_for_harness_action.request.v1",
+            request_schema="failure_pause_for_harness_action.request.v2",
             request_payload=request,
             actor="system",
             command_id=self._id_factory(),
@@ -263,7 +337,7 @@ class HarnessActionFailureService:
                 semantic_kind="harness_action_error_summary",
                 media_type="application/json",
                 schema_id="harness-action-failure",
-                schema_version=1,
+                schema_version=2,
                 created_at_ms=timestamp,
             )
             if not await session.runs.failure_pause_for_action(

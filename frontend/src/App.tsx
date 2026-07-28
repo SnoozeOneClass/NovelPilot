@@ -306,7 +306,7 @@ function ProjectWorkspace(props: ProjectWorkspaceProps) {
   const [feedback, setFeedback] = useState("");
   const [feedbackLayer, setFeedbackLayer] = useState<"book" | "arc" | "chapter">("book");
   const [arcTarget, setArcTarget] = useState(
-    state.current_arc?.recommended_closure_chapter_count ?? 1
+    state.current_arc?.recommended_closure_cumulative_chapter_count ?? 1
   );
   const [mode, setMode] = useState<OperationMode>(state.project.operation_mode);
   const commands = useMemo(
@@ -315,10 +315,12 @@ function ProjectWorkspace(props: ProjectWorkspaceProps) {
   );
 
   useEffect(() => {
-    setArcTarget(state.current_arc?.recommended_closure_chapter_count ?? 1);
+    setArcTarget(
+      state.current_arc?.recommended_closure_cumulative_chapter_count ?? 1
+    );
   }, [
     state.current_arc?.arc_id,
-    state.current_arc?.recommended_closure_chapter_count
+    state.current_arc?.recommended_closure_cumulative_chapter_count
   ]);
 
   useEffect(() => setMode(state.project.operation_mode), [state.project.operation_mode]);
@@ -399,8 +401,8 @@ function ProjectWorkspace(props: ProjectWorkspaceProps) {
 
         <section id="arc" className={styles.section}>
           <div className={styles.sectionHeading}><div><span>Arc Loop</span><h2>故事弧</h2></div><StatePill text={state.current_arc?.lifecycle_status ?? "未创建"} /></div>
-          {state.current_arc ? <div className={styles.factGrid}><Fact label="Arc ID" value={state.current_arc.arc_id} /><Fact label="正式版本" value={state.current_arc.baseline_version ? `v${state.current_arc.baseline_version}` : "候选中"} /><Fact label="章节进度" value={`${state.current_arc.committed_chapter_count} / ${state.current_arc.closure_chapter_count ?? state.current_arc.recommended_closure_chapter_count ?? "?"}`} /><Fact label="审阅" value={state.current_arc.pending_review_decision ?? "—"} /></div> : <p className={styles.muted}>Book 批准后由 Run Engine 创建首个 Story Arc。</p>}
-          {command(state, "approve_arc").enabled && <div className={styles.gateRow}><label>本弧目标章节数<input type="number" min={1} max={30} value={arcTarget} onChange={(event) => setArcTarget(Number(event.target.value))} /></label><ActionButton icon={<Check size={16} />} label="批准当前故事弧" item={command(state, "approve_arc")} busy={busyAction === "approve-arc"} primary onClick={() => void onMutate("approve-arc", () => workspaceApi.approveArc(projectId, arcTarget, idempotencyKey("approve-arc")))} /></div>}
+          {state.current_arc ? <div className={styles.factGrid}><Fact label="Arc ID" value={state.current_arc.arc_id} /><Fact label="正式版本" value={state.current_arc.baseline_version ? `v${state.current_arc.baseline_version}` : "候选中"} /><Fact label="全书累计进度" value={`${state.current_arc.cumulative_committed_chapter_count} / ${state.current_arc.closure_cumulative_chapter_count ?? state.current_arc.recommended_closure_cumulative_chapter_count ?? "?"}`} /><Fact label="本弧已提交" value={String(state.current_arc.arc_committed_chapter_count)} /><Fact label="审阅" value={state.current_arc.pending_review_decision ?? "—"} /></div> : <p className={styles.muted}>Book 批准后由 Run Engine 创建首个 Story Arc。</p>}
+          {command(state, "approve_arc").enabled && <div className={styles.gateRow}><label>全书累计收束章号<input type="number" min={1} max={state.book.maximum_chapter_count ?? undefined} value={arcTarget} onChange={(event) => setArcTarget(Number(event.target.value))} /></label><ActionButton icon={<Check size={16} />} label="批准当前故事弧" item={command(state, "approve_arc")} busy={busyAction === "approve-arc"} primary onClick={() => void onMutate("approve-arc", () => workspaceApi.approveArc(projectId, arcTarget, idempotencyKey("approve-arc")))} /></div>}
         </section>
 
         <section id="chapter" className={styles.section}>

@@ -20,6 +20,7 @@ from app.db.maintenance import (
     validate_backup,
     validate_database,
 )
+from app.db.revisions import HEAD_REVISION
 from app.db.schema import books, canon_baselines, generation_runs, projects
 from app.store.content import ContentRepository, prepare_canonical_json, prepare_exact_text
 
@@ -134,7 +135,7 @@ def test_backup_accepts_supported_pre_head_database_and_restore_migrates(
     assert backup_health.schema_revision == "7c0d2a9f4b31"
 
     restored_health = restore_database(backup, restored)
-    assert restored_health.schema_revision == "1be6decc58a4"
+    assert restored_health.schema_revision == HEAD_REVISION
 
 
 def test_backup_refuses_active_execution_state(tmp_path: Path) -> None:

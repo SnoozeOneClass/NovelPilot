@@ -48,10 +48,9 @@ npm.cmd run acceptance
 离线工程验收后执行固定 series：
 
 ```powershell
-npm.cmd run profile:probe -- jemmy-gpt-5.6-terra
-npm.cmd run observe:live-book-series -- --case benchmark-mother-natural-book-v1 --profile-id jemmy-gpt-5.6-terra --runs 4
+npm.cmd run experiment:live-book
 ```
 
-当前冻结观测使用 OpenAI Responses Profile `jemmy-gpt-5.6-terra`（模型 `gpt-5.6-terra`，base URL `https://api.jemmy.icu/v1`）。每个 slot 只允许正常产品交互，不允许技术救援。报告保存：代码/Prompt/Profile/framework/Harness 指纹、项目 ID、模式、最终权威状态、章节/Arc/closure/handoff/gate、全部 task attempt metadata、usage、retry/repair、类型化错误、completion identity 和导出 hash。
+命令默认使用应用当前选中的 Profile；当前冻结观测使用 OpenAI Responses Profile `jemmy-gpt-5.6-terra`（模型 `gpt-5.6-terra`，base URL `https://api.jemmy.icu/v1`）。每个 slot 只允许正常产品交互，不允许技术救援。报告保存：代码/Prompt/Profile/framework/Harness 指纹、项目 ID、模式、最终权威状态、章节/Arc/closure/handoff/gate、全部 task attempt metadata、usage、retry/repair、类型化错误、completion identity 和导出 hash。
 
-可能结果是 0～4 个 completed；failed 和 not_run 同样是有效观测记录。series 结束后不自动分析、不修改代码、不补跑，保留现场等待后续分析。
+可能结果是 0～4 个 completed；failed 和 not_run 同样是有效观测记录。终端按权威状态变化播报，并在 60 秒无变化时输出心跳，不生成虚假完成百分比。`latest-series.json` 和批次内 `series.json` 标识实验是否仍在运行、意外中断或已完成采集，`active_observation` 只保存最新的非权威观察。series 结束后不自动分析、不修改代码、不补跑；Codex 只在结束后读取 aggregate、slot 报告与数据库证据进行集中分析。

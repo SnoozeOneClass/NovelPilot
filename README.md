@@ -81,11 +81,10 @@ npm.cmd run audit:secrets
 全部离线门禁通过后，才可以显式启动当前冻结的四轮真实模型观测：
 
 ```powershell
-npm.cmd run profile:probe -- jemmy-gpt-5.6-terra
-npm.cmd run observe:live-book-series -- --case benchmark-mother-natural-book-v1 --profile-id jemmy-gpt-5.6-terra --runs 4
+npm.cmd run experiment:live-book
 ```
 
-顺序固定为 `full_auto → participatory → full_auto → participatory`。真实结果只记录 completed/failed/not_run、usage、retry、repair 与问题索引，不作为重构成功门槛，也不会自动重跑或现场修复。
+命令使用应用当前选中的 Profile，顺序固定为 `full_auto → participatory → full_auto → participatory`。终端只播报权威阶段变化、正常 actor 动作和每 60 秒无变化心跳，不输出正文或伪造完成百分比。真实结果只记录 completed/failed/not_run、usage、retry、repair 与问题索引，不作为重构成功门槛，也不会自动重跑或现场修复。命令结束后通过 `data/live-observations/latest-series.json` 定位本次证据，再由后续 Codex 会话分析；Codex 不参与实验运行。
 
 ## 简历项目表述
 

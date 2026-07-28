@@ -8,6 +8,7 @@ ChapterComponent = Literal[
     "plan",
     "draft",
     "observations",
+    "repair_plan",
     "repair_prose",
     "repair_observations",
 ]
@@ -15,7 +16,6 @@ ChapterReviewDecision = Literal[
     "pass",
     "local_repair",
     "escalate_to_arc",
-    "needs_user",
 ]
 
 
@@ -115,7 +115,6 @@ class RecordChapterReviewRequest(BaseModel):
     evaluator_attempt_id: str
     rubric_id: str
     rubric_version: int = Field(ge=1)
-    deterministic_precheck: dict[str, object]
 
 
 class RecordChapterReviewResult(BaseModel):

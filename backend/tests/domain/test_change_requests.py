@@ -11,9 +11,13 @@ from app.agents.contracts import (
     ArcClosureSignal,
     ArcPlanProposal,
     ArcStateTransition,
+    ChapterEvaluationIssue,
     LayerEvaluationResult,
 )
-from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
+from app.agents.registry import (
+    DEFAULT_EVALUATION_STRATEGY_REGISTRY,
+    DEFAULT_TASK_REGISTRY,
+)
 from app.db.engine import create_sqlite_async_engine
 from app.db.maintenance import alembic_config
 from app.db.schema import (
@@ -62,6 +66,7 @@ from app.domain.evaluation import (
     ArcParentContractEvaluation,
     BookParentContractEvaluation,
 )
+from app.runtime.context import HarnessContextBuilder
 from app.store.command_bus import CommandBus
 from tests.domain.test_arc_lifecycle import _prepare_reviewed_arc
 from tests.domain.test_chapter_lifecycle import _prepare_reviewed_chapter
@@ -319,6 +324,16 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                 evaluation=LayerEvaluationResult(
                     decision="escalate_to_arc",
                     summary="The Arc contract must change before this Chapter can proceed.",
+                    issues=[
+                        ChapterEvaluationIssue(
+                            code="arc_contract_concern",
+                            subject="current Arc contract",
+                            summary=(
+                                "The Arc contract must change before this Chapter can proceed."
+                            ),
+                            affected_components=["plan"],
+                        )
+                    ],
                 ),
             )
             async with engine.connect() as connection:
@@ -333,6 +348,47 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                     )
                 )
             assert change_request_id is not None and arc_lock is not None
+            async with engine.connect() as connection:
+                assert (
+                    await connection.scalar(
+                        select(chapter_workspaces.c.base_chapter_baseline_id).where(
+                            chapter_workspaces.c.chapter_id == ready.chapter_id
+                        )
+                    )
+                    is None
+                )
+            definition = DEFAULT_TASK_REGISTRY.get(
+                role="evaluator",
+                task_kind="evaluate.arc_parent_contract",
+                contract_version=1,
+            )
+            frozen_context = await HarnessContextBuilder(engine).build(
+                task_kind="evaluate.arc_parent_contract",
+                project_id=ready.foundation.project_id,
+                book_id=ready.foundation.book_id,
+                arc_id=ready.foundation.arc_id,
+                chapter_id=None,
+                semantic_goal="Judge the exact rejected Chapter candidate against its Arc.",
+                definition=definition,
+                evaluation_strategy=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                    "evaluate.arc_parent_contract"
+                ),
+                source_chapter_arc_request_id=change_request_id,
+                canon_baseline_id=ready.foundation.canon_baseline_id,
+            )
+            labels = {
+                str(item["label"])
+                for item in frozen_context.manifest["items"]
+            }
+            assert {
+                "chapter_to_arc_request_evidence",
+                "source_chapter_candidate_manifest",
+                "source_chapter_candidate_plan",
+                "source_chapter_candidate_prose",
+                "source_chapter_candidate_observations",
+                "source_chapter_candidate_canon_intent",
+            } <= labels
+            assert all("current" not in label for label in labels)
             bus = CommandBus(engine)
             with pytest.raises(
                 CommandPreconditionError,
@@ -397,10 +453,10 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                 character_obligations=["Mara changes one belief through evidence."],
                 foreshadowing_obligations=["Leave one clue for the next Arc."],
                 prohibitions=["Do not contradict committed Canon."],
-                minimum_chapter_count=1,
-                recommended_closure_chapter_count=2,
-                maximum_chapter_count=3,
-                closure_chapter_count=2,
+                minimum_cumulative_chapter_count=1,
+                recommended_closure_cumulative_chapter_count=2,
+                maximum_cumulative_chapter_count=3,
+                closure_cumulative_chapter_count=2,
                 closure_signals=[
                     ArcClosureSignal(
                         signal_key="first_edit_identified",
@@ -547,6 +603,14 @@ def test_rejected_change_request_keeps_formal_baselines_and_blocks_source_for_us
                 evaluation=LayerEvaluationResult(
                     decision="escalate_to_arc",
                     summary="The proposed reveal appears to require an Arc change.",
+                    issues=[
+                        ChapterEvaluationIssue(
+                            code="arc_reveal_scope",
+                            subject="proposed reveal",
+                            summary="The proposed reveal appears to require an Arc change.",
+                            affected_components=["plan"],
+                        )
+                    ],
                 ),
             )
             async with engine.connect() as connection:

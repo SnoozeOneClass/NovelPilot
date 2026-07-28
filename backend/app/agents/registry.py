@@ -65,10 +65,16 @@ ARC_EVALUATION_CONTRACT = (
     "semantic conflict. The Harness owns approval, routing, IDs, and state changes."
 )
 CHAPTER_EVALUATION_CONTRACT = (
-    "Use decision='local_repair' exactly when repair_scope is non-empty. Use "
-    "escalate_to_arc only for a concrete evidence-bound concern about the immediate parent "
-    "Arc. Never judge or route directly to Book. The Harness owns approval, routing, IDs, "
-    "and state changes."
+    "Every blocking issue must name a natural-language semantic subject and a unique non-empty "
+    "affected_components set. The Harness derives local repair authorization from the union; "
+    "do not return a separate repair scope. Use plan as the only affected component when the "
+    "mutable Chapter plan itself is infeasible but can be replaced under the same frozen Arc "
+    "and Canon; the Harness will invalidate and regenerate all downstream Chapter components. "
+    "During verify_repair.chapter, mark recurrence='persists_after_authorized_repair' only when "
+    "the same semantic issue remains after its authorized correction; otherwise use 'new'. "
+    "Use escalate_to_arc only for a concrete evidence-bound concern that the immediate parent "
+    "Arc cannot remain applicable. Chapter evaluation cannot create a user wait. Never judge "
+    "or route directly to Book. The Harness owns approval, routing, IDs, and state changes."
 )
 
 BOOK_CANDIDATE_RUBRIC = (
@@ -86,9 +92,20 @@ ARC_CANDIDATE_RUBRIC = (
     "Advisory beats must not become immutable Chapter slots."
 )
 CHAPTER_CANDIDATE_RUBRIC = (
-    "Check the complete Chapter candidate against its frozen goal, relevant Canon, immediate "
-    "Arc constraints, continuity, minimum prose usability, and evidence-supported observations. "
-    "Report only blocking issues. An upstream concern may question the Arc only, never Book."
+    "Apply a minimum completion gate to the complete Chapter candidate against its frozen goal, "
+    "relevant Canon, immediate Arc constraints, continuity, minimum prose usability, and "
+    "evidence-supported observations. Reject only an affirmative conflict with frozen prose, "
+    "committed Chapter history, Canon, the Arc contract, or the Book contract. The current "
+    "Chapter may establish an ordinary fact for the first time; earlier silence and the absence "
+    "of an explicit prior negation are not evidence against it. For example, a current-scene "
+    "statement that a character has not recorded an event for twelve years is admissible when "
+    "the scene establishes it and committed history contains no affirmative record of that "
+    "event; history need not separately prove the non-recording. Require stronger support only "
+    "for a claim that changes an upper contract, closes a core mystery, assigns culpability, or "
+    "contradicts an explicitly uncertain governing fact. Report only blocking issues. If the "
+    "mutable Chapter plan is infeasible but the same Arc and Canon remain applicable, authorize "
+    "plan-only local repair. Question the Arc only when its immediate parent contract may no "
+    "longer remain applicable, and never judge Book."
 )
 ARC_PARENT_REVIEW_RUBRIC = (
     "Review one evidence-bound Chapter-to-Arc request against the current Arc baseline and "
@@ -147,6 +164,7 @@ class EvaluationStrategyDefinition:
     deterministic_prechecks: tuple[str, ...]
     legal_semantic_signals: tuple[str, ...]
     output_model: type[BaseModel]
+    output_schema_version: int
 
 
 class EvaluationStrategyRegistry:
@@ -470,6 +488,7 @@ def _evaluation(
         rubric_text=strategy.rubric_text,
         evaluation_strategy_id=strategy.strategy_id,
         evaluation_strategy_version=strategy.strategy_version,
+        output_schema_version=strategy.output_schema_version,
     )
 
 
@@ -486,10 +505,12 @@ def _strategy(
     deterministic_prechecks: tuple[str, ...],
     legal_semantic_signals: tuple[str, ...],
     output_model: type[BaseModel],
+    strategy_version: int = 1,
+    output_schema_version: int = 1,
 ) -> EvaluationStrategyDefinition:
     return EvaluationStrategyDefinition(
         strategy_id=f"{task_kind}-strategy",
-        strategy_version=1,
+        strategy_version=strategy_version,
         task_kind=task_kind,
         scope_layer=scope_layer,
         objective=objective,
@@ -503,6 +524,7 @@ def _strategy(
         deterministic_prechecks=deterministic_prechecks,
         legal_semantic_signals=legal_semantic_signals,
         output_model=output_model,
+        output_schema_version=output_schema_version,
     )
 
 
@@ -570,7 +592,7 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
             task_kind="evaluate.chapter",
             scope_layer="chapter",
             objective="Evaluate one complete frozen Chapter candidate.",
-            context_policy_id="chapter-evaluator-context-v2",
+            context_policy_id="chapter-evaluator-context-v3",
             context_includes=(
                 "chapter_goal_and_plan",
                 "complete_prose",
@@ -583,20 +605,21 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "unrelated_future_secrets",
                 "harness_storage_protocol",
             ),
-            rubric_id="chapter-candidate-rubric-v2",
+            rubric_id="chapter-candidate-rubric-v4",
             rubric_text=CHAPTER_CANDIDATE_RUBRIC,
             deterministic_prechecks=(
-                "chapter_components_complete",
-                "frozen_dependencies_current",
-                "evidence_spans_materializable",
+                "frozen_submission_loaded",
+                "canon_baseline_loaded",
+                "canon_patch_applicable",
             ),
             legal_semantic_signals=(
                 "pass",
                 "local_repair",
                 "escalate_to_arc",
-                "needs_user",
             ),
             output_model=LayerEvaluationResult,
+            strategy_version=3,
+            output_schema_version=3,
         ),
         _strategy(
             task_kind="evaluate.arc_parent_contract",
@@ -773,7 +796,11 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 task_kind=f"verify_repair.{layer}",
                 scope_layer=layer,
                 objective=f"Verify only the authorized {layer} repair.",
-                context_policy_id=f"{layer}-repair-verification-context-v2",
+                context_policy_id=(
+                    "chapter-repair-verification-context-v3"
+                    if layer == "chapter"
+                    else f"{layer}-repair-verification-context-v2"
+                ),
                 context_includes=(
                     "frozen_candidate_before_repair",
                     "repaired_candidate",
@@ -786,7 +813,11 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                     "replacement_parent_content",
                     "harness_route_commands",
                 ),
-                rubric_id=f"{layer}-repair-rubric-v2",
+                rubric_id=(
+                    "chapter-repair-rubric-v4"
+                    if layer == "chapter"
+                    else f"{layer}-repair-rubric-v2"
+                ),
                 rubric_text=(
                     BOOK_CANDIDATE_RUBRIC
                     if layer == "book"
@@ -803,15 +834,17 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                     "frozen_dependencies_current",
                 ),
                 legal_semantic_signals=(
-                    "pass",
-                    "local_repair",
-                    "needs_user",
+                    ("pass", "local_repair", "escalate_to_arc")
+                    if layer == "chapter"
+                    else ("pass", "local_repair", "needs_user")
                 ),
                 output_model=(
                     BookEvaluation
                     if layer == "book"
                     else ArcEvaluation if layer == "arc" else LayerEvaluationResult
                 ),
+                strategy_version=3 if layer == "chapter" else 1,
+                output_schema_version=3 if layer == "chapter" else 1,
             )
             for layer in ("book", "arc", "chapter")
         ],
@@ -873,8 +906,9 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
                 task_kind,
                 "arc",
                 ArcPlanProposal,
-                context_policy_id=f"{task_kind.replace('.', '-')}-context-v1",
+                context_policy_id=f"{task_kind.replace('.', '-')}-context-v2",
                 instructions=instructions,
+                output_schema_version=2,
             )
             for task_kind, instructions in (
                 (
@@ -907,7 +941,7 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
                 "rejected as a no-op. Do not invent storage IDs, approval state, routes, or "
                 "commands."
             ),
-            output_schema_version=2,
+            output_schema_version=3,
         ),
         _native(
             "chapter_writer",
@@ -940,11 +974,14 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             ChapterObservationResult,
             context_policy_id="chapter-observation-context-v1",
             instructions=(
-                "Observe the frozen prose and propose semantic Canon changes without inventing "
-                "IDs. Write evidence_hint as a natural semantic rationale; do not copy exact "
-                "quotes, offsets, locators, or stored source strings. The Harness owns optional "
-                "exact-span binding."
+                "Observe the frozen prose and propose semantic Canon assertions without choosing "
+                "add, update, or resolve commands and without inventing IDs. For each subject, "
+                "state its complete current meaning and whether the chapter semantically resolves "
+                "it. Write evidence_hint as a natural semantic rationale; do not copy exact quotes, "
+                "offsets, locators, or stored source strings. The Harness owns subject upsert and "
+                "optional exact-span binding."
             ),
+            output_schema_version=2,
         ),
         _native(
             "chapter_writer",
@@ -954,8 +991,25 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             context_policy_id="chapter-revision-observation-context-v1",
             instructions=(
                 "Re-observe the revised prose and propose only semantically evidence-bound Canon "
-                "changes. Write evidence_hint as a natural rationale, not an exact quote, offset, "
-                "locator, or stored source string; the Harness owns optional exact-span binding."
+                "assertions. Do not choose storage operations: state each subject's complete current "
+                "meaning and resolved status. Write evidence_hint as a natural rationale, not an "
+                "exact quote, offset, locator, or stored source string; the Harness owns subject "
+                "upsert and optional exact-span binding."
+            ),
+            output_schema_version=2,
+        ),
+        _native(
+            "chapter_writer",
+            "chapter.repair.plan",
+            "chapter",
+            ChapterPlanProposal,
+            context_policy_id="chapter-plan-repair-context-v1",
+            instructions=(
+                "Return one complete replacement for the evaluator-authorized mutable Chapter "
+                "plan. The replacement must remain within the same frozen Arc and Canon. Do not "
+                "repair prose or observations, change upstream authority, or return storage and "
+                "Route metadata; the Harness invalidates and regenerates every downstream working "
+                "component."
             ),
         ),
         _text(
@@ -974,9 +1028,10 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
                 "summary and continuity observations, and canon for Canon proposals. Do not "
                 "repeat omitted components; the Harness preserves them. Canon evidence_hint is "
                 "a natural semantic rationale, never an exact quote, offset, locator, or stored "
-                "source string."
+                "source string. Canon changes are semantic assertions with a resolved state, not "
+                "model-authored storage operations."
             ),
-            output_schema_version=2,
+            output_schema_version=3,
         ),
         *[
             _evaluation(

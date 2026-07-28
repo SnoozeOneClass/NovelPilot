@@ -78,7 +78,7 @@ scripts\python.cmd scripts/migrate_profile_config.py
 4. Book 候选通过 Evaluator 后仍会等待显式批准；两种模式都不能跳过。
 5. full-auto 自动提交通过评审的当前 Arc 契约；participatory 对每个 Arc 显示一个批准动作，可以采用建议的收束检查章节数。
 6. Chapter 自动执行 plan → draft → observe → evaluate → commit；没有章节人工审批。
-7. 达到 Arc 的 `closure_chapter_count` 只会触发收束评估。Arc 契约确实被正式 Chapter/Canon 事实满足后，Harness 才提交 formal closure。
+7. 达到 Arc 的 `closure_cumulative_chapter_count`（全书累计章号）只会触发收束评估。Arc 契约确实被正式 Chapter/Canon 事实满足后，Harness 才提交 formal closure。
 8. formal closure 触发 Book boundary evaluation：未完结时产生下一 Arc 的持久 handoff；满足全书终止契约时提交 formal completion。
 9. 用户反馈只会先排队，由 Run Engine 在当前原子动作结束后的安全边界按 FIFO 应用。页面会显示反馈是 queued、applied 还是 dismissed。
 10. 如果系统显示 creator question，回答会绑定具体 owning layer 和来源 review；系统执行或评估契约错误不会伪装成用户待办。
@@ -146,14 +146,18 @@ npm.cmd run audit:secrets
 
 ## 8. 四次真实模型观测
 
-只有上一节全部通过后才执行。先启动后端，再运行：
+只有上一节全部通过后才执行。先启动后端，再用一个独立命令运行：
 
 ```powershell
-npm.cmd run profile:probe -- jemmy-gpt-5.6-terra
-npm.cmd run observe:live-book-series -- --case benchmark-mother-natural-book-v1 --profile-id jemmy-gpt-5.6-terra --runs 4
+npm.cmd run experiment:live-book
 ```
 
-当前冻结测试 Profile 是 `jemmy-gpt-5.6-terra`：OpenAI Responses 协议、模型 `gpt-5.6-terra`、base URL `https://api.jemmy.icu/v1`。runner 会先验证 Prompt SHA-256、固定四轮顺序、Profile capability 与 fingerprint，不会输出 secret。四轮各创建一个全新普通项目：
+runner 默认使用应用当前选中的 Profile；需要刻意覆盖时才传
+`-- --profile-id <profile-id>`。当前选中测试 Profile 是
+`jemmy-gpt-5.6-terra`：OpenAI Responses 协议、模型 `gpt-5.6-terra`、base URL
+`https://api.jemmy.icu/v1`。runner 只检查本地已记录的 Profile readiness、Prompt
+SHA-256、固定四轮顺序与 fingerprint，不会先发 Provider 探测请求，也不会输出
+secret。四轮各创建一个全新普通项目：
 
 ```text
 1 full_auto
@@ -162,9 +166,28 @@ npm.cmd run observe:live-book-series -- --case benchmark-mother-natural-book-v1 
 4 participatory
 ```
 
+终端会立即刷新真实阶段播报，不显示无法证明的完成百分比：
+
+```text
+Experiment <series-id> started | profile=<profile-id> | schedule=...
+[1/4 full_auto] Book | phase=active/drafting | task=book.discuss#1/running | committed=0 | run=running | elapsed=00:00:03
+[1/4 full_auto] actor submitted recommended Book input | elapsed=00:04:12
+[1/4 full_auto] Chapter 3 | phase=drafting/drafting | task=chapter.draft#2/running | transport_retries=1 | committed=2 | run=running | elapsed=00:18:42
+[1/4 full_auto] still running | Chapter 3 | ... | elapsed=00:19:42
+```
+
+只有 compact 权威状态发生变化才播报新阶段；连续 60 秒没有变化才输出一次
+`still running` 心跳。可用 `-- --heartbeat-seconds <seconds>` 显式调整，
+但必须为正数。播报只包含槽位、生命周期、任务/attempt 状态、重试计数、
+已提交章节数和耗时，不包含 Prompt、Context、正文、工具内容或 secret。
+
 固定 actor 只执行正常产品动作：推荐 Book 回答、Book 批准，以及 participatory Arc 批准。它没有 Retry、Resume、Pause、数据库编辑、Prompt 编辑或模型输出修改能力。
 
-每轮结束立即写入独立脱敏报告；自然失败不补跑该轮，只要 Provider 仍可调用就继续下一个新项目。鉴权、额度、Profile 或能力问题阻止后续调用时，剩余 slot 标记 `not_run`。aggregate 只汇总事实，不生成 4/4 verdict。series 完成后停止，不自动诊断或修复，等待后续分析。
+每轮结束立即写入独立脱敏报告；自然失败不补跑该轮，只要 Provider 仍可调用就继续下一个新项目。鉴权、额度、Profile 或能力问题阻止后续调用时，剩余 slot 标记 `not_run`。aggregate 只汇总事实，不生成 4/4 verdict。
+
+命令会在 `data/live-observations/latest-series.json` 写入最新批次指针，并在批次目录持续更新 `series.json`：`active_observation` 是最新的非权威槽位观察，会被后续观察覆盖；`running` 表示仍在执行或曾被意外中断，`finished` 只表示四个 slot 的证据采集已经收束，不代表四本小说成功。slot 报告落盘后会清除对应 `active_observation`。结束后读取 `aggregate.json`、四份 slot 报告和普通项目数据库，再让 Codex 做一次集中分析。运行期间不需要 Codex 观察，也不会自动诊断、修改代码或补跑。
+
+该命令使用普通本地数据库，不创建隔离数据库，也不隐式重置或迁移数据库。开发期如果决定清空旧测试数据，应在服务停止时作为独立且显式的操作完成。
 
 ## 9. 应留在本地的内容
 

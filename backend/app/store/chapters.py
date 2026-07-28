@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.db.schema import (
     arc_baselines,
     arc_closures,
+    book_baselines,
     book_progress_handoffs,
     chapter_baselines,
     chapter_arc_change_requests,
@@ -29,10 +30,11 @@ class ActiveArcContext:
     arc_baseline_id: str
     book_baseline_id: str
     canon_baseline_id: str
-    minimum_chapter_count: int
-    recommended_closure_chapter_count: int
-    maximum_chapter_count: int
-    closure_chapter_count: int
+    book_maximum_chapter_count: int
+    minimum_cumulative_chapter_count: int
+    recommended_closure_cumulative_chapter_count: int
+    maximum_cumulative_chapter_count: int
+    closure_cumulative_chapter_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,10 +337,13 @@ class ChapterRepository:
                     story_arcs.c.current_baseline_id.label("arc_baseline_id"),
                     arc_baselines.c.book_baseline_id,
                     projects.c.current_canon_baseline_id.label("canon_baseline_id"),
-                    arc_baselines.c.minimum_chapter_count,
-                    arc_baselines.c.recommended_closure_chapter_count,
-                    arc_baselines.c.maximum_chapter_count,
-                    arc_baselines.c.closure_chapter_count,
+                    book_baselines.c.maximum_chapter_count.label(
+                        "book_maximum_chapter_count"
+                    ),
+                    arc_baselines.c.minimum_cumulative_chapter_count,
+                    arc_baselines.c.recommended_closure_cumulative_chapter_count,
+                    arc_baselines.c.maximum_cumulative_chapter_count,
+                    arc_baselines.c.closure_cumulative_chapter_count,
                 )
                 .join(
                     arc_baselines,
@@ -346,6 +351,12 @@ class ChapterRepository:
                     & (arc_baselines.c.book_id == story_arcs.c.book_id)
                     & (arc_baselines.c.arc_id == story_arcs.c.id)
                     & (arc_baselines.c.id == story_arcs.c.current_baseline_id),
+                )
+                .join(
+                    book_baselines,
+                    (book_baselines.c.project_id == arc_baselines.c.project_id)
+                    & (book_baselines.c.book_id == arc_baselines.c.book_id)
+                    & (book_baselines.c.id == arc_baselines.c.book_baseline_id),
                 )
                 .join(projects, projects.c.id == story_arcs.c.project_id)
                 .where(
@@ -365,12 +376,21 @@ class ChapterRepository:
             arc_baseline_id=cast(str, row["arc_baseline_id"]),
             book_baseline_id=cast(str, row["book_baseline_id"]),
             canon_baseline_id=cast(str, row["canon_baseline_id"]),
-            minimum_chapter_count=cast(int, row["minimum_chapter_count"]),
-            recommended_closure_chapter_count=cast(
-                int, row["recommended_closure_chapter_count"]
+            book_maximum_chapter_count=cast(
+                int, row["book_maximum_chapter_count"]
             ),
-            maximum_chapter_count=cast(int, row["maximum_chapter_count"]),
-            closure_chapter_count=cast(int, row["closure_chapter_count"]),
+            minimum_cumulative_chapter_count=cast(
+                int, row["minimum_cumulative_chapter_count"]
+            ),
+            recommended_closure_cumulative_chapter_count=cast(
+                int, row["recommended_closure_cumulative_chapter_count"]
+            ),
+            maximum_cumulative_chapter_count=cast(
+                int, row["maximum_cumulative_chapter_count"]
+            ),
+            closure_cumulative_chapter_count=cast(
+                int, row["closure_cumulative_chapter_count"]
+            ),
         )
 
     async def next_ordinals(self, *, book_id: str, arc_id: str) -> tuple[int, int]:
@@ -768,11 +788,11 @@ class ChapterRepository:
         project_id: str,
         arc_id: str,
         arc_baseline_id: str,
-        committed_count: int,
-        closure_chapter_count: int,
+        cumulative_committed_count: int,
+        closure_cumulative_chapter_count: int,
         now_ms: int,
     ) -> bool:
-        if committed_count != closure_chapter_count:
+        if cumulative_committed_count != closure_cumulative_chapter_count:
             return False
         result = await self._connection.execute(
             update(story_arcs)

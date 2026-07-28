@@ -10,7 +10,11 @@ from alembic import command
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.agents.contracts import ChapterObservationResult, LayerEvaluationResult
+from app.agents.contracts import (
+    ChapterEvaluationIssue,
+    ChapterObservationResult,
+    LayerEvaluationResult,
+)
 from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
 from app.db.engine import create_sqlite_async_engine
 from app.db.maintenance import alembic_config
@@ -86,6 +90,14 @@ async def _prepare_arc_parent_fixture(
         evaluation=LayerEvaluationResult(
             decision="escalate_to_arc",
             summary="The Chapter preserves evidence that requires Arc authority.",
+            issues=[
+                ChapterEvaluationIssue(
+                    code="arc_authority_required",
+                    subject="preserved Chapter evidence",
+                    summary="The Chapter evidence requires Arc authority.",
+                    affected_components=["observations", "canon"],
+                )
+            ],
         ),
     )
     async with engine.connect() as connection:
@@ -450,6 +462,14 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
                 evaluation=LayerEvaluationResult(
                     decision="escalate_to_arc",
                     summary="Arc authority must inspect earlier derived evidence.",
+                    issues=[
+                        ChapterEvaluationIssue(
+                            code="arc_authority_required",
+                            subject="earlier derived evidence",
+                            summary="Arc authority must inspect earlier derived evidence.",
+                            affected_components=["observations", "canon"],
+                        )
+                    ],
                 ),
             )
             async with engine.connect() as connection:
@@ -609,7 +629,6 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
                         evaluator_attempt_id=failed_attempt,
                         rubric_id=evidence_strategy.rubric_id,
                         rubric_version=evidence_strategy.rubric_version,
-                        deterministic_precheck={"passed": True},
                     ),
                     idempotency_key="evidence:reject-descendant-conflict",
                 )
@@ -651,7 +670,6 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
                     evaluator_attempt_id=evaluator_attempt,
                     rubric_id=evidence_strategy.rubric_id,
                     rubric_version=evidence_strategy.rubric_version,
-                    deterministic_precheck={"passed": True},
                 ),
                 idempotency_key="evidence:record-review",
             )

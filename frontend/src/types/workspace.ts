@@ -203,11 +203,12 @@ export interface ArcStateView {
   latest_closure_review_id: string | null;
   current_closure_id: string | null;
   baseline_version: number | null;
-  minimum_chapter_count: number | null;
-  recommended_closure_chapter_count: number | null;
-  maximum_chapter_count: number | null;
-  closure_chapter_count: number | null;
-  committed_chapter_count: number;
+  minimum_cumulative_chapter_count: number | null;
+  recommended_closure_cumulative_chapter_count: number | null;
+  maximum_cumulative_chapter_count: number | null;
+  closure_cumulative_chapter_count: number | null;
+  cumulative_committed_chapter_count: number;
+  arc_committed_chapter_count: number;
   workspace_state: string;
   workspace_lock_version: number;
   semantic_repair_count: number;

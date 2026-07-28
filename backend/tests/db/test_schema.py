@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import (
     CheckConstraint,
     ForeignKeyConstraint,
@@ -16,6 +17,7 @@ from sqlalchemy import (
 )
 
 from app.db.engine import create_sqlite_async_engine
+from app.db.revisions import HEAD_REVISION
 from app.db.schema import EXPECTED_TABLE_NAMES, metadata
 from app.db.schema import (
     agent_evidence_items,
@@ -44,6 +46,11 @@ def _constraint_names(table_name: str, constraint_type: type[object]) -> set[str
     }
 
 
+def test_declared_head_revision_matches_alembic_graph(tmp_path: Path) -> None:
+    config = _alembic_config(tmp_path / "unused.sqlite3")
+    assert ScriptDirectory.from_config(config).get_current_head() == HEAD_REVISION
+
+
 def test_initial_revision_supports_empty_database_lifecycle(tmp_path: Path) -> None:
     database_path = tmp_path / "schema.sqlite3"
     config = _alembic_config(database_path)
@@ -69,6 +76,68 @@ def test_initial_revision_supports_empty_database_lifecycle(tmp_path: Path) -> N
         engine.dispose()
 
     command.upgrade(config, "7c0d2a9f4b31")
+
+
+def test_arc_count_column_names_round_trip_across_cumulative_revision(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "arc-count-columns.sqlite3"
+    config = _alembic_config(database_path)
+    range_old = {
+        "minimum_chapter_count",
+        "recommended_closure_chapter_count",
+        "maximum_chapter_count",
+        "closure_chapter_count",
+    }
+    range_new = {
+        "minimum_cumulative_chapter_count",
+        "recommended_closure_cumulative_chapter_count",
+        "maximum_cumulative_chapter_count",
+        "closure_cumulative_chapter_count",
+    }
+
+    def columns(table_name: str) -> set[str]:
+        engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+        try:
+            return {
+                str(column["name"])
+                for column in inspect(engine).get_columns(table_name)
+            }
+        finally:
+            engine.dispose()
+
+    command.upgrade(config, "head")
+    for table_name in (
+        "arc_workspaces",
+        "arc_review_submissions",
+        "arc_baselines",
+    ):
+        assert range_new <= columns(table_name)
+        assert not range_old & columns(table_name)
+    assert "closure_cumulative_chapter_count" in columns("arc_approvals")
+    assert {
+        "cumulative_committed_chapter_count",
+        "closure_cumulative_chapter_count",
+    } <= columns("arc_closure_reviews")
+    assert "cumulative_committed_chapter_count" in columns("arc_closures")
+
+    command.downgrade(config, "6d4d321a8c7e")
+    for table_name in (
+        "arc_workspaces",
+        "arc_review_submissions",
+        "arc_baselines",
+    ):
+        assert range_old <= columns(table_name)
+        assert not range_new & columns(table_name)
+    assert "closure_chapter_count" in columns("arc_approvals")
+    assert {
+        "committed_chapter_count",
+        "closure_chapter_count",
+    } <= columns("arc_closure_reviews")
+    assert "committed_chapter_count" in columns("arc_closures")
+
+    command.upgrade(config, "head")
+    assert "cumulative_committed_chapter_count" in columns("arc_closures")
 
 
 def test_reflected_constraint_and_index_names_match_metadata(tmp_path: Path) -> None:

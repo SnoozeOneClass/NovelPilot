@@ -69,7 +69,7 @@ def test_stale_arc_workspace_rebases_to_current_upstream_facts(tmp_path: Path) -
                             arc_workspaces.c.base_arc_baseline_id,
                             arc_workspaces.c.revision_origin,
                             arc_workspaces.c.plan_ref_id,
-                            arc_workspaces.c.recommended_closure_chapter_count,
+                            arc_workspaces.c.recommended_closure_cumulative_chapter_count,
                             arc_workspaces.c.stale_reason_code,
                         ).where(arc_workspaces.c.arc_id == foundation.arc_id)
                     )

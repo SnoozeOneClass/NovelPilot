@@ -600,15 +600,29 @@ class ArcPlanProposal(BaseModel):
         min_length=1,
         description="Book constraints and outcomes this Arc must not violate.",
     )
-    minimum_chapter_count: int = Field(ge=1, le=30)
-    recommended_closure_chapter_count: int = Field(ge=1, le=30)
-    maximum_chapter_count: int = Field(ge=1, le=30)
-    closure_chapter_count: int = Field(
+    minimum_cumulative_chapter_count: int = Field(
         ge=1,
-        le=30,
         description=(
-            "Selected cumulative checkpoint for the first mandatory closure "
-            "evaluation. Reaching it does not complete the Arc."
+            "Minimum whole-Book committed Chapter count at which this Arc may close."
+        ),
+    )
+    recommended_closure_cumulative_chapter_count: int = Field(
+        ge=1,
+        description=(
+            "Recommended whole-Book committed Chapter count for this Arc closure."
+        ),
+    )
+    maximum_cumulative_chapter_count: int = Field(
+        ge=1,
+        description=(
+            "Maximum whole-Book committed Chapter count allowed before this Arc closes."
+        ),
+    )
+    closure_cumulative_chapter_count: int = Field(
+        ge=1,
+        description=(
+            "Selected whole-Book committed Chapter checkpoint for the first mandatory "
+            "closure evaluation. Reaching it does not complete the Arc."
         ),
     )
     closure_signals: list[ArcClosureSignal] = Field(
@@ -638,19 +652,22 @@ class ArcPlanProposal(BaseModel):
     @model_validator(mode="after")
     def _chapter_range_contains_checkpoint(self) -> ArcPlanProposal:
         if not (
-            self.minimum_chapter_count
-            <= self.recommended_closure_chapter_count
-            <= self.maximum_chapter_count
+            self.minimum_cumulative_chapter_count
+            <= self.recommended_closure_cumulative_chapter_count
+            <= self.maximum_cumulative_chapter_count
         ):
             raise ValueError(
-                "Arc Chapter range must satisfy minimum <= recommended <= maximum."
+                "Arc cumulative Chapter range must satisfy "
+                "minimum <= recommended <= maximum."
             )
         if not (
-            self.minimum_chapter_count
-            <= self.closure_chapter_count
-            <= self.maximum_chapter_count
+            self.minimum_cumulative_chapter_count
+            <= self.closure_cumulative_chapter_count
+            <= self.maximum_cumulative_chapter_count
         ):
-            raise ValueError("Arc closure checkpoint must fall inside its Chapter range.")
+            raise ValueError(
+                "Arc closure cumulative checkpoint must fall inside its cumulative range."
+            )
         return self
 
 
@@ -676,14 +693,25 @@ class SemanticCanonProposal(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     category: Literal["characters", "relationships", "world_facts", "foreshadowing"]
-    operation: Literal["add", "update", "resolve"]
     subject: str = Field(
         min_length=1,
-        description="Semantic subject from the chapter; never an internal Canon ID.",
+        description=(
+            "Semantic subject established or changed by the chapter. Use natural meaning; "
+            "never copy or invent a Canon ID, reference, or stored locator."
+        ),
     )
     semantic_change: str = Field(
         min_length=1,
-        description="Proposed Canon meaning, without committing or routing it.",
+        description=(
+            "The complete current meaning established for this semantic subject, without "
+            "choosing a storage operation or committing it."
+        ),
+    )
+    resolved: bool = Field(
+        description=(
+            "True only when this chapter semantically closes the subject; false when the "
+            "subject remains active. The Harness alone derives insert-or-replace behavior."
+        ),
     )
     evidence_hint: str = Field(
         min_length=1,
@@ -714,7 +742,7 @@ class ChapterObservationResult(BaseModel):
     )
 
 
-ChapterRepairComponent = Literal["prose", "observations", "canon"]
+ChapterRepairComponent = Literal["plan", "prose", "observations", "canon"]
 
 
 class ChapterObservationsRepair(BaseModel):
@@ -786,32 +814,85 @@ class EvaluationIssue(BaseModel):
     )
 
 
+class ChapterEvaluationIssue(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    code: str = Field(min_length=1, description="Stable semantic issue category.")
+    subject: str = Field(
+        min_length=1,
+        description=(
+            "Concise semantic fact or obligation affected by this issue; never an ID, "
+            "locator, exact quote, or storage key."
+        ),
+    )
+    summary: str = Field(min_length=1, description="Clear explanation of the rubric failure.")
+    evidence_hint: str | None = Field(
+        default=None,
+        description="Human-readable evidence in the frozen candidate or committed history.",
+    )
+    affected_components: list[ChapterRepairComponent] = Field(
+        min_length=1,
+        description=(
+            "Unique semantic Chapter components affected by this issue. The Harness derives "
+            "repair authorization from the union across issues."
+        ),
+    )
+    recurrence: Literal["new", "persists_after_authorized_repair"] = Field(
+        default="new",
+        description=(
+            "Use persists_after_authorized_repair only in repair verification when this "
+            "same semantic issue remains after its authorized correction."
+        ),
+    )
+
+    @field_validator("affected_components")
+    @classmethod
+    def _unique_affected_components(
+        cls,
+        value: list[ChapterRepairComponent],
+    ) -> list[ChapterRepairComponent]:
+        if len(value) != len(set(value)):
+            raise ValueError("Chapter issue affected components must be unique.")
+        return value
+
+
 class LayerEvaluationResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    decision: Literal["pass", "local_repair", "escalate_to_arc", "needs_user"] = Field(
+    decision: Literal["pass", "local_repair", "escalate_to_arc"] = Field(
         description=(
             "Use local_repair only for a bounded chapter repair; use "
             "escalate_to_arc only for a specific evidence-bound concern about "
-            "the immediate parent Arc."
+            "the immediate parent Arc. Chapter evaluation cannot create a user wait."
         ),
     )
     summary: str = Field(min_length=1, description="Evidence-based evaluation summary.")
-    issues: list[EvaluationIssue] = Field(default_factory=list)
-    repair_scope: list[ChapterRepairComponent] = Field(
+    issues: list[ChapterEvaluationIssue] = Field(
         default_factory=list,
         description=(
-            "Required and non-empty only when decision is local_repair; otherwise empty."
+            "Blocking semantic issues. Each issue owns its typed affected-component set; "
+            "the Harness derives any local repair scope from their union."
         ),
     )
+
     @model_validator(mode="after")
     def _decision_payload(self) -> LayerEvaluationResult:
-        if self.decision == "local_repair" and not self.repair_scope:
-            raise ValueError("local_repair requires a bounded repair_scope.")
-        if self.decision != "local_repair" and self.repair_scope:
-            raise ValueError("Only local_repair can carry repair_scope.")
-        if len(self.repair_scope) != len(set(self.repair_scope)):
-            raise ValueError("Chapter repair_scope components must be unique.")
+        if self.decision == "pass" and self.issues:
+            raise ValueError("A passing Chapter evaluation cannot carry blocking issues.")
+        if self.decision != "pass" and not self.issues:
+            raise ValueError("A non-passing Chapter evaluation requires blocking issues.")
+        repair_scope = {
+            component
+            for issue in self.issues
+            for component in issue.affected_components
+        }
+        if self.decision == "local_repair" and not repair_scope:
+            raise ValueError("local_repair requires affected Chapter components.")
+        if "plan" in repair_scope and repair_scope != {"plan"}:
+            raise ValueError(
+                "A Chapter plan repair must be the only repair component; the Harness "
+                "invalidates and regenerates every downstream working component."
+            )
         return self
 
 

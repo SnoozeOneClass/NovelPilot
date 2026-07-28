@@ -451,7 +451,6 @@ def test_chapter_revision_creates_v2_without_increasing_committed_chapter_count(
                     rubric_version=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
                         "evaluate.chapter"
                     ).rubric_version,
-                    deterministic_precheck={"passed": True},
                 ),
                 idempotency_key="chapter-revision:review",
             )

@@ -351,3 +351,22 @@ def raise_for_incomplete_stream(response: ModelResponse) -> None:
         raise ProviderStreamIncomplete(
             f"Provider stream ended in state={response.state!r} without a complete result."
         )
+    usable_output = False
+    for part in response.parts:
+        part_kind = getattr(part, "part_kind", None)
+        if part_kind == "thinking":
+            continue
+        if part_kind == "text":
+            content = getattr(part, "content", None)
+            if isinstance(content, str) and content.strip():
+                usable_output = True
+                break
+            continue
+        # Structured output/tool calls and other non-thinking protocol parts are
+        # usable inputs to Pydantic AI even when no plain text accompanies them.
+        usable_output = True
+        break
+    if not usable_output:
+        raise ProviderStreamIncomplete(
+            "Provider returned HTTP success but no usable output for the frozen task."
+        )

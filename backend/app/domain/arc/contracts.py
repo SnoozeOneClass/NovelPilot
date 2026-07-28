@@ -82,27 +82,30 @@ class ArcProhibitionsRepair(BaseModel):
 class ArcChapterRange(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    minimum_chapter_count: int = Field(ge=1, le=30)
-    recommended_closure_chapter_count: int = Field(ge=1, le=30)
-    maximum_chapter_count: int = Field(ge=1, le=30)
-    closure_chapter_count: int = Field(ge=1, le=30)
+    minimum_cumulative_chapter_count: int = Field(ge=1)
+    recommended_closure_cumulative_chapter_count: int = Field(ge=1)
+    maximum_cumulative_chapter_count: int = Field(ge=1)
+    closure_cumulative_chapter_count: int = Field(ge=1)
 
     @model_validator(mode="after")
     def _valid_range(self) -> ArcChapterRange:
         if not (
-            self.minimum_chapter_count
-            <= self.recommended_closure_chapter_count
-            <= self.maximum_chapter_count
+            self.minimum_cumulative_chapter_count
+            <= self.recommended_closure_cumulative_chapter_count
+            <= self.maximum_cumulative_chapter_count
         ):
             raise ValueError(
-                "Arc Chapter range must satisfy minimum <= recommended <= maximum."
+                "Arc cumulative Chapter range must satisfy "
+                "minimum <= recommended <= maximum."
             )
         if not (
-            self.minimum_chapter_count
-            <= self.closure_chapter_count
-            <= self.maximum_chapter_count
+            self.minimum_cumulative_chapter_count
+            <= self.closure_cumulative_chapter_count
+            <= self.maximum_cumulative_chapter_count
         ):
-            raise ValueError("Arc closure checkpoint must fall inside its Chapter range.")
+            raise ValueError(
+                "Arc closure cumulative checkpoint must fall inside its cumulative range."
+            )
         return self
 
 
@@ -341,7 +344,7 @@ class CommitArcAutoRequest(BaseModel):
 
 class ApproveArcRequest(CommitArcAutoRequest):
     approval_gate_id: str
-    closure_chapter_count: int = Field(ge=1, le=30)
+    closure_cumulative_chapter_count: int = Field(ge=1)
 
 
 class RejectArcGateRequest(BaseModel):
@@ -362,10 +365,10 @@ class CommitArcResult(BaseModel):
     arc_id: str
     baseline_id: str
     baseline_version: int = Field(ge=1)
-    minimum_chapter_count: int = Field(ge=1, le=30)
-    recommended_closure_chapter_count: int = Field(ge=1, le=30)
-    maximum_chapter_count: int = Field(ge=1, le=30)
-    closure_chapter_count: int = Field(ge=1, le=30)
+    minimum_cumulative_chapter_count: int = Field(ge=1)
+    recommended_closure_cumulative_chapter_count: int = Field(ge=1)
+    maximum_cumulative_chapter_count: int = Field(ge=1)
+    closure_cumulative_chapter_count: int = Field(ge=1)
     authorization_kind: Literal["policy_auto", "human_approval"]
     lifecycle_status: Literal["active", "closing"]
 

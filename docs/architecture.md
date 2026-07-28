@@ -97,7 +97,7 @@ mutable workspace
 `Book > Story Arc > Chapter` 是正式语义权威顺序。下层可以提交证据和直属上层审查请求，但不能判断或替换上层 baseline：
 
 - Chapter 只在当前 Book/Arc baseline、当前 Canon 和当前章目标齐备时启动。正文、observations 与 Canon intent 通过独立评审并由原子 Command 提交，才算 Chapter 退出成功。
-- Arc 只在当前 Book baseline 与合法的上一 Arc progress handoff（首 Arc 除外）齐备时启动。`closure_chapter_count` 只触发最低限度的收束检查；只有 Arc 契约被已提交事实满足并形成 formal closure，Arc 才算结束。
+- Arc 只在当前 Book baseline 与合法的上一 Arc progress handoff（首 Arc 除外）齐备时启动。`closure_cumulative_chapter_count` 是全书累计章号，只触发最低限度的收束检查；只有 Arc 契约被已提交事实满足并形成 formal closure，Arc 才算结束。
 - 每个 formal Arc closure 触发一次独立 Book boundary evaluation。它只能形成绑定该精确输入的下一 Arc handoff、Book 层审查，或 formal Book completion；“章节数到了”与“流程跑完了”都不能直接完成 Book。
 
 Arc 收束或父层审查的自动向下纠正，在同一冻结评审 lineage 中最多一轮。第二次出现同类问题时，若拥有该问题的 Agent 给出了用户可以回答的具体问题，则进入显式 creator wait；执行、评估契约或上下文问题进入失败暂停，不能伪装成等待用户。

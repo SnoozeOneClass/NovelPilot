@@ -47,16 +47,17 @@ class BoundCanonOperation(BaseModel):
     operation_id: str
     entity_id: str
     category: CanonCategory
-    operation: Literal["add", "update", "resolve"]
+    operation: Literal["upsert"] = "upsert"
     subject: str
     semantic_change: str
+    resolved: bool
     evidence: CanonEvidence
 
 
 class BoundCanonPatch(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_id: Literal["chapter-canon-patch-v2"] = "chapter-canon-patch-v2"
+    schema_id: Literal["chapter-canon-patch-v3"] = "chapter-canon-patch-v3"
     chapter_id: str
     operations: list[BoundCanonOperation]
 
@@ -85,6 +86,17 @@ class AppliedCanonPatch(BaseModel):
 
 class CanonPatchConflictError(ValueError):
     """A semantic operation conflicts with the frozen Canon baseline."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        operation: BoundCanonOperation | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.operation = operation
 
 
 def bind_canon_patch(
@@ -115,10 +127,30 @@ def apply_canon_patch(
     patch: BoundCanonPatch,
 ) -> AppliedCanonPatch:
     if patch.chapter_id != chapter_id:
-        raise CanonPatchConflictError("Canon patch is bound to another Chapter.")
+        raise CanonPatchConflictError(
+            "Canon patch is bound to another Chapter.",
+            code="canon_patch_chapter_mismatch",
+        )
     result = {category: list(current[category]) for category in CANON_CATEGORIES}
     changed: set[CanonCategory] = set()
+    seen_by_entity: dict[str, BoundCanonOperation] = {}
     for operation in patch.operations:
+        previous = seen_by_entity.get(operation.entity_id)
+        if previous is not None:
+            if (
+                previous.semantic_change != operation.semantic_change
+                or previous.resolved != operation.resolved
+            ):
+                raise CanonPatchConflictError(
+                    (
+                        f"Canon subject {operation.subject!r} has multiple incompatible "
+                        "semantic assertions in one Chapter."
+                    ),
+                    code="canon_subject_assertion_conflict",
+                    operation=operation,
+                )
+            continue
+        seen_by_entity[operation.entity_id] = operation
         entries = result[operation.category]
         matching_index = next(
             (
@@ -128,37 +160,16 @@ def apply_canon_patch(
             ),
             None,
         )
-        if operation.operation == "add":
-            if matching_index is None:
-                entries.append(_entry(chapter_id, operation, resolved=False))
-                changed.add(operation.category)
-            else:
-                existing = entries[matching_index]
-                if existing.semantic_state != operation.semantic_change or existing.resolved:
-                    raise CanonPatchConflictError(
-                        f"Canon subject {operation.subject!r} already exists; use update."
-                    )
-        elif operation.operation == "update":
-            if matching_index is None:
-                raise CanonPatchConflictError(
-                    f"Canon subject {operation.subject!r} does not exist for update."
-                )
-            existing = entries[matching_index]
-            if existing.resolved:
-                raise CanonPatchConflictError(
-                    f"Resolved Canon subject {operation.subject!r} cannot be updated."
-                )
-            if existing.semantic_state != operation.semantic_change:
-                entries[matching_index] = _entry(chapter_id, operation, resolved=False)
-                changed.add(operation.category)
+        if matching_index is None:
+            entries.append(_entry(chapter_id, operation))
+            changed.add(operation.category)
         else:
-            if matching_index is None:
-                raise CanonPatchConflictError(
-                    f"Canon subject {operation.subject!r} does not exist for resolve."
-                )
             existing = entries[matching_index]
-            if not existing.resolved or existing.semantic_state != operation.semantic_change:
-                entries[matching_index] = _entry(chapter_id, operation, resolved=True)
+            if (
+                existing.semantic_state != operation.semantic_change
+                or existing.resolved != operation.resolved
+            ):
+                entries[matching_index] = _entry(chapter_id, operation)
                 changed.add(operation.category)
         entries.sort(key=lambda item: item.entity_id)
     return AppliedCanonPatch(
@@ -203,8 +214,8 @@ def _bind_operation(
             {
                 "chapter_id": chapter_id,
                 "entity_id": entity_id,
-                "operation": proposal.operation,
                 "semantic_change": semantic_change,
+                "resolved": proposal.resolved,
             }
         )
     ).hexdigest()
@@ -212,9 +223,9 @@ def _bind_operation(
         operation_id=operation_id,
         entity_id=entity_id,
         category=proposal.category,
-        operation=proposal.operation,
         subject=proposal.subject.strip(),
         semantic_change=semantic_change,
+        resolved=proposal.resolved,
         evidence=evidence,
     )
 
@@ -239,14 +250,12 @@ def _find_unique_exact_span(prose: str, hint: str) -> ExactEvidenceSpan | None:
 def _entry(
     chapter_id: str,
     operation: BoundCanonOperation,
-    *,
-    resolved: bool,
 ) -> CanonEntry:
     return CanonEntry(
         entity_id=operation.entity_id,
         subject=operation.subject,
         semantic_state=operation.semantic_change,
-        resolved=resolved,
+        resolved=operation.resolved,
         source_chapter_id=chapter_id,
         evidence=operation.evidence,
     )

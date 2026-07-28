@@ -13,7 +13,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, Protocol, Sequence, cast
+from typing import Any, Callable, Literal, Protocol, Sequence, cast
 
 import httpx
 
@@ -21,10 +21,19 @@ import httpx
 ROOT_DIR = Path(__file__).resolve().parents[1]
 CASE_DIR = ROOT_DIR / "scripts" / "live_acceptance_cases"
 DEFAULT_REPORT_ROOT = ROOT_DIR / "data" / "live-observations"
+DEFAULT_CASE_ID = "benchmark-mother-natural-book-v1"
 EXPECTED_SCHEDULE = ("full_auto", "participatory", "full_auto", "participatory")
+SERIES_STATE_FILENAME = "series.json"
+LATEST_SERIES_FILENAME = "latest-series.json"
 
 JsonObject = dict[str, Any]
 Mode = Literal["full_auto", "participatory"]
+ProgressKind = Literal[
+    "slot_started",
+    "state_changed",
+    "heartbeat",
+    "actor_action",
+]
 
 
 class ObservationConfigurationError(RuntimeError):
@@ -58,6 +67,33 @@ class ObservationCase:
     raw: JsonObject
 
 
+@dataclass(frozen=True, slots=True)
+class ObservationProgress:
+    slot: int
+    total_slots: int
+    mode: Mode
+    project_id: str
+    kind: ProgressKind
+    observed_at: str
+    elapsed_seconds: float
+    message: str
+    authoritative_state: JsonObject | None
+
+    def to_json(self) -> JsonObject:
+        return {
+            "slot": self.slot,
+            "total_slots": self.total_slots,
+            "mode": self.mode,
+            "project_id": self.project_id,
+            "kind": self.kind,
+            "observed_at": self.observed_at,
+            "elapsed_seconds": self.elapsed_seconds,
+            "message": self.message,
+            "authoritative_state": self.authoritative_state,
+            "non_authoritative": True,
+        }
+
+
 class ObservationApi(Protocol):
     def profiles(self) -> JsonObject: ...
 
@@ -85,7 +121,7 @@ class ObservationApi(Protocol):
         self,
         *,
         project_id: str,
-        closure_chapter_count: int | None,
+        closure_cumulative_chapter_count: int | None,
         key: str,
     ) -> JsonObject: ...
 
@@ -195,14 +231,18 @@ class HttpObservationApi:
         self,
         *,
         project_id: str,
-        closure_chapter_count: int | None,
+        closure_cumulative_chapter_count: int | None,
         key: str,
     ) -> JsonObject:
         result = self._request(
             "POST",
             f"/api/projects/{project_id}/arc/approve",
             key=key,
-            body={"closure_chapter_count": closure_chapter_count},
+            body={
+                "closure_cumulative_chapter_count": (
+                    closure_cumulative_chapter_count
+                )
+            },
         )
         return cast(JsonObject, result["state"])
 
@@ -363,22 +403,37 @@ def _profile_facts(profile: JsonObject) -> JsonObject:
     }
 
 
-def _preflight_profile(api: ObservationApi, profile_id: str) -> JsonObject:
+def _preflight_profile(
+    api: ObservationApi, profile_id: str | None
+) -> tuple[str, JsonObject]:
     document = api.profiles()
     profiles = cast(list[JsonObject], document.get("profiles", []))
-    profile = next((item for item in profiles if item.get("id") == profile_id), None)
+    resolved_profile_id = profile_id or str(document.get("selected_profile_id") or "")
+    if not resolved_profile_id:
+        raise ObservationConfigurationError(
+            "No Profile was requested and the application has no selected Profile."
+        )
+    profile = next(
+        (item for item in profiles if item.get("id") == resolved_profile_id), None
+    )
     if profile is None:
-        raise ObservationConfigurationError(f"Profile {profile_id!r} does not exist.")
+        raise ObservationConfigurationError(
+            f"Profile {resolved_profile_id!r} does not exist."
+        )
     capabilities = cast(JsonObject, profile.get("capabilities") or {})
     if not profile.get("enabled") or profile.get("capability_status") != "ready":
-        raise ObservationConfigurationError(f"Profile {profile_id!r} is not capability-ready.")
+        raise ObservationConfigurationError(
+            f"Profile {resolved_profile_id!r} is not capability-ready."
+        )
     if not capabilities.get("text_streaming") or not capabilities.get("native_json_schema"):
         raise ObservationConfigurationError(
-            f"Profile {profile_id!r} lacks text_streaming or native_json_schema."
+            f"Profile {resolved_profile_id!r} lacks text_streaming or native_json_schema."
         )
     if not profile.get("has_api_key"):
-        raise ObservationConfigurationError(f"Profile {profile_id!r} has no API key.")
-    return profile
+        raise ObservationConfigurationError(
+            f"Profile {resolved_profile_id!r} has no API key."
+        )
+    return resolved_profile_id, profile
 
 
 def _command_enabled(state: JsonObject, command_id: str) -> bool:
@@ -395,21 +450,99 @@ def _compact_state(state: JsonObject) -> JsonObject:
     book = cast(JsonObject, state.get("book", {}))
     arc = cast(JsonObject, state.get("current_arc") or {})
     chapter = cast(JsonObject, state.get("current_chapter") or {})
+    recent_tasks = cast(list[JsonObject], state.get("recent_tasks", []))
+    latest_task = recent_tasks[0] if recent_tasks else {}
     return {
         "project_lifecycle_status": project.get("lifecycle_status"),
         "run_status": run.get("status"),
         "wait_reason_code": run.get("wait_reason_code"),
         "failure_code": run.get("failure_code"),
         "book_lifecycle_status": book.get("lifecycle_status"),
+        "book_workspace_state": book.get("workspace_state"),
         "book_baseline_id": book.get("current_baseline_id"),
         "committed_chapter_count": project.get("committed_chapter_count", 0),
         "current_arc_id": arc.get("arc_id"),
         "current_arc_ordinal": arc.get("ordinal"),
         "current_arc_status": arc.get("lifecycle_status"),
+        "current_arc_workspace_state": arc.get("workspace_state"),
         "current_chapter_id": chapter.get("chapter_id"),
         "current_chapter_ordinal": chapter.get("book_ordinal"),
+        "current_chapter_status": chapter.get("lifecycle_status"),
+        "current_chapter_workspace_state": chapter.get("workspace_state"),
+        "latest_task_kind": latest_task.get("task_kind"),
+        "latest_task_status": latest_task.get("status"),
+        "latest_task_delivery_state": latest_task.get("delivery_state"),
+        "latest_attempt_number": latest_task.get("attempt_number"),
+        "latest_attempt_status": latest_task.get("attempt_status"),
+        "latest_retry_kind": latest_task.get("retry_kind"),
+        "latest_provider_request_count": latest_task.get("provider_request_count"),
+        "latest_transport_retry_count": latest_task.get("transport_retry_count"),
         "latest_event_sequence": state.get("latest_event_sequence", 0),
     }
+
+
+def _format_elapsed(seconds: float) -> str:
+    total_seconds = max(0, int(seconds))
+    hours, remainder = divmod(total_seconds, 60 * 60)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def _describe_state(state: JsonObject) -> str:
+    chapter_ordinal = state.get("current_chapter_ordinal")
+    arc_ordinal = state.get("current_arc_ordinal")
+    if chapter_ordinal is not None:
+        scope = f"Chapter {chapter_ordinal}"
+        lifecycle = state.get("current_chapter_status")
+        workspace = state.get("current_chapter_workspace_state")
+    elif arc_ordinal is not None:
+        scope = f"Arc {arc_ordinal}"
+        lifecycle = state.get("current_arc_status")
+        workspace = state.get("current_arc_workspace_state")
+    else:
+        scope = "Book"
+        lifecycle = state.get("book_lifecycle_status")
+        workspace = state.get("book_workspace_state")
+
+    parts = [scope]
+    phase = "/".join(
+        str(value) for value in (lifecycle, workspace) if value not in (None, "")
+    )
+    if phase:
+        parts.append(f"phase={phase}")
+    task_kind = state.get("latest_task_kind")
+    if task_kind:
+        task_status = state.get("latest_attempt_status") or state.get(
+            "latest_task_status"
+        )
+        attempt_number = state.get("latest_attempt_number")
+        task = str(task_kind)
+        if attempt_number is not None:
+            task += f"#{attempt_number}"
+        if task_status:
+            task += f"/{task_status}"
+        parts.append(f"task={task}")
+    transport_retries = int(state.get("latest_transport_retry_count") or 0)
+    if transport_retries:
+        parts.append(f"transport_retries={transport_retries}")
+    parts.append(f"committed={int(state.get('committed_chapter_count') or 0)}")
+    run_status = state.get("run_status")
+    if run_status:
+        parts.append(f"run={run_status}")
+    wait_reason = state.get("wait_reason_code")
+    if wait_reason:
+        parts.append(f"wait={wait_reason}")
+    failure_code = state.get("failure_code")
+    if failure_code:
+        parts.append(f"failure={failure_code}")
+    return " | ".join(parts)
+
+
+def _progress_line(progress: ObservationProgress) -> str:
+    return (
+        f"[{progress.slot}/{progress.total_slots} {progress.mode}] "
+        f"{progress.message} | elapsed={_format_elapsed(progress.elapsed_seconds)}"
+    )
 
 
 def _attempt_metrics(diagnostics: JsonObject) -> JsonObject:
@@ -503,6 +636,80 @@ def _issue(code: str, message: str) -> JsonObject:
     return {"code": code, "message": message}
 
 
+def _series_status_counts(reports: list[JsonObject]) -> JsonObject:
+    counts = Counter(str(item["status"]) for item in reports)
+    return {
+        "completed": counts.get("completed", 0),
+        "failed": counts.get("failed", 0),
+        "not_run": counts.get("not_run", 0),
+    }
+
+
+def _write_series_checkpoint(
+    *,
+    report_root: Path,
+    series_dir: Path,
+    series_id: str,
+    case_id: str,
+    profile_id: str,
+    started_at: str,
+    reports: list[JsonObject],
+    next_slot: int | None,
+    status: Literal["running", "finished"],
+    finished_at: str | None = None,
+    active_observation: ObservationProgress | None = None,
+) -> None:
+    updated_at = datetime.now(UTC).isoformat()
+    relative_dir = series_dir.relative_to(report_root).as_posix()
+    state: JsonObject = {
+        "schema_id": "novelpilot-live-book-series-state-v1",
+        "series_id": series_id,
+        "status": status,
+        "case_id": case_id,
+        "profile_id": profile_id,
+        "started_at": started_at,
+        "updated_at": updated_at,
+        "finished_at": finished_at,
+        "next_slot": next_slot,
+        "recorded_slot_count": len(reports),
+        "status_counts": _series_status_counts(reports),
+        "slots": [
+            {
+                "slot": item["slot"],
+                "mode": item["mode"],
+                "status": item["status"],
+                "project_id": item.get("project_id"),
+                "issue_codes": [
+                    issue.get("code")
+                    for issue in cast(list[JsonObject], item.get("issues", []))
+                ],
+            }
+            for item in reports
+        ],
+        "technical_rescue_count": 0,
+        "analysis_ready": status == "finished",
+        "aggregate_path": "aggregate.json" if status == "finished" else None,
+        "active_observation": (
+            None if active_observation is None else active_observation.to_json()
+        ),
+    }
+    _atomic_json(series_dir / SERIES_STATE_FILENAME, state)
+    _atomic_json(
+        report_root / LATEST_SERIES_FILENAME,
+        {
+            "schema_id": "novelpilot-live-book-latest-series-v1",
+            "series_id": series_id,
+            "status": status,
+            "updated_at": updated_at,
+            "series_directory": relative_dir,
+            "series_state_path": f"{relative_dir}/{SERIES_STATE_FILENAME}",
+            "aggregate_path": (
+                f"{relative_dir}/aggregate.json" if status == "finished" else None
+            ),
+        },
+    )
+
+
 def run_observation_slot(
     *,
     api: ObservationApi,
@@ -513,12 +720,48 @@ def run_observation_slot(
     slot: int,
     mode: Mode,
     sleep_seconds: float,
+    heartbeat_seconds: float,
     sleep: Any = time.sleep,
     monotonic: Any = time.monotonic,
+    on_progress: Callable[[ObservationProgress], None] | None = None,
 ) -> tuple[JsonObject, bool]:
     started_wall = datetime.now(UTC)
     started_monotonic = monotonic()
     project_id = f"obs-{series_id}-{slot:02d}-{mode.replace('_', '-')}"
+    progress_callback = on_progress or (lambda _progress: None)
+
+    def emit_progress(
+        *,
+        kind: ProgressKind,
+        message: str,
+        authoritative_state: JsonObject | None,
+        now: float | None = None,
+    ) -> float:
+        observed_monotonic = monotonic() if now is None else now
+        progress_callback(
+            ObservationProgress(
+                slot=slot,
+                total_slots=len(case.schedule),
+                mode=mode,
+                project_id=project_id,
+                kind=kind,
+                observed_at=datetime.now(UTC).isoformat(),
+                elapsed_seconds=round(
+                    observed_monotonic - started_monotonic,
+                    3,
+                ),
+                message=message,
+                authoritative_state=authoritative_state,
+            )
+        )
+        return observed_monotonic
+
+    last_progress_at = emit_progress(
+        kind="slot_started",
+        message="slot started",
+        authoritative_state=None,
+        now=started_monotonic,
+    )
     issues: list[JsonObject] = []
     gates: list[JsonObject] = []
     transitions: list[JsonObject] = []
@@ -549,9 +792,11 @@ def run_observation_slot(
         deadline = started_monotonic + case.maximum_slot_hours * 60 * 60
         last_marker: tuple[object, ...] | None = None
         while True:
+            now = monotonic()
             compact = _compact_state(state)
             marker = tuple(compact.values())
-            if marker != last_marker:
+            state_changed = marker != last_marker
+            if state_changed:
                 transitions.append(
                     {
                         "observed_at": datetime.now(UTC).isoformat(),
@@ -559,6 +804,12 @@ def run_observation_slot(
                     }
                 )
                 last_marker = marker
+                last_progress_at = emit_progress(
+                    kind="state_changed",
+                    message=_describe_state(compact),
+                    authoritative_state=compact,
+                    now=now,
+                )
             run = cast(JsonObject, state.get("run", {}))
             status = str(run.get("status"))
             if status == "completed":
@@ -579,7 +830,7 @@ def run_observation_slot(
                     )
                 )
                 break
-            if monotonic() >= deadline:
+            if now >= deadline:
                 issues.append(
                     _issue(
                         "slot_timeout",
@@ -587,6 +838,13 @@ def run_observation_slot(
                     )
                 )
                 break
+            if not state_changed and now - last_progress_at >= heartbeat_seconds:
+                last_progress_at = emit_progress(
+                    kind="heartbeat",
+                    message=f"still running | {_describe_state(compact)}",
+                    authoritative_state=compact,
+                    now=now,
+                )
 
             if _command_enabled(state, "send_book_input"):
                 book = cast(JsonObject, state.get("book", {}))
@@ -613,6 +871,11 @@ def run_observation_slot(
                     key=f"{series_id}:{slot}:book-input:{turn}",
                 )
                 action_counts["book_input"] += 1
+                last_progress_at = emit_progress(
+                    kind="actor_action",
+                    message="actor submitted recommended Book input",
+                    authoritative_state=_compact_state(state),
+                )
                 gates.append(
                     {
                         "kind": "book_input",
@@ -629,6 +892,11 @@ def run_observation_slot(
                     key=f"{series_id}:{slot}:book-approve",
                 )
                 action_counts["book_approval"] += 1
+                last_progress_at = emit_progress(
+                    kind="actor_action",
+                    message="actor approved the reviewed Book baseline",
+                    authoritative_state=_compact_state(state),
+                )
                 gates.append({"kind": "book_approval"})
                 continue
 
@@ -642,21 +910,31 @@ def run_observation_slot(
                     )
                     break
                 arc = cast(JsonObject, state.get("current_arc") or {})
-                checkpoint = arc.get("recommended_closure_chapter_count")
+                checkpoint = arc.get(
+                    "recommended_closure_cumulative_chapter_count"
+                )
                 state = api.approve_arc(
                     project_id=project_id,
-                    closure_chapter_count=(
+                    closure_cumulative_chapter_count=(
                         None if checkpoint is None else int(checkpoint)
                     ),
                     key=f"{series_id}:{slot}:arc-approve:{arc.get('arc_id')}",
                 )
                 action_counts["arc_approval"] += 1
+                last_progress_at = emit_progress(
+                    kind="actor_action",
+                    message=(
+                        "actor approved "
+                        f"Arc {arc.get('ordinal')} at Chapter {checkpoint}"
+                    ),
+                    authoritative_state=_compact_state(state),
+                )
                 gates.append(
                     {
                         "kind": "arc_approval",
                         "arc_id": arc.get("arc_id"),
                         "arc_ordinal": arc.get("ordinal"),
-                        "closure_chapter_count": checkpoint,
+                        "closure_cumulative_chapter_count": checkpoint,
                     }
                 )
                 continue
@@ -707,12 +985,14 @@ def run_observation_slot(
 
     finished_wall = datetime.now(UTC)
     attempt_metrics = _attempt_metrics(diagnostics)
-    status: Literal["completed", "failed"] = "completed" if not issues else "failed"
+    slot_status: Literal["completed", "failed"] = (
+        "completed" if not issues else "failed"
+    )
     report: JsonObject = {
         "schema_id": "novelpilot-live-book-observation-v1",
         "series_id": series_id,
         "slot": slot,
-        "status": status,
+        "status": slot_status,
         "project_id": project_id,
         "mode": mode,
         "started_at": started_wall.isoformat(),
@@ -745,19 +1025,26 @@ def run_series(
     *,
     api: ObservationApi,
     case: ObservationCase,
-    profile_id: str,
+    profile_id: str | None,
     runs: int,
     report_root: Path,
     sleep_seconds: float = 2.0,
+    heartbeat_seconds: float = 60.0,
     sleep: Any = time.sleep,
     monotonic: Any = time.monotonic,
+    announce: Callable[[str], None] | None = None,
 ) -> tuple[Path, JsonObject]:
     if runs != len(case.schedule) or runs != 4:
         raise ObservationConfigurationError("This frozen series requires exactly four runs.")
-    profile = _preflight_profile(api, profile_id)
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    if heartbeat_seconds <= 0:
+        raise ObservationConfigurationError("Heartbeat interval must be positive.")
+    announce_line = announce or (lambda _message: None)
+    resolved_profile_id, profile = _preflight_profile(api, profile_id)
+    started_at = datetime.now(UTC)
+    timestamp = started_at.strftime("%Y%m%dT%H%M%SZ")
     series_id = f"{timestamp}-{uuid.uuid4().hex[:8]}"
-    series_dir = (report_root / series_id).resolve()
+    resolved_report_root = report_root.resolve()
+    series_dir = resolved_report_root / series_id
     frozen: JsonObject = {
         "git_commit": _git_commit(),
         "working_tree_dirty": _working_tree_dirty(),
@@ -779,10 +1066,40 @@ def run_series(
             "frozen": frozen,
         },
     )
+    _write_series_checkpoint(
+        report_root=resolved_report_root,
+        series_dir=series_dir,
+        series_id=series_id,
+        case_id=case.case_id,
+        profile_id=resolved_profile_id,
+        started_at=started_at.isoformat(),
+        reports=[],
+        next_slot=1,
+        status="running",
+    )
+    announce_line(
+        f"Experiment {series_id} started | profile={resolved_profile_id} | "
+        f"schedule={','.join(case.schedule)}"
+    )
 
     reports: list[JsonObject] = []
     stop_series = False
     for index, mode in enumerate(case.schedule, start=1):
+        def record_progress(progress: ObservationProgress) -> None:
+            _write_series_checkpoint(
+                report_root=resolved_report_root,
+                series_dir=series_dir,
+                series_id=series_id,
+                case_id=case.case_id,
+                profile_id=resolved_profile_id,
+                started_at=started_at.isoformat(),
+                reports=reports,
+                next_slot=index,
+                status="running",
+                active_observation=progress,
+            )
+            announce_line(_progress_line(progress))
+
         if stop_series:
             report = {
                 "schema_id": "novelpilot-live-book-observation-v1",
@@ -806,19 +1123,45 @@ def run_series(
             report, stop_series = run_observation_slot(
                 api=api,
                 case=case,
-                profile_id=profile_id,
+                profile_id=resolved_profile_id,
                 frozen=frozen,
                 series_id=series_id,
                 slot=index,
                 mode=mode,
                 sleep_seconds=sleep_seconds,
+                heartbeat_seconds=heartbeat_seconds,
                 sleep=sleep,
                 monotonic=monotonic,
+                on_progress=record_progress,
             )
         reports.append(report)
         _atomic_json(series_dir / f"slot-{index:02d}-{mode}.json", report)
+        _write_series_checkpoint(
+            report_root=resolved_report_root,
+            series_dir=series_dir,
+            series_id=series_id,
+            case_id=case.case_id,
+            profile_id=resolved_profile_id,
+            started_at=started_at.isoformat(),
+            reports=reports,
+            next_slot=index + 1 if index < len(case.schedule) else None,
+            status="running",
+        )
+        issue_codes = [
+            str(issue.get("code"))
+            for issue in cast(list[JsonObject], report.get("issues", []))
+        ]
+        result_line = (
+            f"[{index}/{len(case.schedule)} {mode}] "
+            f"slot {report['status']}"
+        )
+        elapsed_seconds = report.get("elapsed_seconds")
+        if isinstance(elapsed_seconds, int | float):
+            result_line += f" | elapsed={_format_elapsed(float(elapsed_seconds))}"
+        if issue_codes:
+            result_line += f" | issues={','.join(issue_codes)}"
+        announce_line(result_line)
 
-    status_counts = Counter(str(item["status"]) for item in reports)
     issue_index = [
         {"slot": item["slot"], "mode": item["mode"], **issue}
         for item in reports
@@ -828,13 +1171,9 @@ def run_series(
         "schema_id": "novelpilot-live-book-series-aggregate-v1",
         "series_id": series_id,
         "case_id": case.case_id,
-        "profile_id": profile_id,
+        "profile_id": resolved_profile_id,
         "mode_schedule": list(case.schedule),
-        "status_counts": {
-            "completed": status_counts.get("completed", 0),
-            "failed": status_counts.get("failed", 0),
-            "not_run": status_counts.get("not_run", 0),
-        },
+        "status_counts": _series_status_counts(reports),
         "slots": [
             {
                 "slot": item["slot"],
@@ -863,22 +1202,47 @@ def run_series(
         "note": "This is a factual observation index, not a 4/4 success verdict.",
     }
     _atomic_json(series_dir / "aggregate.json", aggregate)
+    finished_at = datetime.now(UTC).isoformat()
+    _write_series_checkpoint(
+        report_root=resolved_report_root,
+        series_dir=series_dir,
+        series_id=series_id,
+        case_id=case.case_id,
+        profile_id=resolved_profile_id,
+        started_at=started_at.isoformat(),
+        reports=reports,
+        next_slot=None,
+        status="finished",
+        finished_at=finished_at,
+    )
+    counts = cast(JsonObject, aggregate["status_counts"])
+    announce_line(
+        f"Experiment {series_id} finished | completed={counts['completed']} | "
+        f"failed={counts['failed']} | not_run={counts['not_run']}"
+    )
     return series_dir, aggregate
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run the frozen four-slot whole-book observation through public NovelPilot APIs."
+        description=(
+            "Run the frozen four-slot whole-book experiment without Codex attendance "
+            "or technical rescue."
+        )
     )
-    parser.add_argument("--case", required=True)
-    parser.add_argument("--profile-id", required=True)
-    parser.add_argument("--runs", required=True, type=int)
+    parser.add_argument("--case", default=DEFAULT_CASE_ID)
+    parser.add_argument(
+        "--profile-id",
+        help="Profile override. By default the application's selected Profile is used.",
+    )
+    parser.add_argument("--runs", default=4, type=int)
     parser.add_argument(
         "--api-base-url",
         default=os.environ.get("NOVELPILOT_API_BASE_URL", "http://127.0.0.1:8010"),
     )
     parser.add_argument("--report-root", type=Path, default=DEFAULT_REPORT_ROOT)
     parser.add_argument("--poll-seconds", type=float, default=2.0)
+    parser.add_argument("--heartbeat-seconds", type=float, default=60.0)
     return parser
 
 
@@ -886,21 +1250,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     if arguments.poll_seconds <= 0:
         raise ObservationConfigurationError("--poll-seconds must be positive.")
+    if arguments.heartbeat_seconds <= 0:
+        raise ObservationConfigurationError("--heartbeat-seconds must be positive.")
     case = load_case(arguments.case)
     api = HttpObservationApi(arguments.api_base_url)
     try:
-        series_dir, aggregate = run_series(
+        series_dir, _aggregate = run_series(
             api=api,
             case=case,
             profile_id=arguments.profile_id,
             runs=arguments.runs,
             report_root=arguments.report_root,
             sleep_seconds=arguments.poll_seconds,
+            heartbeat_seconds=arguments.heartbeat_seconds,
+            announce=lambda message: print(message, flush=True),
         )
     finally:
         api.close()
-    print(f"Observation reports: {series_dir}")
-    print(json.dumps(aggregate["status_counts"], ensure_ascii=False, sort_keys=True))
+    print(f"Codex analysis directory: {series_dir}", flush=True)
     return 0
 
 

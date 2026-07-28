@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import pytest
+
 from app.agents.contracts import ChapterObservationResult, SemanticCanonProposal
-from app.domain.chapter.canon import bind_canon_patch
+from app.domain.chapter.canon import (
+    CANON_CATEGORIES,
+    CanonCategory,
+    CanonPatchConflictError,
+    apply_canon_patch,
+    bind_canon_patch,
+)
 
 
 def _proposal(*, hint: str) -> SemanticCanonProposal:
     return SemanticCanonProposal(
         category="world_facts",
-        operation="add",
         subject="Mutable testimony",
         semantic_change="Written testimony can change while a witness watches.",
+        resolved=False,
         evidence_hint=hint,
     )
 
@@ -31,7 +39,7 @@ def test_semantic_evidence_hint_does_not_require_a_prose_substring() -> None:
         observations=_observations(_proposal(hint=hint)),
     )
 
-    assert patch.schema_id == "chapter-canon-patch-v2"
+    assert patch.schema_id == "chapter-canon-patch-v3"
     assert len(patch.operations) == 1
     assert patch.operations[0].evidence.hint == hint
     assert patch.operations[0].evidence.exact_span is None
@@ -68,3 +76,103 @@ def test_duplicate_semantic_canon_proposals_are_normalized() -> None:
     )
 
     assert len(patch.operations) == 1
+
+
+@pytest.mark.parametrize(
+    ("category", "subject"),
+    [
+        ("world_facts", "锁闭数据室内显露的半张机械潮位纸"),
+        ("foreshadowing", "程雾当场死亡旧叙事的裂缝"),
+        ("characters", "顾向潮的旧案立场与权限"),
+    ],
+)
+def test_new_semantic_subjects_are_harness_upserts(
+    category: CanonCategory,
+    subject: str,
+) -> None:
+    proposal = SemanticCanonProposal(
+        category=category,
+        subject=subject,
+        semantic_change="本章建立了新的、受证据边界约束的语义事实。",
+        resolved=False,
+        evidence_hint="本章中的行动与物证共同支持这一有限事实。",
+    )
+    patch = bind_canon_patch(
+        chapter_id="chapter-new-subject",
+        prose="人物核对行动与物证，并只记录能够确认的有限事实。",
+        observations=_observations(proposal),
+    )
+
+    applied = apply_canon_patch(
+        chapter_id="chapter-new-subject",
+        current={canon_category: [] for canon_category in CANON_CATEGORIES},
+        patch=patch,
+    )
+
+    entries = applied.categories[proposal.category]
+    assert len(entries) == 1
+    assert entries[0].subject == subject
+    assert entries[0].semantic_state == proposal.semantic_change
+
+
+def test_same_semantic_subject_is_replaced_by_harness() -> None:
+    first = _proposal(hint="The first account is recorded.")
+    initial_patch = bind_canon_patch(
+        chapter_id="chapter-1",
+        prose="The first account is recorded.",
+        observations=_observations(first),
+    )
+    initial = apply_canon_patch(
+        chapter_id="chapter-1",
+        current={category: [] for category in CANON_CATEGORIES},
+        patch=initial_patch,
+    )
+    changed = SemanticCanonProposal(
+        category="world_facts",
+        subject=first.subject,
+        semantic_change="The testimony is now independently corroborated.",
+        resolved=True,
+        evidence_hint="An analogue record independently corroborates the testimony.",
+    )
+    changed_patch = bind_canon_patch(
+        chapter_id="chapter-2",
+        prose="An analogue record independently corroborates the testimony.",
+        observations=_observations(changed),
+    )
+
+    applied = apply_canon_patch(
+        chapter_id="chapter-2",
+        current=initial.categories,
+        patch=changed_patch,
+    )
+
+    entries = applied.categories["world_facts"]
+    assert len(entries) == 1
+    assert entries[0].semantic_state == changed.semantic_change
+    assert entries[0].resolved
+    assert entries[0].source_chapter_id == "chapter-2"
+
+
+def test_incompatible_assertions_for_one_subject_are_rejected() -> None:
+    first = _proposal(hint="The first account is recorded.")
+    conflicting = first.model_copy(
+        update={
+            "semantic_change": "The same testimony is proven false.",
+            "evidence_hint": "A second account contradicts it.",
+        }
+    )
+    patch = bind_canon_patch(
+        chapter_id="chapter-conflict",
+        prose="Two records disagree.",
+        observations=_observations(first, conflicting),
+    )
+
+    with pytest.raises(
+        CanonPatchConflictError,
+        match="multiple incompatible semantic assertions",
+    ):
+        apply_canon_patch(
+            chapter_id="chapter-conflict",
+            current={category: [] for category in CANON_CATEGORIES},
+            patch=patch,
+        )

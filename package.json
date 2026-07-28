@@ -22,6 +22,7 @@
     "profile:migrate": "scripts\\python.cmd scripts/migrate_profile_config.py",
     "profile:probe": "scripts\\python.cmd scripts/probe_profile.py",
     "audit:secrets": "scripts\\python.cmd scripts/audit_runtime_secrets.py",
+    "experiment:live-book": "scripts\\python.cmd scripts/live_book_observation_series.py",
     "observe:live-book-series": "scripts\\python.cmd scripts/live_book_observation_series.py",
     "lint": "npm.cmd run backend:lint && npm.cmd run frontend:lint",
     "typecheck": "npm.cmd run backend:typecheck && npm.cmd run frontend:typecheck",

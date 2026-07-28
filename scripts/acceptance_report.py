@@ -227,7 +227,10 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
     ),
     AcceptanceCriterion(
         id="live_observation_ready",
-        requirement="A non-gating four-slot real-model observation is frozen, public-API-only, and records zero rescue.",
+        requirement=(
+            "A command-owned, non-gating four-slot real-model experiment is frozen, "
+            "public-API-only, records zero rescue, and leaves a later-analysis handoff."
+        ),
         probes=(
             EvidenceProbe(
                 "scripts/live_acceptance_cases/benchmark_mother_natural_book_v1.json",
@@ -235,11 +238,25 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
             ),
             EvidenceProbe(
                 "scripts/live_book_observation_series.py",
-                ("technical_rescue_count", "engineering_acceptance_dependency", "run_series"),
+                (
+                    "technical_rescue_count",
+                    "engineering_acceptance_dependency",
+                    "LATEST_SERIES_FILENAME",
+                    "heartbeat_seconds",
+                    "active_observation",
+                    "run_series",
+                ),
                 ("/run/retry", "/run/resume", "/run/pause"),
             ),
-            EvidenceProbe("backend/tests/test_live_observation_series.py", ("exact_mode_schedule_without_rescue",)),
-            EvidenceProbe("package.json", ("observe:live-book-series",)),
+            EvidenceProbe(
+                "backend/tests/test_live_observation_series.py",
+                (
+                    "exact_mode_schedule_without_rescue",
+                    "unchanged_long_running_state_emits_truthful_heartbeat",
+                    "unexpected_runner_crash_leaves_durable_running_marker",
+                ),
+            ),
+            EvidenceProbe("package.json", ("experiment:live-book",)),
         ),
     ),
     AcceptanceCriterion(
@@ -248,7 +265,7 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
         probes=(
             EvidenceProbe("README.md", ("Pydantic AI", "SQLite", "简历")),
             EvidenceProbe("docs/architecture.md", ("Domain Harness", "Transactional Outbox", "LT1")),
-            EvidenceProbe("docs/local-usage.md", ("backend:migrate", "observe:live-book-series")),
+            EvidenceProbe("docs/local-usage.md", ("backend:migrate", "experiment:live-book")),
             EvidenceProbe("docs/acceptance-traceability.md", ("工程验收", "真实观测")),
         ),
     ),

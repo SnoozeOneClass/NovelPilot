@@ -828,10 +828,10 @@ arc_workspaces = Table(
     Column("correction_lineage_origin", String),
     Column("automatic_correction_round", Integer),
     Column("plan_ref_id", String),
-    Column("minimum_chapter_count", Integer),
-    Column("recommended_closure_chapter_count", Integer),
-    Column("maximum_chapter_count", Integer),
-    Column("closure_chapter_count", Integer),
+    Column("minimum_cumulative_chapter_count", Integer),
+    Column("recommended_closure_cumulative_chapter_count", Integer),
+    Column("maximum_cumulative_chapter_count", Integer),
+    Column("closure_cumulative_chapter_count", Integer),
     Column("guidance_ref_id", String),
     Column("repair_policy_id", String, nullable=False),
     Column("semantic_repair_count", Integer, nullable=False),
@@ -862,14 +862,18 @@ arc_workspaces = Table(
     ),
     _ck(
         "plan_count_shape",
-        "((plan_ref_id IS NULL AND minimum_chapter_count IS NULL "
-        "AND recommended_closure_chapter_count IS NULL "
-        "AND maximum_chapter_count IS NULL AND closure_chapter_count IS NULL) "
-        "OR (plan_ref_id IS NOT NULL AND minimum_chapter_count >= 1 "
-        "AND recommended_closure_chapter_count >= minimum_chapter_count "
-        "AND maximum_chapter_count >= recommended_closure_chapter_count "
-        "AND closure_chapter_count BETWEEN minimum_chapter_count "
-        "AND maximum_chapter_count))",
+        "((plan_ref_id IS NULL AND minimum_cumulative_chapter_count IS NULL "
+        "AND recommended_closure_cumulative_chapter_count IS NULL "
+        "AND maximum_cumulative_chapter_count IS NULL "
+        "AND closure_cumulative_chapter_count IS NULL) "
+        "OR (plan_ref_id IS NOT NULL AND minimum_cumulative_chapter_count >= 1 "
+        "AND recommended_closure_cumulative_chapter_count "
+        ">= minimum_cumulative_chapter_count "
+        "AND maximum_cumulative_chapter_count "
+        ">= recommended_closure_cumulative_chapter_count "
+        "AND closure_cumulative_chapter_count "
+        "BETWEEN minimum_cumulative_chapter_count "
+        "AND maximum_cumulative_chapter_count))",
     ),
     _ck(
         "prior_arc_pair",
@@ -971,10 +975,10 @@ arc_review_submissions = Table(
     Column("prior_arc_baseline_id", String),
     Column("purpose", String, nullable=False),
     Column("plan_ref_id", String, nullable=False),
-    Column("minimum_chapter_count", Integer, nullable=False),
-    Column("recommended_closure_chapter_count", Integer, nullable=False),
-    Column("maximum_chapter_count", Integer, nullable=False),
-    Column("closure_chapter_count", Integer, nullable=False),
+    Column("minimum_cumulative_chapter_count", Integer, nullable=False),
+    Column("recommended_closure_cumulative_chapter_count", Integer, nullable=False),
+    Column("maximum_cumulative_chapter_count", Integer, nullable=False),
+    Column("closure_cumulative_chapter_count", Integer, nullable=False),
     Column("content_manifest_ref_id", String, nullable=False),
     Column("content_fingerprint", String, nullable=False),
     Column("disposition", String, nullable=False),
@@ -986,11 +990,14 @@ arc_review_submissions = Table(
     _ck("workspace_lock_version_positive", "workspace_lock_version >= 1"),
     _ck(
         "chapter_count_ranges",
-        "minimum_chapter_count >= 1 "
-        "AND recommended_closure_chapter_count >= minimum_chapter_count "
-        "AND maximum_chapter_count >= recommended_closure_chapter_count "
-        "AND closure_chapter_count BETWEEN minimum_chapter_count "
-        "AND maximum_chapter_count",
+        "minimum_cumulative_chapter_count >= 1 "
+        "AND recommended_closure_cumulative_chapter_count "
+        ">= minimum_cumulative_chapter_count "
+        "AND maximum_cumulative_chapter_count "
+        ">= recommended_closure_cumulative_chapter_count "
+        "AND closure_cumulative_chapter_count "
+        "BETWEEN minimum_cumulative_chapter_count "
+        "AND maximum_cumulative_chapter_count",
     ),
     _ck("content_fingerprint", _sha_expression("content_fingerprint")),
     _enum_ck("purpose", "purpose", ("regular", "final")),
@@ -1158,7 +1165,7 @@ arc_approvals = Table(
     Column("submission_id", String, nullable=False),
     Column("review_id", String, nullable=False),
     Column("decision", String, nullable=False),
-    Column("closure_chapter_count", Integer),
+    Column("closure_cumulative_chapter_count", Integer),
     Column("created_at_ms", Integer, nullable=False),
     *_project_owned_constraints(),
     UniqueConstraint("gate_id"),
@@ -1176,8 +1183,9 @@ arc_approvals = Table(
     _enum_ck("decision", "decision", ("approved", "rejected")),
     _ck(
         "approval_closure_count",
-        "((decision = 'approved' AND closure_chapter_count >= 1) "
-        "OR (decision = 'rejected' AND closure_chapter_count IS NULL))",
+        "((decision = 'approved' AND closure_cumulative_chapter_count >= 1) "
+        "OR (decision = 'rejected' "
+        "AND closure_cumulative_chapter_count IS NULL))",
     ),
     ForeignKeyConstraint(
         ["project_id", "book_id", "arc_id", "submission_id", "review_id", "gate_id"],
@@ -1210,10 +1218,10 @@ arc_baselines = Table(
     Column("prior_arc_baseline_id", String),
     Column("purpose", String, nullable=False),
     Column("plan_ref_id", String, nullable=False),
-    Column("minimum_chapter_count", Integer, nullable=False),
-    Column("recommended_closure_chapter_count", Integer, nullable=False),
-    Column("maximum_chapter_count", Integer, nullable=False),
-    Column("closure_chapter_count", Integer, nullable=False),
+    Column("minimum_cumulative_chapter_count", Integer, nullable=False),
+    Column("recommended_closure_cumulative_chapter_count", Integer, nullable=False),
+    Column("maximum_cumulative_chapter_count", Integer, nullable=False),
+    Column("closure_cumulative_chapter_count", Integer, nullable=False),
     Column("revision_origin", String, nullable=False),
     Column("authorization_kind", String, nullable=False),
     Column("approval_gate_id", String),
@@ -1232,11 +1240,14 @@ arc_baselines = Table(
     ),
     _ck(
         "chapter_count_ranges",
-        "minimum_chapter_count >= 1 "
-        "AND recommended_closure_chapter_count >= minimum_chapter_count "
-        "AND maximum_chapter_count >= recommended_closure_chapter_count "
-        "AND closure_chapter_count BETWEEN minimum_chapter_count "
-        "AND maximum_chapter_count",
+        "minimum_cumulative_chapter_count >= 1 "
+        "AND recommended_closure_cumulative_chapter_count "
+        ">= minimum_cumulative_chapter_count "
+        "AND maximum_cumulative_chapter_count "
+        ">= recommended_closure_cumulative_chapter_count "
+        "AND closure_cumulative_chapter_count "
+        "BETWEEN minimum_cumulative_chapter_count "
+        "AND maximum_cumulative_chapter_count",
     ),
     _ck(
         "prior_arc_pair",
@@ -1250,7 +1261,8 @@ arc_baselines = Table(
         "authorization",
         "((authorization_kind = 'policy_auto' AND approval_gate_id IS NULL "
         "AND approval_id IS NULL "
-        "AND closure_chapter_count = recommended_closure_chapter_count) "
+        "AND closure_cumulative_chapter_count "
+        "= recommended_closure_cumulative_chapter_count) "
         "OR (authorization_kind = 'human_approval' AND approval_gate_id IS NOT NULL "
         "AND approval_id IS NOT NULL))",
     ),
@@ -1582,7 +1594,7 @@ chapter_reviews = Table(
     _enum_ck(
         "decision",
         "decision",
-        ("pass", "local_repair", "escalate_to_arc", "needs_user"),
+        ("pass", "local_repair", "escalate_to_arc"),
     ),
     _ck("rubric_version_positive", "rubric_version >= 1"),
     _ck(
@@ -2425,8 +2437,8 @@ arc_closure_reviews = Table(
     Column("canon_baseline_id", String, nullable=False),
     Column("terminal_chapter_id", String, nullable=False),
     Column("terminal_chapter_baseline_id", String, nullable=False),
-    Column("committed_chapter_count", Integer, nullable=False),
-    Column("closure_chapter_count", Integer, nullable=False),
+    Column("cumulative_committed_chapter_count", Integer, nullable=False),
+    Column("closure_cumulative_chapter_count", Integer, nullable=False),
     Column("chapter_set_fingerprint", String, nullable=False),
     Column("chapter_set_manifest_ref_id", String, nullable=False),
     Column("source_task_id", String, nullable=False),
@@ -2463,8 +2475,9 @@ arc_closure_reviews = Table(
     ),
     _ck(
         "chapter_counts",
-        "committed_chapter_count >= 1 "
-        "AND closure_chapter_count = committed_chapter_count",
+        "cumulative_committed_chapter_count >= 1 "
+        "AND closure_cumulative_chapter_count "
+        "= cumulative_committed_chapter_count",
     ),
     _ck("chapter_set_fingerprint", _sha_expression("chapter_set_fingerprint")),
     _ck("exact_input_fingerprint", _sha_expression("exact_input_fingerprint")),
@@ -2592,7 +2605,7 @@ arc_closures = Table(
     Column("canon_baseline_id", String, nullable=False),
     Column("terminal_chapter_id", String, nullable=False),
     Column("terminal_chapter_baseline_id", String, nullable=False),
-    Column("committed_chapter_count", Integer, nullable=False),
+    Column("cumulative_committed_chapter_count", Integer, nullable=False),
     Column("chapter_set_fingerprint", String, nullable=False),
     Column("chapter_set_manifest_ref_id", String, nullable=False),
     Column("normalized_result_ref_id", String, nullable=False),
@@ -2607,7 +2620,10 @@ arc_closures = Table(
         "((closure_version = 1 AND parent_closure_id IS NULL) "
         "OR (closure_version >= 2 AND parent_closure_id IS NOT NULL))",
     ),
-    _ck("committed_chapter_count_positive", "committed_chapter_count >= 1"),
+    _ck(
+        "cumulative_committed_chapter_count_positive",
+        "cumulative_committed_chapter_count >= 1",
+    ),
     _ck("chapter_set_fingerprint", _sha_expression("chapter_set_fingerprint")),
     ForeignKeyConstraint(
         ["project_id", "book_id", "arc_id", "parent_closure_id"],

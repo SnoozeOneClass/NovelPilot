@@ -28,7 +28,10 @@ from app.db.schema import (
     generation_runs,
     story_arcs,
 )
-from app.domain.arc.commands import ArcCommandService
+from app.domain.arc.commands import (
+    ArcCommandService,
+    _require_cumulative_arc_budget,
+)
 from app.domain.arc.contracts import (
     ApplyArcTaskRequest,
     ApproveArcRequest,
@@ -108,10 +111,10 @@ def _arc_plan(
         character_obligations=["The investigator commits to verifiable evidence."],
         foreshadowing_obligations=[],
         prohibitions=["Do not invalidate committed evidence as a dream."],
-        minimum_chapter_count=target_chapter_count,
-        recommended_closure_chapter_count=target_chapter_count,
-        maximum_chapter_count=min(30, target_chapter_count + 2),
-        closure_chapter_count=target_chapter_count,
+        minimum_cumulative_chapter_count=target_chapter_count,
+        recommended_closure_cumulative_chapter_count=target_chapter_count,
+        maximum_cumulative_chapter_count=min(12, target_chapter_count + 2),
+        closure_cumulative_chapter_count=target_chapter_count,
         closure_signals=[
             ArcClosureSignal(
                 signal_key="first_edit_source_identified",
@@ -389,6 +392,36 @@ async def _prepare_reviewed_arc(
     )
 
 
+def test_cumulative_arc_budget_must_move_forward_and_fit_book_maximum() -> None:
+    _require_cumulative_arc_budget(
+        current_book_chapter_count=10,
+        book_maximum_chapter_count=22,
+        minimum_cumulative_chapter_count=18,
+        recommended_closure_cumulative_chapter_count=20,
+        maximum_cumulative_chapter_count=22,
+        closure_cumulative_chapter_count=20,
+    )
+
+    with pytest.raises(CommandPreconditionError, match="approved Book maximum"):
+        _require_cumulative_arc_budget(
+            current_book_chapter_count=10,
+            book_maximum_chapter_count=22,
+            minimum_cumulative_chapter_count=18,
+            recommended_closure_cumulative_chapter_count=20,
+            maximum_cumulative_chapter_count=23,
+            closure_cumulative_chapter_count=20,
+        )
+    with pytest.raises(CommandPreconditionError, match="current Book count"):
+        _require_cumulative_arc_budget(
+            current_book_chapter_count=10,
+            book_maximum_chapter_count=22,
+            minimum_cumulative_chapter_count=10,
+            recommended_closure_cumulative_chapter_count=20,
+            maximum_cumulative_chapter_count=22,
+            closure_cumulative_chapter_count=20,
+        )
+
+
 def test_full_auto_pass_commits_without_arc_gate_and_preserves_final_hint(
     tmp_path: Path,
 ) -> None:
@@ -426,7 +459,7 @@ def test_full_auto_pass_commits_without_arc_gate_and_preserves_final_hint(
                 idempotency_key="project-auto:arc-commit",
             )
             assert committed.result.authorization_kind == "policy_auto"
-            assert committed.result.closure_chapter_count == 3
+            assert committed.result.closure_cumulative_chapter_count == 3
             assert committed.result.lifecycle_status == "active"
             async with engine.connect() as connection:
                 arc = (
@@ -442,8 +475,8 @@ def test_full_auto_pass_commits_without_arc_gate_and_preserves_final_hint(
                     await connection.execute(
                         select(
                             arc_baselines.c.purpose,
-                            arc_baselines.c.recommended_closure_chapter_count,
-                            arc_baselines.c.closure_chapter_count,
+                            arc_baselines.c.recommended_closure_cumulative_chapter_count,
+                            arc_baselines.c.closure_cumulative_chapter_count,
                             arc_baselines.c.authorization_kind,
                         ).where(arc_baselines.c.id == committed.result.baseline_id)
                     )
@@ -503,12 +536,12 @@ def test_participatory_pass_waits_for_exactly_one_adjustable_user_approval(
                     submission_id=setup.submission_id,
                     review_id=setup.review.review_id,
                     approval_gate_id=setup.review.approval_gate_id,
-                    closure_chapter_count=4,
+                    closure_cumulative_chapter_count=4,
                 ),
                 idempotency_key="participatory:approve",
             )
             assert committed.result.authorization_kind == "human_approval"
-            assert committed.result.closure_chapter_count == 4
+            assert committed.result.closure_cumulative_chapter_count == 4
             async with engine.connect() as connection:
                 assert await connection.scalar(select(func.count()).select_from(arc_approvals)) == 1
                 assert (
@@ -587,7 +620,7 @@ def test_full_auto_review_then_mode_switch_creates_persistent_gate(
                     submission_id=setup.submission_id,
                     review_id=setup.review.review_id,
                     approval_gate_id=gate_id,
-                    closure_chapter_count=3,
+                    closure_cumulative_chapter_count=3,
                 ),
                 idempotency_key="race:approve",
             )
@@ -878,8 +911,8 @@ def test_arc_local_repair_is_bounded_by_components_and_five_attempts(
                 assert merged_plan.purpose == setup.plan.purpose
                 assert merged_plan.title == setup.plan.title
                 assert (
-                    merged_plan.closure_chapter_count
-                    == setup.plan.closure_chapter_count
+                    merged_plan.closure_cumulative_chapter_count
+                    == setup.plan.closure_cumulative_chapter_count
                 )
                 assert merged_plan.closure_signals == setup.plan.closure_signals
 

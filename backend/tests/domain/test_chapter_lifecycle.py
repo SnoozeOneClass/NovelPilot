@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.agents.contracts import (
     ChapterCanonRepair,
     ChapterDraftResult,
+    ChapterEvaluationIssue,
     ChapterObservationRepairPatch,
     ChapterObservationResult,
     ChapterObservationsRepair,
@@ -30,6 +31,7 @@ from app.db.schema import (
     canon_baselines,
     chapter_baselines,
     chapter_arc_change_requests,
+    chapter_reviews,
     chapter_review_submissions,
     chapter_workspaces,
     chapters,
@@ -75,12 +77,12 @@ async def _prepare_reviewed_chapter(
     target_chapter_count: int,
     canon_change: bool,
     evaluation: LayerEvaluationResult | None = None,
-    repair_count_before_review: int | None = None,
     arc_purpose: Literal["regular", "final"] = "regular",
     foundation: ApprovedFoundation | None = None,
     idempotency_suffix: str = "",
     canon_evidence_hint: str = "The blue ink changed while she watched",
     canon_category: CanonCategory = "characters",
+    canon_proposals: list[SemanticCanonProposal] | None = None,
 ) -> ReviewedChapter:
     if foundation is None:
         foundation = await seed_approved_book_and_arc(
@@ -174,17 +176,23 @@ async def _prepare_reviewed_chapter(
         idempotency_key=f"{chapter_id}:apply-draft",
     )
     proposals = (
-        [
-            SemanticCanonProposal(
-                category=canon_category,
-                operation="add",
-                subject="Mara",
-                semantic_change="Mara directly witnesses written memory evidence changing.",
-                evidence_hint=canon_evidence_hint,
-            )
-        ]
-        if canon_change
-        else []
+        canon_proposals
+        if canon_proposals is not None
+        else (
+            [
+                SemanticCanonProposal(
+                    category=canon_category,
+                    subject="Mara",
+                    semantic_change=(
+                        "Mara directly witnesses written memory evidence changing."
+                    ),
+                    resolved=False,
+                    evidence_hint=canon_evidence_hint,
+                )
+            ]
+            if canon_change
+            else []
+        )
     )
     observation_task, observation_attempt = await insert_successful_task(
         engine,
@@ -227,12 +235,7 @@ async def _prepare_reviewed_chapter(
         ),
         idempotency_key=f"{chapter_id}:submit",
     )
-    evaluator_task_kind = (
-        "verify_repair.chapter"
-        if repair_count_before_review is not None
-        and repair_count_before_review > 0
-        else "evaluate.chapter"
-    )
+    evaluator_task_kind = "evaluate.chapter"
     evaluator_task, evaluator_attempt = await insert_successful_task(
         engine,
         project_id=project_id,
@@ -260,13 +263,6 @@ async def _prepare_reviewed_chapter(
             )
         ),
     )
-    if repair_count_before_review is not None:
-        async with engine.begin() as connection:
-            await connection.execute(
-                update(chapter_workspaces)
-                .where(chapter_workspaces.c.chapter_id == chapter_id)
-                .values(semantic_repair_count=repair_count_before_review)
-            )
     reviewed = await service.record_review(
         RecordChapterReviewRequest(
             project_id=project_id,
@@ -280,7 +276,6 @@ async def _prepare_reviewed_chapter(
             rubric_version=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
                 evaluator_task_kind
             ).rubric_version,
-            deterministic_precheck={"passed": True, "checks": ["canon_evidence"]},
         ),
         idempotency_key=f"{chapter_id}:review",
     )
@@ -298,6 +293,227 @@ async def _prepare_reviewed_chapter(
         review_id=reviewed.result.review_id,
         workspace_lock_version=final_workspace_lock,
     )
+
+
+def test_real_precheck_routes_conflicting_canon_assertions_to_repair(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "chapter-real-precheck.sqlite3"
+    command.upgrade(alembic_config(database), "head")
+
+    async def exercise() -> None:
+        engine = create_sqlite_async_engine(database)
+        try:
+            first = SemanticCanonProposal(
+                category="world_facts",
+                subject="The analogue record",
+                semantic_change="The record supports the witness.",
+                resolved=False,
+                evidence_hint="The analogue record agrees with the witness.",
+            )
+            conflicting = first.model_copy(
+                update={
+                    "semantic_change": "The record disproves the witness.",
+                    "evidence_hint": "The analogue record contradicts the witness.",
+                }
+            )
+            ready = await _prepare_reviewed_chapter(
+                engine,
+                project_id="project-real-precheck",
+                target_chapter_count=2,
+                canon_change=False,
+                canon_proposals=[first, conflicting],
+            )
+
+            async with engine.connect() as connection:
+                review = (
+                    await connection.execute(
+                        select(
+                            chapter_reviews.c.decision,
+                            chapter_reviews.c.precheck_ref_id,
+                            chapter_reviews.c.detail_ref_id,
+                            chapter_reviews.c.repair_contract_ref_id,
+                        ).where(chapter_reviews.c.id == ready.review_id)
+                    )
+                ).one()
+                observations_ref_id = await connection.scalar(
+                    select(chapter_review_submissions.c.observations_ref_id).where(
+                        chapter_review_submissions.c.id == ready.submission_id
+                    )
+                )
+                assert observations_ref_id is not None
+                content_versions = {
+                    row.semantic_kind: row.schema_version
+                    for row in (
+                        await connection.execute(
+                            select(
+                                content_refs.c.semantic_kind,
+                                content_refs.c.schema_version,
+                            ).where(
+                                content_refs.c.id.in_(
+                                    (
+                                        review.precheck_ref_id,
+                                        review.detail_ref_id,
+                                        review.repair_contract_ref_id,
+                                        observations_ref_id,
+                                    )
+                                )
+                            )
+                        )
+                    )
+                }
+                workspace_state = await connection.scalar(
+                    select(chapter_workspaces.c.state).where(
+                        chapter_workspaces.c.chapter_id == ready.chapter_id
+                    )
+                )
+                run_status = await connection.scalar(
+                    select(generation_runs.c.status).where(
+                        generation_runs.c.id == ready.foundation.run_id
+                    )
+                )
+                content = ContentRepository(connection)
+                precheck = json.loads(
+                    (
+                        await content.get_packed(
+                            project_id=ready.foundation.project_id,
+                            ref_id=review.precheck_ref_id,
+                        )
+                    ).unpack_and_verify()
+                )
+                assert review.repair_contract_ref_id is not None
+                repair = json.loads(
+                    (
+                        await content.get_packed(
+                            project_id=ready.foundation.project_id,
+                            ref_id=review.repair_contract_ref_id,
+                        )
+                    ).unpack_and_verify()
+                )
+
+            assert review.decision == "local_repair"
+            assert precheck["passed"] is False
+            assert precheck["checks"]["canon_patch_applicable"] is False
+            assert precheck["issues"][0]["code"] == "canon_subject_assertion_conflict"
+            assert repair["authorized_components"] == ["canon"]
+            assert content_versions == {
+                "chapter.deterministic_precheck": 3,
+                "chapter.review_detail": 3,
+                "chapter.repair_contract": 3,
+                "chapter.observations": 2,
+            }
+            assert workspace_state == "active"
+            assert run_status == "running"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+def test_plan_repair_replaces_mutable_plan_and_invalidates_downstream(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "chapter-plan-repair.sqlite3"
+    command.upgrade(alembic_config(database), "head")
+
+    async def exercise() -> None:
+        engine = create_sqlite_async_engine(database)
+        try:
+            ready = await _prepare_reviewed_chapter(
+                engine,
+                project_id="project-plan-repair",
+                target_chapter_count=2,
+                canon_change=False,
+                evaluation=LayerEvaluationResult(
+                    decision="local_repair",
+                    summary=(
+                        "The mutable Chapter plan overclaims evidence but can be "
+                        "replaced under the same Arc."
+                    ),
+                    issues=[
+                        ChapterEvaluationIssue(
+                            code="chapter_plan_infeasible",
+                            subject="mutable Chapter plan",
+                            summary="The plan overclaims evidence available under this Arc.",
+                            affected_components=["plan"],
+                        )
+                    ],
+                ),
+            )
+            replacement = ChapterPlanProposal(
+                title="A Signal Without a Name",
+                purpose=(
+                    "Preserve the Arc evidence boundary while advancing the investigation."
+                ),
+                scene_beats=[
+                    "The witness records only the light that was actually observed.",
+                    "Investigators separate identity from timing.",
+                ],
+                required_continuity=[
+                    "No current physical evidence identifies the signaler or exact time."
+                ],
+            )
+            task_id, attempt_id = await insert_successful_task(
+                engine,
+                project_id=ready.foundation.project_id,
+                run_id=ready.foundation.run_id,
+                task_id=f"{ready.chapter_id}:repair-plan",
+                attempt_id=f"{ready.chapter_id}:repair-plan:attempt",
+                role="chapter_writer",
+                task_kind="chapter.repair.plan",
+                scope_layer="chapter",
+                book_id=ready.foundation.book_id,
+                book_baseline_id=ready.foundation.book_baseline_id,
+                arc_id=ready.foundation.arc_id,
+                arc_baseline_id=ready.foundation.arc_baseline_id,
+                chapter_id=ready.chapter_id,
+                canon_baseline_id=ready.foundation.canon_baseline_id,
+                workspace_lock_version=ready.workspace_lock_version,
+                result=replacement,
+            )
+            applied = await ChapterCommandService(CommandBus(engine)).apply_repair_result(
+                ApplyChapterTaskRequest(
+                    project_id=ready.foundation.project_id,
+                    chapter_id=ready.chapter_id,
+                    task_id=task_id,
+                    attempt_id=attempt_id,
+                    expected_workspace_lock_version=ready.workspace_lock_version,
+                ),
+                idempotency_key=f"{ready.chapter_id}:apply-plan-repair",
+            )
+
+            assert applied.result.component == "repair_plan"
+            async with engine.connect() as connection:
+                workspace = (
+                    await connection.execute(
+                        select(
+                            chapter_workspaces.c.plan_ref_id,
+                            chapter_workspaces.c.draft_ref_id,
+                            chapter_workspaces.c.observations_ref_id,
+                            chapter_workspaces.c.candidate_canon_patch_ref_id,
+                            chapter_workspaces.c.semantic_repair_count,
+                        ).where(chapter_workspaces.c.chapter_id == ready.chapter_id)
+                    )
+                ).one()
+                assert workspace.plan_ref_id is not None
+                stored_plan = ChapterPlanProposal.model_validate_json(
+                    (
+                        await ContentRepository(connection).get_packed(
+                            project_id=ready.foundation.project_id,
+                            ref_id=workspace.plan_ref_id,
+                        )
+                    ).unpack_and_verify()
+                )
+
+            assert stored_plan == replacement
+            assert workspace.draft_ref_id is None
+            assert workspace.observations_ref_id is None
+            assert workspace.candidate_canon_patch_ref_id is None
+            assert workspace.semantic_repair_count == 1
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
 
 
 def test_chapter_and_changed_canon_commit_atomically_and_open_arc_closure(
@@ -603,7 +819,14 @@ def test_local_repair_changes_only_authorized_component_and_consumes_one_budget(
                 evaluation=LayerEvaluationResult(
                     decision="local_repair",
                     summary="One paragraph overstates what Mara can know.",
-                    repair_scope=["prose"],
+                    issues=[
+                        ChapterEvaluationIssue(
+                            code="prose_knowledge_overclaim",
+                            subject="Mara's knowledge",
+                            summary="The prose overstates what Mara can know.",
+                            affected_components=["prose"],
+                        )
+                    ],
                 ),
             )
             task_id, attempt_id = await insert_successful_task(
@@ -677,7 +900,14 @@ def test_observation_repair_patch_preserves_unauthorized_canon_component(
                 evaluation=LayerEvaluationResult(
                     decision="local_repair",
                     summary="The summary and continuity observation need clarification.",
-                    repair_scope=["observations"],
+                    issues=[
+                        ChapterEvaluationIssue(
+                            code="observation_clarity",
+                            subject="Chapter observations",
+                            summary="The summary and continuity observation need clarification.",
+                            affected_components=["observations"],
+                        )
+                    ],
                 ),
             )
             service = ChapterCommandService(CommandBus(engine))
@@ -845,14 +1075,21 @@ def test_canon_repair_patch_preserves_unauthorized_observation_components(
                 evaluation=LayerEvaluationResult(
                     decision="local_repair",
                     summary="Only the Canon proposal needs correction.",
-                    repair_scope=["canon"],
+                    issues=[
+                        ChapterEvaluationIssue(
+                            code="canon_assertion_inaccurate",
+                            subject="mutable documentary evidence",
+                            summary="Only the Canon assertion needs correction.",
+                            affected_components=["canon"],
+                        )
+                    ],
                 ),
             )
             replacement = SemanticCanonProposal(
                 category="world_facts",
-                operation="add",
                 subject="Mutable documentary evidence",
                 semantic_change="Written statements can change while a witness watches.",
+                resolved=False,
                 evidence_hint="The blue ink changed while she watched",
             )
             result = ChapterObservationRepairPatch(
@@ -918,7 +1155,199 @@ def test_canon_repair_patch_preserves_unauthorized_observation_components(
     asyncio.run(exercise())
 
 
-def test_sixth_semantic_repair_is_not_started_and_run_failure_pauses(
+def test_multi_component_repair_union_stalls_when_same_issue_persists(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "chapter-repair-stalled.sqlite3"
+    command.upgrade(alembic_config(database), "head")
+
+    async def exercise() -> None:
+        engine = create_sqlite_async_engine(database)
+        try:
+            ready = await _prepare_reviewed_chapter(
+                engine,
+                project_id="project-repair-stalled",
+                target_chapter_count=2,
+                canon_change=True,
+                evaluation=LayerEvaluationResult(
+                    decision="local_repair",
+                    summary="The observations and Canon assertion disagree.",
+                    issues=[
+                        ChapterEvaluationIssue(
+                            code="documentary_evidence_mismatch",
+                            subject="Mara's documentary evidence",
+                            summary=(
+                                "The observation summary and Canon assertion must be "
+                                "corrected together."
+                            ),
+                            affected_components=["observations", "canon"],
+                        )
+                    ],
+                ),
+            )
+            service = ChapterCommandService(CommandBus(engine))
+            async with engine.connect() as connection:
+                repair_ref_id = await connection.scalar(
+                    select(chapter_reviews.c.repair_contract_ref_id).where(
+                        chapter_reviews.c.id == ready.review_id
+                    )
+                )
+                assert repair_ref_id is not None
+                repair_contract = json.loads(
+                    (
+                        await ContentRepository(connection).get_packed(
+                            project_id=ready.foundation.project_id,
+                            ref_id=repair_ref_id,
+                        )
+                    ).unpack_and_verify()
+                )
+            assert repair_contract["authorized_components"] == [
+                "observations",
+                "canon",
+            ]
+
+            repair = ChapterObservationRepairPatch(
+                changes=[
+                    ChapterObservationsRepair(
+                        component="observations",
+                        summary=(
+                            "Mara sees the written confession change but cannot yet "
+                            "identify who caused it."
+                        ),
+                        continuity_observations=[
+                            "Mara preserves analogue copies for later comparison."
+                        ],
+                    ),
+                    ChapterCanonRepair(
+                        component="canon",
+                        canon_proposals=[
+                            SemanticCanonProposal(
+                                category="world_facts",
+                                subject="Mutable documentary evidence",
+                                semantic_change=(
+                                    "Written evidence can change while an observer watches."
+                                ),
+                                resolved=False,
+                                evidence_hint="The blue ink changed while she watched",
+                            )
+                        ],
+                    ),
+                ]
+            )
+            repair_task, repair_attempt = await insert_successful_task(
+                engine,
+                project_id=ready.foundation.project_id,
+                run_id=ready.foundation.run_id,
+                task_id=f"{ready.chapter_id}:repair-observation-and-canon",
+                attempt_id=(
+                    f"{ready.chapter_id}:repair-observation-and-canon:attempt"
+                ),
+                role="chapter_writer",
+                task_kind="chapter.repair.observation",
+                scope_layer="chapter",
+                book_id=ready.foundation.book_id,
+                book_baseline_id=ready.foundation.book_baseline_id,
+                arc_id=ready.foundation.arc_id,
+                arc_baseline_id=ready.foundation.arc_baseline_id,
+                chapter_id=ready.chapter_id,
+                canon_baseline_id=ready.foundation.canon_baseline_id,
+                workspace_lock_version=ready.workspace_lock_version,
+                result=repair,
+            )
+            applied = await service.apply_repair_result(
+                ApplyChapterTaskRequest(
+                    project_id=ready.foundation.project_id,
+                    chapter_id=ready.chapter_id,
+                    task_id=repair_task,
+                    attempt_id=repair_attempt,
+                    expected_workspace_lock_version=ready.workspace_lock_version,
+                ),
+                idempotency_key=f"{ready.chapter_id}:apply-multi-repair",
+            )
+            submitted = await service.submit_for_review(
+                SubmitChapterRequest(
+                    project_id=ready.foundation.project_id,
+                    chapter_id=ready.chapter_id,
+                    expected_workspace_lock_version=(
+                        applied.result.workspace_lock_version
+                    ),
+                ),
+                idempotency_key=f"{ready.chapter_id}:resubmit-after-multi-repair",
+            )
+            verification = LayerEvaluationResult(
+                decision="local_repair",
+                summary="The same documentary-evidence mismatch remains.",
+                issues=[
+                    ChapterEvaluationIssue(
+                        code="documentary_evidence_mismatch",
+                        subject="Mara's documentary evidence",
+                        summary=(
+                            "The observation summary and Canon assertion still do "
+                            "not establish the same fact."
+                        ),
+                        affected_components=["canon"],
+                    )
+                ],
+            )
+            verify_task, verify_attempt = await insert_successful_task(
+                engine,
+                project_id=ready.foundation.project_id,
+                run_id=ready.foundation.run_id,
+                task_id=f"{ready.chapter_id}:verify-multi-repair",
+                attempt_id=f"{ready.chapter_id}:verify-multi-repair:attempt",
+                role="evaluator",
+                task_kind="verify_repair.chapter",
+                scope_layer="chapter",
+                book_id=ready.foundation.book_id,
+                book_baseline_id=ready.foundation.book_baseline_id,
+                arc_id=ready.foundation.arc_id,
+                arc_baseline_id=ready.foundation.arc_baseline_id,
+                chapter_id=ready.chapter_id,
+                canon_baseline_id=ready.foundation.canon_baseline_id,
+                workspace_lock_version=applied.result.workspace_lock_version,
+                result=verification,
+            )
+            strategy = DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                "verify_repair.chapter"
+            )
+            await service.record_review(
+                RecordChapterReviewRequest(
+                    project_id=ready.foundation.project_id,
+                    chapter_id=ready.chapter_id,
+                    submission_id=submitted.result.submission_id,
+                    evaluator_task_id=verify_task,
+                    evaluator_attempt_id=verify_attempt,
+                    rubric_id=strategy.rubric_id,
+                    rubric_version=strategy.rubric_version,
+                ),
+                idempotency_key=f"{ready.chapter_id}:verify-stalled-repair",
+            )
+            async with engine.connect() as connection:
+                run = (
+                    await connection.execute(
+                        select(
+                            generation_runs.c.status,
+                            generation_runs.c.failure_code,
+                        ).where(generation_runs.c.id == ready.foundation.run_id)
+                    )
+                ).one()
+                repair_tasks = await connection.scalar(
+                    select(func.count())
+                    .select_from(agent_tasks)
+                    .where(
+                        agent_tasks.c.project_id == ready.foundation.project_id,
+                        agent_tasks.c.task_kind.like("chapter.repair.%"),
+                    )
+                )
+            assert tuple(run) == ("failure_paused", "semantic_repair_stalled")
+            assert repair_tasks == 1
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+def test_sixth_distinct_semantic_repair_is_not_started_and_run_failure_pauses(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "chapter-repair-cap.sqlite3"
@@ -934,10 +1363,122 @@ def test_sixth_semantic_repair_is_not_started_and_run_failure_pauses(
                 canon_change=False,
                 evaluation=LayerEvaluationResult(
                     decision="local_repair",
-                    summary="Another local prose repair would be required.",
-                    repair_scope=["prose"],
+                    summary="The observation overstates what Mara knows.",
+                    issues=[
+                        ChapterEvaluationIssue(
+                            code="knowledge_overclaim",
+                            subject="Mara's knowledge",
+                            summary="The observation overstates what Mara knows.",
+                            affected_components=["observations"],
+                        )
+                    ],
                 ),
-                repair_count_before_review=5,
+            )
+            service = ChapterCommandService(CommandBus(engine))
+            repair_task, repair_attempt = await insert_successful_task(
+                engine,
+                project_id=ready.foundation.project_id,
+                run_id=ready.foundation.run_id,
+                task_id=f"{ready.chapter_id}:repair-observation-before-cap",
+                attempt_id=(
+                    f"{ready.chapter_id}:repair-observation-before-cap:attempt"
+                ),
+                role="chapter_writer",
+                task_kind="chapter.repair.observation",
+                scope_layer="chapter",
+                book_id=ready.foundation.book_id,
+                book_baseline_id=ready.foundation.book_baseline_id,
+                arc_id=ready.foundation.arc_id,
+                arc_baseline_id=ready.foundation.arc_baseline_id,
+                chapter_id=ready.chapter_id,
+                canon_baseline_id=ready.foundation.canon_baseline_id,
+                workspace_lock_version=ready.workspace_lock_version,
+                result=ChapterObservationRepairPatch(
+                    changes=[
+                        ChapterObservationsRepair(
+                            component="observations",
+                            summary=(
+                                "Mara records only that the blue ink changed before her."
+                            ),
+                            continuity_observations=[
+                                "Mara preserves analogue copies for later comparison."
+                            ],
+                        )
+                    ]
+                ),
+            )
+            applied = await service.apply_repair_result(
+                ApplyChapterTaskRequest(
+                    project_id=ready.foundation.project_id,
+                    chapter_id=ready.chapter_id,
+                    task_id=repair_task,
+                    attempt_id=repair_attempt,
+                    expected_workspace_lock_version=ready.workspace_lock_version,
+                ),
+                idempotency_key=f"{ready.chapter_id}:apply-repair-before-cap",
+            )
+            async with engine.begin() as connection:
+                await connection.execute(
+                    update(chapter_workspaces)
+                    .where(chapter_workspaces.c.chapter_id == ready.chapter_id)
+                    .values(semantic_repair_count=5)
+                )
+            submitted = await service.submit_for_review(
+                SubmitChapterRequest(
+                    project_id=ready.foundation.project_id,
+                    chapter_id=ready.chapter_id,
+                    expected_workspace_lock_version=(
+                        applied.result.workspace_lock_version
+                    ),
+                ),
+                idempotency_key=f"{ready.chapter_id}:resubmit-at-cap",
+            )
+            verify_task, verify_attempt = await insert_successful_task(
+                engine,
+                project_id=ready.foundation.project_id,
+                run_id=ready.foundation.run_id,
+                task_id=f"{ready.chapter_id}:verify-distinct-issue-at-cap",
+                attempt_id=f"{ready.chapter_id}:verify-distinct-issue-at-cap:attempt",
+                role="evaluator",
+                task_kind="verify_repair.chapter",
+                scope_layer="chapter",
+                book_id=ready.foundation.book_id,
+                book_baseline_id=ready.foundation.book_baseline_id,
+                arc_id=ready.foundation.arc_id,
+                arc_baseline_id=ready.foundation.arc_baseline_id,
+                chapter_id=ready.chapter_id,
+                canon_baseline_id=ready.foundation.canon_baseline_id,
+                workspace_lock_version=applied.result.workspace_lock_version,
+                result=LayerEvaluationResult(
+                    decision="local_repair",
+                    summary="A distinct continuity issue remains.",
+                    issues=[
+                        ChapterEvaluationIssue(
+                            code="continuity_gap",
+                            subject="Mara's analogue copies",
+                            summary=(
+                                "The revised prose omits the already-required "
+                                "continuity consequence."
+                            ),
+                            affected_components=["observations"],
+                        )
+                    ],
+                ),
+            )
+            strategy = DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                "verify_repair.chapter"
+            )
+            await service.record_review(
+                RecordChapterReviewRequest(
+                    project_id=ready.foundation.project_id,
+                    chapter_id=ready.chapter_id,
+                    submission_id=submitted.result.submission_id,
+                    evaluator_task_id=verify_task,
+                    evaluator_attempt_id=verify_attempt,
+                    rubric_id=strategy.rubric_id,
+                    rubric_version=strategy.rubric_version,
+                ),
+                idempotency_key=f"{ready.chapter_id}:review-distinct-issue-at-cap",
             )
             async with engine.connect() as connection:
                 run = (
@@ -951,10 +1492,13 @@ def test_sixth_semantic_repair_is_not_started_and_run_failure_pauses(
                 repair_tasks = await connection.scalar(
                     select(func.count())
                     .select_from(agent_tasks)
-                    .where(agent_tasks.c.task_kind.like("chapter.repair.%"))
+                    .where(
+                        agent_tasks.c.project_id == ready.foundation.project_id,
+                        agent_tasks.c.task_kind.like("chapter.repair.%"),
+                    )
                 )
             assert tuple(run) == ("failure_paused", "semantic_repair_exhausted")
-            assert repair_tasks == 0
+            assert repair_tasks == 1
         finally:
             await engine.dispose()
 
@@ -978,6 +1522,17 @@ def test_chapter_escalation_opens_explicit_arc_request_and_blocks_workspace(
                 evaluation=LayerEvaluationResult(
                     decision="escalate_to_arc",
                     summary="The approved Arc requires a contradiction this Chapter cannot resolve.",
+                    issues=[
+                        ChapterEvaluationIssue(
+                            code="arc_contract_concern",
+                            subject="required Arc contradiction",
+                            summary=(
+                                "The approved Arc requires a contradiction this Chapter "
+                                "cannot resolve."
+                            ),
+                            affected_components=["plan"],
+                        )
+                    ],
                 ),
             )
             async with engine.connect() as connection:

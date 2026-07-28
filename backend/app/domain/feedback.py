@@ -1215,10 +1215,10 @@ class FeedbackCommandService:
             plan_ref_id=(
                 None if arc.current_baseline_id is None else workspace.plan_ref_id
             ),
-            recommended_closure_chapter_count=(
+            recommended_closure_cumulative_chapter_count=(
                 None
                 if arc.current_baseline_id is None
-                else workspace.recommended_closure_chapter_count
+                else workspace.recommended_closure_cumulative_chapter_count
             ),
             guidance_ref_id=feedback.content_ref_id,
             semantic_repair_count=0,

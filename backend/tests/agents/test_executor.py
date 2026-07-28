@@ -163,6 +163,55 @@ class AlwaysReadTimeoutBindingResolver:
         )
 
 
+class AlwaysEmptyBindingResolver:
+    def resolve(
+        self,
+        *,
+        profile: object,
+        expected_profile_fingerprint: str,
+        required_capabilities: object,
+        model_request_limit: int,
+        credential: ProfileCredential,
+    ) -> ResolvedModelBinding:
+        del profile, expected_profile_fingerprint, required_capabilities, credential
+        budget = ActivationRequestBudget(
+            model_request_limit=model_request_limit,
+            protocol="openai_responses",
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, request=request, content=b" ")
+
+        client = httpx.AsyncClient(
+            transport=build_observed_transport(
+                budget=budget,
+                wrapped=httpx.MockTransport(handler),
+            )
+        )
+
+        async def response(
+            _messages: list[object],
+            _info: AgentInfo,
+        ) -> AsyncIterator[str]:
+            async with client.stream(
+                "POST",
+                "https://provider.example/v1/responses",
+            ) as provider_response:
+                async for chunk in provider_response.aiter_bytes():
+                    if chunk:
+                        yield chunk.decode("utf-8")
+
+        return ResolvedModelBinding(
+            model=RequestCountingModel(
+                FunctionModel(stream_function=response),
+                budget=budget,
+            ),
+            budget=budget,
+            adapter_key="openai_responses",
+            _http_client=client,
+        )
+
+
 class AttemptTextStream(httpx.AsyncByteStream):
     def __init__(
         self,
@@ -729,6 +778,211 @@ def test_prose_replay_discards_partial_text_and_restarts_from_frozen_plan(
     assert budget.attempts[1].retry_decision == "completed"
 
 
+def test_empty_http_success_replays_same_prose_task_then_succeeds(
+    tmp_path: Path,
+) -> None:
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    async def exercise() -> tuple[str, list[AgentLiveEvent], ActivationRequestBudget]:
+        engine = create_sqlite_async_engine(tmp_path / "empty-prose-replay.sqlite3")
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(
+                200,
+                request=request,
+                stream=AttemptTextStream(
+                    request=request,
+                    content=(
+                        b" " if calls == 1 else b"complete prose after replay"
+                    ),
+                    interrupt=False,
+                ),
+            )
+
+        budget = ActivationRequestBudget(
+            model_request_limit=1,
+            protocol="openai_responses",
+        )
+        client = httpx.AsyncClient(
+            transport=build_observed_transport(
+                budget=budget,
+                wrapped=httpx.MockTransport(handler),
+            )
+        )
+
+        async def response(
+            _messages: list[object],
+            _info: AgentInfo,
+        ) -> AsyncIterator[str]:
+            async with client.stream(
+                "POST",
+                "https://provider.example/v1/responses",
+            ) as provider_response:
+                async for chunk in provider_response.aiter_bytes():
+                    if chunk:
+                        yield chunk.decode("utf-8")
+
+        profile = ProfileSnapshot.create(
+            profile_id="empty-prose-replay-profile",
+            display_name="Empty prose replay profile",
+            api_family="openai_responses",
+            base_url="https://provider.example/v1",
+            model_id="opaque-test-model",
+            capabilities=ProfileCapabilities(
+                text_streaming=True,
+                native_json_schema=True,
+            ),
+        )
+        plan = DEFAULT_TASK_REGISTRY.freeze_plan(
+            task_id="empty-chapter-draft-task",
+            project_id="project-empty-prose-replay",
+            run_id="run-empty-prose-replay",
+            task_key="chapter.draft:chapter-a:1",
+            action_key="chapter.draft",
+            role="chapter_writer",
+            task_kind="chapter.draft",
+            contract_version=1,
+            book_id="book-a",
+            arc_id="arc-a",
+            chapter_id="chapter-a",
+            canon_baseline_id="canon-a",
+            semantic_goal="Draft one complete chapter.",
+            prompt="Write the complete chapter from the frozen context.",
+            context_manifest={"plan": {"goal": "Recover the archive."}},
+            profile_snapshot=profile,
+            workspace_lock_version=1,
+        )
+        definition = DEFAULT_TASK_REGISTRY.get(
+            role=plan.role,
+            task_kind=plan.task_kind,
+            contract_version=plan.contract_version,
+        )
+        live = RecordingLivePublisher()
+        executor = AgentExecutor(
+            engine,
+            registry=DEFAULT_TASK_REGISTRY,
+            live_publisher=live,
+            sleep=no_sleep,
+        )
+        try:
+            output, _usage = await executor._run_agent(
+                plan=plan,
+                attempt_id="empty-chapter-draft-attempt",
+                definition=definition,
+                agent=build_agent(
+                    model=RequestCountingModel(
+                        FunctionModel(stream_function=response),
+                        budget=budget,
+                    ),
+                    definition=definition,
+                ),
+                budget=budget,
+                captured_messages=[],
+            )
+            return output.prose, live.events, budget
+        finally:
+            await client.aclose()
+            await engine.dispose()
+
+    prose, events, budget = asyncio.run(exercise())
+
+    assert prose == "complete prose after replay"
+    assert [event.kind for event in events] == [
+        "prose_delta",
+        "prose_discarded",
+        "attempt_restarting",
+        "prose_delta",
+    ]
+    assert budget.provider_request_count == 2
+    assert budget.transport_retry_count == 1
+    assert budget.attempts[0].retry_reason == "provider_stream_incomplete"
+    assert budget.attempts[1].retry_decision == "completed"
+
+
+def test_six_empty_http_successes_exhaust_stream_replay_budget(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "agent-executor-empty-exhaustion.sqlite3"
+    command.upgrade(alembic_config(database), "head")
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    async def exercise() -> AgentExecutionResult:
+        engine = create_sqlite_async_engine(database)
+        try:
+            created = await ProjectCommandService(CommandBus(engine)).create_project(
+                CreateProjectRequest(
+                    project_id="project-empty-exhaustion",
+                    creator_brief="A mystery returned through an empty Provider body.",
+                    operation_mode="full_auto",
+                ),
+                idempotency_key="create-project-empty-exhaustion",
+            )
+            profile = ProfileSnapshot.create(
+                profile_id="empty-retry-profile",
+                display_name="Empty retry profile",
+                api_family="openai_responses",
+                base_url="https://provider.example/v1",
+                model_id="opaque-test-model",
+                capabilities=ProfileCapabilities(
+                    text_streaming=True,
+                    native_json_schema=True,
+                ),
+            )
+            plan = DEFAULT_TASK_REGISTRY.freeze_plan(
+                task_id="empty-retry-exhaustion-task",
+                project_id=created.result.project_id,
+                run_id=created.result.generation_run_id,
+                task_key="evaluate.book:empty-retry-exhaustion",
+                action_key="evaluate.book",
+                role="evaluator",
+                task_kind="evaluate.book",
+                contract_version=1,
+                book_id=created.result.book_id,
+                canon_baseline_id=created.result.canon_baseline_id,
+                semantic_goal="Evaluate a frozen Book candidate.",
+                prompt="Evaluate the supplied frozen Book candidate.",
+                context_manifest={"candidate": {"direction": "An empty archive."}},
+                profile_snapshot=profile,
+                workspace_lock_version=1,
+            )
+            await AgentTaskStore(engine).create_initial(
+                plan=plan,
+                attempt_id="empty-retry-exhaustion-attempt",
+                created_at_ms=20,
+            )
+            result = await AgentExecutor(
+                engine,
+                registry=DEFAULT_TASK_REGISTRY,
+                resolver=AlwaysEmptyBindingResolver(),
+                now_ms=lambda: 100,
+                sleep=no_sleep,
+            ).execute(
+                project_id=plan.project_id,
+                task_id=plan.task_id,
+                attempt_id="empty-retry-exhaustion-attempt",
+                owner_instance_id="test-engine",
+                lease_token="lease-empty-retry-exhaustion",
+                credential=ProfileCredential.from_plaintext("not-persisted"),
+            )
+            return result
+        finally:
+            await engine.dispose()
+
+    result = asyncio.run(exercise())
+
+    assert result.status == "failed"
+    assert result.error_code == "provider_stream_retries_exhausted"
+    assert result.provider_request_count == 6
+    assert result.transport_retry_count == 5
+    assert result.model_request_count == 1
+
+
 @pytest.mark.parametrize(
     ("error", "retry_reason", "category", "code"),
     [
@@ -794,4 +1048,11 @@ def test_length_finish_reason_is_rejected_before_any_result_commit() -> None:
     response = ModelResponse(parts=[], finish_reason="length", state="complete")
 
     with pytest.raises(ProviderOutputTruncated):
+        raise_for_incomplete_stream(response)
+
+
+def test_complete_response_without_usable_output_is_incomplete() -> None:
+    response = ModelResponse(parts=[], finish_reason="stop", state="complete")
+
+    with pytest.raises(ProviderStreamIncomplete, match="no usable output"):
         raise_for_incomplete_stream(response)

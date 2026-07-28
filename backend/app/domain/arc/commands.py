@@ -105,6 +105,37 @@ def _merge_arc_repair(
     return proposal
 
 
+def _require_cumulative_arc_budget(
+    *,
+    current_book_chapter_count: int,
+    book_maximum_chapter_count: int,
+    minimum_cumulative_chapter_count: int,
+    recommended_closure_cumulative_chapter_count: int,
+    maximum_cumulative_chapter_count: int,
+    closure_cumulative_chapter_count: int,
+) -> None:
+    if not (
+        current_book_chapter_count
+        < minimum_cumulative_chapter_count
+        <= recommended_closure_cumulative_chapter_count
+        <= maximum_cumulative_chapter_count
+        <= book_maximum_chapter_count
+    ):
+        raise CommandPreconditionError(
+            "Arc cumulative Chapter budget must satisfy current Book count < "
+            "minimum <= recommended <= maximum <= approved Book maximum."
+        )
+    if not (
+        minimum_cumulative_chapter_count
+        <= closure_cumulative_chapter_count
+        <= maximum_cumulative_chapter_count
+    ):
+        raise CommandPreconditionError(
+            "Arc selected closure cumulative checkpoint must remain inside its "
+            "reviewed cumulative range."
+        )
+
+
 class ArcCommandService:
     def __init__(
         self,
@@ -180,10 +211,20 @@ class ArcCommandService:
         async def handler(session: StoreSession) -> CommandEffect[CreateStoryArcResult]:
             project = await session.projects.get(request.project_id)
             book = await session.books.get_for_project(request.project_id)
+            book_baseline = (
+                None
+                if book is None or book.current_baseline_id is None
+                else await session.books.get_baseline(
+                    project_id=request.project_id,
+                    book_id=request.book_id,
+                    baseline_id=book.current_baseline_id,
+                )
+            )
             if project is None:
                 raise ProjectNotFoundError(request.project_id)
             if (
                 book is None
+                or book_baseline is None
                 or book.id != request.book_id
                 or book.lifecycle_status != "active"
                 or book.current_completion_id is not None
@@ -191,6 +232,15 @@ class ArcCommandService:
                 or project.current_canon_baseline_id != request.expected_canon_baseline_id
             ):
                 raise CommandPreconditionError("Book or Canon dependencies are not current.")
+            current_book_chapter_count = (
+                await session.chapters.count_committed_for_book(
+                    book_id=request.book_id
+                )
+            )
+            if current_book_chapter_count >= book_baseline.maximum_chapter_count:
+                raise CommandPreconditionError(
+                    "Cannot create a Story Arc at the approved Book Chapter maximum."
+                )
             if (
                 await session.arcs.get_unfinished_for_book(
                     project_id=request.project_id,
@@ -288,10 +338,10 @@ class ArcCommandService:
                     correction_lineage_origin=None,
                     automatic_correction_round=None,
                     plan_ref_id=None,
-                    minimum_chapter_count=None,
-                    recommended_closure_chapter_count=None,
-                    maximum_chapter_count=None,
-                    closure_chapter_count=None,
+                    minimum_cumulative_chapter_count=None,
+                    recommended_closure_cumulative_chapter_count=None,
+                    maximum_cumulative_chapter_count=None,
+                    closure_cumulative_chapter_count=None,
                     repair_policy_id="semantic-repair-v1",
                     semantic_repair_count=0,
                     semantic_repair_limit=5,
@@ -430,10 +480,10 @@ class ArcCommandService:
                 correction_lineage_origin=None,
                 automatic_correction_round=None,
                 plan_ref_id=None,
-                minimum_chapter_count=None,
-                recommended_closure_chapter_count=None,
-                maximum_chapter_count=None,
-                closure_chapter_count=None,
+                minimum_cumulative_chapter_count=None,
+                recommended_closure_cumulative_chapter_count=None,
+                maximum_cumulative_chapter_count=None,
+                closure_cumulative_chapter_count=None,
                 semantic_repair_count=0,
                 stale_reason_code=None,
                 stale_at_ms=None,
@@ -650,7 +700,7 @@ class ArcCommandService:
                 semantic_kind="arc.plan",
                 media_type="application/json",
                 schema_id="arc-plan-proposal",
-                schema_version=1,
+                schema_version=2,
                 ref_id=plan_ref_id,
                 created_at_ms=timestamp,
             )
@@ -659,12 +709,18 @@ class ArcCommandService:
                 state="active",
                 lock_version=workspace.lock_version + 1,
                 plan_ref_id=plan_ref.id,
-                minimum_chapter_count=proposal.minimum_chapter_count,
-                recommended_closure_chapter_count=(
-                    proposal.recommended_closure_chapter_count
+                minimum_cumulative_chapter_count=(
+                    proposal.minimum_cumulative_chapter_count
                 ),
-                maximum_chapter_count=proposal.maximum_chapter_count,
-                closure_chapter_count=proposal.closure_chapter_count,
+                recommended_closure_cumulative_chapter_count=(
+                    proposal.recommended_closure_cumulative_chapter_count
+                ),
+                maximum_cumulative_chapter_count=(
+                    proposal.maximum_cumulative_chapter_count
+                ),
+                closure_cumulative_chapter_count=(
+                    proposal.closure_cumulative_chapter_count
+                ),
                 semantic_repair_count=workspace.semantic_repair_count + repair_increment,
                 stale_reason_code=None,
                 stale_at_ms=None,
@@ -701,12 +757,18 @@ class ArcCommandService:
                             "task_id": request.task_id,
                             "task_kind": task.task_kind,
                             "workspace_lock_version": updated_workspace.lock_version,
-                            "minimum_chapter_count": proposal.minimum_chapter_count,
-                            "recommended_closure_chapter_count": (
-                                proposal.recommended_closure_chapter_count
+                            "minimum_cumulative_chapter_count": (
+                                proposal.minimum_cumulative_chapter_count
                             ),
-                            "maximum_chapter_count": proposal.maximum_chapter_count,
-                            "closure_chapter_count": proposal.closure_chapter_count,
+                            "recommended_closure_cumulative_chapter_count": (
+                                proposal.recommended_closure_cumulative_chapter_count
+                            ),
+                            "maximum_cumulative_chapter_count": (
+                                proposal.maximum_cumulative_chapter_count
+                            ),
+                            "closure_cumulative_chapter_count": (
+                                proposal.closure_cumulative_chapter_count
+                            ),
                         },
                     ),
                 ),
@@ -754,10 +816,10 @@ class ArcCommandService:
                 or workspace.lock_version != request.expected_workspace_lock_version
                 or workspace.state != "active"
                 or workspace.plan_ref_id is None
-                or workspace.minimum_chapter_count is None
-                or workspace.recommended_closure_chapter_count is None
-                or workspace.maximum_chapter_count is None
-                or workspace.closure_chapter_count is None
+                or workspace.minimum_cumulative_chapter_count is None
+                or workspace.recommended_closure_cumulative_chapter_count is None
+                or workspace.maximum_cumulative_chapter_count is None
+                or workspace.closure_cumulative_chapter_count is None
                 or workspace.book_baseline_id != book.current_baseline_id
                 or workspace.canon_baseline_id != project.current_canon_baseline_id
             ):
@@ -771,7 +833,7 @@ class ArcCommandService:
             ):
                 raise CommandPreconditionError("An Arc submission is already pending.")
             manifest = {
-                "schema": "arc-review-manifest-v1",
+                "schema": "arc-review-manifest-v2",
                 "workspace_id": workspace.id,
                 "workspace_lock_version": workspace.lock_version,
                 "base_arc_baseline_id": workspace.base_arc_baseline_id,
@@ -781,12 +843,18 @@ class ArcCommandService:
                 "prior_arc_baseline_id": workspace.prior_arc_baseline_id,
                 "purpose": arc.purpose,
                 "plan_ref_id": workspace.plan_ref_id,
-                "minimum_chapter_count": workspace.minimum_chapter_count,
-                "recommended_closure_chapter_count": (
-                    workspace.recommended_closure_chapter_count
+                "minimum_cumulative_chapter_count": (
+                    workspace.minimum_cumulative_chapter_count
                 ),
-                "maximum_chapter_count": workspace.maximum_chapter_count,
-                "closure_chapter_count": workspace.closure_chapter_count,
+                "recommended_closure_cumulative_chapter_count": (
+                    workspace.recommended_closure_cumulative_chapter_count
+                ),
+                "maximum_cumulative_chapter_count": (
+                    workspace.maximum_cumulative_chapter_count
+                ),
+                "closure_cumulative_chapter_count": (
+                    workspace.closure_cumulative_chapter_count
+                ),
             }
             prepared_manifest = prepare_canonical_json(manifest)
             manifest_ref = await session.content.put(
@@ -795,7 +863,7 @@ class ArcCommandService:
                 semantic_kind="arc.review_manifest",
                 media_type="application/json",
                 schema_id="arc-review-manifest",
-                schema_version=1,
+                schema_version=2,
                 ref_id=manifest_ref_id,
                 created_at_ms=timestamp,
             )
@@ -814,12 +882,18 @@ class ArcCommandService:
                     prior_arc_baseline_id=workspace.prior_arc_baseline_id,
                     purpose=arc.purpose,
                     plan_ref_id=workspace.plan_ref_id,
-                    minimum_chapter_count=workspace.minimum_chapter_count,
-                    recommended_closure_chapter_count=(
-                        workspace.recommended_closure_chapter_count
+                    minimum_cumulative_chapter_count=(
+                        workspace.minimum_cumulative_chapter_count
                     ),
-                    maximum_chapter_count=workspace.maximum_chapter_count,
-                    closure_chapter_count=workspace.closure_chapter_count,
+                    recommended_closure_cumulative_chapter_count=(
+                        workspace.recommended_closure_cumulative_chapter_count
+                    ),
+                    maximum_cumulative_chapter_count=(
+                        workspace.maximum_cumulative_chapter_count
+                    ),
+                    closure_cumulative_chapter_count=(
+                        workspace.closure_cumulative_chapter_count
+                    ),
                     content_manifest_ref_id=manifest_ref.id,
                     content_fingerprint=prepared_manifest.sha256,
                     disposition="pending",
@@ -918,6 +992,7 @@ class ArcCommandService:
                 attempt_id=request.evaluator_attempt_id,
             )
             project = await session.projects.get(request.project_id)
+            book = await session.books.get_for_project(request.project_id)
             submission = await session.arcs.get_submission(
                 project_id=request.project_id,
                 submission_id=request.submission_id,
@@ -925,6 +1000,15 @@ class ArcCommandService:
             workspace = await session.arcs.get_workspace(
                 project_id=request.project_id,
                 arc_id=request.arc_id,
+            )
+            book_baseline = (
+                None
+                if book is None or submission is None
+                else await session.books.get_baseline(
+                    project_id=request.project_id,
+                    book_id=request.book_id,
+                    baseline_id=submission.book_baseline_id,
+                )
             )
             expected_task_kind = (
                 "verify_repair.arc"
@@ -937,7 +1021,10 @@ class ArcCommandService:
             if (
                 current_task != task
                 or project is None
+                or book is None
                 or submission is None
+                or book.current_baseline_id != submission.book_baseline_id
+                or book_baseline is None
                 or submission.book_id != request.book_id
                 or submission.arc_id != request.arc_id
                 or submission.disposition != "pending"
@@ -963,6 +1050,27 @@ class ArcCommandService:
                 or task.canon_baseline_id != submission.canon_baseline_id
             ):
                 raise CommandPreconditionError("Arc evaluation facts are stale or mismatched.")
+            if evaluation.decision == "pass":
+                _require_cumulative_arc_budget(
+                    current_book_chapter_count=(
+                        await session.chapters.count_committed_for_book(
+                            book_id=request.book_id
+                        )
+                    ),
+                    book_maximum_chapter_count=book_baseline.maximum_chapter_count,
+                    minimum_cumulative_chapter_count=(
+                        submission.minimum_cumulative_chapter_count
+                    ),
+                    recommended_closure_cumulative_chapter_count=(
+                        submission.recommended_closure_cumulative_chapter_count
+                    ),
+                    maximum_cumulative_chapter_count=(
+                        submission.maximum_cumulative_chapter_count
+                    ),
+                    closure_cumulative_chapter_count=(
+                        submission.closure_cumulative_chapter_count
+                    ),
+                )
             precheck_ref = await session.content.put(
                 project_id=request.project_id,
                 prepared=prepared_precheck,
@@ -1186,7 +1294,7 @@ class ArcCommandService:
     ) -> CommandExecution[CommitArcResult]:
         return await self._commit_baseline(
             request=request,
-            closure_chapter_count=None,
+            closure_cumulative_chapter_count=None,
             approval_gate_id=None,
             authorization_kind="policy_auto",
             idempotency_key=idempotency_key,
@@ -1200,7 +1308,9 @@ class ArcCommandService:
     ) -> CommandExecution[CommitArcResult]:
         return await self._commit_baseline(
             request=request,
-            closure_chapter_count=request.closure_chapter_count,
+            closure_cumulative_chapter_count=(
+                request.closure_cumulative_chapter_count
+            ),
             approval_gate_id=request.approval_gate_id,
             authorization_kind="human_approval",
             idempotency_key=idempotency_key,
@@ -1210,7 +1320,7 @@ class ArcCommandService:
         self,
         *,
         request: CommitArcAutoRequest,
-        closure_chapter_count: int | None,
+        closure_cumulative_chapter_count: int | None,
         approval_gate_id: str | None,
         authorization_kind: Literal["policy_auto", "human_approval"],
         idempotency_key: str,
@@ -1235,6 +1345,15 @@ class ArcCommandService:
         async def handler(session: StoreSession) -> CommandEffect[CommitArcResult]:
             project = await session.projects.get(request.project_id)
             book = await session.books.get_for_project(request.project_id)
+            book_baseline = (
+                None
+                if book is None or book.current_baseline_id is None
+                else await session.books.get_baseline(
+                    project_id=request.project_id,
+                    book_id=request.book_id,
+                    baseline_id=book.current_baseline_id,
+                )
+            )
             arc = await session.arcs.get(project_id=request.project_id, arc_id=request.arc_id)
             submission = await session.arcs.get_submission(
                 project_id=request.project_id,
@@ -1259,6 +1378,7 @@ class ArcCommandService:
             if (
                 project is None
                 or book is None
+                or book_baseline is None
                 or arc is None
                 or arc.book_id != request.book_id
                 or arc.current_baseline_id != request.expected_current_baseline_id
@@ -1295,7 +1415,7 @@ class ArcCommandService:
                     raise CommandPreconditionError(
                         "Auto Arc commit cannot bypass current mode or a persistent gate."
                     )
-                final_checkpoint = submission.closure_chapter_count
+                final_checkpoint = submission.closure_cumulative_chapter_count
             else:
                 if (
                     approval_gate_id is None
@@ -1303,25 +1423,29 @@ class ArcCommandService:
                     or gate.id != approval_gate_id
                     or gate.submission_id != submission.id
                     or gate.review_id != review.id
-                    or closure_chapter_count is None
+                    or closure_cumulative_chapter_count is None
                 ):
                     raise CommandPreconditionError("Arc approval gate is stale or incomplete.")
-                final_checkpoint = closure_chapter_count
-            committed_count = await session.arcs.count_committed_chapters(
-                arc_id=request.arc_id
+                final_checkpoint = closure_cumulative_chapter_count
+            cumulative_committed_count = (
+                await session.chapters.count_committed_for_book(
+                    book_id=request.book_id
+                )
             )
-            if not (
-                submission.minimum_chapter_count
-                <= final_checkpoint
-                <= submission.maximum_chapter_count
-            ):
-                raise CommandPreconditionError(
-                    "Arc closure checkpoint must remain inside the reviewed Chapter range."
-                )
-            if final_checkpoint < committed_count:
-                raise CommandPreconditionError(
-                    "Arc closure checkpoint cannot be smaller than its committed Chapter count."
-                )
+            _require_cumulative_arc_budget(
+                current_book_chapter_count=cumulative_committed_count,
+                book_maximum_chapter_count=book_baseline.maximum_chapter_count,
+                minimum_cumulative_chapter_count=(
+                    submission.minimum_cumulative_chapter_count
+                ),
+                recommended_closure_cumulative_chapter_count=(
+                    submission.recommended_closure_cumulative_chapter_count
+                ),
+                maximum_cumulative_chapter_count=(
+                    submission.maximum_cumulative_chapter_count
+                ),
+                closure_cumulative_chapter_count=final_checkpoint,
+            )
             baseline_version = await session.arcs.next_baseline_version(
                 arc_id=request.arc_id
             )
@@ -1338,9 +1462,7 @@ class ArcCommandService:
                 expected_version = current_version + 1
             if baseline_version != expected_version:
                 raise CommandPreconditionError("Arc baseline version does not follow current head.")
-            lifecycle_status: Literal["active", "closing"] = (
-                "closing" if final_checkpoint == committed_count else "active"
-            )
+            lifecycle_status: Literal["active", "closing"] = "active"
             if authorization_kind == "human_approval":
                 assert gate is not None and approval_id is not None
                 await session.arcs.insert_approval(
@@ -1353,7 +1475,7 @@ class ArcCommandService:
                         submission_id=submission.id,
                         review_id=review.id,
                         decision="approved",
-                        closure_chapter_count=final_checkpoint,
+                        closure_cumulative_chapter_count=final_checkpoint,
                         created_at_ms=timestamp,
                     )
                 )
@@ -1374,12 +1496,16 @@ class ArcCommandService:
                     prior_arc_baseline_id=submission.prior_arc_baseline_id,
                     purpose=submission.purpose,
                     plan_ref_id=submission.plan_ref_id,
-                    minimum_chapter_count=submission.minimum_chapter_count,
-                    recommended_closure_chapter_count=(
-                        submission.recommended_closure_chapter_count
+                    minimum_cumulative_chapter_count=(
+                        submission.minimum_cumulative_chapter_count
                     ),
-                    maximum_chapter_count=submission.maximum_chapter_count,
-                    closure_chapter_count=final_checkpoint,
+                    recommended_closure_cumulative_chapter_count=(
+                        submission.recommended_closure_cumulative_chapter_count
+                    ),
+                    maximum_cumulative_chapter_count=(
+                        submission.maximum_cumulative_chapter_count
+                    ),
+                    closure_cumulative_chapter_count=final_checkpoint,
                     revision_origin=workspace.revision_origin,
                     authorization_kind=authorization_kind,
                     approval_gate_id=approval_gate_id,
@@ -1420,12 +1546,16 @@ class ArcCommandService:
                 book_baseline_id=submission.book_baseline_id,
                 canon_baseline_id=submission.canon_baseline_id,
                 plan_ref_id=submission.plan_ref_id,
-                minimum_chapter_count=submission.minimum_chapter_count,
-                recommended_closure_chapter_count=(
-                    submission.recommended_closure_chapter_count
+                minimum_cumulative_chapter_count=(
+                    submission.minimum_cumulative_chapter_count
                 ),
-                maximum_chapter_count=submission.maximum_chapter_count,
-                closure_chapter_count=final_checkpoint,
+                recommended_closure_cumulative_chapter_count=(
+                    submission.recommended_closure_cumulative_chapter_count
+                ),
+                maximum_cumulative_chapter_count=(
+                    submission.maximum_cumulative_chapter_count
+                ),
+                closure_cumulative_chapter_count=final_checkpoint,
                 guidance_ref_id=None,
                 semantic_repair_count=0,
                 stale_reason_code=None,
@@ -1460,12 +1590,16 @@ class ArcCommandService:
                 arc_id=request.arc_id,
                 baseline_id=baseline_id,
                 baseline_version=baseline_version,
-                minimum_chapter_count=submission.minimum_chapter_count,
-                recommended_closure_chapter_count=(
-                    submission.recommended_closure_chapter_count
+                minimum_cumulative_chapter_count=(
+                    submission.minimum_cumulative_chapter_count
                 ),
-                maximum_chapter_count=submission.maximum_chapter_count,
-                closure_chapter_count=final_checkpoint,
+                recommended_closure_cumulative_chapter_count=(
+                    submission.recommended_closure_cumulative_chapter_count
+                ),
+                maximum_cumulative_chapter_count=(
+                    submission.maximum_cumulative_chapter_count
+                ),
+                closure_cumulative_chapter_count=final_checkpoint,
                 authorization_kind=authorization_kind,
                 lifecycle_status=lifecycle_status,
             )
@@ -1478,12 +1612,16 @@ class ArcCommandService:
                             "baseline_id": baseline_id,
                             "baseline_version": baseline_version,
                             "authorization_kind": authorization_kind,
-                            "minimum_chapter_count": submission.minimum_chapter_count,
-                            "recommended_closure_chapter_count": (
-                                submission.recommended_closure_chapter_count
+                            "minimum_cumulative_chapter_count": (
+                                submission.minimum_cumulative_chapter_count
                             ),
-                            "maximum_chapter_count": submission.maximum_chapter_count,
-                            "closure_chapter_count": final_checkpoint,
+                            "recommended_closure_cumulative_chapter_count": (
+                                submission.recommended_closure_cumulative_chapter_count
+                            ),
+                            "maximum_cumulative_chapter_count": (
+                                submission.maximum_cumulative_chapter_count
+                            ),
+                            "closure_cumulative_chapter_count": final_checkpoint,
                             "lifecycle_status": lifecycle_status,
                         },
                     )
@@ -1568,7 +1706,7 @@ class ArcCommandService:
                     submission_id=submission.id,
                     review_id=review.id,
                     decision="rejected",
-                    closure_chapter_count=None,
+                    closure_cumulative_chapter_count=None,
                     created_at_ms=timestamp,
                 )
             )

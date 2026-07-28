@@ -26,6 +26,8 @@ from app.db.schema import (
     agent_task_attempts,
     agent_tasks,
     arc_approval_gates,
+    arc_baselines,
+    arc_closures,
     book_approvals,
     chapter_baselines,
     command_receipts,
@@ -56,7 +58,12 @@ from app.runtime.control import (
     RunControlRequest,
     RunControlService,
 )
-from app.runtime.driver import DomainRunDriver, _normalize_delivery_failure
+from app.runtime.context import ContextFactError
+from app.runtime.driver import (
+    DomainRunDriver,
+    HarnessInvariantError,
+    _normalize_delivery_failure,
+)
 from app.runtime.engine import RunEngine
 from app.runtime.reconcile import ReconcileService
 from app.store.command_bus import CommandBus
@@ -293,6 +300,148 @@ def test_arc_local_repair_review_is_consumed_once_before_verification() -> None:
     asyncio.run(exercise())
 
 
+def test_chapter_plan_repair_regenerates_invalidated_downstream_content() -> None:
+    async def exercise() -> None:
+        review = SimpleNamespace(
+            decision="local_repair",
+            submission_id="reviewed-submission",
+            repair_contract_ref_id="repair-contract-ref",
+            created_at_ms=1_100,
+        )
+        chapter = SimpleNamespace(
+            id="chapter",
+            book_id="book",
+            arc_id="arc",
+            current_baseline_id=None,
+        )
+        workspace = SimpleNamespace(
+            state="active",
+            lock_version=13,
+            semantic_repair_count=1,
+            book_baseline_id="book-baseline",
+            arc_baseline_id="arc-baseline",
+            base_chapter_baseline_id=None,
+            plan_ref_id="original-plan-ref",
+            draft_ref_id="original-draft-ref",
+            observations_ref_id="original-observations-ref",
+            candidate_canon_patch_ref_id="original-canon-patch-ref",
+            correction_lineage_id=None,
+            correction_lineage_origin=None,
+            automatic_correction_round=None,
+            source_arc_parent_review_id=None,
+            source_arc_closure_review_id=None,
+            source_feedback_id=None,
+        )
+        applied_tasks: set[str] = set()
+
+        async def has_applied_task(**kwargs: object) -> bool:
+            return str(kwargs["task_kind"]) in applied_tasks
+
+        packed_repair = SimpleNamespace(
+            unpack_and_verify=lambda: json.dumps(
+                {"authorized_components": ["plan"]},
+                ensure_ascii=False,
+            ).encode()
+        )
+        chapters = SimpleNamespace(
+            get_non_idle_workspace_for_arc=AsyncMock(
+                return_value=(chapter, workspace)
+            ),
+            find_pending_submission=AsyncMock(return_value=None),
+            get_latest_review=AsyncMock(return_value=review),
+        )
+        store = SimpleNamespace(
+            chapters=chapters,
+            arcs=SimpleNamespace(),
+            books=SimpleNamespace(),
+            content=SimpleNamespace(get_packed=AsyncMock(return_value=packed_repair)),
+            execution=SimpleNamespace(
+                has_applied_task=AsyncMock(side_effect=has_applied_task)
+            ),
+        )
+        driver = object.__new__(DomainRunDriver)
+        arguments = {
+            "store": store,
+            "run": SimpleNamespace(id="run-chapter"),
+            "project_id": "project-chapter",
+            "book_id": "book",
+            "book_baseline_id": "book-baseline",
+            "canon_baseline_id": "canon-baseline",
+            "arc": SimpleNamespace(id="arc"),
+            "arc_baseline_id": "arc-baseline",
+        }
+
+        first = await driver._decide_chapter(**arguments)
+        assert first.task_kind == "chapter.repair.plan"
+
+        applied_tasks.add("chapter.repair.plan")
+        workspace.plan_ref_id = "replacement-plan-ref"
+        workspace.draft_ref_id = None
+        workspace.observations_ref_id = None
+        workspace.candidate_canon_patch_ref_id = None
+        workspace.lock_version += 1
+        second = await driver._decide_chapter(**arguments)
+        assert second.task_kind == "chapter.draft"
+
+        workspace.draft_ref_id = "regenerated-draft-ref"
+        workspace.lock_version += 1
+        third = await driver._decide_chapter(**arguments)
+        assert third.task_kind == "chapter.observe"
+
+        workspace.observations_ref_id = "regenerated-observations-ref"
+        workspace.candidate_canon_patch_ref_id = "regenerated-canon-patch-ref"
+        workspace.lock_version += 1
+        fourth = await driver._decide_chapter(**arguments)
+        assert fourth.kind == "submit_chapter"
+
+    asyncio.run(exercise())
+
+
+def test_driver_never_creates_chapter_beyond_approved_book_maximum() -> None:
+    async def exercise() -> None:
+        chapters = SimpleNamespace(
+            get_non_idle_workspace_for_arc=AsyncMock(return_value=None),
+            count_committed_for_book=AsyncMock(return_value=22),
+        )
+        store = SimpleNamespace(
+            chapters=chapters,
+            arcs=SimpleNamespace(
+                get_baseline=AsyncMock(
+                    return_value=SimpleNamespace(
+                        closure_cumulative_chapter_count=22
+                    )
+                )
+            ),
+            books=SimpleNamespace(
+                get_baseline=AsyncMock(
+                    return_value=SimpleNamespace(maximum_chapter_count=22)
+                )
+            ),
+            content=SimpleNamespace(),
+            execution=SimpleNamespace(),
+        )
+        driver = object.__new__(DomainRunDriver)
+
+        with pytest.raises(
+            HarnessInvariantError,
+            match="approved maximum",
+        ):
+            await driver._decide_chapter(
+                store=store,
+                run=SimpleNamespace(id="run-book-cap"),
+                project_id="project-book-cap",
+                book_id="book",
+                book_baseline_id="book-baseline",
+                canon_baseline_id="canon-baseline",
+                arc=SimpleNamespace(id="arc"),
+                arc_baseline_id="arc-baseline",
+            )
+
+        chapters.count_committed_for_book.assert_awaited_once_with(book_id="book")
+
+    asyncio.run(exercise())
+
+
 def _message_text(messages: list[object]) -> str:
     fragments: list[str] = []
     for message in messages:
@@ -407,6 +556,14 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
     if task_kind in {"arc.plan", "arc.revise"}:
         arc_match = re.search(r'"arc_ordinal":(\d+)', prompt)
         ordinal = int(arc_match.group(1)) if arc_match else 1
+        if ordinal == 1:
+            minimum_cumulative_count = 8
+            recommended_cumulative_count = 10
+            maximum_cumulative_count = 12
+        else:
+            minimum_cumulative_count = 18
+            recommended_cumulative_count = 20
+            maximum_cumulative_count = 22
         return {
             "title": f"第{ordinal}故事弧",
             "purpose": f"推进第{ordinal}阶段调查并留下可验证的新证据。",
@@ -419,10 +576,12 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
             "character_obligations": ["主角必须因调查结果改变一个重要判断。"],
             "foreshadowing_obligations": ["留下通往下一阶段或终局的可验证线索。"],
             "prohibitions": ["不得推翻既有正式 Canon。"],
-            "minimum_chapter_count": 8,
-            "recommended_closure_chapter_count": 10,
-            "maximum_chapter_count": 12,
-            "closure_chapter_count": 10,
+            "minimum_cumulative_chapter_count": minimum_cumulative_count,
+            "recommended_closure_cumulative_chapter_count": (
+                recommended_cumulative_count
+            ),
+            "maximum_cumulative_chapter_count": maximum_cumulative_count,
+            "closure_cumulative_chapter_count": recommended_cumulative_count,
             "closure_signals": [
                 {
                     "signal_key": "stage_complete",
@@ -437,7 +596,7 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
         return {
             "changes": [
                 {
-                    "component": "beats",
+                    "component": "advisory_beats",
                     "value": ["重新验证物证", "补全证词矛盾", "确认下一层责任人"],
                 }
             ]
@@ -449,7 +608,7 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
             "issues": [],
             "repair_scope": [],
         }
-    if task_kind in {"chapter.plan", "chapter.revise.plan"}:
+    if task_kind in {"chapter.plan", "chapter.revise.plan", "chapter.repair.plan"}:
         chapter_match = re.search(r'"chapter_book_ordinal":(\d+)', prompt)
         ordinal = int(chapter_match.group(1)) if chapter_match else 1
         return {
@@ -488,7 +647,6 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
             "decision": "pass",
             "summary": "章节计划、正文、观察与上游合同一致。",
             "issues": [],
-            "repair_scope": [],
         }
     if task_kind == "evaluate.arc_closure":
         return {
@@ -1048,7 +1206,15 @@ def test_context_assembly_failure_binds_real_harness_action_and_requires_action_
             )
 
             async def reject_context(**_kwargs: object) -> object:
-                raise LookupError("fixture deliberately removed one authority input")
+                raise ContextFactError(
+                    "fixture_authority_input_present",
+                    (
+                        "fixture deliberately removed one authority input\n"
+                        "Authorization: Bearer do-not-store-auth-token\n"
+                        "api_key=do-not-store-api-key\n"
+                        "prompt=do-not-store-private-prompt"
+                    ),
+                )
 
             monkeypatch.setattr(driver._context, "build", reject_context)
             run_engine = RunEngine(
@@ -1087,14 +1253,41 @@ def test_context_assembly_failure_binds_real_harness_action_and_requires_action_
                         )
                     )
                 ).scalar_one()
+                assert run.failure_ref_id is not None
+                failure_payload = json.loads(
+                    (
+                        await ContentRepository(connection).get_packed(
+                            project_id=created.result.project_id,
+                            ref_id=run.failure_ref_id,
+                        )
+                    ).unpack_and_verify()
+                )
 
             assert run.status == "failure_paused"
             assert run.failure_source_kind == "harness_action"
             assert run.blocking_task_id is None
             assert run.blocking_action_key.startswith("freeze-task:book.discuss:")
             assert run.failure_code == "context_assembly_invalid"
-            assert run.failure_ref_id is not None
             assert task_count == 0
+            assert failure_payload["schema_id"] == "harness-action-failure-v2"
+            details = failure_payload["details"]
+            assert details["phase"] == "context"
+            assert details["task_kind"] == "book.discuss"
+            assert (
+                details["failed_invariant"]
+                == "fixture_authority_input_present"
+            )
+            assert [
+                item["exception_type"] for item in details["cause_chain"]
+            ] == ["ContextAssemblyError", "ContextFactError"]
+            assert (
+                "fixture deliberately removed one authority input"
+                in details["cause_chain"][1]["message"]
+            )
+            serialized_failure = json.dumps(failure_payload, ensure_ascii=False)
+            assert "do-not-store-auth-token" not in serialized_failure
+            assert "do-not-store-api-key" not in serialized_failure
+            assert "do-not-store-private-prompt" not in serialized_failure
 
             with pytest.raises(CommandPreconditionError):
                 await RunControlService(bus).retry_failed_task(
@@ -1259,7 +1452,9 @@ def test_driver_completes_twenty_chapter_book_with_only_product_gates(
                                 submission_id=pending.id,
                                 review_id=review.id,
                                 approval_gate_id=gate.id,
-                                closure_chapter_count=pending.recommended_closure_chapter_count,
+                                closure_cumulative_chapter_count=(
+                                    pending.recommended_closure_cumulative_chapter_count
+                                ),
                                 expected_current_baseline_id=arc.current_baseline_id,
                             )
                             action = ("arc", arc_request)
@@ -1311,10 +1506,34 @@ def test_driver_completes_twenty_chapter_book_with_only_product_gates(
                 stored_arc_gates = await connection.scalar(
                     select(func.count()).select_from(arc_approval_gates)
                 )
+                arc_checkpoints = list(
+                    (
+                        await connection.scalars(
+                            select(
+                                arc_baselines.c.closure_cumulative_chapter_count
+                            ).order_by(
+                                arc_baselines.c.closure_cumulative_chapter_count
+                            )
+                        )
+                    ).all()
+                )
+                closure_counts = list(
+                    (
+                        await connection.scalars(
+                            select(
+                                arc_closures.c.cumulative_committed_chapter_count
+                            ).order_by(
+                                arc_closures.c.cumulative_committed_chapter_count
+                            )
+                        )
+                    ).all()
+                )
             assert chapter_count is not None
             assert stored_book_approvals == book_gate_count
             assert stored_arc_gates is not None
             assert completed_run == "completed"
+            assert arc_checkpoints == [10, 20]
+            assert closure_counts == [10, 20]
             return int(chapter_count), book_gate_count, int(stored_arc_gates), str(project_status)
         finally:
             await engine.dispose()

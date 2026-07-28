@@ -1005,7 +1005,13 @@ class LoopAuthorityCommandService:
                     )
                 ).unpack_and_verify()
             )
-            arc, baseline, workspace, chapters = await self._arc_closure_snapshot(
+            (
+                arc,
+                baseline,
+                workspace,
+                chapters,
+                cumulative_committed_chapter_count,
+            ) = await self._arc_closure_snapshot(
                 session,
                 request=request,
                 task=task,
@@ -1020,9 +1026,14 @@ class LoopAuthorityCommandService:
             )
             self._validate_arc_signal_coverage(evaluation=evaluation, plan=plan)
             chapter_manifest = {
-                "schema_id": "arc-closure-chapter-set-v1",
+                "schema_id": "arc-closure-chapter-set-v2",
                 "arc_ordinal": arc.ordinal,
-                "closure_chapter_count": baseline.closure_chapter_count,
+                "closure_cumulative_chapter_count": (
+                    baseline.closure_cumulative_chapter_count
+                ),
+                "cumulative_committed_chapter_count": (
+                    cumulative_committed_chapter_count
+                ),
                 "chapters": [
                     {
                         "chapter_id": chapter.chapter_id,
@@ -1060,10 +1071,12 @@ class LoopAuthorityCommandService:
                 ),
             )
             precheck = {
-                "schema_id": "arc-closure-precheck-v1",
+                "schema_id": "arc-closure-precheck-v2",
                 "passed": True,
-                "checkpoint_reached_exactly": len(chapters)
-                == baseline.closure_chapter_count,
+                "checkpoint_reached_exactly": (
+                    cumulative_committed_chapter_count
+                    == baseline.closure_cumulative_chapter_count
+                ),
                 "arc_status": arc.lifecycle_status,
                 "workspace_state": workspace.state,
                 "chapter_set_fingerprint": prepared_manifest.sha256,
@@ -1076,7 +1089,7 @@ class LoopAuthorityCommandService:
             )
             prepared_normalized = prepare_canonical_json(
                 {
-                    "schema_id": "formal-arc-closure-result-v1",
+                    "schema_id": "formal-arc-closure-result-v2",
                     "arc_purpose": arc.purpose,
                     "disposition": disposition,
                     "signal_statuses": [
@@ -1084,7 +1097,9 @@ class LoopAuthorityCommandService:
                         for item in evaluation.signal_statuses
                     ],
                     "summary": evaluation.summary,
-                    "committed_chapter_count": len(chapters),
+                    "cumulative_committed_chapter_count": (
+                        cumulative_committed_chapter_count
+                    ),
                     "chapter_set_fingerprint": prepared_manifest.sha256,
                 }
             )
@@ -1093,7 +1108,12 @@ class LoopAuthorityCommandService:
                     "book_baseline_id": task.book_baseline_id,
                     "arc_baseline_id": task.arc_baseline_id,
                     "canon_baseline_id": task.canon_baseline_id,
-                    "closure_chapter_count": baseline.closure_chapter_count,
+                    "closure_cumulative_chapter_count": (
+                        baseline.closure_cumulative_chapter_count
+                    ),
+                    "cumulative_committed_chapter_count": (
+                        cumulative_committed_chapter_count
+                    ),
                     "chapter_set_fingerprint": prepared_manifest.sha256,
                     "strategy_id": task.evaluation_strategy_id,
                     "strategy_version": task.evaluation_strategy_version,
@@ -1121,18 +1141,24 @@ class LoopAuthorityCommandService:
             )
             if current_task != task or task.delivery_state != "pending":
                 raise CommandPreconditionError("Arc closure task changed before delivery.")
-            current_arc, current_baseline, current_workspace, current_chapters = (
-                await self._arc_closure_snapshot(
-                    session,
-                    request=request,
-                    task=task,
-                )
+            (
+                current_arc,
+                current_baseline,
+                current_workspace,
+                current_chapters,
+                current_cumulative_committed_chapter_count,
+            ) = await self._arc_closure_snapshot(
+                session,
+                request=request,
+                task=task,
             )
             if (
                 current_arc != arc
                 or current_baseline != baseline
                 or current_workspace != workspace
                 or current_chapters != chapters
+                or current_cumulative_committed_chapter_count
+                != cumulative_committed_chapter_count
             ):
                 raise CommandPreconditionError(
                     "Arc closure authority changed before delivery."
@@ -1170,7 +1196,7 @@ class LoopAuthorityCommandService:
                 semantic_kind="arc.closure_chapter_set",
                 media_type="application/json",
                 schema_id="arc-closure-chapter-set",
-                schema_version=1,
+                schema_version=2,
                 ref_id=manifest_ref_id,
                 created_at_ms=timestamp,
             )
@@ -1180,7 +1206,7 @@ class LoopAuthorityCommandService:
                 semantic_kind="arc.closure_precheck",
                 media_type="application/json",
                 schema_id="arc-closure-precheck",
-                schema_version=1,
+                schema_version=2,
                 ref_id=precheck_ref_id,
                 created_at_ms=timestamp,
             )
@@ -1206,8 +1232,12 @@ class LoopAuthorityCommandService:
                 canon_baseline_id=task.canon_baseline_id,
                 terminal_chapter_id=chapters[-1].chapter_id,
                 terminal_chapter_baseline_id=chapters[-1].id,
-                committed_chapter_count=len(chapters),
-                closure_chapter_count=baseline.closure_chapter_count,
+                cumulative_committed_chapter_count=(
+                    cumulative_committed_chapter_count
+                ),
+                closure_cumulative_chapter_count=(
+                    baseline.closure_cumulative_chapter_count
+                ),
                 chapter_set_fingerprint=prepared_manifest.sha256,
                 chapter_set_manifest_ref_id=manifest_ref.id,
                 source_task_id=task.task_id,
@@ -1278,7 +1308,7 @@ class LoopAuthorityCommandService:
                     semantic_kind="arc.formal_closure_result",
                     media_type="application/json",
                     schema_id="formal-arc-closure-result",
-                    schema_version=1,
+                    schema_version=2,
                     ref_id=normalized_ref_id,
                     created_at_ms=timestamp,
                 )
@@ -1305,7 +1335,9 @@ class LoopAuthorityCommandService:
                         canon_baseline_id=task.canon_baseline_id,
                         terminal_chapter_id=chapters[-1].chapter_id,
                         terminal_chapter_baseline_id=chapters[-1].id,
-                        committed_chapter_count=len(chapters),
+                        cumulative_committed_chapter_count=(
+                            cumulative_committed_chapter_count
+                        ),
                         chapter_set_fingerprint=prepared_manifest.sha256,
                         chapter_set_manifest_ref_id=manifest_ref.id,
                         normalized_result_ref_id=normalized_ref.id,
@@ -1556,10 +1588,10 @@ class LoopAuthorityCommandService:
                 correction_lineage_origin=review.correction_lineage_origin,
                 automatic_correction_round=1,
                 plan_ref_id=None,
-                minimum_chapter_count=None,
-                recommended_closure_chapter_count=None,
-                maximum_chapter_count=None,
-                closure_chapter_count=None,
+                minimum_cumulative_chapter_count=None,
+                recommended_closure_cumulative_chapter_count=None,
+                maximum_cumulative_chapter_count=None,
+                closure_cumulative_chapter_count=None,
                 guidance_ref_id=review.detail_ref_id,
                 semantic_repair_count=0,
                 stale_reason_code=None,
@@ -2629,6 +2661,7 @@ class LoopAuthorityCommandService:
         ArcBaselineRecord,
         ArcWorkspaceRecord,
         list[ChapterBaselineRecord],
+        int,
     ]:
         arc = await session.arcs.get(
             project_id=request.project_id,
@@ -2674,13 +2707,13 @@ class LoopAuthorityCommandService:
             or project is None
             or project.current_canon_baseline_id != task.canon_baseline_id
             or drafting is not None
-            or len(arc_chapters) != baseline.closure_chapter_count
+            or len(committed) != baseline.closure_cumulative_chapter_count
             or not arc_chapters
         ):
             raise CommandPreconditionError(
                 "Arc closure checkpoint facts are stale or incomplete."
             )
-        return arc, baseline, workspace, arc_chapters
+        return arc, baseline, workspace, arc_chapters, len(committed)
 
     @staticmethod
     async def _book_boundary_snapshot(
@@ -3022,10 +3055,10 @@ class LoopAuthorityCommandService:
             correction_lineage_origin=review.correction_lineage_origin,
             automatic_correction_round=1,
             plan_ref_id=None,
-            minimum_chapter_count=None,
-            recommended_closure_chapter_count=None,
-            maximum_chapter_count=None,
-            closure_chapter_count=None,
+            minimum_cumulative_chapter_count=None,
+            recommended_closure_cumulative_chapter_count=None,
+            maximum_cumulative_chapter_count=None,
+            closure_cumulative_chapter_count=None,
             guidance_ref_id=review.detail_ref_id,
             semantic_repair_count=0,
             stale_reason_code=None,

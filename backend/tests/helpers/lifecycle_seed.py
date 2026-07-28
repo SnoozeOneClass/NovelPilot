@@ -357,10 +357,10 @@ async def seed_approved_book_and_arc(
             character_obligations=["The investigator changes one belief about memory."],
             foreshadowing_obligations=["Leave one clue for the next Arc."],
             prohibitions=["Do not contradict committed Canon."],
-            minimum_chapter_count=1,
-            recommended_closure_chapter_count=target_chapter_count,
-            maximum_chapter_count=max(target_chapter_count, 3),
-            closure_chapter_count=target_chapter_count,
+            minimum_cumulative_chapter_count=1,
+            recommended_closure_cumulative_chapter_count=target_chapter_count,
+            maximum_cumulative_chapter_count=max(target_chapter_count, 3),
+            closure_cumulative_chapter_count=target_chapter_count,
             closure_signals=[
                 ArcClosureSignal(
                     signal_key="first_edit_identified",

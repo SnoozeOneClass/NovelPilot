@@ -21,6 +21,14 @@ class FrozenTaskContext:
     manifest: dict[str, JsonValue]
 
 
+class ContextFactError(RuntimeError):
+    """One named authority relation required for context assembly is invalid."""
+
+    def __init__(self, invariant: str, message: str) -> None:
+        super().__init__(message)
+        self.invariant = invariant
+
+
 @dataclass(frozen=True, slots=True)
 class _ContextItem:
     group: str
@@ -165,6 +173,16 @@ _TASK_CONTEXT_GROUPS: dict[str, frozenset[str]] = {
             "chapter_prose",
             "chapter_guidance",
             "canon",
+        }
+    ),
+    "chapter.repair.plan": frozenset(
+        {
+            "book_baseline",
+            "arc_baseline",
+            "chapter_plan",
+            "chapter_candidate_review",
+            "canon",
+            "committed_observations",
         }
     ),
     "chapter.repair.prose": frozenset(
@@ -830,15 +848,15 @@ class HarnessContextBuilder:
                         chapter_baseline.observations_ref_id,
                     )
                 if chapter_workspace.source_arc_parent_review_id is not None:
-                    source_review = await store.arc_parent_reviews.get(
+                    source_arc_parent_review = await store.arc_parent_reviews.get(
                         project_id=project_id,
                         review_id=chapter_workspace.source_arc_parent_review_id,
                     )
-                    if source_review is not None:
+                    if source_arc_parent_review is not None:
                         await add(
                             "arc_parent_review",
                             "source_arc_parent_review",
-                            source_review.detail_ref_id,
+                            source_arc_parent_review.detail_ref_id,
                         )
                 if chapter_workspace.source_arc_closure_review_id is not None:
                     source_closure_review = await store.arc_closure_reviews.get(
@@ -896,7 +914,8 @@ class HarnessContextBuilder:
 
             if task_kind == "evaluate.arc_parent_contract":
                 if source_chapter_arc_request_id is None:
-                    raise ValueError(
+                    raise ContextFactError(
+                        "chapter_arc_request_id_present",
                         "Arc parent-contract context requires an exact Chapter-to-Arc request."
                     )
                 request = await store.changes.get_chapter_arc(
@@ -908,51 +927,94 @@ class HarnessContextBuilder:
                     or request.book_id != book_id
                     or request.arc_id != arc_id
                 ):
-                    raise LookupError(
+                    raise ContextFactError(
+                        "chapter_arc_request_matches_task",
                         "Source Chapter-to-Arc request does not match the task."
+                    )
+                if (
+                    arc is None
+                    or arc.current_baseline_id is None
+                    or request.target_arc_baseline_id != arc.current_baseline_id
+                    or request.status not in {"open", "reviewed"}
+                ):
+                    raise ContextFactError(
+                        "chapter_arc_request_targets_current_arc_baseline",
+                        "Source Chapter-to-Arc request does not target the current Arc baseline.",
+                    )
+                source_chapter = await store.chapters.get(
+                    project_id=project_id,
+                    chapter_id=request.chapter_id,
+                )
+                source_chapter_submission = await store.chapters.get_submission(
+                    project_id=project_id,
+                    submission_id=request.source_submission_id,
+                )
+                source_chapter_review = await store.chapters.get_review(
+                    project_id=project_id,
+                    review_id=request.source_review_id,
+                )
+                if (
+                    source_chapter is None
+                    or source_chapter.project_id != project_id
+                    or source_chapter.book_id != book_id
+                    or source_chapter.arc_id != arc_id
+                    or source_chapter_submission is None
+                    or source_chapter_submission.project_id != project_id
+                    or source_chapter_submission.book_id != book_id
+                    or source_chapter_submission.arc_id != arc_id
+                    or source_chapter_submission.chapter_id != source_chapter.id
+                    or source_chapter_review is None
+                    or source_chapter_review.project_id != project_id
+                    or source_chapter_review.book_id != book_id
+                    or source_chapter_review.arc_id != arc_id
+                    or source_chapter_review.chapter_id != source_chapter.id
+                ):
+                    raise ContextFactError(
+                        "chapter_arc_source_objects_match_request_scope",
+                        "Source Chapter-to-Arc request lost its immutable reviewed candidate.",
+                    )
+                if (
+                    source_chapter_review.submission_id
+                    != source_chapter_submission.id
+                    or source_chapter_review.decision != "escalate_to_arc"
+                    or request.evidence_ref_id
+                    != source_chapter_review.detail_ref_id
+                    or source_chapter_submission.arc_baseline_id
+                    != request.target_arc_baseline_id
+                ):
+                    raise ContextFactError(
+                        "chapter_arc_source_submission_review_binding",
+                        "Source Chapter-to-Arc request no longer matches its submission and review.",
                     )
                 await add(
                     "chapter_arc_request",
                     "chapter_to_arc_request_evidence",
                     request.evidence_ref_id,
                 )
-                source_chapter = await store.chapters.get(
-                    project_id=project_id,
-                    chapter_id=request.chapter_id,
-                )
-                source_chapter_baseline = (
-                    None
-                    if source_chapter is None
-                    or source_chapter.current_baseline_id is None
-                    else await store.chapters.get_baseline(
-                        project_id=project_id,
-                        chapter_id=source_chapter.id,
-                        baseline_id=source_chapter.current_baseline_id,
-                    )
-                )
-                if source_chapter is None or source_chapter_baseline is None:
-                    raise LookupError(
-                        "Source Chapter-to-Arc request lost its current Chapter."
-                    )
                 await add(
                     "chapter_arc_request",
-                    "source_chapter_current_plan",
-                    source_chapter_baseline.plan_ref_id,
+                    "source_chapter_candidate_manifest",
+                    source_chapter_submission.content_manifest_ref_id,
                 )
                 await add(
                     "chapter_arc_request",
-                    "source_chapter_current_prose",
-                    source_chapter_baseline.prose_ref_id,
+                    "source_chapter_candidate_plan",
+                    source_chapter_submission.plan_ref_id,
                 )
                 await add(
                     "chapter_arc_request",
-                    "source_chapter_current_observations",
-                    source_chapter_baseline.observations_ref_id,
+                    "source_chapter_candidate_prose",
+                    source_chapter_submission.draft_ref_id,
                 )
                 await add(
                     "chapter_arc_request",
-                    "source_chapter_current_canon_intent",
-                    source_chapter_baseline.accepted_canon_patch_ref_id,
+                    "source_chapter_candidate_observations",
+                    source_chapter_submission.observations_ref_id,
+                )
+                await add(
+                    "chapter_arc_request",
+                    "source_chapter_candidate_canon_intent",
+                    source_chapter_submission.candidate_canon_patch_ref_id,
                 )
                 if source_arc_parent_review_id is not None:
                     predecessor = await store.arc_parent_reviews.get(
@@ -1021,18 +1083,18 @@ class HarnessContextBuilder:
                     subject_workspace.plan_ref_id,
                 )
                 if book_request.source_candidate_submission_id is not None:
-                    source_submission = await store.arcs.get_submission(
+                    source_arc_submission = await store.arcs.get_submission(
                         project_id=project_id,
                         submission_id=book_request.source_candidate_submission_id,
                     )
-                    if source_submission is None:
+                    if source_arc_submission is None:
                         raise LookupError(
                             "Arc-to-Book candidate request lost its frozen submission."
                         )
                     await add(
                         "arc_book_request",
                         "source_arc_candidate_plan",
-                        source_submission.plan_ref_id,
+                        source_arc_submission.plan_ref_id,
                     )
                 if book_request.source_arc_parent_review_id is not None:
                     source_arc_parent = await store.arc_parent_reviews.get(
@@ -1090,6 +1152,7 @@ class HarnessContextBuilder:
                 "book_workspace_lock_version": book_workspace.lock_version,
                 "canon_baseline_id": selected_canon_baseline_id,
                 "committed_chapter_count": len(committed),
+                "book_cumulative_committed_chapter_count": len(committed),
             }
             if book_baseline is not None:
                 facts["approved_title"] = book_baseline.approved_title
@@ -1114,19 +1177,28 @@ class HarnessContextBuilder:
                             else arc_baseline.id
                         ),
                         "arc_workspace_lock_version": arc_workspace.lock_version,
-                        "arc_minimum_chapter_count": (
-                            None if arc_baseline is None else arc_baseline.minimum_chapter_count
-                        ),
-                        "arc_recommended_closure_chapter_count": (
+                        "arc_minimum_cumulative_chapter_count": (
                             None
                             if arc_baseline is None
-                            else arc_baseline.recommended_closure_chapter_count
+                            else arc_baseline.minimum_cumulative_chapter_count
                         ),
-                        "arc_maximum_chapter_count": (
-                            None if arc_baseline is None else arc_baseline.maximum_chapter_count
+                        "arc_recommended_closure_cumulative_chapter_count": (
+                            None
+                            if arc_baseline is None
+                            else (
+                                arc_baseline
+                                .recommended_closure_cumulative_chapter_count
+                            )
                         ),
-                        "arc_closure_chapter_count": (
-                            None if arc_baseline is None else arc_baseline.closure_chapter_count
+                        "arc_maximum_cumulative_chapter_count": (
+                            None
+                            if arc_baseline is None
+                            else arc_baseline.maximum_cumulative_chapter_count
+                        ),
+                        "arc_closure_cumulative_chapter_count": (
+                            None
+                            if arc_baseline is None
+                            else arc_baseline.closure_cumulative_chapter_count
                         ),
                     }
                 )
@@ -1270,16 +1342,17 @@ def _model_visible_facts(facts: dict[str, JsonValue]) -> dict[str, JsonValue]:
         "operation_mode",
         "book_lifecycle_status",
         "committed_chapter_count",
+        "book_cumulative_committed_chapter_count",
         "approved_title",
         "minimum_chapter_count",
         "maximum_chapter_count",
         "arc_ordinal",
         "arc_purpose",
         "arc_lifecycle_status",
-        "arc_minimum_chapter_count",
-        "arc_recommended_closure_chapter_count",
-        "arc_maximum_chapter_count",
-        "arc_closure_chapter_count",
+        "arc_minimum_cumulative_chapter_count",
+        "arc_recommended_closure_cumulative_chapter_count",
+        "arc_maximum_cumulative_chapter_count",
+        "arc_closure_cumulative_chapter_count",
         "chapter_book_ordinal",
         "chapter_arc_ordinal",
         "chapter_lifecycle_status",
