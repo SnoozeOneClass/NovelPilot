@@ -172,17 +172,30 @@ export interface BookTranscript {
   }>;
 }
 
+export interface BookArcContractView {
+  ordinal: number;
+  whole_book_role: string;
+  core_goal: string;
+  handoff_from_previous: string;
+  exit_conditions: string[];
+  is_final: boolean;
+  lifecycle_status: "planned" | "active" | "completed";
+}
+
 export interface BookStateView {
   book_id: string;
   lifecycle_status: string;
   current_baseline_id: string | null;
-  latest_boundary_review_id: string | null;
+  latest_completion_review_id: string | null;
   current_progress_handoff_id: string | null;
   current_completion_id: string | null;
   baseline_version: number | null;
   approved_title: string | null;
-  minimum_chapter_count: number | null;
-  maximum_chapter_count: number | null;
+  whole_book_scale_guidance: string | null;
+  arc_contract_count: number | null;
+  final_arc_ordinal: number | null;
+  topology_effective_after_arc_ordinal: number | null;
+  arc_topology: BookArcContractView[];
   workspace_state: string;
   workspace_lock_version: number;
   semantic_repair_count: number;
@@ -194,18 +207,42 @@ export interface BookStateView {
   pending_review_decision: string | null;
 }
 
+export interface ArcOutlineAssignmentView {
+  title: string;
+  core_event: string;
+  hook: string;
+  scenes: string[];
+}
+
+export interface ArcOutlineEntryView {
+  book_ordinal: number;
+  arc_ordinal: number;
+  status: "committed" | "drafting" | "planned";
+  chapter_id: string | null;
+  actual_chapter_title: string | null;
+  assignment: ArcOutlineAssignmentView;
+  source_arc_baseline_id: string;
+  source_arc_baseline_version: number;
+}
+
+export interface ArcOutlineView {
+  arc_id: string;
+  arc_ordinal: number;
+  current_baseline_id: string;
+  current_baseline_version: number;
+  entries: ArcOutlineEntryView[];
+}
+
 export interface ArcStateView {
   arc_id: string;
   ordinal: number;
-  purpose: string;
+  is_final: boolean;
+  assigned_book_baseline_id: string | null;
   lifecycle_status: string;
   current_baseline_id: string | null;
   latest_closure_review_id: string | null;
   current_closure_id: string | null;
   baseline_version: number | null;
-  minimum_cumulative_chapter_count: number | null;
-  recommended_closure_cumulative_chapter_count: number | null;
-  maximum_cumulative_chapter_count: number | null;
   closure_cumulative_chapter_count: number | null;
   cumulative_committed_chapter_count: number;
   arc_committed_chapter_count: number;
@@ -220,6 +257,7 @@ export interface ArcStateView {
   approval_gate_state: string | null;
   revision_origin: string;
   automatic_correction_round: number | null;
+  outline: ArcOutlineView | null;
 }
 
 export interface ChapterStateView {
@@ -251,7 +289,7 @@ export interface CreatorInputNeed {
 }
 
 export interface CreatorInputRequestView {
-  review_kind: "arc_parent" | "book_parent" | "arc_closure" | "book_boundary";
+  review_kind: "arc_parent" | "book_parent" | "arc_closure" | "book_completion";
   review_id: string;
   route_layer: "book" | "arc";
   book_id: string;
@@ -276,7 +314,7 @@ export interface FeedbackStateView {
   arc_parent_review_id: string | null;
   book_parent_review_id: string | null;
   arc_closure_review_id: string | null;
-  book_boundary_review_id: string | null;
+  book_completion_review_id: string | null;
   resulting_correction_lineage_id: string | null;
   dismiss_reason_code: string | null;
   applied_command_id: string | null;
@@ -293,24 +331,34 @@ export interface AgentTaskStateView {
   scope_layer: string;
   arc_id: string | null;
   chapter_id: string | null;
-  status: string;
+  task_status: string;
   delivery_state: string;
   profile_id: string;
   model_id: string;
-  attempt_id: string | null;
-  attempt_number: number | null;
-  attempt_status: string | null;
-  retry_kind: string | null;
-  provider_request_count: number | null;
-  transport_retry_count: number | null;
-  model_request_count: number | null;
+  profile_fingerprint: string;
+  output_schema_id: string;
+  output_schema_version: number;
+  harness_policy_id: string;
+  harness_policy_version: number;
+  attempt_id: string;
+  attempt_number: number;
+  retry_kind: string;
+  attempt_status: string;
+  framework_fingerprint: string;
+  provider_request_count: number;
+  transport_retry_count: number;
+  model_request_count: number;
   input_tokens: number | null;
   output_tokens: number | null;
+  total_tokens: number | null;
   error_code: string | null;
+  error_category: string | null;
+  http_status: number | null;
   error_ref_id: string | null;
   diagnostic_ref_id: string | null;
   created_at_ms: number;
-  updated_at_ms: number;
+  started_at_ms: number | null;
+  finished_at_ms: number | null;
 }
 
 export interface ExecutableCommand {

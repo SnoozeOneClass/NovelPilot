@@ -24,11 +24,16 @@ from app.agents.contracts import (
     finalize_chapter_prose,
 )
 from app.domain.arc.contracts import ArcEvaluation, ArcRepairPatch
-from app.domain.book.contracts import BookCandidatePack, BookEvaluation, BookRepairPatch
+from app.domain.book.contracts import (
+    BookCandidatePack,
+    BookEvaluation,
+    BookRepairPatch,
+    BookSuccessorCandidateProposal,
+)
 from app.domain.evaluation import (
     ArcClosureEvaluation,
     ArcParentContractEvaluation,
-    BookBoundaryEvaluation,
+    BookCompletionEvaluation,
     BookParentContractEvaluation,
     ChapterEvidenceCorrectionEvaluation,
 )
@@ -50,9 +55,11 @@ BOOK_DISCUSSION_INSTRUCTIONS = (
 )
 BOOK_CANDIDATE_CONTRACT = (
     "Return substantive semantic Book content only. Every required constraints, rolling-plan, "
-    "and completion-requirement field must contain concrete content. Keep "
-    "maximum_chapter_count greater than or equal to minimum_chapter_count. Do not invent "
-    "storage IDs, approval state, routes, or commands."
+    "completion-requirement, and Arc-topology field must contain concrete content. The "
+    "ordered Arc topology contains semantic whole-book roles, goals, handoffs, exit "
+    "conditions, and exactly one final last Arc. It must not allocate Chapter counts, "
+    "Chapter titles, events, scenes, IDs, or ordinals. Treat whole-book scale guidance "
+    "as advisory only. Do not invent storage IDs, approval state, routes, or commands."
 )
 BOOK_EVALUATION_CONTRACT = (
     "Use decision='local_repair' exactly when a non-null bounded repair_contract is needed; "
@@ -79,17 +86,24 @@ CHAPTER_EVALUATION_CONTRACT = (
 
 BOOK_CANDIDATE_RUBRIC = (
     "Check that the whole-book direction, genre/reader promise, premise engine, stable world "
-    "and character invariants, long-term directions, pacing/ending tendency, Chapter range, "
-    "and every keyed completion requirement are substantive, mutually coherent, feasible, "
-    "and usable by later Arc planning. Empty placeholders fail. Do not request scenes or a "
-    "Chapter-by-Chapter outline."
+    "and character invariants, long-term directions, pacing/ending tendency, advisory scale "
+    "guidance, ordered semantic Arc topology, and every keyed completion requirement are "
+    "substantive, mutually coherent, feasible, and usable by later Arc planning. Verify "
+    "adjacent Arc handoff coherence, observable exit conditions, and exactly one final last "
+    "Arc. Empty placeholders and Book-authored Chapter allocation fail. Do not request "
+    "Chapter counts, Chapter titles, scenes, or a Chapter-by-Chapter outline."
 )
 ARC_CANDIDATE_RUBRIC = (
-    "Check that the stage purpose and desired state transition serve the current Book "
-    "contract; conflict and pacing trajectories are stage-level and feasible; character, "
-    "foreshadowing, and prohibition obligations are explicit; the cumulative Chapter range "
-    "and selected closure checkpoint are coherent; and every closure signal is observable. "
-    "Advisory beats must not become immutable Chapter slots."
+    "Check that the desired state transition serves the exact assigned Book Arc contract; "
+    "conflict and pacing trajectories are stage-level and feasible; character, "
+    "foreshadowing, and prohibition obligations are explicit; and every closure signal is "
+    "observable. "
+    "Review the complete current-Arc Chapter outline as a causal sequence: required setup "
+    "must precede payoff, evidence must be scheduled before conclusions, each Chapter load "
+    "must be feasible, and the sequence must be capable of reaching closure. Treat outline "
+    "entries as strong semantic assignments, not exact wording or field-copy protocols. The "
+    "Arc chooses the complete remaining outline; the Harness derives its closure checkpoint "
+    "from the frozen effective count plus outline length."
 )
 CHAPTER_CANDIDATE_RUBRIC = (
     "Apply a minimum completion gate to the complete Chapter candidate against its frozen goal, "
@@ -104,8 +118,12 @@ CHAPTER_CANDIDATE_RUBRIC = (
     "for a claim that changes an upper contract, closes a core mystery, assigns culpability, or "
     "contradicts an explicitly uncertain governing fact. Report only blocking issues. If the "
     "mutable Chapter plan is infeasible but the same Arc and Canon remain applicable, authorize "
-    "plan-only local repair. Question the Arc only when its immediate parent contract may no "
-    "longer remain applicable, and never judge Book."
+    "plan-only local repair. Evaluate semantic fulfillment of the assigned Arc outline entry: "
+    "allow title changes, scene regrouping, equivalent hooks, and locally better execution "
+    "that preserves the same macro function. Reject a current candidate that abandons, reverses, "
+    "prematurely consumes, or skips its assignment, and repair that candidate locally. Question "
+    "the Arc only when already committed facts make its current or future assignment infeasible, "
+    "and never judge Book."
 )
 ARC_PARENT_REVIEW_RUBRIC = (
     "Review one evidence-bound Chapter-to-Arc request against the current Arc baseline and "
@@ -130,11 +148,12 @@ ARC_CLOSURE_RUBRIC = (
     "observations/Canon correction goal; never emit a storage ID. Reaching the Chapter "
     "checkpoint is not semantic completion and you must not select a Domain command."
 )
-BOOK_BOUNDARY_RUBRIC = (
+BOOK_COMPLETION_RUBRIC = (
     "For every frozen Book completion requirement, return satisfied, unresolved, or "
-    "contradicted with committed evidence. Judge ending trajectory as regular-Arc-needed, "
-    "final-Arc-ready, completion-ready, or unable-to-judge, and separately judge Book-contract "
-    "applicability. Do not invent the next Arc, author Book revisions, or select the route."
+    "contradicted using cumulative evidence from every formal Arc closure and current Canon. "
+    "Separately judge whether the current Book contract remains applicable, warrants its "
+    "normal human-approved revision workflow, or cannot be judged. Do not invent another "
+    "Arc, author replacement Book content, or select a Domain route."
 )
 CHAPTER_EVIDENCE_RUBRIC = (
     "Verify only whether corrected observations and Canon intent are supported by byte-frozen "
@@ -352,7 +371,7 @@ class TaskRegistry:
         source_arc_parent_review_id: str | None = None,
         source_book_parent_review_id: str | None = None,
         source_arc_closure_review_id: str | None = None,
-        source_book_boundary_review_id: str | None = None,
+        source_book_completion_review_id: str | None = None,
         source_chapter_arc_request_id: str | None = None,
         source_arc_book_request_id: str | None = None,
         source_arc_closure_id: str | None = None,
@@ -388,7 +407,7 @@ class TaskRegistry:
             source_arc_parent_review_id=source_arc_parent_review_id,
             source_book_parent_review_id=source_book_parent_review_id,
             source_arc_closure_review_id=source_arc_closure_review_id,
-            source_book_boundary_review_id=source_book_boundary_review_id,
+            source_book_completion_review_id=source_book_completion_review_id,
             source_chapter_arc_request_id=source_chapter_arc_request_id,
             source_arc_book_request_id=source_arc_book_request_id,
             source_arc_closure_id=source_arc_closure_id,
@@ -462,7 +481,7 @@ def _text(
         output_model=ChapterDraftResult,
         output_schema_id=f"{task_kind}-result",
         output_schema_version=1,
-        context_policy_id="chapter-prose-context-v1",
+        context_policy_id="chapter-prose-context-v2",
         context_policy_version=1,
         task_instructions=instructions,
         text_finalizer=finalize_chapter_prose,
@@ -551,6 +570,7 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "candidate_components_present",
                 "book_workspace_version_current",
                 "completion_requirement_keys_unique",
+                "book_arc_topology_valid",
             ),
             legal_semantic_signals=("pass", "local_repair", "needs_user"),
             output_model=BookEvaluation,
@@ -558,27 +578,28 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
         _strategy(
             task_kind="evaluate.arc",
             scope_layer="arc",
-            objective="Evaluate one frozen Story Arc candidate without planning Chapters.",
-            context_policy_id="arc-evaluator-context-v2",
+            objective="Evaluate one frozen Story Arc candidate and its complete Chapter outline.",
+            context_policy_id="arc-evaluator-context-v4",
             context_includes=(
+                "assigned_book_arc_contract",
                 "candidate_arc_contract",
+                "candidate_arc_chapter_outline",
                 "current_book_baseline",
                 "current_canon",
                 "prior_formal_arc_closure",
                 "current_book_progress_handoff",
             ),
             context_excludes=(
-                "future_chapter_slots",
                 "harness_route_commands",
                 "unrelated_execution_evidence",
             ),
-            rubric_id="arc-candidate-rubric-v2",
+            rubric_id="arc-candidate-rubric-v3",
             rubric_text=ARC_CANDIDATE_RUBRIC,
             deterministic_prechecks=(
                 "arc_workspace_version_current",
-                "arc_chapter_range_ordered",
+                "arc_outline_coverage_exact",
                 "closure_signal_keys_unique",
-                "book_capacity_available",
+                "assigned_book_arc_contract_current",
             ),
             legal_semantic_signals=(
                 "pass",
@@ -587,14 +608,17 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "needs_user",
             ),
             output_model=ArcEvaluation,
+            strategy_version=3,
+            output_schema_version=3,
         ),
         _strategy(
             task_kind="evaluate.chapter",
             scope_layer="chapter",
             objective="Evaluate one complete frozen Chapter candidate.",
-            context_policy_id="chapter-evaluator-context-v3",
+            context_policy_id="chapter-evaluator-context-v4",
             context_includes=(
                 "chapter_goal_and_plan",
+                "current_and_next_arc_outline_assignments",
                 "complete_prose",
                 "observations_and_canon_intent",
                 "current_arc_contract",
@@ -605,7 +629,7 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "unrelated_future_secrets",
                 "harness_storage_protocol",
             ),
-            rubric_id="chapter-candidate-rubric-v4",
+            rubric_id="chapter-candidate-rubric-v5",
             rubric_text=CHAPTER_CANDIDATE_RUBRIC,
             deterministic_prechecks=(
                 "frozen_submission_loaded",
@@ -618,16 +642,17 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "escalate_to_arc",
             ),
             output_model=LayerEvaluationResult,
-            strategy_version=3,
-            output_schema_version=3,
+            strategy_version=4,
+            output_schema_version=4,
         ),
         _strategy(
             task_kind="evaluate.arc_parent_contract",
             scope_layer="arc",
             objective="Review one Chapter-to-Arc request at Arc authority.",
-            context_policy_id="arc-parent-review-context-v1",
+            context_policy_id="arc-parent-review-context-v2",
             context_includes=(
                 "current_arc_baseline",
+                "coherent_current_arc_outline",
                 "source_chapter_request_and_evidence",
                 "predecessor_arc_parent_review",
                 "committed_arc_chapters",
@@ -639,7 +664,7 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "book_revision_commands",
                 "unrelated_agent_history",
             ),
-            rubric_id="arc-parent-contract-rubric-v1",
+            rubric_id="arc-parent-contract-rubric-v2",
             rubric_text=ARC_PARENT_REVIEW_RUBRIC,
             deterministic_prechecks=(
                 "request_open_and_current",
@@ -693,9 +718,10 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
             task_kind="evaluate.arc_closure",
             scope_layer="arc",
             objective="Evaluate the current Arc at its frozen closure checkpoint.",
-            context_policy_id="arc-closure-context-v1",
+            context_policy_id="arc-closure-context-v2",
             context_includes=(
                 "current_arc_contract",
+                "coherent_current_arc_outline",
                 "exact_committed_arc_chapter_set",
                 "chapter_observations",
                 "predecessor_arc_closure_review",
@@ -707,7 +733,7 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "replacement_arc_content",
                 "later_mutable_canon",
             ),
-            rubric_id="arc-closure-rubric-v1",
+            rubric_id="arc-closure-rubric-v2",
             rubric_text=ARC_CLOSURE_RUBRIC,
             deterministic_prechecks=(
                 "closure_checkpoint_reached_exactly",
@@ -726,38 +752,38 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
             output_model=ArcClosureEvaluation,
         ),
         _strategy(
-            task_kind="evaluate.book_boundary",
+            task_kind="evaluate.book_completion",
             scope_layer="book",
-            objective="Evaluate Book progress and ending readiness after a formal Arc closure.",
-            context_policy_id="book-boundary-context-v1",
+            objective="Evaluate whole-Book completion after the planned final Arc closes.",
+            context_policy_id="book-completion-context-v1",
             context_includes=(
                 "current_book_baseline",
-                "source_formal_arc_closure",
-                "closure_frozen_canon",
-                "closure_frozen_chapter_set",
-                "predecessor_book_boundary_review",
-                "prior_book_progress_handoff",
+                "complete_book_arc_topology",
+                "ordered_formal_arc_closures",
+                "cumulative_committed_chapter_evidence",
+                "current_canon",
+                "completion_requirements",
+                "predecessor_book_completion_review",
             ),
             context_excludes=(
-                "next_arc_candidate",
+                "next_arc_creation",
                 "replacement_book_content",
-                "later_mutable_canon",
+                "chapter_count_completion_gate",
             ),
-            rubric_id="book-boundary-rubric-v1",
-            rubric_text=BOOK_BOUNDARY_RUBRIC,
+            rubric_id="book-completion-rubric-v1",
+            rubric_text=BOOK_COMPLETION_RUBRIC,
             deterministic_prechecks=(
-                "formal_arc_closure_current",
+                "planned_final_arc_formally_closed",
                 "book_baseline_current",
-                "closure_inputs_frozen",
-                "chapter_count_within_book_maximum",
+                "all_formal_arc_closures_ordered",
+                "completion_inputs_frozen",
             ),
             legal_semantic_signals=(
                 "requirement_statuses",
-                "ending_trajectory_judgment",
                 "book_contract_judgment",
                 "creator_input_need",
             ),
-            output_model=BookBoundaryEvaluation,
+            output_model=BookCompletionEvaluation,
         ),
         _strategy(
             task_kind="verify_evidence.chapter",
@@ -797,9 +823,13 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 scope_layer=layer,
                 objective=f"Verify only the authorized {layer} repair.",
                 context_policy_id=(
-                    "chapter-repair-verification-context-v3"
+                    "chapter-repair-verification-context-v4"
                     if layer == "chapter"
-                    else f"{layer}-repair-verification-context-v2"
+                    else (
+                        "arc-repair-verification-context-v3"
+                        if layer == "arc"
+                        else f"{layer}-repair-verification-context-v2"
+                    )
                 ),
                 context_includes=(
                     "frozen_candidate_before_repair",
@@ -814,9 +844,13 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                     "harness_route_commands",
                 ),
                 rubric_id=(
-                    "chapter-repair-rubric-v4"
+                    "chapter-repair-rubric-v5"
                     if layer == "chapter"
-                    else f"{layer}-repair-rubric-v2"
+                    else (
+                        "arc-repair-rubric-v4"
+                        if layer == "arc"
+                        else "book-repair-rubric-v3"
+                    )
                 ),
                 rubric_text=(
                     BOOK_CANDIDATE_RUBRIC
@@ -843,8 +877,12 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                     if layer == "book"
                     else ArcEvaluation if layer == "arc" else LayerEvaluationResult
                 ),
-                strategy_version=3 if layer == "chapter" else 1,
-                output_schema_version=3 if layer == "chapter" else 1,
+                strategy_version=(
+                    4 if layer == "chapter" else 3 if layer == "arc" else 2
+                ),
+                output_schema_version=(
+                    4 if layer == "chapter" else 3 if layer == "arc" else 2
+                ),
             )
             for layer in ("book", "arc", "chapter")
         ],
@@ -867,38 +905,44 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             "book.synthesize",
             "book",
             BookCandidatePack,
-            context_policy_id="book-synthesis-context-v1",
+            context_policy_id="book-synthesis-context-v2",
             instructions=(
                 "Synthesize the frozen creator brief and discussion into one coherent Book "
                 f"candidate. {BOOK_CANDIDATE_CONTRACT}"
             ),
+            output_schema_version=2,
         ),
         _native(
             "book_strategist",
             "book.revise",
             "book",
-            BookCandidatePack,
-            context_policy_id="book-revision-context-v1",
+            BookSuccessorCandidateProposal,
+            context_policy_id="book-revision-context-v2",
             instructions=(
                 "Revise only the Book-level intent authorized by the frozen change request. "
-                f"{BOOK_CANDIDATE_CONTRACT}"
+                "Return only the mutable future Arc suffix in arc_topology_suffix; never "
+                "repeat the Harness-frozen historical prefix, ordinals, IDs, or baseline "
+                f"metadata. {BOOK_CANDIDATE_CONTRACT}"
             ),
+            output_schema_version=2,
         ),
         _native(
             "book_strategist",
             "book.repair",
             "book",
             BookRepairPatch,
-            context_policy_id="book-repair-context-v1",
+            context_policy_id="book-repair-context-v2",
             instructions=(
                 "Return only a semantic patch whose change components are a subset of the "
                 "evaluator-authorized Book repair contract in frozen context. Do not return "
                 "selected_title or repeat any omitted Book component; the Harness preserves "
                 "omitted content. Every returned replacement must actually differ from the "
-                "current component; an unchanged replacement is rejected as a no-op. Do not "
+                "current component; an arc_topology repair returns only the authorized mutable "
+                "future suffix and never repeats the frozen historical prefix. An unchanged "
+                "replacement is rejected as a no-op. Do not "
                 "invent storage IDs, approval state, routes, or commands."
             ),
-            output_schema_version=2,
+            output_schema_version=3,
         ),
         *[
             _native(
@@ -906,24 +950,33 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
                 task_kind,
                 "arc",
                 ArcPlanProposal,
-                context_policy_id=f"{task_kind.replace('.', '-')}-context-v2",
+                context_policy_id=f"{task_kind.replace('.', '-')}-context-v4",
                 instructions=instructions,
-                output_schema_version=2,
+                output_schema_version=4,
             )
             for task_kind, instructions in (
                 (
                     "arc.plan",
-                    "Plan only the next stage-level Story Arc from the approved Book, current "
-                    "Book progress handoff, committed Canon, and prior formal closure. Define "
+                    "Plan only the next Story Arc from the approved Book, current "
+                    "assigned Book Arc contract, deterministic progress handoff, committed "
+                    "Canon, and prior formal closure. Define "
                     "a target state transition, trajectories, obligations, prohibitions, "
-                    "cumulative Chapter range, one selected closure checkpoint, and observable "
-                    "closure signals. Advisory beats are optional and are not Chapter slots.",
+                    "observable closure signals, and the complete ordered chapter_outline "
+                    "needed to realize this Arc. Each entry contains only title, core_event, "
+                    "hook, and scenes. The Harness derives the closure checkpoint from the "
+                    "approved outline length and owns ordinals and identities. Expand the "
+                    "assigned Book contract semantically; do not copy its wording or redefine "
+                    "its whole-book role. The outline is a strong semantic plan, not an exact "
+                    "wording protocol.",
                 ),
                 (
                     "arc.revise",
                     "Revise only the current Arc contract under explicit Arc-layer "
-                    "authorization and preserve committed Chapter/Canon facts. Any extension "
-                    "must select a new cumulative closure checkpoint inside a coherent range.",
+                    "authorization and preserve committed Chapter/Canon facts. Return the "
+                    "complete remaining future chapter_outline from the frozen "
+                    "effective point through semantic closure, without copying historical "
+                    "prefixes, ordinals, IDs, or baseline versions. The Harness derives the "
+                    "new closure checkpoint from the effective count plus outline length.",
                 ),
             )
         ],
@@ -932,47 +985,67 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             "arc.repair",
             "arc",
             ArcRepairPatch,
-            context_policy_id="arc-repair-context-v1",
+            context_policy_id="arc-repair-context-v3",
             instructions=(
                 "Return only a semantic patch whose change components are a subset of the "
                 "evaluator-authorized Arc repair scope in frozen context. Do not repeat omitted "
                 "Arc components; the Harness preserves them exactly. Every returned replacement "
                 "must actually differ from the current component; an unchanged replacement is "
-                "rejected as a no-op. Do not invent storage IDs, approval state, routes, or "
-                "commands."
+                "rejected as a no-op. Replacing chapter_outline replaces the complete mutable "
+                "future interval; the Harness derives the closure checkpoint from its length. Do not "
+                "invent storage IDs, approval state, routes, or commands."
             ),
-            output_schema_version=3,
+            output_schema_version=5,
         ),
         _native(
             "chapter_writer",
             "chapter.plan",
             "chapter",
             ChapterPlanProposal,
-            context_policy_id="chapter-plan-context-v1",
-            instructions="Plan one chapter within the frozen Book, Arc, and Canon contracts.",
+            context_policy_id="chapter-plan-context-v2",
+            instructions=(
+                "Refine the current assigned Arc outline entry into one executable Chapter "
+                "plan under the frozen Book, Arc, and Canon contracts. Use the optional next "
+                "entry only to create a natural hook and handoff; do not consume its core event "
+                "early. Preserve semantic intent without copying outline wording or returning "
+                "an outline index, ID, or stored locator."
+            ),
         ),
         _native(
             "chapter_writer",
             "chapter.revise.plan",
             "chapter",
             ChapterPlanProposal,
-            context_policy_id="chapter-revision-plan-context-v1",
-            instructions="Revise the Chapter plan only within the explicit Chapter-level request.",
+            context_policy_id="chapter-revision-plan-context-v2",
+            instructions=(
+                "Revise the Chapter plan only within the explicit Chapter-level request while "
+                "still fulfilling the current assigned Arc outline entry. Use the optional next "
+                "entry only for handoff and return no outline index, ID, or stored locator."
+            ),
         ),
         _text(
             "chapter.draft",
-            instructions="Write only the complete chapter prose. Do not emit JSON, metadata, or commentary.",
+            instructions=(
+                "Write only the complete chapter prose. Fulfill the current assigned Arc "
+                "outline entry through the approved Chapter plan. Use the optional next "
+                "entry only for a natural handoff and do not consume its core event early. "
+                "Do not emit JSON, metadata, or commentary."
+            ),
         ),
         _text(
             "chapter.revise.draft",
-            instructions="Return the complete revised chapter prose only, preserving all unaffected facts.",
+            instructions=(
+                "Return the complete revised chapter prose only. Preserve all unaffected "
+                "facts, continue to fulfill the current assigned Arc outline entry, and use "
+                "the optional next entry only for handoff rather than early consumption."
+            ),
         ),
         _native(
             "chapter_writer",
             "chapter.observe",
             "chapter",
             ChapterObservationResult,
-            context_policy_id="chapter-observation-context-v1",
+            context_policy_id="chapter-observation-context-v2",
             instructions=(
                 "Observe the frozen prose and propose semantic Canon assertions without choosing "
                 "add, update, or resolve commands and without inventing IDs. For each subject, "
@@ -988,7 +1061,7 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             "chapter.revise.observe",
             "chapter",
             ChapterObservationResult,
-            context_policy_id="chapter-revision-observation-context-v1",
+            context_policy_id="chapter-revision-observation-context-v2",
             instructions=(
                 "Re-observe the revised prose and propose only semantically evidence-bound Canon "
                 "assertions. Do not choose storage operations: state each subject's complete current "
@@ -1003,7 +1076,7 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             "chapter.repair.plan",
             "chapter",
             ChapterPlanProposal,
-            context_policy_id="chapter-plan-repair-context-v1",
+            context_policy_id="chapter-plan-repair-context-v2",
             instructions=(
                 "Return one complete replacement for the evaluator-authorized mutable Chapter "
                 "plan. The replacement must remain within the same frozen Arc and Canon. Do not "
@@ -1014,14 +1087,18 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
         ),
         _text(
             "chapter.repair.prose",
-            instructions="Return the complete repaired prose only, changing only the authorized repair scope.",
+            instructions=(
+                "Return the complete repaired prose only, changing only the authorized "
+                "repair scope while preserving the current assigned Arc outline function. "
+                "The optional next entry is handoff context, not permission to consume it."
+            ),
         ),
         _native(
             "chapter_writer",
             "chapter.repair.observation",
             "chapter",
             ChapterObservationRepairPatch,
-            context_policy_id="chapter-observation-repair-context-v1",
+            context_policy_id="chapter-observation-repair-context-v2",
             instructions=(
                 "Return only a semantic patch whose change components are a subset of the "
                 "authorized Chapter repair scope in frozen context. Use observations for the "

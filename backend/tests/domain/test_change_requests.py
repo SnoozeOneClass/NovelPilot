@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.agents.contracts import (
+    ArcChapterOutlineEntry,
     ArcClosureSignal,
     ArcPlanProposal,
     ArcStateTransition,
@@ -26,6 +27,7 @@ from app.db.schema import (
     arc_workspaces,
     book_baselines,
     book_workspaces,
+    chapters,
     chapter_workspaces,
     chapter_arc_change_requests,
     metadata,
@@ -43,16 +45,19 @@ from app.domain.arc.contracts import (
     RecordArcReviewRequest,
     SubmitArcRequest,
 )
+from app.domain.arc.outline import ArcOutlineProjectionError
 from app.domain.book.commands import BookCommandService
 from app.domain.book.contracts import (
     ApplyBookCandidateTaskRequest,
     ApproveBookRequest,
-    BookCandidatePack,
+    BookArcContract,
+    BookArcTopologySuffix,
     BookCompletionRequirement,
     BookCreativeConstraints,
     BookEvaluation,
     BookRollingPlan,
     CompletionContract,
+    BookSuccessorCandidateProposal,
     RecordBookReviewRequest,
     SubmitBookRequest,
 )
@@ -61,11 +66,14 @@ from app.domain.change_requests import (
     ChangeRequestCommandService,
     RejectChangeRequest,
 )
+from app.domain.chapter.commands import ChapterCommandService
+from app.domain.chapter.contracts import CommitChapterRequest
 from app.domain.commands import CommandPreconditionError
 from app.domain.evaluation import (
     ArcParentContractEvaluation,
     BookParentContractEvaluation,
 )
+from app.domain.project_state import ProjectStateQuery
 from app.runtime.context import HarnessContextBuilder
 from app.store.command_bus import CommandBus
 from tests.domain.test_arc_lifecycle import _prepare_reviewed_arc
@@ -84,7 +92,7 @@ async def _commit_book_v2(
     workspace_lock_version: int,
     suffix: str,
 ) -> str:
-    candidate = BookCandidatePack(
+    candidate = BookSuccessorCandidateProposal(
         direction="The investigation now permits the explicitly escalated reveal.",
         constraints=BookCreativeConstraints(
             genre_reader_promise="A fair-play speculative mystery.",
@@ -99,16 +107,12 @@ async def _commit_book_v2(
             long_term_character_directions=[
                 "Mara learns to trust evidence without surrendering judgment."
             ],
-            high_level_phase_strategy=[
-                "Identify one edit source before exposing the wider system."
-            ],
             whole_book_pacing_strategy="Escalate through evidence-bound Arc closures.",
             ending_tendency="Resolve the central edit while preserving earned consequences.",
             arc_planning_guidelines=["Each Arc must close an observable state transition."],
+            whole_book_scale_guidance="Around twelve Chapters remains advisory.",
         ),
         completion_contract=CompletionContract(
-            minimum_chapter_count=1,
-            maximum_chapter_count=12,
             completion_requirements=[
                 BookCompletionRequirement(
                     requirement_key="central_memory_conflict_resolved",
@@ -116,6 +120,19 @@ async def _commit_book_v2(
                     evidence_expectation="Committed Chapters prove the resolution.",
                 )
             ],
+        ),
+        arc_topology_suffix=BookArcTopologySuffix(
+            arcs=[
+                BookArcContract(
+                    whole_book_role="Resolve the revised memory mystery.",
+                    core_goal="Permit the evidence-bound escalated reveal.",
+                    handoff_from_previous="Continue the current active Arc.",
+                    exit_conditions=[
+                        "The escalated reveal is supported and resolved."
+                    ],
+                    is_final=True,
+                )
+            ]
         ),
     )
     task_id, attempt_id = await insert_successful_task(
@@ -316,11 +333,31 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
     async def exercise() -> None:
         engine = create_sqlite_async_engine(database)
         try:
+            first = await _prepare_reviewed_chapter(
+                engine,
+                project_id="change-project",
+                target_chapter_count=2,
+                canon_change=False,
+            )
+            await ChapterCommandService(CommandBus(engine)).commit_chapter_and_canon(
+                CommitChapterRequest(
+                    project_id=first.foundation.project_id,
+                    chapter_id=first.chapter_id,
+                    submission_id=first.submission_id,
+                    review_id=first.review_id,
+                    expected_canon_baseline_id=(
+                        first.foundation.canon_baseline_id
+                    ),
+                ),
+                idempotency_key="change:commit-first-chapter",
+            )
             ready = await _prepare_reviewed_chapter(
                 engine,
                 project_id="change-project",
                 target_chapter_count=2,
                 canon_change=False,
+                foundation=first.foundation,
+                idempotency_suffix=":second",
                 evaluation=LayerEvaluationResult(
                     decision="escalate_to_arc",
                     summary="The Arc contract must change before this Chapter can proceed.",
@@ -440,7 +477,6 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
 
             plan = ArcPlanProposal(
                 title="The First Contradiction, Revised",
-                purpose="Allow the Chapter to reveal a physical memory-edit trace.",
                 desired_state_transition=ArcStateTransition(
                     start_state="The memory contradiction remains unexplained.",
                     end_state="The edit source is identified through physical evidence.",
@@ -453,10 +489,6 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                 character_obligations=["Mara changes one belief through evidence."],
                 foreshadowing_obligations=["Leave one clue for the next Arc."],
                 prohibitions=["Do not contradict committed Canon."],
-                minimum_cumulative_chapter_count=1,
-                recommended_closure_cumulative_chapter_count=2,
-                maximum_cumulative_chapter_count=3,
-                closure_cumulative_chapter_count=2,
                 closure_signals=[
                     ArcClosureSignal(
                         signal_key="first_edit_identified",
@@ -464,9 +496,13 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                         evidence_expectation="Committed observations identify the source.",
                     )
                 ],
-                advisory_beats=[
-                    "Witnesses disagree",
-                    "The revised evidence can now appear",
+                chapter_outline=[
+                    ArcChapterOutlineEntry(
+                        title="The surviving trace",
+                        core_event="The revised evidence can now appear",
+                        hook="The verified trace is ready for Arc closure review.",
+                        scenes=["Verify and commit the physical trace."],
+                    ),
                 ],
             )
             task_id, attempt_id = await insert_successful_task(
@@ -497,6 +533,24 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                     expected_workspace_lock_version=activated.result.workspace_lock_version,
                 ),
                 idempotency_key="change:apply-arc-revision",
+            )
+            candidate_context = await HarnessContextBuilder(engine).build(
+                task_kind="evaluate.arc",
+                project_id=ready.foundation.project_id,
+                book_id=ready.foundation.book_id,
+                arc_id=ready.foundation.arc_id,
+                chapter_id=None,
+                semantic_goal="Evaluate the coherent Arc successor candidate.",
+            )
+            assert '"title":"Chapter 1"' in candidate_context.prompt
+            assert '"title":"The surviving trace"' in candidate_context.prompt
+            assert "physical evidence at assignment 2" not in (
+                candidate_context.prompt
+            )
+            assert any(
+                item["label"] == "candidate_coherent_story_arc_outline"
+                for item in candidate_context.manifest["items"]
+                if isinstance(item, dict)
             )
             submitted = await arc_service.submit_for_review(
                 SubmitArcRequest(
@@ -574,12 +628,65 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                         ).where(chapter_workspaces.c.chapter_id == ready.chapter_id)
                     )
                 ).one()
+                outline_source = await connection.scalar(
+                    select(chapters.c.outline_arc_baseline_id).where(
+                        chapters.c.id == ready.chapter_id
+                    )
+                )
                 assert tuple(change) == ("resolved", committed.result.baseline_id)
-                assert tuple(chapter_workspace) == ("stale", "upstream_arc_revised")
+                assert tuple(chapter_workspace) == ("active", None)
+                assert outline_source == committed.result.baseline_id
                 assert (
                     await connection.scalar(select(func.count()).select_from(arc_baselines))
                     == 2
                 )
+            state = await ProjectStateQuery(engine).get_project(
+                ready.foundation.project_id
+            )
+            assert state is not None
+            assert state.current_arc is not None
+            assert state.current_arc.outline is not None
+            assert state.current_arc.outline.current_baseline_version == 2
+            assert [
+                (entry.arc_ordinal, entry.status, entry.source_arc_baseline_version)
+                for entry in state.current_arc.outline.entries
+            ] == [
+                (1, "committed", 1),
+                (2, "drafting", 2),
+            ]
+            arc_context = await HarnessContextBuilder(engine).build(
+                task_kind="arc.revise",
+                project_id=ready.foundation.project_id,
+                book_id=ready.foundation.book_id,
+                arc_id=ready.foundation.arc_id,
+                chapter_id=None,
+                semantic_goal="Revise the coherent current Story Arc.",
+            )
+            assert '"title":"Chapter 1"' in arc_context.prompt
+            assert '"title":"The surviving trace"' in arc_context.prompt
+            assert any(
+                item["label"] == "formal_coherent_story_arc_outline"
+                for item in arc_context.manifest["items"]
+                if isinstance(item, dict)
+            )
+            async with engine.begin() as connection:
+                await connection.execute(
+                    chapters.update()
+                    .where(chapters.c.id == ready.chapter_id)
+                    .values(
+                        outline_arc_baseline_id=(
+                            ready.foundation.arc_baseline_id
+                        )
+                    )
+                )
+            with pytest.raises(ArcOutlineProjectionError) as corrupted:
+                await ProjectStateQuery(engine).get_project(
+                    ready.foundation.project_id
+                )
+            assert (
+                corrupted.value.reason_code
+                == "chapter_source_not_governing_interval"
+            )
         finally:
             await engine.dispose()
 

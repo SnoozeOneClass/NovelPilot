@@ -30,12 +30,14 @@ from app.domain.book.commands import BookCommandService
 from app.domain.book.contracts import (
     ApplyBookCandidateTaskRequest,
     ApproveBookRequest,
-    BookCandidatePack,
+    BookArcContract,
+    BookArcTopologySuffix,
     BookCompletionRequirement,
     BookCreativeConstraints,
     BookEvaluation,
     BookRollingPlan,
     CompletionContract,
+    BookSuccessorCandidateProposal,
     RecordBookReviewRequest,
     SubmitBookRequest,
 )
@@ -96,7 +98,7 @@ def test_book_revision_requires_review_and_user_approval_then_stales_active_arc_
                 ),
                 idempotency_key="revision:activate-book",
             )
-            candidate = BookCandidatePack(
+            candidate = BookSuccessorCandidateProposal(
                 direction="Conflicting testimony reveals memory editing without rewriting history.",
                 constraints=BookCreativeConstraints(
                     genre_reader_promise="A fair-play memory mystery.",
@@ -113,19 +115,14 @@ def test_book_revision_requires_review_and_user_approval_then_stales_active_arc_
                     long_term_character_directions=[
                         "Mara learns to distinguish trust from certainty."
                     ],
-                    high_level_phase_strategy=[
-                        "Identify the edit mechanism",
-                        "Confront its operator",
-                    ],
                     whole_book_pacing_strategy="Escalate through bounded Arcs.",
                     ending_tendency="Resolve the central edit at a personal cost.",
                     arc_planning_guidelines=[
                         "Every Arc must close an observable state transition."
                     ],
+                    whole_book_scale_guidance="Around twelve Chapters is advisory.",
                 ),
                 completion_contract=CompletionContract(
-                    minimum_chapter_count=1,
-                    maximum_chapter_count=12,
                     completion_requirements=[
                         BookCompletionRequirement(
                             requirement_key="central_memory_conflict_resolved",
@@ -133,6 +130,17 @@ def test_book_revision_requires_review_and_user_approval_then_stales_active_arc_
                             evidence_expectation="Committed Chapters prove the resolution.",
                         )
                     ],
+                ),
+                arc_topology_suffix=BookArcTopologySuffix(
+                    arcs=[
+                        BookArcContract(
+                            whole_book_role="Resolve the memory mystery.",
+                            core_goal="Confront the operator with verified evidence.",
+                            handoff_from_previous="Continue the current active Arc.",
+                            exit_conditions=["The central edit is resolved."],
+                            is_final=True,
+                        )
+                    ]
                 ),
             )
             revise_task, revise_attempt = await insert_successful_task(

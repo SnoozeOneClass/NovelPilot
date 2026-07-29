@@ -9,6 +9,7 @@
 | 单 SQLite、39 表、Alembic drift | `app.db` | `backend/tests/db`、`test_database_engine.py` |
 | 项目内 CAS 与删除隔离 | `app.store.content`、复合 FK | `test_content.py`、`test_constraints.py` |
 | Book workspace/review/approval/baseline | `app.domain.book` | `test_book_discussion.py`、`test_book_lifecycle.py` |
+| Book 有序 Arc 拓扑与非最终弧确定性交接 | `domain.book/authority`、`runtime.driver` | `test_completion.py`、整书 driver 参数化测试 |
 | 当前 Arc 契约、双模式审批与 formal closure | `app.domain.arc`、`domain.authority` | `test_arc_lifecycle.py`、`test_completion.py`、整书 driver 参数化测试 |
 | Chapter/Canon 原子提交 | `app.domain.chapter` | `test_chapter_lifecycle.py`、`test_revisions.py` |
 | Book > Arc > Chapter 直属上层审查 | `domain.change_requests/authority` | `test_change_requests.py`、`test_authority_feedback.py` |
@@ -37,9 +38,9 @@ npm.cmd run acceptance
 `backend/tests/runtime/test_domain_driver.py` 使用 Pydantic AI `FunctionModel`，但经过正式 Task Registry、Agent Executor、execution evidence、Route、Domain Commands 和 SQLite Store，而不是绕过业务层直接塞 fixture。
 
 - full-auto：20 个正式 Chapter、1 次 Book 批准、0 次 Arc 批准；
-- participatory：20 个正式 Chapter、1 次 Book 批准、10 次 Arc 批准；
-- 两者都经过正式 Arc closure、Book boundary handoff，并到达正式 Book completion；
-- closure 由契约与已提交事实判定，章节数只负责触发检查；
+- participatory：20 个正式 Chapter、1 次 Book 批准、2 次 Arc 批准；
+- 两者都严格运行 Book 规划的两个 Arc；Arc 1 closure 确定性交接到 Arc 2，Arc 2 作为最终弧触发正式 Book completion；
+- closure 由契约与已提交事实判定，检查点只由已批准 Arc 大纲长度派生；
 - 无 Arc 滚动复盘、无 Chapter-to-Book 直达变更、无按次数完成；
 - 浏览器、SSE 和真实 Provider 均不是推进条件。
 

@@ -58,8 +58,8 @@ Pydantic AI 接管通用能力：Provider/Model 调用、原生 JSON Schema、�
 | 角色 | 职责 |
 | --- | --- |
 | BookStrategist | Book 讨论、候选综合与正式修订候选 |
-| ArcPlanner | 当前 Story Arc 契约的规划与修订候选 |
-| ChapterWriter | Chapter 计划、正文、观察与局部修订 |
+| ArcPlanner | 当前 Story Arc 契约、从生效点到收束检查点的完整逐章大纲，以及获得授权后的未来计划修订候选 |
+| ChapterWriter | 在 Harness 分配的当前 Arc 大纲项内完成 Chapter 细化计划、正文、观察与局部修订 |
 | Evaluator | 按任务绑定的 Book/Arc/Chapter、父层审查、Arc 收束、Book 边界和证据纠正策略只读评审 |
 
 计划、观察、评估使用原生结构化输出；章节正文使用文本流。结果格式与线协议相互独立：结构化任务由 Agent 保留一次原生输出修复，但每次底层 Provider 调用同样使用流式连接，完整 Pydantic 校验通过前不会形成结果或领域事实。
@@ -85,6 +85,12 @@ mutable workspace
 - 章节内部影响由 Chapter 层处理；影响 Story Arc 或全书时只能逐级升级 change request。
 - Agent 只提出、修订或评审；Harness 通过 Domain Command 写权威状态。
 - 上游 baseline 更新后，未提交的下游 workspace 会失效并显式重绑；已提交历史不会被自动 rebase/replay。
+- 每个正式 Book baseline 冻结一个有序语义 Arc 拓扑，并且恰好标记一个最终 Arc。Book 只规定各 Arc 在全书中的职责、核心目标、前序交接和退出条件，不分配章节标题、章节事件、场景或每弧章数。
+- 用户给出的章节数只作为软规模建议传给规划 Agent，不参与 Route、Arc 收束、Book 完成或拓扑修订门禁。
+- 每个正式 Arc baseline 冻结一个明确生效点和恰好覆盖其未来区间的 `chapter_outline`；初始 Arc 必须至少包含一章，合法 successor 可以在生效点已经等于新检查点时包含零个未来项。
+- Harness 创建 Chapter 时确定性分配唯一大纲项，并把来源 Arc baseline 固定到 Chapter 身份上。Chapter 自身的 revision 不能改写这项 provenance。
+- Arc successor 只替换生效点之后的未来大纲。已有正式 Chapter 保持原来源；唯一尚未提交的当前 Chapter 在同一事务中重绑到 successor 并清空依赖旧大纲的草稿内容。
+- 后端把同一 `story_arcs.id` 的 baseline lineage 投影成一条连续 Arc：已存在 Chapter 使用稳定 provenance，未来项只取当前 baseline。前端和模型不得自行拼接 v1/v2。
 
 产品门禁：
 
@@ -97,8 +103,10 @@ mutable workspace
 `Book > Story Arc > Chapter` 是正式语义权威顺序。下层可以提交证据和直属上层审查请求，但不能判断或替换上层 baseline：
 
 - Chapter 只在当前 Book/Arc baseline、当前 Canon 和当前章目标齐备时启动。正文、observations 与 Canon intent 通过独立评审并由原子 Command 提交，才算 Chapter 退出成功。
-- Arc 只在当前 Book baseline 与合法的上一 Arc progress handoff（首 Arc 除外）齐备时启动。`closure_cumulative_chapter_count` 是全书累计章号，只触发最低限度的收束检查；只有 Arc 契约被已提交事实满足并形成 formal closure，Arc 才算结束。
-- 每个 formal Arc closure 触发一次独立 Book boundary evaluation。它只能形成绑定该精确输入的下一 Arc handoff、Book 层审查，或 formal Book completion；“章节数到了”与“流程跑完了”都不能直接完成 Book。
+- Arc 只在当前 Book baseline、当前 ordinal 对应的精确 Book Arc contract，以及合法的上一 Arc progress handoff（首 Arc 除外）齐备时启动。`closure_cumulative_chapter_count` 由 Arc 获批时的生效点加完整大纲长度确定，只触发最低限度的收束检查；只有 Arc 契约被已提交事实满足并形成 formal closure，Arc 才算结束。
+- 非最终 formal Arc closure 不调用 Book 模型任务；Harness 只按当前 Book 拓扑确定性提交下一 ordinal 的 handoff。只有规划中的最终 Arc closure 才触发 `evaluate.book_completion`，并使用所有正式 Arc closure 与累计 Canon 判断整书终止。它不能隐式创建未规划的 Arc。
+
+Arc Planner 和 Arc candidate/closure Evaluator 可以看到当前 Arc 的完整逐章大纲。正常 Chapter 计划与正文只看到当前项和至多一个下一项；Chapter 观察、Canon 抽取和评审只看到当前项。大纲遵循软语义约束：Chapter 必须完成宏观职责，但不要求标题、措辞、场景数量或事件描述逐字匹配。逐章大纲耗尽只触发 Arc 收束检查，不等于收束通过，也不引入周期性 Arc 质量复盘。
 
 Arc 收束或父层审查的自动向下纠正，在同一冻结评审 lineage 中最多一轮。第二次出现同类问题时，若拥有该问题的 Agent 给出了用户可以回答的具体问题，则进入显式 creator wait；执行、评估契约或上下文问题进入失败暂停，不能伪装成等待用户。
 

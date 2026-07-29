@@ -4,21 +4,23 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.agents.contracts import ArcClosureSignal, ArcStateTransition, EvaluationIssue
+from app.agents.contracts import (
+    ArcChapterOutlineEntry,
+    ArcClosureSignal,
+    ArcStateTransition,
+    EvaluationIssue,
+)
 
-ArcPurpose = Literal["regular", "final"]
 ArcRepairComponent = Literal[
     "title",
-    "purpose",
     "desired_state_transition",
     "conflict_trajectory",
     "pacing_trajectory",
     "character_obligations",
     "foreshadowing_obligations",
     "prohibitions",
-    "chapter_range",
     "closure_signals",
-    "advisory_beats",
+    "chapter_outline",
 ]
 ArcReviewDecision = Literal["pass", "local_repair", "escalate_to_book", "needs_user"]
 
@@ -28,13 +30,6 @@ class ArcTitleRepair(BaseModel):
 
     component: Literal["title"]
     value: str = Field(min_length=1, description="Replacement Story Arc title.")
-
-
-class ArcPurposeRepair(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    component: Literal["purpose"]
-    value: str = Field(min_length=1, description="Replacement Story Arc purpose.")
 
 
 class ArcStateTransitionRepair(BaseModel):
@@ -79,43 +74,6 @@ class ArcProhibitionsRepair(BaseModel):
     value: list[str] = Field(min_length=1)
 
 
-class ArcChapterRange(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    minimum_cumulative_chapter_count: int = Field(ge=1)
-    recommended_closure_cumulative_chapter_count: int = Field(ge=1)
-    maximum_cumulative_chapter_count: int = Field(ge=1)
-    closure_cumulative_chapter_count: int = Field(ge=1)
-
-    @model_validator(mode="after")
-    def _valid_range(self) -> ArcChapterRange:
-        if not (
-            self.minimum_cumulative_chapter_count
-            <= self.recommended_closure_cumulative_chapter_count
-            <= self.maximum_cumulative_chapter_count
-        ):
-            raise ValueError(
-                "Arc cumulative Chapter range must satisfy "
-                "minimum <= recommended <= maximum."
-            )
-        if not (
-            self.minimum_cumulative_chapter_count
-            <= self.closure_cumulative_chapter_count
-            <= self.maximum_cumulative_chapter_count
-        ):
-            raise ValueError(
-                "Arc closure cumulative checkpoint must fall inside its cumulative range."
-            )
-        return self
-
-
-class ArcChapterRangeRepair(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    component: Literal["chapter_range"]
-    value: ArcChapterRange
-
-
 class ArcClosureSignalsRepair(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -123,25 +81,23 @@ class ArcClosureSignalsRepair(BaseModel):
     value: list[ArcClosureSignal] = Field(min_length=1)
 
 
-class ArcAdvisoryBeatsRepair(BaseModel):
+class ArcChapterOutlineRepair(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    component: Literal["advisory_beats"]
-    value: list[str]
+    component: Literal["chapter_outline"]
+    value: list[ArcChapterOutlineEntry]
 
 
 ArcRepairChange = Annotated[
     ArcTitleRepair
-    | ArcPurposeRepair
     | ArcStateTransitionRepair
     | ArcConflictTrajectoryRepair
     | ArcPacingTrajectoryRepair
     | ArcCharacterObligationsRepair
     | ArcForeshadowingObligationsRepair
     | ArcProhibitionsRepair
-    | ArcChapterRangeRepair
     | ArcClosureSignalsRepair
-    | ArcAdvisoryBeatsRepair,
+    | ArcChapterOutlineRepair,
     Field(discriminator="component"),
 ]
 
@@ -220,7 +176,8 @@ class CreateStoryArcRequest(BaseModel):
     book_id: str
     expected_book_baseline_id: str
     expected_canon_baseline_id: str
-    purpose: ArcPurpose = "regular"
+    expected_ordinal: int = Field(ge=1)
+    source_progress_handoff_id: str | None = None
     source_task_id: str | None = None
 
 
@@ -232,7 +189,6 @@ class CreateStoryArcResult(BaseModel):
     arc_id: str
     workspace_id: str
     ordinal: int = Field(ge=1)
-    purpose: ArcPurpose
     workspace_lock_version: int = 1
 
 
@@ -344,7 +300,6 @@ class CommitArcAutoRequest(BaseModel):
 
 class ApproveArcRequest(CommitArcAutoRequest):
     approval_gate_id: str
-    closure_cumulative_chapter_count: int = Field(ge=1)
 
 
 class RejectArcGateRequest(BaseModel):
@@ -365,9 +320,6 @@ class CommitArcResult(BaseModel):
     arc_id: str
     baseline_id: str
     baseline_version: int = Field(ge=1)
-    minimum_cumulative_chapter_count: int = Field(ge=1)
-    recommended_closure_cumulative_chapter_count: int = Field(ge=1)
-    maximum_cumulative_chapter_count: int = Field(ge=1)
     closure_cumulative_chapter_count: int = Field(ge=1)
     authorization_kind: Literal["policy_auto", "human_approval"]
     lifecycle_status: Literal["active", "closing"]

@@ -3,8 +3,6 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
-
 import pytest
 from alembic import command
 from sqlalchemy import func, select
@@ -30,14 +28,14 @@ from app.domain.authority import (
     CommitBookProgressHandoffRequest,
     LoopAuthorityCommandService,
     RecordArcClosureReviewRequest,
-    RecordBookBoundaryReviewRequest,
+    RecordBookCompletionReviewRequest,
 )
 from app.domain.chapter.commands import ChapterCommandService
 from app.domain.chapter.contracts import CommitChapterRequest
 from app.domain.commands import CommandPreconditionError
 from app.domain.evaluation import (
     ArcClosureEvaluation,
-    BookBoundaryEvaluation,
+    BookCompletionEvaluation,
     CompletionRequirementStatus,
     ContractSignalStatus,
 )
@@ -51,25 +49,25 @@ from tests.helpers.lifecycle_seed import insert_successful_task
 
 
 @dataclass(frozen=True, slots=True)
-class FormalArcBoundary:
+class FormalArcClosure:
     chapter: ReviewedChapter
     canon_baseline_id: str
     arc_closure_id: str
     book_workspace_lock_version: int
 
 
-async def _prepare_formal_arc_boundary(
+async def _prepare_formal_arc_closure(
     engine: AsyncEngine,
     *,
     project_id: str,
-    arc_purpose: Literal["regular", "final"],
-) -> FormalArcBoundary:
+    arc_contract_count: int = 1,
+) -> FormalArcClosure:
     ready = await _prepare_reviewed_chapter(
         engine,
         project_id=project_id,
         target_chapter_count=1,
         canon_change=False,
-        arc_purpose=arc_purpose,
+        arc_contract_count=arc_contract_count,
     )
     committed = await ChapterCommandService(CommandBus(engine)).commit_chapter_and_canon(
         CommitChapterRequest(
@@ -142,7 +140,7 @@ async def _prepare_formal_arc_boundary(
             )
         )
     assert book_workspace_lock is not None
-    return FormalArcBoundary(
+    return FormalArcClosure(
         chapter=ready,
         canon_baseline_id=committed.result.canon_after_id,
         arc_closure_id=closure.result.formal_closure_id,
@@ -150,37 +148,32 @@ async def _prepare_formal_arc_boundary(
     )
 
 
-async def _record_book_boundary(
+async def _record_book_completion(
     engine: AsyncEngine,
     *,
-    boundary: FormalArcBoundary,
-    ending_judgment: Literal[
-        "regular_arc_needed",
-        "final_arc_ready",
-        "completion_ready",
-    ],
-    requirement_status: Literal["satisfied", "unresolved"],
+    closure: FormalArcClosure,
+    requirement_status: str,
     suffix: str,
 ) -> tuple[LoopAuthorityCommandService, str, str]:
-    ready = boundary.chapter
+    ready = closure.chapter
     task_id, attempt_id = await insert_successful_task(
         engine,
         project_id=ready.foundation.project_id,
         run_id=ready.foundation.run_id,
-        task_id=f"{suffix}:evaluate-book-boundary",
-        attempt_id=f"{suffix}:evaluate-book-boundary:attempt",
+        task_id=f"{suffix}:evaluate-book-completion",
+        attempt_id=f"{suffix}:evaluate-book-completion:attempt",
         role="evaluator",
-        task_kind="evaluate.book_boundary",
+        task_kind="evaluate.book_completion",
         scope_layer="book",
         book_id=ready.foundation.book_id,
         book_baseline_id=ready.foundation.book_baseline_id,
-        canon_baseline_id=boundary.canon_baseline_id,
-        workspace_lock_version=boundary.book_workspace_lock_version,
-        correction_lineage_id=f"{suffix}:book-boundary-lineage",
+        canon_baseline_id=closure.canon_baseline_id,
+        workspace_lock_version=closure.book_workspace_lock_version,
+        correction_lineage_id=f"{suffix}:book-completion-lineage",
         correction_lineage_origin="review_initiated",
         automatic_correction_round=0,
-        source_arc_closure_id=boundary.arc_closure_id,
-        result=BookBoundaryEvaluation(
+        source_arc_closure_id=closure.arc_closure_id,
+        result=BookCompletionEvaluation(
             requirement_statuses=[
                 CompletionRequirementStatus(
                     requirement_key="memory_conflict_resolved",
@@ -189,25 +182,24 @@ async def _record_book_boundary(
                     rationale="The status is frozen from committed evidence.",
                 )
             ],
-            ending_trajectory_judgment=ending_judgment,
             book_contract_judgment="remains_applicable",
-            summary="The Book boundary has an explicit semantic disposition.",
+            summary="The planned final Arc supports a Book completion decision.",
         ),
     )
     authority = LoopAuthorityCommandService(CommandBus(engine))
-    review = await authority.record_book_boundary_review(
-        RecordBookBoundaryReviewRequest(
+    review = await authority.record_book_completion_review(
+        RecordBookCompletionReviewRequest(
             project_id=ready.foundation.project_id,
             book_id=ready.foundation.book_id,
             task_id=task_id,
             attempt_id=attempt_id,
         ),
-        idempotency_key=f"{suffix}:record-book-boundary",
+        idempotency_key=f"{suffix}:record-book-completion",
     )
     return authority, review.result.review_id, review.result.disposition
 
 
-def test_formal_final_arc_and_book_boundary_atomically_complete_run(
+def test_formal_final_arc_and_book_completion_atomically_complete_run(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "completion.sqlite3"
@@ -216,24 +208,22 @@ def test_formal_final_arc_and_book_boundary_atomically_complete_run(
     async def exercise() -> None:
         engine = create_sqlite_async_engine(database)
         try:
-            boundary = await _prepare_formal_arc_boundary(
+            closure = await _prepare_formal_arc_closure(
                 engine,
                 project_id="completion-project",
-                arc_purpose="final",
             )
-            authority, review_id, disposition = await _record_book_boundary(
+            authority, review_id, disposition = await _record_book_completion(
                 engine,
-                boundary=boundary,
-                ending_judgment="completion_ready",
+                closure=closure,
                 requirement_status="satisfied",
                 suffix="completion",
             )
             assert disposition == "complete_book"
             completed = await authority.commit_book_completion(
                 CommitBookCompletionRequest(
-                    project_id=boundary.chapter.foundation.project_id,
-                    book_id=boundary.chapter.foundation.book_id,
-                    boundary_review_id=review_id,
+                    project_id=closure.chapter.foundation.project_id,
+                    book_id=closure.chapter.foundation.book_id,
+                    completion_review_id=review_id,
                 ),
                 idempotency_key="completion:commit",
             )
@@ -243,13 +233,13 @@ def test_formal_final_arc_and_book_boundary_atomically_complete_run(
             ):
                 await ArcCommandService(CommandBus(engine)).create_story_arc(
                     CreateStoryArcRequest(
-                        project_id=boundary.chapter.foundation.project_id,
-                        book_id=boundary.chapter.foundation.book_id,
+                        project_id=closure.chapter.foundation.project_id,
+                        book_id=closure.chapter.foundation.book_id,
                         expected_book_baseline_id=(
-                            boundary.chapter.foundation.book_baseline_id
+                            closure.chapter.foundation.book_baseline_id
                         ),
-                        expected_canon_baseline_id=boundary.canon_baseline_id,
-                        purpose="regular",
+                        expected_canon_baseline_id=closure.canon_baseline_id,
+                        expected_ordinal=2,
                     ),
                     idempotency_key="completion:no-next-arc",
                 )
@@ -270,7 +260,7 @@ def test_formal_final_arc_and_book_boundary_atomically_complete_run(
                         )
                         .where(
                             projects.c.id
-                            == boundary.chapter.foundation.project_id
+                            == closure.chapter.foundation.project_id
                         )
                     )
                 ).one()
@@ -299,107 +289,105 @@ def test_formal_final_arc_and_book_boundary_atomically_complete_run(
     asyncio.run(exercise())
 
 
-@pytest.mark.parametrize(
-    ("ending_judgment", "expected_disposition", "expected_purpose"),
-    [
-        ("regular_arc_needed", "continue_regular_arc", "regular"),
-        ("final_arc_ready", "plan_final_arc", "final"),
-    ],
-)
-def test_nonterminal_book_boundary_commits_handoff_before_next_arc(
+def test_nonfinal_arc_closure_deterministically_commits_next_topology_handoff(
     tmp_path: Path,
-    ending_judgment: Literal["regular_arc_needed", "final_arc_ready"],
-    expected_disposition: Literal["continue_regular_arc", "plan_final_arc"],
-    expected_purpose: Literal["regular", "final"],
 ) -> None:
-    database = tmp_path / f"handoff-{expected_purpose}.sqlite3"
+    database = tmp_path / "handoff-next-ordinal.sqlite3"
     command.upgrade(alembic_config(database), "head")
 
     async def exercise() -> None:
         engine = create_sqlite_async_engine(database)
         try:
-            boundary = await _prepare_formal_arc_boundary(
+            closure = await _prepare_formal_arc_closure(
                 engine,
-                project_id=f"handoff-{expected_purpose}-project",
-                arc_purpose="regular",
+                project_id="handoff-project",
+                arc_contract_count=2,
             )
-            authority, review_id, disposition = await _record_book_boundary(
-                engine,
-                boundary=boundary,
-                ending_judgment=ending_judgment,
-                requirement_status="unresolved",
-                suffix=f"handoff-{expected_purpose}",
-            )
-            assert disposition == expected_disposition
+            authority = LoopAuthorityCommandService(CommandBus(engine))
             with pytest.raises(
                 CommandPreconditionError,
                 match="requires the current Book progress handoff",
             ):
                 await ArcCommandService(CommandBus(engine)).create_story_arc(
                     CreateStoryArcRequest(
-                        project_id=boundary.chapter.foundation.project_id,
-                        book_id=boundary.chapter.foundation.book_id,
+                        project_id=closure.chapter.foundation.project_id,
+                        book_id=closure.chapter.foundation.book_id,
                         expected_book_baseline_id=(
-                            boundary.chapter.foundation.book_baseline_id
+                            closure.chapter.foundation.book_baseline_id
                         ),
-                        expected_canon_baseline_id=boundary.canon_baseline_id,
-                        purpose=expected_purpose,
+                        expected_canon_baseline_id=closure.canon_baseline_id,
+                        expected_ordinal=2,
                     ),
-                    idempotency_key=f"handoff-{expected_purpose}:missing-handoff",
+                    idempotency_key="handoff:missing",
                 )
             handoff = await authority.commit_book_progress_handoff(
                 CommitBookProgressHandoffRequest(
-                    project_id=boundary.chapter.foundation.project_id,
-                    book_id=boundary.chapter.foundation.book_id,
-                    boundary_review_id=review_id,
+                    project_id=closure.chapter.foundation.project_id,
+                    book_id=closure.chapter.foundation.book_id,
+                    source_arc_closure_id=closure.arc_closure_id,
                 ),
-                idempotency_key=f"handoff-{expected_purpose}:commit",
+                idempotency_key="handoff:commit",
             )
-            assert handoff.result.next_arc_purpose == expected_purpose
-            wrong_purpose: Literal["regular", "final"] = (
-                "final" if expected_purpose == "regular" else "regular"
-            )
+            assert handoff.result.next_arc_ordinal == 2
             with pytest.raises(
                 CommandPreconditionError,
-                match="does not match the current Book handoff",
+                match="requires the current Book progress handoff",
             ):
                 await ArcCommandService(CommandBus(engine)).create_story_arc(
                     CreateStoryArcRequest(
-                        project_id=boundary.chapter.foundation.project_id,
-                        book_id=boundary.chapter.foundation.book_id,
+                        project_id=closure.chapter.foundation.project_id,
+                        book_id=closure.chapter.foundation.book_id,
                         expected_book_baseline_id=(
-                            boundary.chapter.foundation.book_baseline_id
+                            closure.chapter.foundation.book_baseline_id
                         ),
-                        expected_canon_baseline_id=boundary.canon_baseline_id,
-                        purpose=wrong_purpose,
+                        expected_canon_baseline_id=closure.canon_baseline_id,
+                        expected_ordinal=2,
+                        source_progress_handoff_id="wrong-handoff",
                     ),
-                    idempotency_key=f"handoff-{expected_purpose}:wrong-purpose",
+                    idempotency_key="handoff:wrong-id",
                 )
             await ArcCommandService(CommandBus(engine)).create_story_arc(
                 CreateStoryArcRequest(
-                    project_id=boundary.chapter.foundation.project_id,
-                    book_id=boundary.chapter.foundation.book_id,
+                    project_id=closure.chapter.foundation.project_id,
+                    book_id=closure.chapter.foundation.book_id,
                     expected_book_baseline_id=(
-                        boundary.chapter.foundation.book_baseline_id
+                        closure.chapter.foundation.book_baseline_id
                     ),
-                    expected_canon_baseline_id=boundary.canon_baseline_id,
-                    purpose=handoff.result.next_arc_purpose,
+                    expected_canon_baseline_id=closure.canon_baseline_id,
+                    expected_ordinal=handoff.result.next_arc_ordinal,
+                    source_progress_handoff_id=handoff.result.handoff_id,
                 ),
-                idempotency_key=f"handoff-{expected_purpose}:create-next-arc",
+                idempotency_key="handoff:create-next",
             )
+            with pytest.raises(
+                CommandPreconditionError,
+                match="exceeds the approved Book topology",
+            ):
+                await ArcCommandService(CommandBus(engine)).create_story_arc(
+                    CreateStoryArcRequest(
+                        project_id=closure.chapter.foundation.project_id,
+                        book_id=closure.chapter.foundation.book_id,
+                        expected_book_baseline_id=(
+                            closure.chapter.foundation.book_baseline_id
+                        ),
+                        expected_canon_baseline_id=closure.canon_baseline_id,
+                        expected_ordinal=3,
+                        source_progress_handoff_id=handoff.result.handoff_id,
+                    ),
+                    idempotency_key="handoff:reject-unplanned-third-arc",
+                )
             async with engine.connect() as connection:
                 arcs = (
                     await connection.execute(
                         select(
                             story_arcs.c.ordinal,
-                            story_arcs.c.purpose,
                             story_arcs.c.lifecycle_status,
                         ).order_by(story_arcs.c.ordinal)
                     )
                 ).all()
                 assert [tuple(row) for row in arcs] == [
-                    (1, "regular", "completed"),
-                    (2, expected_purpose, "planning"),
+                    (1, "completed"),
+                    (2, "planning"),
                 ]
                 assert (
                     await connection.scalar(
@@ -419,7 +407,7 @@ def test_nonterminal_book_boundary_commits_handoff_before_next_arc(
     asyncio.run(exercise())
 
 
-def test_completion_gate_rejects_queued_feedback_after_boundary_review(
+def test_completion_gate_rejects_queued_feedback_after_completion_review(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "completion-blocked.sqlite3"
@@ -428,22 +416,20 @@ def test_completion_gate_rejects_queued_feedback_after_boundary_review(
     async def exercise() -> None:
         engine = create_sqlite_async_engine(database)
         try:
-            boundary = await _prepare_formal_arc_boundary(
+            closure = await _prepare_formal_arc_closure(
                 engine,
                 project_id="completion-blocked-project",
-                arc_purpose="final",
             )
-            authority, review_id, disposition = await _record_book_boundary(
+            authority, review_id, disposition = await _record_book_completion(
                 engine,
-                boundary=boundary,
-                ending_judgment="completion_ready",
+                closure=closure,
                 requirement_status="satisfied",
                 suffix="completion-blocked",
             )
             assert disposition == "complete_book"
             await FeedbackCommandService(CommandBus(engine)).submit(
                 SubmitFeedbackRequest(
-                    project_id=boundary.chapter.foundation.project_id,
+                    project_id=closure.chapter.foundation.project_id,
                     content="Resolve this queued creator input before completion.",
                 ),
                 idempotency_key="completion-blocked:feedback",
@@ -454,9 +440,9 @@ def test_completion_gate_rejects_queued_feedback_after_boundary_review(
             ):
                 await authority.commit_book_completion(
                     CommitBookCompletionRequest(
-                        project_id=boundary.chapter.foundation.project_id,
-                        book_id=boundary.chapter.foundation.book_id,
-                        boundary_review_id=review_id,
+                        project_id=closure.chapter.foundation.project_id,
+                        book_id=closure.chapter.foundation.book_id,
+                        completion_review_id=review_id,
                     ),
                     idempotency_key="completion-blocked:commit",
                 )

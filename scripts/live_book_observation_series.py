@@ -121,7 +121,6 @@ class ObservationApi(Protocol):
         self,
         *,
         project_id: str,
-        closure_cumulative_chapter_count: int | None,
         key: str,
     ) -> JsonObject: ...
 
@@ -231,18 +230,13 @@ class HttpObservationApi:
         self,
         *,
         project_id: str,
-        closure_cumulative_chapter_count: int | None,
         key: str,
     ) -> JsonObject:
         result = self._request(
             "POST",
             f"/api/projects/{project_id}/arc/approve",
             key=key,
-            body={
-                "closure_cumulative_chapter_count": (
-                    closure_cumulative_chapter_count
-                )
-            },
+            body={},
         )
         return cast(JsonObject, result["state"])
 
@@ -470,7 +464,7 @@ def _compact_state(state: JsonObject) -> JsonObject:
         "current_chapter_status": chapter.get("lifecycle_status"),
         "current_chapter_workspace_state": chapter.get("workspace_state"),
         "latest_task_kind": latest_task.get("task_kind"),
-        "latest_task_status": latest_task.get("status"),
+        "latest_task_status": latest_task.get("task_status"),
         "latest_task_delivery_state": latest_task.get("delivery_state"),
         "latest_attempt_number": latest_task.get("attempt_number"),
         "latest_attempt_status": latest_task.get("attempt_status"),
@@ -910,14 +904,8 @@ def run_observation_slot(
                     )
                     break
                 arc = cast(JsonObject, state.get("current_arc") or {})
-                checkpoint = arc.get(
-                    "recommended_closure_cumulative_chapter_count"
-                )
                 state = api.approve_arc(
                     project_id=project_id,
-                    closure_cumulative_chapter_count=(
-                        None if checkpoint is None else int(checkpoint)
-                    ),
                     key=f"{series_id}:{slot}:arc-approve:{arc.get('arc_id')}",
                 )
                 action_counts["arc_approval"] += 1
@@ -925,7 +913,7 @@ def run_observation_slot(
                     kind="actor_action",
                     message=(
                         "actor approved "
-                        f"Arc {arc.get('ordinal')} at Chapter {checkpoint}"
+                        f"Arc {arc.get('ordinal')} with its derived outline checkpoint"
                     ),
                     authoritative_state=_compact_state(state),
                 )
@@ -934,7 +922,6 @@ def run_observation_slot(
                         "kind": "arc_approval",
                         "arc_id": arc.get("arc_id"),
                         "arc_ordinal": arc.get("ordinal"),
-                        "closure_cumulative_chapter_count": checkpoint,
                     }
                 )
                 continue
@@ -954,16 +941,6 @@ def run_observation_slot(
         diagnostics = api.diagnostics(project_id)
         events = api.events(project_id)
         if str(cast(JsonObject, state.get("run", {})).get("status")) == "completed":
-            chapter_count = int(
-                cast(JsonObject, state.get("project", {})).get("committed_chapter_count", 0)
-            )
-            if not case.minimum_chapters <= chapter_count <= case.maximum_chapters:
-                issues.append(
-                    _issue(
-                        "chapter_count_out_of_range",
-                        f"Completed Book has {chapter_count} Chapters; expected 18-22.",
-                    )
-                )
             if diagnostics.get("completion_id") is None:
                 issues.append(
                     _issue("completion_identity_missing", "Completed Run has no completion identity.")
@@ -1010,6 +987,20 @@ def run_observation_slot(
         "completion": {
             "completion_id": diagnostics.get("completion_id"),
             "completion_version": diagnostics.get("completion_version"),
+            "chapter_count": int(
+                cast(JsonObject, state.get("project", {})).get(
+                    "committed_chapter_count", 0
+                )
+            ),
+            "within_advisory_chapter_range": (
+                case.minimum_chapters
+                <= int(
+                    cast(JsonObject, state.get("project", {})).get(
+                        "committed_chapter_count", 0
+                    )
+                )
+                <= case.maximum_chapters
+            ),
         },
         "snapshot": snapshot,
         "export": export_result,

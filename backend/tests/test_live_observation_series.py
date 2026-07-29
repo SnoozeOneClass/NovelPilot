@@ -100,10 +100,8 @@ class FakeObservationApi:
         self,
         *,
         project_id: str,
-        closure_cumulative_chapter_count: int | None,
         key: str,
     ) -> dict[str, Any]:
-        assert closure_cumulative_chapter_count == 20
         assert ":arc-approve:" in key
         self.projects[project_id]["stage"] = 4
         self.actions.append((project_id, "arc_approval"))
@@ -122,7 +120,7 @@ class FakeObservationApi:
             "attempts": [
                 {
                     "task_id": f"{project_id}:task",
-                    "task_kind": "evaluate.book_boundary",
+                    "task_kind": "evaluate.book_completion",
                     "attempt_id": f"{project_id}:attempt",
                     "attempt_number": 1,
                     "attempt_status": "succeeded",
@@ -189,7 +187,7 @@ class FakeObservationApi:
             1: "book.discuss",
             2: "evaluate.book",
             3: "arc.plan",
-            4: "evaluate.book_boundary",
+            4: "evaluate.book_completion",
         }
         task_kind = task_kind_by_stage.get(stage)
         return {
@@ -228,7 +226,7 @@ class FakeObservationApi:
                 "ordinal": 1,
                 "lifecycle_status": "completed" if stage == 4 else "planning",
                 "workspace_state": "approved" if stage == 4 else "planning",
-                "recommended_closure_cumulative_chapter_count": 20,
+                "closure_cumulative_chapter_count": 20,
             },
             "current_chapter": None,
             "latest_event_sequence": stage,
@@ -239,7 +237,7 @@ class FakeObservationApi:
                 else [
                     {
                         "task_kind": task_kind,
-                        "status": "succeeded",
+                        "task_status": "succeeded",
                         "delivery_state": "applied",
                         "attempt_number": 1,
                         "attempt_status": "succeeded",
@@ -250,6 +248,14 @@ class FakeObservationApi:
                 ]
             ),
         }
+
+
+class OutsideAdvisoryRangeObservationApi(FakeObservationApi):
+    def _state(self, project_id: str) -> dict[str, Any]:
+        state = super()._state(project_id)
+        if int(self.projects[project_id]["stage"]) == 4:
+            state["project"]["committed_chapter_count"] = 1
+        return state
 
 
 class FailurePausedObservationApi(FakeObservationApi):
@@ -330,7 +336,7 @@ class FailurePausedObservationApi(FakeObservationApi):
             "recent_tasks": [
                 {
                     "task_kind": "book.discuss",
-                    "status": "failed",
+                    "task_status": "failed",
                     "delivery_state": "failed",
                     "attempt_number": 6,
                     "attempt_status": "failed",
@@ -392,7 +398,7 @@ class SlowObservationApi(FakeObservationApi):
                 "ordinal": 1,
                 "lifecycle_status": "active",
                 "workspace_state": "approved",
-                "recommended_closure_cumulative_chapter_count": 20,
+                "closure_cumulative_chapter_count": 20,
             },
             "current_chapter": {
                 "chapter_id": f"{project_id}:chapter:3",
@@ -405,7 +411,7 @@ class SlowObservationApi(FakeObservationApi):
             "recent_tasks": [
                 {
                     "task_kind": "chapter.draft",
-                    "status": "running",
+                    "task_status": "running",
                     "delivery_state": "pending",
                     "attempt_number": 2,
                     "attempt_status": "running",
@@ -482,7 +488,8 @@ def test_frozen_series_runs_exact_mode_schedule_without_rescue(tmp_path: Path) -
         for line in announcements
     )
     assert any(
-        "[2/4 participatory] actor approved Arc 1 at Chapter 20" in line
+        "[2/4 participatory] actor approved Arc 1 with its derived outline checkpoint"
+        in line
         for line in announcements
     )
     assert announcements[-1].endswith(
@@ -490,6 +497,40 @@ def test_frozen_series_runs_exact_mode_schedule_without_rescue(tmp_path: Path) -
     )
     assert all("%" not in line for line in announcements)
     assert all(case.prompt not in line for line in announcements)
+
+
+def test_advisory_chapter_range_is_recorded_without_failing_a_completed_run(
+    tmp_path: Path,
+) -> None:
+    series_dir, aggregate = run_series(
+        api=OutsideAdvisoryRangeObservationApi(),
+        case=load_case("benchmark-mother-natural-book-v1"),
+        profile_id=None,
+        runs=4,
+        report_root=tmp_path,
+    )
+
+    assert aggregate["status_counts"] == {
+        "completed": 4,
+        "failed": 0,
+        "not_run": 0,
+    }
+    assert aggregate["issue_index"] == []
+    reports = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted(series_dir.glob("slot-*.json"))
+    ]
+    assert [report["completion"]["chapter_count"] for report in reports] == [
+        1,
+        1,
+        1,
+        1,
+    ]
+    assert all(
+        report["completion"]["within_advisory_chapter_range"] is False
+        for report in reports
+    )
+    assert all(report["issues"] == [] for report in reports)
 
 
 def test_frozen_series_rejects_partial_run_count(tmp_path: Path) -> None:

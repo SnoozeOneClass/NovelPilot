@@ -19,7 +19,6 @@ from app.db.schema import (
 class ArcSnapshotRecord:
     arc_id: str
     ordinal: int
-    purpose: str
     lifecycle_status: str
     arc_baseline_id: str
 
@@ -55,7 +54,6 @@ class SnapshotRepository:
                 select(
                     story_arcs.c.id,
                     story_arcs.c.ordinal,
-                    story_arcs.c.purpose,
                     story_arcs.c.lifecycle_status,
                     story_arcs.c.current_baseline_id,
                 )
@@ -71,7 +69,6 @@ class SnapshotRepository:
             ArcSnapshotRecord(
                 arc_id=cast(str, row["id"]),
                 ordinal=cast(int, row["ordinal"]),
-                purpose=cast(str, row["purpose"]),
                 lifecycle_status=cast(str, row["lifecycle_status"]),
                 arc_baseline_id=cast(str, row["current_baseline_id"]),
             )

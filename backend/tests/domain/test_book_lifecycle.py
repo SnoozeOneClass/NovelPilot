@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from alembic import command
+from pydantic import ValidationError
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -34,6 +35,8 @@ from app.domain.book.contracts import (
     ApplyBookCandidateTaskRequest,
     ApplyBookDiscussionTaskRequest,
     ApproveBookRequest,
+    BookArcContract,
+    BookArcTopology,
     BookCandidatePack,
     BookCompletionRequirement,
     BookConstraintsRepair,
@@ -79,21 +82,15 @@ def _book_constraints(*, perspective: str = "limited-third") -> BookCreativeCons
 def _book_rolling_plan() -> BookRollingPlan:
     return BookRollingPlan(
         long_term_character_directions=["Trust evidence over memory."],
-        high_level_phase_strategy=["Expose the edit", "Confront its source"],
         whole_book_pacing_strategy="Escalate through bounded rolling Arcs.",
         ending_tendency="The investigator chooses truth at personal cost.",
         arc_planning_guidelines=["Each Arc must close observable evidence."],
+        whole_book_scale_guidance="About twenty Chapters is advisory.",
     )
 
 
-def _completion_contract(
-    *,
-    minimum_chapter_count: int = 18,
-    maximum_chapter_count: int = 22,
-) -> CompletionContract:
+def _completion_contract() -> CompletionContract:
     return CompletionContract(
-        minimum_chapter_count=minimum_chapter_count,
-        maximum_chapter_count=maximum_chapter_count,
         completion_requirements=[
             BookCompletionRequirement(
                 requirement_key="memory_conflict_resolved",
@@ -102,6 +99,37 @@ def _completion_contract(
             )
         ],
     )
+
+
+def _book_topology() -> BookArcTopology:
+    return BookArcTopology(
+        arcs=[
+            BookArcContract(
+                whole_book_role="Resolve the memory mystery.",
+                core_goal="Identify the edit source with physical evidence.",
+                handoff_from_previous="Begin from the approved premise.",
+                exit_conditions=["The source and central conflict are resolved."],
+                is_final=True,
+            )
+        ]
+    )
+
+
+def test_book_arc_topology_is_semantic_count_free_and_final_last() -> None:
+    final_contract = _book_topology().arcs[0]
+    nonfinal_contract = final_contract.model_copy(update={"is_final": False})
+
+    with pytest.raises(ValidationError, match="at least 1 item"):
+        BookArcTopology(arcs=[])
+    with pytest.raises(ValidationError, match="exactly one final Arc"):
+        BookArcTopology(arcs=[nonfinal_contract])
+    with pytest.raises(ValidationError, match="exactly one final Arc"):
+        BookArcTopology(arcs=[final_contract, nonfinal_contract])
+
+    count_bearing_contract = final_contract.model_dump(mode="python")
+    count_bearing_contract["chapter_count"] = 10
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        BookArcContract.model_validate(count_bearing_contract)
 
 
 async def _insert_successful_book_evaluator_task(
@@ -163,6 +191,7 @@ def test_book_requires_review_and_user_approval_before_formal_baseline(
                         selected_title="《证词回声》",
                         rolling_plan=_book_rolling_plan(),
                         completion_contract=_completion_contract(),
+                        arc_topology=_book_topology(),
                     ),
                 ),
                 idempotency_key="apply-candidate",
@@ -314,6 +343,7 @@ def test_stale_book_workspace_cannot_overwrite_newer_candidate(tmp_path: Path) -
                     selected_title="A",
                     rolling_plan=_book_rolling_plan(),
                     completion_contract=_completion_contract(),
+                    arc_topology=_book_topology(),
                 ),
             )
             await service.apply_candidate(request, idempotency_key="candidate-1")
@@ -468,6 +498,7 @@ def test_task_driven_book_loop_reaches_baseline_only_after_explicit_approval(
                 selected_title="Echo Testimony",
                 rolling_plan=_book_rolling_plan(),
                 completion_contract=_completion_contract(),
+                arc_topology=_book_topology(),
             )
             await insert_successful_task(
                 engine,
@@ -712,6 +743,7 @@ def test_book_local_repair_is_scope_bounded_and_sixth_cycle_failure_pauses_run(
                 selected_title="Echo Testimony",
                 rolling_plan=_book_rolling_plan(),
                 completion_contract=_completion_contract(),
+                arc_topology=_book_topology(),
             )
             await insert_successful_task(
                 engine,

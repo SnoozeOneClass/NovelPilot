@@ -41,6 +41,8 @@ from app.domain.arc.contracts import ApproveArcRequest, ArcRepairPatch
 from app.domain.book.commands import BookCommandService
 from app.domain.book.contracts import ApproveBookRequest
 from app.domain.book.contracts import (
+    BookArcContract,
+    BookArcTopology,
     BookCandidatePack,
     BookCompletionRequirement,
     BookCreativeConstraints,
@@ -184,10 +186,11 @@ def test_book_local_repair_review_is_consumed_once_before_verification() -> None
             semantic_repair_count=1,
             discussion_state_ref_id="discussion-ref",
             candidate_constraints_ref_id="constraints-ref",
-            candidate_titles_ref_id="titles-ref",
-            candidate_rolling_plan_ref_id="rolling-ref",
-            candidate_completion_contract_ref_id="completion-ref",
-        )
+                candidate_titles_ref_id="titles-ref",
+                candidate_rolling_plan_ref_id="rolling-ref",
+                candidate_completion_contract_ref_id="completion-ref",
+                candidate_arc_topology_ref_id="topology-ref",
+            )
         driver = object.__new__(DomainRunDriver)
         arguments = {
             "store": store,
@@ -257,7 +260,10 @@ def test_arc_local_repair_review_is_consumed_once_before_verification() -> None:
         execution = SimpleNamespace(
             has_applied_task=AsyncMock(side_effect=(False, True))
         )
-        store = SimpleNamespace(arcs=arcs, execution=execution)
+        books = SimpleNamespace(
+            get_baseline=AsyncMock(return_value=SimpleNamespace(id="book-baseline"))
+        )
+        store = SimpleNamespace(arcs=arcs, books=books, execution=execution)
         driver = object.__new__(DomainRunDriver)
         arguments = {
             "store": store,
@@ -397,39 +403,106 @@ def test_chapter_plan_repair_regenerates_invalidated_downstream_content() -> Non
     asyncio.run(exercise())
 
 
-def test_driver_never_creates_chapter_beyond_approved_book_maximum() -> None:
+def test_driver_routes_from_arc_outline_without_a_book_chapter_maximum() -> None:
     async def exercise() -> None:
+        proposal = _task_output(
+            "arc.plan",
+            '"arc_ordinal":1 "book_cumulative_committed_chapter_count":0',
+        )
         chapters = SimpleNamespace(
             get_non_idle_workspace_for_arc=AsyncMock(return_value=None),
-            count_committed_for_book=AsyncMock(return_value=22),
+            count_committed_for_book=AsyncMock(return_value=9),
+            next_ordinals=AsyncMock(return_value=(10, 10)),
         )
         store = SimpleNamespace(
             chapters=chapters,
             arcs=SimpleNamespace(
                 get_baseline=AsyncMock(
                     return_value=SimpleNamespace(
-                        closure_cumulative_chapter_count=22
+                        id="arc-baseline",
+                        baseline_version=1,
+                        plan_ref_id="arc-plan-ref",
+                        planned_after_cumulative_chapter_count=0,
+                        planned_after_arc_chapter_count=0,
+                        closure_cumulative_chapter_count=10,
                     )
                 )
             ),
-            books=SimpleNamespace(
-                get_baseline=AsyncMock(
-                    return_value=SimpleNamespace(maximum_chapter_count=22)
+            content=SimpleNamespace(
+                get_packed=AsyncMock(
+                    return_value=SimpleNamespace(
+                        unpack_and_verify=lambda: json.dumps(
+                            proposal,
+                            ensure_ascii=False,
+                        ).encode()
+                    )
                 )
             ),
-            content=SimpleNamespace(),
+            execution=SimpleNamespace(),
+        )
+        driver = object.__new__(DomainRunDriver)
+        instruction = await driver._decide_chapter(
+            store=store,
+            run=SimpleNamespace(id="run-book-scale"),
+            project_id="project-book-scale",
+            book_id="book",
+            book_baseline_id="book-baseline",
+            canon_baseline_id="canon-baseline",
+            arc=SimpleNamespace(id="arc"),
+            arc_baseline_id="arc-baseline",
+        )
+        assert instruction.kind == "create_chapter"
+        chapters.count_committed_for_book.assert_awaited_once_with(book_id="book")
+
+    asyncio.run(exercise())
+
+
+def test_driver_rejects_missing_arc_outline_slot_before_scheduling_chapter() -> None:
+    async def exercise() -> None:
+        proposal = _task_output(
+            "arc.plan",
+            '"arc_ordinal":1 "book_cumulative_committed_chapter_count":0',
+        )
+        assert isinstance(proposal, dict)
+        proposal["chapter_outline"] = []
+        chapters = SimpleNamespace(
+            get_non_idle_workspace_for_arc=AsyncMock(return_value=None),
+            count_committed_for_book=AsyncMock(return_value=0),
+            next_ordinals=AsyncMock(return_value=(1, 1)),
+        )
+        store = SimpleNamespace(
+            chapters=chapters,
+            arcs=SimpleNamespace(
+                get_baseline=AsyncMock(
+                    return_value=SimpleNamespace(
+                        id="arc-baseline",
+                        baseline_version=1,
+                        plan_ref_id="arc-plan-ref",
+                        planned_after_cumulative_chapter_count=0,
+                        planned_after_arc_chapter_count=0,
+                        closure_cumulative_chapter_count=1,
+                    )
+                )
+            ),
+            content=SimpleNamespace(
+                get_packed=AsyncMock(
+                    return_value=SimpleNamespace(
+                        unpack_and_verify=lambda: json.dumps(
+                            proposal,
+                            ensure_ascii=False,
+                        ).encode()
+                    )
+                )
+            ),
             execution=SimpleNamespace(),
         )
         driver = object.__new__(DomainRunDriver)
 
-        with pytest.raises(
-            HarnessInvariantError,
-            match="approved maximum",
-        ):
+        with pytest.raises(HarnessInvariantError) as captured:
             await driver._decide_chapter(
                 store=store,
-                run=SimpleNamespace(id="run-book-cap"),
-                project_id="project-book-cap",
+                run=SimpleNamespace(id="run-outline-gap"),
+                project_id="project-outline-gap",
                 book_id="book",
                 book_baseline_id="book-baseline",
                 canon_baseline_id="canon-baseline",
@@ -437,7 +510,11 @@ def test_driver_never_creates_chapter_beyond_approved_book_maximum() -> None:
                 arc_baseline_id="arc-baseline",
             )
 
-        chapters.count_committed_for_book.assert_awaited_once_with(book_id="book")
+        assert captured.value.failure_code == "arc_outline_slot_missing"
+        chapters.next_ordinals.assert_awaited_once_with(
+            book_id="book",
+            arc_id="arc",
+        )
 
     asyncio.run(exercise())
 
@@ -500,7 +577,7 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
             "readiness": {"status": "ready", "reason": "全书方向已经闭合。"},
         }
     if task_kind in {"book.synthesize", "book.revise"}:
-        return {
+        candidate = {
             "direction": "调查员逐步揭开城市记忆篡改系统，并为恢复真相付出私人代价。",
             "constraints": {
                 "genre_reader_promise": "一部证据不断反转、最终能够闭合真相的悬疑长篇。",
@@ -513,14 +590,12 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
             "selected_title": "《回声证词》",
             "rolling_plan": {
                 "long_term_character_directions": ["主角从相信记忆转为相信可复核证据。"],
-                "high_level_phase_strategy": ["发现篡改机制", "追踪操作者并完成最终选择"],
                 "whole_book_pacing_strategy": "前半建立机制，后半集中回收线索。",
                 "ending_tendency": "主角公开真相并承担私人记忆受损的代价。",
                 "arc_planning_guidelines": ["每个故事弧都必须留下可供上层验证的正式证据。"],
+                "whole_book_scale_guidance": "用户希望大约二十章；这只是软性建议。",
             },
             "completion_contract": {
-                "minimum_chapter_count": 18,
-                "maximum_chapter_count": 22,
                 "completion_requirements": [
                     {
                         "requirement_key": "truth_exposed",
@@ -537,6 +612,33 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
                 ],
             },
         }
+        topology = {
+            "arcs": [
+                {
+                    "whole_book_role": "建立记忆篡改机制。",
+                    "core_goal": "形成第一条可复核证据链。",
+                    "handoff_from_previous": "承接已批准的悬疑开局。",
+                    "exit_conditions": ["物证已经证明记忆篡改机制。"],
+                    "is_final": False,
+                },
+                {
+                    "whole_book_role": "解决记忆篡改阴谋。",
+                    "core_goal": "揭露操作者并完成主角的最终选择。",
+                    "handoff_from_previous": "承接第一故事弧的正式证据。",
+                    "exit_conditions": [
+                        "操作者已经被揭露。",
+                        "主角承担了约定的代价。",
+                    ],
+                    "is_final": True,
+                },
+            ]
+        }
+        candidate[
+            "arc_topology_suffix"
+            if task_kind == "book.revise"
+            else "arc_topology"
+        ] = topology
+        return candidate
     if task_kind == "book.repair":
         return {
             "changes": [
@@ -556,17 +658,14 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
     if task_kind in {"arc.plan", "arc.revise"}:
         arc_match = re.search(r'"arc_ordinal":(\d+)', prompt)
         ordinal = int(arc_match.group(1)) if arc_match else 1
-        if ordinal == 1:
-            minimum_cumulative_count = 8
-            recommended_cumulative_count = 10
-            maximum_cumulative_count = 12
-        else:
-            minimum_cumulative_count = 18
-            recommended_cumulative_count = 20
-            maximum_cumulative_count = 22
+        committed_match = re.search(
+            r'"book_cumulative_committed_chapter_count":(\d+)',
+            prompt,
+        )
+        committed_count = int(committed_match.group(1)) if committed_match else 0
+        planned_chapter_count = 10
         return {
             "title": f"第{ordinal}故事弧",
-            "purpose": f"推进第{ordinal}阶段调查并留下可验证的新证据。",
             "desired_state_transition": {
                 "start_state": f"第{ordinal}阶段关键证据尚未闭合。",
                 "end_state": f"第{ordinal}阶段关键证据已经形成可复核结论。",
@@ -576,12 +675,6 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
             "character_obligations": ["主角必须因调查结果改变一个重要判断。"],
             "foreshadowing_obligations": ["留下通往下一阶段或终局的可验证线索。"],
             "prohibitions": ["不得推翻既有正式 Canon。"],
-            "minimum_cumulative_chapter_count": minimum_cumulative_count,
-            "recommended_closure_cumulative_chapter_count": (
-                recommended_cumulative_count
-            ),
-            "maximum_cumulative_chapter_count": maximum_cumulative_count,
-            "closure_cumulative_chapter_count": recommended_cumulative_count,
             "closure_signals": [
                 {
                     "signal_key": "stage_complete",
@@ -590,14 +683,46 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
                     "required": True,
                 }
             ],
-            "advisory_beats": ["发现矛盾证词", "验证物证", "确认阶段责任人"],
+            "chapter_outline": [
+                {
+                    "title": f"第{committed_count + index + 1}章 阶段证据",
+                    "core_event": (
+                        f"完成第{ordinal}阶段的第{index + 1}个因果推进。"
+                    ),
+                    "hook": (
+                        "把尚未完成的证据问题交给下一章。"
+                        if index + 1 < planned_chapter_count
+                        else "把完整阶段证据交给 Arc 收束评估。"
+                    ),
+                    "scenes": ["发现本章矛盾", "验证并提交一个后果"],
+                }
+                for index in range(planned_chapter_count)
+            ],
         }
     if task_kind == "arc.repair":
+        effective_match = re.search(
+            r'"arc_planned_after_cumulative_chapter_count":(\d+)',
+            prompt,
+        )
+        closure_match = re.search(
+            r'"arc_closure_cumulative_chapter_count":(\d+)',
+            prompt,
+        )
+        effective_count = int(effective_match.group(1)) if effective_match else 0
+        closure_count = int(closure_match.group(1)) if closure_match else effective_count + 1
         return {
             "changes": [
                 {
-                    "component": "advisory_beats",
-                    "value": ["重新验证物证", "补全证词矛盾", "确认下一层责任人"],
+                    "component": "chapter_outline",
+                    "value": [
+                        {
+                            "title": f"第{effective_count + index + 1}章 修复证据",
+                            "core_event": "重新验证物证并补全证词矛盾。",
+                            "hook": "把验证结果交给下一任务或 Arc 收束评估。",
+                            "scenes": ["重查物证", "提交修复后的因果结果"],
+                        }
+                        for index in range(closure_count - effective_count)
+                    ],
                 }
             ]
         }
@@ -665,10 +790,18 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
             "issues": [],
             "creator_input_need": None,
         }
-    if task_kind == "evaluate.book_boundary":
+    if task_kind == "evaluate.book_completion":
         count_match = re.search(r'"committed_chapter_count":(\d+)', prompt)
         count = int(count_match.group(1)) if count_match else 0
         if count >= 20:
+            assert (
+                '<NOVELPILOT_CONTEXT label="formal_arc_1_closure">'
+                in prompt
+            )
+            assert (
+                '<NOVELPILOT_CONTEXT label="formal_arc_2_closure">'
+                in prompt
+            )
             return {
                 "requirement_statuses": [
                     {
@@ -679,28 +812,14 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
                     }
                     for key in ("truth_exposed", "cost_paid")
                 ],
-                "ending_trajectory_judgment": "completion_ready",
                 "book_contract_judgment": "remains_applicable",
                 "summary": "全书要求和终局方向均已满足。",
                 "issues": [],
                 "creator_input_need": None,
             }
-        return {
-            "requirement_statuses": [
-                {
-                    "requirement_key": key,
-                    "status": "unresolved",
-                    "evidence": ["第一 Arc 只完成了阶段性证据链。"],
-                    "rationale": "需要一个 final Arc 才能完成终局要求。",
-                }
-                for key in ("truth_exposed", "cost_paid")
-            ],
-            "ending_trajectory_judgment": "final_arc_ready",
-            "book_contract_judgment": "remains_applicable",
-            "summary": "当前阶段已收束，正式终局 Arc 可以开始。",
-            "issues": [],
-            "creator_input_need": None,
-        }
+        raise AssertionError(
+            "Book completion must not run before the planned final Arc."
+        )
     raise AssertionError(f"Unhandled offline task kind: {task_kind}")
 
 
@@ -982,16 +1101,14 @@ def test_rejected_domain_delivery_failure_pauses_once_and_requires_explicit_retr
                             long_term_character_directions=[
                                 "The investigator learns from verified evidence."
                             ],
-                            high_level_phase_strategy=["Reach the fixture ending."],
                             whole_book_pacing_strategy="Use one bounded fixture Arc.",
                             ending_tendency="End at the deterministic assertion.",
                             arc_planning_guidelines=[
                                 "Close only after committed evidence."
                             ],
+                            whole_book_scale_guidance="One or two Chapters is advisory.",
                         ),
                     completion_contract=CompletionContract(
-                        minimum_chapter_count=1,
-                        maximum_chapter_count=2,
                         completion_requirements=[
                             BookCompletionRequirement(
                                 requirement_key="delivery_failure_fixture",
@@ -1001,6 +1118,17 @@ def test_rejected_domain_delivery_failure_pauses_once_and_requires_explicit_retr
                                 ),
                             )
                         ],
+                    ),
+                    arc_topology=BookArcTopology(
+                        arcs=[
+                            BookArcContract(
+                                whole_book_role="Reach the fixture ending.",
+                                core_goal="Complete the deterministic assertion.",
+                                handoff_from_previous="Begin from the fixture premise.",
+                                exit_conditions=["The fixture ending is committed."],
+                                is_final=True,
+                            )
+                        ]
                     ),
                 ),
             )
@@ -1452,9 +1580,6 @@ def test_driver_completes_twenty_chapter_book_with_only_product_gates(
                                 submission_id=pending.id,
                                 review_id=review.id,
                                 approval_gate_id=gate.id,
-                                closure_cumulative_chapter_count=(
-                                    pending.recommended_closure_cumulative_chapter_count
-                                ),
                                 expected_current_baseline_id=arc.current_baseline_id,
                             )
                             action = ("arc", arc_request)

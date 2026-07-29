@@ -148,16 +148,10 @@ class ArcClosureEvaluation(BaseModel):
         return self
 
 
-class BookBoundaryEvaluation(BaseModel):
+class BookCompletionEvaluation(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     requirement_statuses: list[CompletionRequirementStatus] = Field(min_length=1)
-    ending_trajectory_judgment: Literal[
-        "regular_arc_needed",
-        "final_arc_ready",
-        "completion_ready",
-        "unable_to_judge",
-    ]
     book_contract_judgment: BookContractJudgment
     summary: str = Field(min_length=1)
     issues: list[EvaluationIssue] = Field(default_factory=list)

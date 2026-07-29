@@ -10,7 +10,7 @@ from app.store.authority import (
     ArcClosureRepository,
     ArcClosureReviewRepository,
     ArcParentReviewRepository,
-    BookBoundaryReviewRepository,
+    BookCompletionReviewRepository,
     BookParentReviewRepository,
     BookProgressHandoffRepository,
 )
@@ -45,7 +45,7 @@ class StoreSession:
         self.projects = ProjectRepository(connection)
         self.books = BookRepository(connection)
         self.book_parent_reviews = BookParentReviewRepository(connection)
-        self.book_boundary_reviews = BookBoundaryReviewRepository(connection)
+        self.book_completion_reviews = BookCompletionReviewRepository(connection)
         self.book_progress_handoffs = BookProgressHandoffRepository(connection)
         self.canon = CanonRepository(connection)
         self.changes = ChangeRequestRepository(connection)

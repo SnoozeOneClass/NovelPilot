@@ -106,7 +106,7 @@ def test_arc_count_column_names_round_trip_across_cumulative_revision(
         finally:
             engine.dispose()
 
-    command.upgrade(config, "head")
+    command.upgrade(config, "c4a7d91e2b65")
     for table_name in (
         "arc_workspaces",
         "arc_review_submissions",
@@ -136,7 +136,7 @@ def test_arc_count_column_names_round_trip_across_cumulative_revision(
     } <= columns("arc_closure_reviews")
     assert "committed_chapter_count" in columns("arc_closures")
 
-    command.upgrade(config, "head")
+    command.upgrade(config, "c4a7d91e2b65")
     assert "cumulative_committed_chapter_count" in columns("arc_closures")
 
 
@@ -416,5 +416,49 @@ def test_loop_boundary_revision_rejects_pre_refactor_project_graph(
                 == "7c0d2a9f4b31"
             )
         assert "arc_closures" not in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
+
+
+def test_arc_outline_revision_requires_reset_for_existing_story_history(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "incompatible-arc-outline.sqlite3"
+    config = _alembic_config(database_path)
+    command.upgrade(config, "a91f3c7d2e60")
+    seed_engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    try:
+        with seed_engine.begin() as connection:
+            connection.exec_driver_sql(
+                "INSERT INTO story_arcs "
+                "(id, project_id, book_id, ordinal, purpose, lifecycle_status, "
+                "current_baseline_id, latest_closure_review_id, "
+                "current_closure_id, created_at_ms, updated_at_ms, "
+                "completed_at_ms) VALUES "
+                "('legacy-arc', 'legacy-project', 'legacy-book', 1, "
+                "'regular', 'planning', NULL, NULL, NULL, 1, 1, NULL)"
+            )
+    finally:
+        seed_engine.dispose()
+
+    with pytest.raises(
+        RuntimeError,
+        match="Reset the development database and rerun the migration",
+    ):
+        command.upgrade(config, "head")
+
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    try:
+        with engine.connect() as connection:
+            assert (
+                connection.exec_driver_sql(
+                    "SELECT version_num FROM alembic_version"
+                ).scalar_one()
+                == "a91f3c7d2e60"
+            )
+        assert "outline_arc_baseline_id" not in {
+            str(column["name"])
+            for column in inspect(engine).get_columns("chapters")
+        }
     finally:
         engine.dispose()

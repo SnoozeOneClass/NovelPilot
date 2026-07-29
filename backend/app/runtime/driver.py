@@ -13,11 +13,12 @@ from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.agents.binding import ModelBindingError, ProfileCredential
-from app.agents.contracts import AgentRole
+from app.agents.contracts import AgentRole, ArcPlanProposal
 from app.agents.executor import AgentExecutionResult, AgentExecutor
 from app.agents.registry import DEFAULT_TASK_REGISTRY, TaskRegistry
 from app.db.uow import UnitOfWork
 from app.domain.arc.commands import ArcCommandService
+from app.domain.arc.outline import ArcOutlineProjectionError, resolve_outline_entry
 from app.domain.arc.contracts import (
     ApplyArcTaskRequest,
     CommitArcAutoRequest,
@@ -40,10 +41,10 @@ from app.domain.authority import (
     CommitBookProgressHandoffRequest,
     LoopAuthorityCommandService,
     OpenArcClosureRevisionRequest,
-    OpenBookBoundaryRevisionRequest,
+    OpenBookCompletionRevisionRequest,
     RecordArcClosureReviewRequest,
     RecordArcParentReviewRequest,
-    RecordBookBoundaryReviewRequest,
+    RecordBookCompletionReviewRequest,
     RecordBookParentReviewRequest,
 )
 from app.domain.change_requests import ActivateChangeRequest, ChangeRequestCommandService
@@ -80,6 +81,16 @@ LOGGER = logging.getLogger(__name__)
 
 class HarnessInvariantError(RuntimeError):
     """Authoritative facts do not describe one legal next Domain Harness action."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_code: str = "context_assembly_invalid",
+    ) -> None:
+        super().__init__(message)
+        self.failure_code = failure_code
+        self.invariant = failure_code
 
 
 class EvaluationContractAssemblyError(RuntimeError):
@@ -192,7 +203,7 @@ class _TaskInstruction:
     source_arc_parent_review_id: str | None = None
     source_book_parent_review_id: str | None = None
     source_arc_closure_review_id: str | None = None
-    source_book_boundary_review_id: str | None = None
+    source_book_completion_review_id: str | None = None
     source_chapter_arc_request_id: str | None = None
     source_arc_book_request_id: str | None = None
     source_arc_closure_id: str | None = None
@@ -213,7 +224,7 @@ class _CommandInstruction:
         "commit_arc_auto",
         "commit_chapter",
         "open_arc_closure_revision",
-        "open_book_boundary_revision",
+        "open_book_completion_revision",
         "commit_book_handoff",
         "commit_book_completion",
     ]
@@ -260,8 +271,8 @@ _SEMANTIC_GOALS: dict[str, str] = {
     "evaluate.arc_closure": (
         "Judge every frozen Arc closure signal against the exact committed boundary."
     ),
-    "evaluate.book_boundary": (
-        "Judge Book progress and completion requirements after one formal Arc closure."
+    "evaluate.book_completion": (
+        "Judge whole-Book completion requirements after the planned final Arc closes."
     ),
     "verify_evidence.chapter": (
         "Verify an evidence-only Chapter correction against byte-frozen approved prose."
@@ -351,7 +362,10 @@ class DomainRunDriver:
             await self._pause_harness_action(
                 run=run,
                 action_key=f"route:{run.id}:{run.lock_version}",
-                failure_code="context_assembly_invalid",
+                failure_code=cast(
+                    str,
+                    getattr(error, "failure_code", "context_assembly_invalid"),
+                ),
                 message=(
                     "Deterministic Route could not derive one legal next action "
                     "from current authority."
@@ -380,10 +394,18 @@ class DomainRunDriver:
                     task_kind=instruction.task_kind,
                 )
             except ContextAssemblyError as error:
+                context_cause = error.__cause__
                 await self._pause_harness_action(
                     run=run,
                     action_key=action_key,
-                    failure_code="context_assembly_invalid",
+                    failure_code=cast(
+                        str,
+                        getattr(
+                            context_cause,
+                            "code",
+                            "context_assembly_invalid",
+                        ),
+                    ),
                     message=(
                         "The Agent task context could not be assembled from current "
                         "authoritative facts."
@@ -476,8 +498,8 @@ class DomainRunDriver:
                 "source_arc_closure_review_id": (
                     instruction.source_arc_closure_review_id
                 ),
-                "source_book_boundary_review_id": (
-                    instruction.source_book_boundary_review_id
+                "source_book_completion_review_id": (
+                    instruction.source_book_completion_review_id
                 ),
                 "source_chapter_arc_request_id": (
                     instruction.source_chapter_arc_request_id
@@ -571,7 +593,9 @@ class DomainRunDriver:
                 source_arc_parent_review_id=instruction.source_arc_parent_review_id,
                 source_book_parent_review_id=instruction.source_book_parent_review_id,
                 source_arc_closure_review_id=instruction.source_arc_closure_review_id,
-                source_book_boundary_review_id=instruction.source_book_boundary_review_id,
+                source_book_completion_review_id=(
+                    instruction.source_book_completion_review_id
+                ),
                 source_chapter_arc_request_id=instruction.source_chapter_arc_request_id,
                 source_arc_book_request_id=instruction.source_arc_book_request_id,
                 source_arc_closure_id=instruction.source_arc_closure_id,
@@ -599,7 +623,7 @@ class DomainRunDriver:
                 instruction.source_arc_parent_review_id or "none",
                 instruction.source_book_parent_review_id or "none",
                 instruction.source_arc_closure_review_id or "none",
-                instruction.source_book_boundary_review_id or "none",
+                instruction.source_book_completion_review_id or "none",
                 instruction.source_chapter_arc_request_id or "none",
                 instruction.source_arc_book_request_id or "none",
                 instruction.source_arc_closure_id or "none",
@@ -638,7 +662,9 @@ class DomainRunDriver:
             source_arc_parent_review_id=instruction.source_arc_parent_review_id,
             source_book_parent_review_id=instruction.source_book_parent_review_id,
             source_arc_closure_review_id=instruction.source_arc_closure_review_id,
-            source_book_boundary_review_id=instruction.source_book_boundary_review_id,
+            source_book_completion_review_id=(
+                instruction.source_book_completion_review_id
+            ),
             source_chapter_arc_request_id=instruction.source_chapter_arc_request_id,
             source_arc_book_request_id=instruction.source_arc_book_request_id,
             source_arc_closure_id=instruction.source_arc_closure_id,
@@ -869,9 +895,9 @@ class DomainRunDriver:
                 idempotency_key=key,
             )
             return
-        if task.task_kind == "evaluate.book_boundary":
-            await self._authority.record_book_boundary_review(
-                RecordBookBoundaryReviewRequest(
+        if task.task_kind == "evaluate.book_completion":
+            await self._authority.record_book_completion_review(
+                RecordBookCompletionReviewRequest(
                     project_id=task.project_id,
                     book_id=task.book_id,
                     task_id=task.task_id,
@@ -1059,27 +1085,27 @@ class DomainRunDriver:
                         source_arc_closure_review_id=arc_closure_review.id,
                         source_feedback_id=correction_feedback.id,
                     )
-                if correction_feedback.book_boundary_review_id is not None:
-                    book_boundary_review = await store.book_boundary_reviews.get(
+                if correction_feedback.book_completion_review_id is not None:
+                    book_completion_review = await store.book_completion_reviews.get(
                         project_id=project.id,
-                        review_id=correction_feedback.book_boundary_review_id,
+                        review_id=correction_feedback.book_completion_review_id,
                     )
-                    if book_boundary_review is None:
+                    if book_completion_review is None:
                         raise HarnessInvariantError(
-                            "Applied Book-boundary feedback lost its source review."
+                            "Applied Book-completion feedback lost its source review."
                         )
                     return _TaskInstruction(
                         role="evaluator",
-                        task_kind="evaluate.book_boundary",
+                        task_kind="evaluate.book_completion",
                         book_id=book.id,
                         workspace_lock_version=book_workspace.lock_version,
                         book_baseline_id=book.current_baseline_id,
-                        canon_baseline_id=book_boundary_review.canon_baseline_id,
+                        canon_baseline_id=book_completion_review.canon_baseline_id,
                         correction_lineage_id=lineage_id,
                         correction_lineage_origin="user_initiated",
                         automatic_correction_round=0,
-                        source_book_boundary_review_id=book_boundary_review.id,
-                        source_arc_closure_id=book_boundary_review.arc_closure_id,
+                        source_book_completion_review_id=book_completion_review.id,
+                        source_arc_closure_id=book_completion_review.arc_closure_id,
                         source_feedback_id=correction_feedback.id,
                     )
                 raise HarnessInvariantError(
@@ -1429,6 +1455,7 @@ class DomainRunDriver:
                 "candidate_titles_ref_id",
                 "candidate_rolling_plan_ref_id",
                 "candidate_completion_contract_ref_id",
+                "candidate_arc_topology_ref_id",
             )
         )
         if latest_review is not None and latest_review.decision == "local_repair":
@@ -1506,6 +1533,13 @@ class DomainRunDriver:
         canon_baseline_id = cast(str, getattr(project, "current_canon_baseline_id"))
         if book_baseline_id is None:
             raise HarnessInvariantError("Arc routing requires an approved Book baseline.")
+        book_baseline = await getattr(session, "books").get_baseline(
+            project_id=project_id,
+            book_id=book_id,
+            baseline_id=book_baseline_id,
+        )
+        if book_baseline is None:
+            raise HarnessInvariantError("Current Book baseline is missing.")
         arc = await arcs.get_unfinished_for_book(project_id=project_id, book_id=book_id)
         if arc is None:
             latest = await arcs.get_latest_for_book(project_id=project_id, book_id=book_id)
@@ -1517,7 +1551,8 @@ class DomainRunDriver:
                         book_id=book_id,
                         expected_book_baseline_id=book_baseline_id,
                         expected_canon_baseline_id=canon_baseline_id,
-                        purpose="regular",
+                        expected_ordinal=1,
+                        source_progress_handoff_id=None,
                     ),
                     idempotency_key=f"engine:create-initial-arc:{book_id}:{book_baseline_id}",
                 )
@@ -1535,22 +1570,76 @@ class DomainRunDriver:
                 raise HarnessInvariantError(
                     "Completed Story Arc lost its formal closure."
                 )
-            boundary = (
+            if latest.ordinal < book_baseline.arc_contract_count:
+                if latest.ordinal >= book_baseline.final_arc_ordinal:
+                    raise HarnessInvariantError(
+                        "Book topology marks a non-terminal Arc as final.",
+                        failure_code="book_arc_route_gap",
+                    )
+                handoff = await getattr(
+                    session, "book_progress_handoffs"
+                ).get_for_arc_closure(
+                    project_id=project_id,
+                    arc_closure_id=closure.id,
+                )
+                if handoff is None:
+                    return _CommandInstruction(
+                        kind="commit_book_handoff",
+                        request=CommitBookProgressHandoffRequest(
+                            project_id=project_id,
+                            book_id=book_id,
+                            source_arc_closure_id=closure.id,
+                        ),
+                        idempotency_key=(
+                            f"engine:commit-book-handoff:{book_baseline_id}:{closure.id}"
+                        ),
+                    )
+                if (
+                    handoff.book_baseline_id != book_baseline_id
+                    or handoff.next_arc_ordinal != latest.ordinal + 1
+                    or handoff.canon_baseline_id != canon_baseline_id
+                ):
+                    raise HarnessInvariantError(
+                        "Book progress handoff does not identify the unique next Arc.",
+                        failure_code="book_arc_route_gap",
+                    )
+                return _CommandInstruction(
+                    kind="create_arc",
+                    request=CreateStoryArcRequest(
+                        project_id=project_id,
+                        book_id=book_id,
+                        expected_book_baseline_id=book_baseline_id,
+                        expected_canon_baseline_id=canon_baseline_id,
+                        expected_ordinal=handoff.next_arc_ordinal,
+                        source_progress_handoff_id=handoff.id,
+                    ),
+                    idempotency_key=(
+                        f"engine:create-arc-from-handoff:{handoff.id}"
+                    ),
+                )
+            if latest.ordinal != book_baseline.final_arc_ordinal:
+                raise HarnessInvariantError(
+                    "Closed Story Arc does not align with the approved Book topology.",
+                    failure_code="book_arc_route_gap",
+                )
+            completion_review = (
                 None
-                if cast(str | None, getattr(book, "latest_boundary_review_id"))
+                if cast(
+                    str | None, getattr(book, "latest_completion_review_id")
+                )
                 is None
-                else await getattr(session, "book_boundary_reviews").get(
+                else await getattr(session, "book_completion_reviews").get(
                     project_id=project_id,
                     review_id=cast(
-                        str, getattr(book, "latest_boundary_review_id")
+                        str, getattr(book, "latest_completion_review_id")
                     ),
                 )
             )
             revision_predecessor = (
                 None
-                if boundary is not None
+                if completion_review is not None
                 else await getattr(
-                    session, "book_boundary_reviews"
+                    session, "book_completion_reviews"
                 ).get_latest_opened_revision_for_closure(
                     project_id=project_id,
                     book_id=book_id,
@@ -1559,38 +1648,27 @@ class DomainRunDriver:
                 )
             )
             if (
-                boundary is None
-                or boundary.arc_closure_id != closure.id
-                or boundary.book_baseline_id != book_baseline_id
+                completion_review is None
+                or completion_review.arc_closure_id != closure.id
+                or completion_review.book_baseline_id != book_baseline_id
             ):
                 predecessor = (
-                    boundary
-                    if boundary is not None
-                    and boundary.arc_closure_id == closure.id
+                    completion_review
+                    if completion_review is not None
+                    and completion_review.arc_closure_id == closure.id
                     else revision_predecessor
                 )
-                if predecessor is not None:
-                    current_book_baseline = await getattr(
-                        session, "books"
-                    ).get_baseline(
-                        project_id=project_id,
-                        book_id=book_id,
-                        baseline_id=book_baseline_id,
+                if predecessor is not None and (
+                    predecessor.book_baseline_id != book_baseline_id
+                    and book_baseline.parent_baseline_id
+                    != predecessor.book_baseline_id
+                ):
+                    raise HarnessInvariantError(
+                        "Book completion successor is not a direct Book lineage child."
                     )
-                    if (
-                        current_book_baseline is None
-                        or (
-                            predecessor.book_baseline_id != book_baseline_id
-                            and current_book_baseline.parent_baseline_id
-                            != predecessor.book_baseline_id
-                        )
-                    ):
-                        raise HarnessInvariantError(
-                            "Book boundary successor is not a direct Book lineage child."
-                        )
                 return _TaskInstruction(
                     role="evaluator",
-                    task_kind="evaluate.book_boundary",
+                    task_kind="evaluate.book_completion",
                     book_id=book_id,
                     workspace_lock_version=cast(
                         int, getattr(book_workspace, "lock_version")
@@ -1600,7 +1678,7 @@ class DomainRunDriver:
                     correction_lineage_id=(
                         _stable_lineage_id(
                             run.id,
-                            "book_boundary",
+                            "book_completion",
                             closure.id,
                             book_baseline_id,
                         )
@@ -1618,92 +1696,58 @@ class DomainRunDriver:
                     automatic_correction_round=(
                         0 if predecessor is None else 1
                     ),
-                    source_book_boundary_review_id=(
+                    source_book_completion_review_id=(
                         None if predecessor is None else predecessor.id
                     ),
                     source_arc_closure_id=closure.id,
                     source_feedback_id=(
-                        None if predecessor is None else predecessor.source_feedback_id
+                        None
+                        if predecessor is None
+                        else predecessor.source_feedback_id
                     ),
                 )
-            if boundary.disposition in {
-                "continue_regular_arc",
-                "plan_final_arc",
-            }:
-                handoff = await getattr(
-                    session, "book_progress_handoffs"
-                ).get_for_boundary_review(
-                    project_id=project_id,
-                    boundary_review_id=boundary.id,
-                )
-                if handoff is None:
-                    return _CommandInstruction(
-                        kind="commit_book_handoff",
-                        request=CommitBookProgressHandoffRequest(
-                            project_id=project_id,
-                            book_id=book_id,
-                            boundary_review_id=boundary.id,
-                        ),
-                        idempotency_key=(
-                            f"engine:commit-book-handoff:{boundary.id}"
-                        ),
-                    )
-                return _CommandInstruction(
-                    kind="create_arc",
-                    request=CreateStoryArcRequest(
-                        project_id=project_id,
-                        book_id=book_id,
-                        expected_book_baseline_id=book_baseline_id,
-                        expected_canon_baseline_id=canon_baseline_id,
-                        purpose=cast(
-                            Literal["regular", "final"],
-                            handoff.next_arc_purpose,
-                        ),
-                    ),
-                    idempotency_key=(
-                        f"engine:create-arc-from-handoff:{handoff.id}"
-                    ),
-                )
-            if boundary.disposition == "complete_book":
+            if completion_review.disposition == "complete_book":
                 return _CommandInstruction(
                     kind="commit_book_completion",
                     request=CommitBookCompletionRequest(
                         project_id=project_id,
                         book_id=book_id,
-                        boundary_review_id=boundary.id,
+                        completion_review_id=completion_review.id,
                     ),
                     idempotency_key=(
-                        f"engine:commit-book-completion:{boundary.id}"
+                        f"engine:commit-book-completion:{completion_review.id}"
                     ),
                 )
             if (
-                boundary.disposition == "book_revision_warranted"
-                and boundary.opened_book_workspace_id is None
+                completion_review.disposition == "book_revision_warranted"
+                and completion_review.opened_book_workspace_id is None
             ):
                 return _CommandInstruction(
-                    kind="open_book_boundary_revision",
-                    request=OpenBookBoundaryRevisionRequest(
+                    kind="open_book_completion_revision",
+                    request=OpenBookCompletionRevisionRequest(
                         project_id=project_id,
                         book_id=book_id,
-                        boundary_review_id=boundary.id,
+                        completion_review_id=completion_review.id,
                         expected_workspace_lock_version=cast(
                             int, getattr(book_workspace, "lock_version")
                         ),
                     ),
                     idempotency_key=(
-                        f"engine:open-book-boundary-revision:{boundary.id}"
+                        "engine:open-book-completion-revision:"
+                        f"{completion_review.id}"
                     ),
                 )
-            if boundary.disposition in {
+            if completion_review.disposition in {
                 "waiting_for_user",
                 "no_legal_route",
                 "book_revision_warranted",
             }:
                 raise HarnessInvariantError(
-                    "Runnable Book boundary has no completed disposition action."
+                    "Runnable Book completion has no completed disposition action."
                 )
             raise HarnessInvariantError(
-                f"Unknown Book boundary disposition {boundary.disposition!r}."
+                "Unknown Book completion disposition "
+                f"{completion_review.disposition!r}."
             )
 
         workspace = await arcs.get_workspace(project_id=project_id, arc_id=arc.id)
@@ -2023,7 +2067,6 @@ class DomainRunDriver:
     ) -> _Instruction:
         chapters = getattr(store, "chapters")
         arcs = getattr(store, "arcs")
-        books = getattr(store, "books")
         content = getattr(store, "content")
         execution = getattr(store, "execution")
         arc_id = cast(str, getattr(arc, "id"))
@@ -2039,25 +2082,46 @@ class DomainRunDriver:
             )
             if baseline is None:
                 raise HarnessInvariantError("Current Story Arc baseline does not exist.")
-            book_baseline = await books.get_baseline(
-                project_id=project_id,
-                book_id=book_id,
-                baseline_id=book_baseline_id,
-            )
-            if book_baseline is None:
-                raise HarnessInvariantError("Current Book baseline does not exist.")
             cumulative_committed = await chapters.count_committed_for_book(
                 book_id=book_id
             )
-            if cumulative_committed >= book_baseline.maximum_chapter_count:
-                raise HarnessInvariantError(
-                    "Book reached its approved maximum without a legal closure "
-                    "or revision route."
-                )
             if (
                 cumulative_committed
                 < baseline.closure_cumulative_chapter_count
             ):
+                try:
+                    arc_plan = ArcPlanProposal.model_validate_json(
+                        (
+                            await content.get_packed(
+                                project_id=project_id,
+                                ref_id=baseline.plan_ref_id,
+                            )
+                        ).unpack_and_verify()
+                    )
+                except ValidationError as error:
+                    raise HarnessInvariantError(
+                        "The current Arc baseline contains an invalid outline plan.",
+                        failure_code="arc_outline_projection_invalid",
+                    ) from error
+                book_ordinal, arc_ordinal = await chapters.next_ordinals(
+                    book_id=book_id,
+                    arc_id=arc_id,
+                )
+                try:
+                    resolve_outline_entry(
+                        baseline=baseline,
+                        plan=arc_plan,
+                        arc_ordinal=arc_ordinal,
+                        book_ordinal=book_ordinal,
+                    )
+                except ArcOutlineProjectionError as error:
+                    raise HarnessInvariantError(
+                        (
+                            "The next Chapter has no unique assignment in the "
+                            "current Arc baseline."
+                        ),
+                        failure_code="arc_outline_slot_missing",
+                    ) from error
                 return _CommandInstruction(
                     kind="create_chapter",
                     request=CreateChapterRequest(
@@ -2440,9 +2504,9 @@ class DomainRunDriver:
                 cast(OpenArcClosureRevisionRequest, instruction.request),
                 idempotency_key=instruction.idempotency_key,
             )
-        elif instruction.kind == "open_book_boundary_revision":
-            await self._authority.open_book_boundary_revision(
-                cast(OpenBookBoundaryRevisionRequest, instruction.request),
+        elif instruction.kind == "open_book_completion_revision":
+            await self._authority.open_book_completion_revision(
+                cast(OpenBookCompletionRevisionRequest, instruction.request),
                 idempotency_key=instruction.idempotency_key,
             )
         elif instruction.kind == "commit_book_handoff":

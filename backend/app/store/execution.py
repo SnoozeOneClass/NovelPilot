@@ -39,7 +39,7 @@ class SuccessfulTaskRecord:
     source_arc_parent_review_id: str | None
     source_book_parent_review_id: str | None
     source_arc_closure_review_id: str | None
-    source_book_boundary_review_id: str | None
+    source_book_completion_review_id: str | None
     source_chapter_arc_request_id: str | None
     source_arc_book_request_id: str | None
     source_arc_closure_id: str | None
@@ -140,7 +140,7 @@ class ActionableTaskRecord:
     source_arc_parent_review_id: str | None
     source_book_parent_review_id: str | None
     source_arc_closure_review_id: str | None
-    source_book_boundary_review_id: str | None
+    source_book_completion_review_id: str | None
     source_chapter_arc_request_id: str | None
     source_arc_book_request_id: str | None
     source_arc_closure_id: str | None
@@ -254,7 +254,7 @@ class ExecutionRepository:
                     agent_tasks.c.source_arc_parent_review_id,
                     agent_tasks.c.source_book_parent_review_id,
                     agent_tasks.c.source_arc_closure_review_id,
-                    agent_tasks.c.source_book_boundary_review_id,
+                    agent_tasks.c.source_book_completion_review_id,
                     agent_tasks.c.source_chapter_arc_request_id,
                     agent_tasks.c.source_arc_book_request_id,
                     agent_tasks.c.source_arc_closure_id,
@@ -338,8 +338,8 @@ class ExecutionRepository:
             source_arc_closure_review_id=cast(
                 str | None, row["source_arc_closure_review_id"]
             ),
-            source_book_boundary_review_id=cast(
-                str | None, row["source_book_boundary_review_id"]
+            source_book_completion_review_id=cast(
+                str | None, row["source_book_completion_review_id"]
             ),
             source_chapter_arc_request_id=cast(
                 str | None, row["source_chapter_arc_request_id"]
@@ -635,7 +635,7 @@ class ExecutionRepository:
                 source_arc_parent_review_id=plan.source_arc_parent_review_id,
                 source_book_parent_review_id=plan.source_book_parent_review_id,
                 source_arc_closure_review_id=plan.source_arc_closure_review_id,
-                source_book_boundary_review_id=plan.source_book_boundary_review_id,
+                source_book_completion_review_id=plan.source_book_completion_review_id,
                 source_chapter_arc_request_id=plan.source_chapter_arc_request_id,
                 source_arc_book_request_id=plan.source_arc_book_request_id,
                 source_arc_closure_id=plan.source_arc_closure_id,
@@ -1270,7 +1270,7 @@ class ExecutionRepository:
                     agent_tasks.c.source_arc_parent_review_id,
                     agent_tasks.c.source_book_parent_review_id,
                     agent_tasks.c.source_arc_closure_review_id,
-                    agent_tasks.c.source_book_boundary_review_id,
+                    agent_tasks.c.source_book_completion_review_id,
                     agent_tasks.c.source_chapter_arc_request_id,
                     agent_tasks.c.source_arc_book_request_id,
                     agent_tasks.c.source_arc_closure_id,
@@ -1329,8 +1329,8 @@ class ExecutionRepository:
             source_arc_closure_review_id=cast(
                 str | None, row["source_arc_closure_review_id"]
             ),
-            source_book_boundary_review_id=cast(
-                str | None, row["source_book_boundary_review_id"]
+            source_book_completion_review_id=cast(
+                str | None, row["source_book_completion_review_id"]
             ),
             source_chapter_arc_request_id=cast(
                 str | None, row["source_chapter_arc_request_id"]

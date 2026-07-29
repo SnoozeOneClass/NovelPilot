@@ -22,7 +22,7 @@ from app.domain.commands import (
 from app.domain.evaluation import (
     ArcClosureEvaluation,
     ArcParentContractEvaluation,
-    BookBoundaryEvaluation,
+    BookCompletionEvaluation,
     BookParentContractEvaluation,
 )
 from app.store.arcs import (
@@ -35,7 +35,7 @@ from app.store.authority import (
     ArcClosureRecord,
     ArcClosureReviewRecord,
     ArcParentReviewRecord,
-    BookBoundaryReviewRecord,
+    BookCompletionReviewRecord,
     BookParentReviewRecord,
     BookProgressHandoffRecord,
 )
@@ -173,7 +173,7 @@ class RecordArcClosureReviewResult(BaseModel):
     ] = "none"
 
 
-class RecordBookBoundaryReviewRequest(BaseModel):
+class RecordBookCompletionReviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     project_id: str
@@ -182,15 +182,13 @@ class RecordBookBoundaryReviewRequest(BaseModel):
     attempt_id: str
 
 
-class RecordBookBoundaryReviewResult(BaseModel):
+class RecordBookCompletionReviewResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     project_id: str
     book_id: str
     review_id: str
     disposition: Literal[
-        "continue_regular_arc",
-        "plan_final_arc",
         "complete_book",
         "book_revision_warranted",
         "waiting_for_user",
@@ -203,7 +201,7 @@ class CommitBookProgressHandoffRequest(BaseModel):
 
     project_id: str
     book_id: str
-    boundary_review_id: str
+    source_arc_closure_id: str
 
 
 class CommitBookProgressHandoffResult(BaseModel):
@@ -211,9 +209,8 @@ class CommitBookProgressHandoffResult(BaseModel):
 
     project_id: str
     book_id: str
-    boundary_review_id: str
     handoff_id: str
-    next_arc_purpose: Literal["regular", "final"]
+    next_arc_ordinal: int
 
 
 class CommitBookCompletionRequest(BaseModel):
@@ -221,7 +218,7 @@ class CommitBookCompletionRequest(BaseModel):
 
     project_id: str
     book_id: str
-    boundary_review_id: str
+    completion_review_id: str
 
 
 class CommitBookCompletionResult(BaseModel):
@@ -229,7 +226,7 @@ class CommitBookCompletionResult(BaseModel):
 
     project_id: str
     book_id: str
-    boundary_review_id: str
+    completion_review_id: str
     completion_id: str
 
 
@@ -253,21 +250,21 @@ class OpenArcClosureRevisionResult(BaseModel):
     workspace_lock_version: int | None = None
 
 
-class OpenBookBoundaryRevisionRequest(BaseModel):
+class OpenBookCompletionRevisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     project_id: str
     book_id: str
-    boundary_review_id: str
+    completion_review_id: str
     expected_workspace_lock_version: int
 
 
-class OpenBookBoundaryRevisionResult(BaseModel):
+class OpenBookCompletionRevisionResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     project_id: str
     book_id: str
-    boundary_review_id: str
+    completion_review_id: str
     workspace_lock_version: int
 
 
@@ -1089,8 +1086,8 @@ class LoopAuthorityCommandService:
             )
             prepared_normalized = prepare_canonical_json(
                 {
-                    "schema_id": "formal-arc-closure-result-v2",
-                    "arc_purpose": arc.purpose,
+                    "schema_id": "formal-arc-closure-result-v3",
+                    "arc_ordinal": arc.ordinal,
                     "disposition": disposition,
                     "signal_statuses": [
                         item.model_dump(mode="json")
@@ -1308,7 +1305,7 @@ class LoopAuthorityCommandService:
                     semantic_kind="arc.formal_closure_result",
                     media_type="application/json",
                     schema_id="formal-arc-closure-result",
-                    schema_version=2,
+                    schema_version=3,
                     ref_id=normalized_ref_id,
                     created_at_ms=timestamp,
                 )
@@ -1582,15 +1579,14 @@ class LoopAuthorityCommandService:
                 source_arc_parent_review_id=None,
                 source_arc_closure_review_id=review.id,
                 source_book_parent_review_id=None,
-                source_book_boundary_review_id=None,
+                source_book_completion_review_id=None,
                 source_feedback_id=None,
                 correction_lineage_id=review.correction_lineage_id,
                 correction_lineage_origin=review.correction_lineage_origin,
                 automatic_correction_round=1,
                 plan_ref_id=None,
-                minimum_cumulative_chapter_count=None,
-                recommended_closure_cumulative_chapter_count=None,
-                maximum_cumulative_chapter_count=None,
+                planned_after_cumulative_chapter_count=None,
+                planned_after_arc_chapter_count=None,
                 closure_cumulative_chapter_count=None,
                 guidance_ref_id=review.detail_ref_id,
                 semantic_repair_count=0,
@@ -1640,28 +1636,28 @@ class LoopAuthorityCommandService:
             handler=handler,
         )
 
-    async def open_book_boundary_revision(
+    async def open_book_completion_revision(
         self,
-        request: OpenBookBoundaryRevisionRequest,
+        request: OpenBookCompletionRevisionRequest,
         *,
         idempotency_key: str,
-    ) -> CommandExecution[OpenBookBoundaryRevisionResult]:
+    ) -> CommandExecution[OpenBookCompletionRevisionResult]:
         timestamp = self._now_ms()
         envelope = self._envelope(
             request=request,
             project_id=request.project_id,
             idempotency_key=idempotency_key,
-            command_kind="open_book_boundary_revision",
+            command_kind="open_book_completion_revision",
             source_task_id=None,
             timestamp=timestamp,
         )
 
         async def handler(
             session: StoreSession,
-        ) -> CommandEffect[OpenBookBoundaryRevisionResult]:
-            review = await session.book_boundary_reviews.get(
+        ) -> CommandEffect[OpenBookCompletionRevisionResult]:
+            review = await session.book_completion_reviews.get(
                 project_id=request.project_id,
-                review_id=request.boundary_review_id,
+                review_id=request.completion_review_id,
             )
             project = await session.projects.get(request.project_id)
             book = await session.books.get_for_project(request.project_id)
@@ -1697,7 +1693,7 @@ class LoopAuthorityCommandService:
                 or book.id != request.book_id
                 or book.lifecycle_status != "active"
                 or book.current_baseline_id != review.book_baseline_id
-                or book.latest_boundary_review_id != review.id
+                or book.latest_completion_review_id != review.id
                 or book.current_progress_handoff_id is not None
                 or book.current_completion_id is not None
                 or workspace is None
@@ -1710,7 +1706,7 @@ class LoopAuthorityCommandService:
                 or terminal_arc.lifecycle_status != "completed"
             ):
                 raise CommandPreconditionError(
-                    "Book boundary revision authorization is stale."
+                    "Book completion revision authorization is stale."
                 )
             pending = await session.books.find_pending_submission(
                 project_id=request.project_id,
@@ -1718,7 +1714,7 @@ class LoopAuthorityCommandService:
             )
             if pending is not None:
                 raise CommandPreconditionError(
-                    "Book boundary revision cannot replace a pending submission."
+                    "Book completion revision cannot replace a pending submission."
                 )
             updated = replace(
                 workspace,
@@ -1730,6 +1726,7 @@ class LoopAuthorityCommandService:
                 candidate_titles_ref_id=None,
                 candidate_rolling_plan_ref_id=None,
                 candidate_completion_contract_ref_id=None,
+                candidate_arc_topology_ref_id=None,
                 guidance_ref_id=review.detail_ref_id,
                 semantic_repair_count=0,
                 stale_reason_code=None,
@@ -1741,30 +1738,30 @@ class LoopAuthorityCommandService:
                 expected_lock_version=workspace.lock_version,
             ):
                 raise CommandPreconditionError(
-                    "Book boundary revision workspace CAS failed."
+                    "Book completion revision workspace CAS failed."
                 )
-            if not await session.book_boundary_reviews.mark_workspace_opened(
+            if not await session.book_completion_reviews.mark_workspace_opened(
                 project_id=request.project_id,
                 review_id=review.id,
                 workspace_id=workspace.id,
             ):
                 raise CommandPreconditionError(
-                    "Book boundary review workspace pointer CAS failed."
+                    "Book completion review workspace pointer CAS failed."
                 )
             return CommandEffect(
-                result=OpenBookBoundaryRevisionResult(
+                result=OpenBookCompletionRevisionResult(
                     project_id=request.project_id,
                     book_id=request.book_id,
-                    boundary_review_id=review.id,
+                    completion_review_id=review.id,
                     workspace_lock_version=updated.lock_version,
                 ),
                 events=(
                     EventDraft(
-                        event_type="book.boundary_revision_workspace_opened",
+                        event_type="book.completion_revision_workspace_opened",
                         aggregate_type="book",
                         aggregate_id=request.book_id,
                         payload={
-                            "boundary_review_id": review.id,
+                            "completion_review_id": review.id,
                             "workspace_lock_version": updated.lock_version,
                         },
                     ),
@@ -1773,16 +1770,16 @@ class LoopAuthorityCommandService:
 
         return await self._command_bus.execute(
             envelope=envelope,
-            result_type=OpenBookBoundaryRevisionResult,
+            result_type=OpenBookCompletionRevisionResult,
             handler=handler,
         )
 
-    async def record_book_boundary_review(
+    async def record_book_completion_review(
         self,
-        request: RecordBookBoundaryReviewRequest,
+        request: RecordBookCompletionReviewRequest,
         *,
         idempotency_key: str,
-    ) -> CommandExecution[RecordBookBoundaryReviewResult]:
+    ) -> CommandExecution[RecordBookCompletionReviewResult]:
         timestamp = self._now_ms()
         review_id = self._id_factory()
         statuses_ref_id = self._id_factory()
@@ -1795,9 +1792,9 @@ class LoopAuthorityCommandService:
                 project_id=request.project_id,
                 task_id=request.task_id,
                 attempt_id=request.attempt_id,
-                task_kind="evaluate.book_boundary",
+                task_kind="evaluate.book_completion",
             )
-            evaluation = BookBoundaryEvaluation.model_validate_json(
+            evaluation = BookCompletionEvaluation.model_validate_json(
                 (
                     await session.content.get_packed(
                         project_id=request.project_id,
@@ -1805,13 +1802,14 @@ class LoopAuthorityCommandService:
                     )
                 ).unpack_and_verify()
             )
-            book, baseline, workspace, closure, terminal_arc, chapter_count = (
-                await self._book_boundary_snapshot(
+            book, baseline, workspace, closures, terminal_arc, chapter_count = (
+                await self._book_completion_snapshot(
                     session,
                     request=request,
                     task=task,
                 )
             )
+            terminal_closure = closures[-1]
             contract = CompletionContract.model_validate_json(
                 (
                     await session.content.get_packed(
@@ -1826,19 +1824,14 @@ class LoopAuthorityCommandService:
             )
             disposition = cast(
                 Literal[
-                    "continue_regular_arc",
-                    "plan_final_arc",
                     "complete_book",
                     "book_revision_warranted",
                     "waiting_for_user",
                     "no_legal_route",
                 ],
                 self._bounded_review_disposition(
-                    disposition=self._book_boundary_disposition(
+                    disposition=self._book_completion_disposition(
                         evaluation=evaluation,
-                        contract=contract,
-                        terminal_arc_purpose=terminal_arc.purpose,
-                        committed_chapter_count=chapter_count,
                     ),
                     task=task,
                     has_creator_question=evaluation.creator_input_need is not None,
@@ -1852,14 +1845,13 @@ class LoopAuthorityCommandService:
             )
             prepared_precheck = prepare_canonical_json(
                 {
-                    "schema_id": "book-boundary-precheck-v1",
+                    "schema_id": "book-completion-precheck-v2",
                     "passed": True,
-                    "formal_arc_closure_current": True,
+                    "planned_final_arc_closed": True,
+                    "formal_arc_closure_count": len(closures),
                     "book_baseline_current": True,
                     "closure_inputs_frozen": True,
                     "committed_chapter_count": chapter_count,
-                    "book_minimum_chapter_count": contract.minimum_chapter_count,
-                    "book_maximum_chapter_count": contract.maximum_chapter_count,
                 }
             )
             prepared_question = (
@@ -1870,9 +1862,18 @@ class LoopAuthorityCommandService:
             exact_input_fingerprint = prepare_canonical_json(
                 {
                     "book_baseline_id": baseline.id,
-                    "arc_closure_id": closure.id,
-                    "closure_canon_baseline_id": closure.canon_baseline_id,
-                    "chapter_set_fingerprint": closure.chapter_set_fingerprint,
+                    "ordered_arc_closures": [
+                        {
+                            "arc_closure_id": closure.id,
+                            "arc_baseline_id": closure.arc_baseline_id,
+                            "canon_baseline_id": closure.canon_baseline_id,
+                            "chapter_set_fingerprint": (
+                                closure.chapter_set_fingerprint
+                            ),
+                        }
+                        for closure in closures
+                    ],
+                    "closure_canon_baseline_id": terminal_closure.canon_baseline_id,
                     "committed_chapter_count": chapter_count,
                     "strategy_id": task.evaluation_strategy_id,
                     "strategy_version": task.evaluation_strategy_version,
@@ -1883,24 +1884,26 @@ class LoopAuthorityCommandService:
             request=request,
             project_id=request.project_id,
             idempotency_key=idempotency_key,
-            command_kind="record_book_boundary_review",
+            command_kind="record_book_completion_review",
             source_task_id=request.task_id,
             timestamp=timestamp,
         )
 
         async def handler(
             session: StoreSession,
-        ) -> CommandEffect[RecordBookBoundaryReviewResult]:
+        ) -> CommandEffect[RecordBookCompletionReviewResult]:
             current_task = await self._successful_task(
                 session,
                 project_id=request.project_id,
                 task_id=request.task_id,
                 attempt_id=request.attempt_id,
-                task_kind="evaluate.book_boundary",
+                task_kind="evaluate.book_completion",
             )
             if current_task != task or task.delivery_state != "pending":
-                raise CommandPreconditionError("Book boundary task changed before delivery.")
-            current = await self._book_boundary_snapshot(
+                raise CommandPreconditionError(
+                    "Book completion task changed before delivery."
+                )
+            current = await self._book_completion_snapshot(
                 session,
                 request=request,
                 task=task,
@@ -1909,23 +1912,23 @@ class LoopAuthorityCommandService:
                 book,
                 baseline,
                 workspace,
-                closure,
+                closures,
                 terminal_arc,
                 chapter_count,
             ):
                 raise CommandPreconditionError(
-                    "Book boundary authority changed before delivery."
+                    "Book completion authority changed before delivery."
                 )
-            latest = await session.book_boundary_reviews.get_latest_for_book(
+            latest = await session.book_completion_reviews.get_latest_for_book(
                 project_id=request.project_id,
                 book_id=request.book_id,
             )
             source_review = (
                 None
-                if task.source_book_boundary_review_id is None
-                else await session.book_boundary_reviews.get(
+                if task.source_book_completion_review_id is None
+                else await session.book_completion_reviews.get(
                     project_id=request.project_id,
-                    review_id=task.source_book_boundary_review_id,
+                    review_id=task.source_book_completion_review_id,
                 )
             )
             if (
@@ -1934,12 +1937,15 @@ class LoopAuthorityCommandService:
                 and latest.id != source_review.id
             ):
                 raise CommandPreconditionError(
-                    "Book boundary predecessor review is not current."
+                    "Book completion predecessor review is not current."
                 )
             if source_review is None and latest is not None:
-                if latest.arc_closure_id == closure.id and latest.book_baseline_id == baseline.id:
+                if (
+                    latest.arc_closure_id == terminal_closure.id
+                    and latest.book_baseline_id == baseline.id
+                ):
                     raise CommandPreconditionError(
-                        "The exact Book boundary already has an authoritative review."
+                        "The exact Book completion already has an authoritative review."
                     )
             lineage = self._review_lineage_links(
                 task=task,
@@ -1948,20 +1954,20 @@ class LoopAuthorityCommandService:
             statuses_ref = await session.content.put(
                 project_id=request.project_id,
                 prepared=prepared_statuses,
-                semantic_kind="book.boundary_requirement_statuses",
+                semantic_kind="book.completion_requirement_statuses",
                 media_type="application/json",
-                schema_id="book-boundary-requirement-statuses",
-                schema_version=1,
+                schema_id="book-completion-requirement-statuses",
+                schema_version=2,
                 ref_id=statuses_ref_id,
                 created_at_ms=timestamp,
             )
             precheck_ref = await session.content.put(
                 project_id=request.project_id,
                 prepared=prepared_precheck,
-                semantic_kind="book.boundary_precheck",
+                semantic_kind="book.completion_precheck",
                 media_type="application/json",
-                schema_id="book-boundary-precheck",
-                schema_version=1,
+                schema_id="book-completion-precheck",
+                schema_version=2,
                 ref_id=precheck_ref_id,
                 created_at_ms=timestamp,
             )
@@ -1977,16 +1983,26 @@ class LoopAuthorityCommandService:
                     ref_id=question_ref_id,
                     created_at_ms=timestamp,
                 )
-            await session.book_boundary_reviews.insert(
-                BookBoundaryReviewRecord(
+            await session.book_completion_reviews.insert(
+                BookCompletionReviewRecord(
                     id=review_id,
                     project_id=request.project_id,
                     book_id=request.book_id,
                     book_baseline_id=baseline.id,
-                    arc_closure_id=closure.id,
-                    canon_baseline_id=closure.canon_baseline_id,
+                    arc_closure_id=terminal_closure.id,
+                    canon_baseline_id=terminal_closure.canon_baseline_id,
                     committed_chapter_count=chapter_count,
-                    chapter_set_fingerprint=closure.chapter_set_fingerprint,
+                    chapter_set_fingerprint=prepare_canonical_json(
+                        [
+                            {
+                                "arc_closure_id": closure.id,
+                                "chapter_set_fingerprint": (
+                                    closure.chapter_set_fingerprint
+                                ),
+                            }
+                            for closure in closures
+                        ]
+                    ).sha256,
                     source_task_id=task.task_id,
                     source_attempt_id=task.attempt_id,
                     strategy_id=self._required_text(
@@ -2000,9 +2016,6 @@ class LoopAuthorityCommandService:
                         task.rubric_version, "rubric"
                     ),
                     requirement_statuses_ref_id=statuses_ref.id,
-                    ending_trajectory_judgment=(
-                        evaluation.ending_trajectory_judgment
-                    ),
                     book_contract_judgment=evaluation.book_contract_judgment,
                     disposition=disposition,
                     resolution_owner=self._book_resolution_owner(disposition),
@@ -2025,26 +2038,28 @@ class LoopAuthorityCommandService:
                     created_at_ms=timestamp,
                 )
             )
-            if not await session.book_boundary_reviews.compare_and_set_latest(
+            if not await session.book_completion_reviews.compare_and_set_latest(
                 project_id=request.project_id,
                 book_id=request.book_id,
                 book_baseline_id=baseline.id,
-                expected_review_id=book.latest_boundary_review_id,
+                expected_review_id=book.latest_completion_review_id,
                 new_review_id=review_id,
                 updated_at_ms=timestamp,
             ):
-                raise CommandPreconditionError("Book boundary review pointer CAS failed.")
+                raise CommandPreconditionError(
+                    "Book completion review pointer CAS failed."
+                )
             if disposition == "waiting_for_user" and not await session.runs.ensure_wait_for_user(
                 run_id=task.run_id,
                 reason_code=(
                     "evidence_correction_needs_user"
                     if task.automatic_correction_round == 1
-                    else "book_boundary_needs_user"
+                    else "book_completion_needs_user"
                 ),
                 now_ms=timestamp,
             ):
                 raise CommandPreconditionError(
-                    "Run could not enter the Book boundary creator wait."
+                    "Run could not enter the Book completion creator wait."
                 )
             if not await session.execution.mark_delivery_applied(
                 project_id=request.project_id,
@@ -2054,10 +2069,10 @@ class LoopAuthorityCommandService:
                 updated_at_ms=timestamp,
             ):
                 raise CommandPreconditionError(
-                    "Book boundary task delivery changed concurrently."
+                    "Book completion task delivery changed concurrently."
                 )
             return CommandEffect(
-                result=RecordBookBoundaryReviewResult(
+                result=RecordBookCompletionReviewResult(
                     project_id=request.project_id,
                     book_id=request.book_id,
                     review_id=review_id,
@@ -2065,12 +2080,12 @@ class LoopAuthorityCommandService:
                 ),
                 events=(
                     EventDraft(
-                        event_type="book.boundary_reviewed",
+                        event_type="book.completion_reviewed",
                         aggregate_type="book",
                         aggregate_id=request.book_id,
                         payload={
                             "review_id": review_id,
-                            "arc_closure_id": closure.id,
+                            "arc_closure_id": terminal_closure.id,
                             "disposition": disposition,
                         },
                     ),
@@ -2079,7 +2094,7 @@ class LoopAuthorityCommandService:
 
         return await self._command_bus.execute(
             envelope=envelope,
-            result_type=RecordBookBoundaryReviewResult,
+            result_type=RecordBookCompletionReviewResult,
             handler=handler,
         )
 
@@ -2091,77 +2106,90 @@ class LoopAuthorityCommandService:
     ) -> CommandExecution[CommitBookProgressHandoffResult]:
         timestamp = self._now_ms()
         handoff_id = self._id_factory()
-        remaining_ref_id = self._id_factory()
-        guidance_ref_id = self._id_factory()
-        async with self._command_bus.read_unit_of_work() as session:
-            review = await session.book_boundary_reviews.get(
-                project_id=request.project_id,
-                review_id=request.boundary_review_id,
-            )
-            if review is None:
-                raise CommandPreconditionError("Book boundary review does not exist.")
-            if review.disposition not in {
-                "continue_regular_arc",
-                "plan_final_arc",
-            }:
-                raise CommandPreconditionError(
-                    "Book boundary review does not authorize a progress handoff."
-                )
-            statuses = (
-                await session.content.get_packed(
-                    project_id=request.project_id,
-                    ref_id=review.requirement_statuses_ref_id,
-                )
-            ).unpack_and_verify()
-            prepared_remaining = prepare_canonical_json(
-                {
-                    "schema_id": "book-remaining-requirements-v1",
-                    "requirement_statuses": __import__("json").loads(statuses),
-                }
-            )
-            prepared_guidance = prepare_canonical_json(
-                {
-                    "schema_id": "book-progress-guidance-v1",
-                    "boundary_disposition": review.disposition,
-                    "ending_trajectory_judgment": review.ending_trajectory_judgment,
-                    "book_contract_judgment": review.book_contract_judgment,
-                    "source_detail_ref_id": review.detail_ref_id,
-                }
-            )
         envelope = self._envelope(
             request=request,
             project_id=request.project_id,
             idempotency_key=idempotency_key,
             command_kind="commit_book_progress_handoff",
-            source_task_id=review.source_task_id,
+            source_task_id=None,
             timestamp=timestamp,
         )
 
         async def handler(
             session: StoreSession,
         ) -> CommandEffect[CommitBookProgressHandoffResult]:
-            current_review = await session.book_boundary_reviews.get(
-                project_id=request.project_id,
-                review_id=request.boundary_review_id,
-            )
             book = await session.books.get_for_project(request.project_id)
+            baseline = (
+                None
+                if book is None or book.current_baseline_id is None
+                else await session.books.get_baseline(
+                    project_id=request.project_id,
+                    book_id=request.book_id,
+                    baseline_id=book.current_baseline_id,
+                )
+            )
             closure = await session.arc_closures.get(
                 project_id=request.project_id,
-                closure_id=review.arc_closure_id,
+                closure_id=request.source_arc_closure_id,
             )
+            source_arc = (
+                None
+                if closure is None
+                else await session.arcs.get(
+                    project_id=request.project_id,
+                    arc_id=closure.arc_id,
+                )
+            )
+            project = await session.projects.get(request.project_id)
             if (
-                current_review != review
-                or book is None
+                book is None
                 or book.id != request.book_id
                 or book.lifecycle_status != "active"
-                or book.current_baseline_id != review.book_baseline_id
-                or book.latest_boundary_review_id != review.id
                 or book.current_completion_id is not None
+                or baseline is None
                 or closure is None
-                or closure.id != review.arc_closure_id
+                or closure.book_id != request.book_id
+                or source_arc is None
+                or source_arc.book_id != request.book_id
+                or source_arc.lifecycle_status != "completed"
+                or source_arc.current_closure_id != closure.id
+                or source_arc.ordinal >= baseline.final_arc_ordinal
+                or source_arc.ordinal >= baseline.arc_contract_count
+                or not (
+                    closure.book_baseline_id == baseline.id
+                    or (
+                        baseline.parent_baseline_id
+                        == closure.book_baseline_id
+                        and baseline.topology_effective_after_arc_ordinal
+                        >= source_arc.ordinal
+                    )
+                )
+                or project is None
+                or project.current_canon_baseline_id != closure.canon_baseline_id
             ):
                 raise CommandPreconditionError(
-                    "Book handoff authority is stale or mismatched."
+                    "Book progress handoff authority is stale or mismatched."
+                )
+            next_arc_ordinal = source_arc.ordinal + 1
+            existing = (
+                await session.book_progress_handoffs.get_for_book_baseline_ordinal(
+                    project_id=request.project_id,
+                    book_baseline_id=baseline.id,
+                    next_arc_ordinal=next_arc_ordinal,
+                )
+            )
+            if existing is not None:
+                raise CommandPreconditionError(
+                    "The next Book Arc contract already has a progress handoff."
+                )
+            next_arc = await session.arcs.get_by_ordinal(
+                project_id=request.project_id,
+                book_id=request.book_id,
+                ordinal=next_arc_ordinal,
+            )
+            if next_arc is not None:
+                raise CommandPreconditionError(
+                    "The next Story Arc already exists; a second handoff is invalid."
                 )
             previous = await session.book_progress_handoffs.get_latest_for_book(
                 project_id=request.project_id,
@@ -2172,31 +2200,6 @@ class LoopAuthorityCommandService:
             )
             if version != (1 if previous is None else previous.handoff_version + 1):
                 raise CommandPreconditionError("Book handoff version is not contiguous.")
-            remaining_ref = await session.content.put(
-                project_id=request.project_id,
-                prepared=prepared_remaining,
-                semantic_kind="book.remaining_requirements",
-                media_type="application/json",
-                schema_id="book-remaining-requirements",
-                schema_version=1,
-                ref_id=remaining_ref_id,
-                created_at_ms=timestamp,
-            )
-            guidance_ref = await session.content.put(
-                project_id=request.project_id,
-                prepared=prepared_guidance,
-                semantic_kind="book.progress_guidance",
-                media_type="application/json",
-                schema_id="book-progress-guidance",
-                schema_version=1,
-                ref_id=guidance_ref_id,
-                created_at_ms=timestamp,
-            )
-            purpose: Literal["regular", "final"] = (
-                "regular"
-                if review.disposition == "continue_regular_arc"
-                else "final"
-            )
             await session.book_progress_handoffs.insert(
                 BookProgressHandoffRecord(
                     id=handoff_id,
@@ -2204,21 +2207,17 @@ class LoopAuthorityCommandService:
                     book_id=request.book_id,
                     handoff_version=version,
                     parent_handoff_id=None if previous is None else previous.id,
-                    source_boundary_review_id=review.id,
-                    arc_closure_id=review.arc_closure_id,
-                    book_baseline_id=review.book_baseline_id,
-                    canon_baseline_id=review.canon_baseline_id,
-                    next_arc_purpose=purpose,
-                    remaining_requirements_ref_id=remaining_ref.id,
-                    guidance_ref_id=guidance_ref.id,
+                    source_arc_closure_id=closure.id,
+                    book_baseline_id=baseline.id,
+                    canon_baseline_id=closure.canon_baseline_id,
+                    next_arc_ordinal=next_arc_ordinal,
                     created_at_ms=timestamp,
                 )
             )
             if not await session.book_progress_handoffs.compare_and_set_current(
                 project_id=request.project_id,
                 book_id=request.book_id,
-                book_baseline_id=review.book_baseline_id,
-                boundary_review_id=review.id,
+                book_baseline_id=baseline.id,
                 expected_handoff_id=book.current_progress_handoff_id,
                 new_handoff_id=handoff_id,
                 updated_at_ms=timestamp,
@@ -2228,9 +2227,8 @@ class LoopAuthorityCommandService:
                 result=CommitBookProgressHandoffResult(
                     project_id=request.project_id,
                     book_id=request.book_id,
-                    boundary_review_id=review.id,
                     handoff_id=handoff_id,
-                    next_arc_purpose=purpose,
+                    next_arc_ordinal=next_arc_ordinal,
                 ),
                 events=(
                     EventDraft(
@@ -2238,9 +2236,9 @@ class LoopAuthorityCommandService:
                         aggregate_type="book",
                         aggregate_id=request.book_id,
                         payload={
-                            "boundary_review_id": review.id,
+                            "source_arc_closure_id": closure.id,
                             "handoff_id": handoff_id,
-                            "next_arc_purpose": purpose,
+                            "next_arc_ordinal": next_arc_ordinal,
                         },
                     ),
                 ),
@@ -2263,30 +2261,27 @@ class LoopAuthorityCommandService:
         decision_ref_id = self._id_factory()
         gate_ref_id = self._id_factory()
         async with self._command_bus.read_unit_of_work() as session:
-            review = await session.book_boundary_reviews.get(
+            review = await session.book_completion_reviews.get(
                 project_id=request.project_id,
-                review_id=request.boundary_review_id,
+                review_id=request.completion_review_id,
             )
             if review is None or review.disposition != "complete_book":
                 raise CommandPreconditionError(
-                    "Book boundary review does not authorize completion."
+                    "Book completion review does not authorize completion."
                 )
             prepared_decision = prepare_canonical_json(
                 {
-                    "schema_id": "book-completion-decision-v1",
-                    "boundary_review_id": review.id,
-                    "ending_trajectory_judgment": (
-                        review.ending_trajectory_judgment
-                    ),
+                    "schema_id": "book-completion-decision-v2",
+                    "completion_review_id": review.id,
                     "book_contract_judgment": review.book_contract_judgment,
                     "requirement_statuses_ref_id": review.requirement_statuses_ref_id,
                 }
             )
             prepared_gate = prepare_canonical_json(
                 {
-                    "schema_id": "book-completion-gate-v1",
+                    "schema_id": "book-completion-gate-v2",
                     "all_requirements_satisfied": True,
-                    "terminal_arc_formally_final": True,
+                    "planned_final_arc_formally_closed": True,
                     "chapter_count": review.committed_chapter_count,
                     "source_arc_closure_id": review.arc_closure_id,
                 }
@@ -2303,9 +2298,9 @@ class LoopAuthorityCommandService:
         async def handler(
             session: StoreSession,
         ) -> CommandEffect[CommitBookCompletionResult]:
-            current_review = await session.book_boundary_reviews.get(
+            current_review = await session.book_completion_reviews.get(
                 project_id=request.project_id,
-                review_id=request.boundary_review_id,
+                review_id=request.completion_review_id,
             )
             project = await session.projects.get(request.project_id)
             book = await session.books.get_for_project(request.project_id)
@@ -2348,7 +2343,7 @@ class LoopAuthorityCommandService:
                 or book.id != request.book_id
                 or book.lifecycle_status != "active"
                 or book.current_baseline_id != review.book_baseline_id
-                or book.latest_boundary_review_id != review.id
+                or book.latest_completion_review_id != review.id
                 or book.current_completion_id is not None
                 or baseline is None
                 or closure is None
@@ -2357,18 +2352,13 @@ class LoopAuthorityCommandService:
                 or terminal_arc.arc_baseline_id != closure.arc_baseline_id
                 or terminal_arc.arc_closure_id != closure.id
                 or terminal_arc.lifecycle_status != "completed"
-                or terminal_arc.purpose != "final"
+                or terminal_arc.ordinal != baseline.final_arc_ordinal
                 or terminal_chapter is None
                 or terminal_chapter.chapter_id != closure.terminal_chapter_id
                 or terminal_chapter.chapter_baseline_id
                 != closure.terminal_chapter_baseline_id
                 or task is None
                 or task.delivery_state != "applied"
-                or not (
-                    baseline.minimum_chapter_count
-                    <= review.committed_chapter_count
-                    <= baseline.maximum_chapter_count
-                )
                 or await session.completion.count_committed_chapters(
                     book_id=request.book_id
                 )
@@ -2390,7 +2380,7 @@ class LoopAuthorityCommandService:
                 semantic_kind="book.completion_decision",
                 media_type="application/json",
                 schema_id="book-completion-decision",
-                schema_version=1,
+                schema_version=2,
                 ref_id=decision_ref_id,
                 created_at_ms=timestamp,
             )
@@ -2400,7 +2390,7 @@ class LoopAuthorityCommandService:
                 semantic_kind="book.completion_gate_manifest",
                 media_type="application/json",
                 schema_id="book-completion-gate-manifest",
-                schema_version=1,
+                schema_version=2,
                 ref_id=gate_ref_id,
                 created_at_ms=timestamp,
             )
@@ -2416,7 +2406,7 @@ class LoopAuthorityCommandService:
                     completion_version=version,
                     parent_completion_id=None if latest is None else latest[0],
                     book_baseline_id=baseline.id,
-                    book_boundary_review_id=review.id,
+                    book_completion_review_id=review.id,
                     arc_closure_id=closure.id,
                     terminal_arc_id=terminal_arc.arc_id,
                     terminal_arc_baseline_id=terminal_arc.arc_baseline_id,
@@ -2453,7 +2443,7 @@ class LoopAuthorityCommandService:
                 result=CommitBookCompletionResult(
                     project_id=request.project_id,
                     book_id=request.book_id,
-                    boundary_review_id=review.id,
+                    completion_review_id=review.id,
                     completion_id=completion_id,
                 ),
                 events=(
@@ -2463,7 +2453,7 @@ class LoopAuthorityCommandService:
                         aggregate_id=request.book_id,
                         payload={
                             "completion_id": completion_id,
-                            "boundary_review_id": review.id,
+                            "completion_review_id": review.id,
                         },
                     ),
                     EventDraft(
@@ -2716,16 +2706,16 @@ class LoopAuthorityCommandService:
         return arc, baseline, workspace, arc_chapters, len(committed)
 
     @staticmethod
-    async def _book_boundary_snapshot(
+    async def _book_completion_snapshot(
         session: StoreSession,
         *,
-        request: RecordBookBoundaryReviewRequest,
+        request: RecordBookCompletionReviewRequest,
         task: SuccessfulTaskRecord,
     ) -> tuple[
         BookRecord,
         BookBaselineRecord,
         BookWorkspaceRecord,
-        ArcClosureRecord,
+        tuple[ArcClosureRecord, ...],
         ArcRecord,
         int,
     ]:
@@ -2747,7 +2737,7 @@ class LoopAuthorityCommandService:
                 baseline_id=book.current_baseline_id,
             )
         )
-        closure = (
+        terminal_closure = (
             None
             if task.source_arc_closure_id is None
             else await session.arc_closures.get(
@@ -2757,29 +2747,41 @@ class LoopAuthorityCommandService:
         )
         terminal_arc = (
             None
-            if closure is None
+            if terminal_closure is None
             else await session.arcs.get(
                 project_id=request.project_id,
-                arc_id=closure.arc_id,
+                arc_id=terminal_closure.arc_id,
             )
         )
         source_review = (
             None
-            if task.source_book_boundary_review_id is None
-            else await session.book_boundary_reviews.get(
+            if task.source_book_completion_review_id is None
+            else await session.book_completion_reviews.get(
                 project_id=request.project_id,
-                review_id=task.source_book_boundary_review_id,
+                review_id=task.source_book_completion_review_id,
             )
         )
+        arcs = await session.arcs.list_for_book(
+            project_id=request.project_id,
+            book_id=request.book_id,
+        )
+        closures = await session.arc_closures.list_current_for_book(
+            project_id=request.project_id,
+            book_id=request.book_id,
+        )
         closure_matches_book_lineage = False
-        if closure is not None and baseline is not None and workspace is not None:
+        if (
+            terminal_closure is not None
+            and baseline is not None
+            and workspace is not None
+        ):
             closure_matches_book_lineage = (
                 source_review is None
-                and closure.book_baseline_id == baseline.id
+                and terminal_closure.book_baseline_id == baseline.id
             ) or (
                 source_review is not None
                 and source_review.book_id == request.book_id
-                and source_review.arc_closure_id == closure.id
+                and source_review.arc_closure_id == terminal_closure.id
                 and source_review.disposition == "book_revision_warranted"
                 and source_review.automatic_correction_round == 0
                 and source_review.opened_book_workspace_id == workspace.id
@@ -2801,20 +2803,27 @@ class LoopAuthorityCommandService:
             or task.book_id != request.book_id
             or task.book_baseline_id != baseline.id
             or task.workspace_lock_version != workspace.lock_version
-            or closure is None
-            or closure.book_id != request.book_id
+            or terminal_closure is None
+            or terminal_closure.book_id != request.book_id
             or not closure_matches_book_lineage
-            or closure.canon_baseline_id != task.canon_baseline_id
+            or terminal_closure.canon_baseline_id != task.canon_baseline_id
             or terminal_arc is None
-            or terminal_arc.current_closure_id != closure.id
+            or terminal_arc.current_closure_id != terminal_closure.id
             or terminal_arc.lifecycle_status != "completed"
+            or terminal_arc.ordinal != baseline.final_arc_ordinal
+            or len(arcs) != baseline.final_arc_ordinal
+            or tuple(arc.ordinal for arc in arcs)
+            != tuple(range(1, baseline.final_arc_ordinal + 1))
+            or any(arc.lifecycle_status != "completed" for arc in arcs)
+            or len(closures) != len(arcs)
+            or tuple(closure.arc_id for closure in closures)
+            != tuple(arc.id for arc in arcs)
             or chapter_count < 1
-            or chapter_count > baseline.maximum_chapter_count
         ):
             raise CommandPreconditionError(
-                "Book boundary facts are stale or incomplete."
+                "Book completion facts are stale or incomplete."
             )
-        return book, baseline, workspace, closure, terminal_arc, chapter_count
+        return book, baseline, workspace, closures, terminal_arc, chapter_count
 
     @staticmethod
     async def _open_chapter_correction(
@@ -3049,15 +3058,14 @@ class LoopAuthorityCommandService:
             source_arc_parent_review_id=None,
             source_arc_closure_review_id=None,
             source_book_parent_review_id=review.id,
-            source_book_boundary_review_id=None,
+            source_book_completion_review_id=None,
             source_feedback_id=task.source_feedback_id,
             correction_lineage_id=review.correction_lineage_id,
             correction_lineage_origin=review.correction_lineage_origin,
             automatic_correction_round=1,
             plan_ref_id=None,
-            minimum_cumulative_chapter_count=None,
-            recommended_closure_cumulative_chapter_count=None,
-            maximum_cumulative_chapter_count=None,
+            planned_after_cumulative_chapter_count=None,
+            planned_after_arc_chapter_count=None,
             closure_cumulative_chapter_count=None,
             guidance_ref_id=review.detail_ref_id,
             semantic_repair_count=0,
@@ -3088,7 +3096,7 @@ class LoopAuthorityCommandService:
 
     @staticmethod
     def _validate_requirement_coverage(
-        *, evaluation: BookBoundaryEvaluation, contract: CompletionContract
+        *, evaluation: BookCompletionEvaluation, contract: CompletionContract
     ) -> None:
         expected = {
             item.requirement_key for item in contract.completion_requirements
@@ -3098,7 +3106,7 @@ class LoopAuthorityCommandService:
             raise AuthorityTaskFailure(
                 code="evaluation_contract_invalid",
                 message=(
-                    "Book boundary evaluation did not cover the exact completion contract."
+                    "Book completion evaluation did not cover the exact completion contract."
                 ),
             )
 
@@ -3187,15 +3195,10 @@ class LoopAuthorityCommandService:
         return "no_legal_route"
 
     @staticmethod
-    def _book_boundary_disposition(
+    def _book_completion_disposition(
         *,
-        evaluation: BookBoundaryEvaluation,
-        contract: CompletionContract,
-        terminal_arc_purpose: str,
-        committed_chapter_count: int,
+        evaluation: BookCompletionEvaluation,
     ) -> Literal[
-        "continue_regular_arc",
-        "plan_final_arc",
         "complete_book",
         "book_revision_warranted",
         "waiting_for_user",
@@ -3210,26 +3213,7 @@ class LoopAuthorityCommandService:
         all_satisfied = all(
             item.status == "satisfied" for item in evaluation.requirement_statuses
         )
-        if evaluation.ending_trajectory_judgment == "completion_ready":
-            if (
-                all_satisfied
-                and terminal_arc_purpose == "final"
-                and contract.minimum_chapter_count
-                <= committed_chapter_count
-                <= contract.maximum_chapter_count
-            ):
-                return "complete_book"
-            return "no_legal_route"
-        if evaluation.ending_trajectory_judgment == "final_arc_ready":
-            if committed_chapter_count < contract.maximum_chapter_count:
-                return "plan_final_arc"
-            return "no_legal_route"
-        if evaluation.ending_trajectory_judgment == "regular_arc_needed":
-            # Keep at least one legal Chapter of capacity for a final Arc.
-            if committed_chapter_count + 1 < contract.maximum_chapter_count:
-                return "continue_regular_arc"
-            return "no_legal_route"
-        return "no_legal_route"
+        return "complete_book" if all_satisfied else "book_revision_warranted"
 
     @staticmethod
     def _bounded_review_disposition(
@@ -3394,8 +3378,6 @@ class LoopAuthorityCommandService:
     def _book_resolution_owner(disposition: str) -> str:
         return {
             "keep_book": "none",
-            "continue_regular_arc": "none",
-            "plan_final_arc": "none",
             "complete_book": "none",
             "book_revision_warranted": "book",
             "arc_evidence_review_required": "arc",

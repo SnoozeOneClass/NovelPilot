@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.exc import IntegrityError
 
 from app.domain.arc.commands import ArcNotFoundError
+from app.domain.arc.outline import ArcOutlineProjectionError
 from app.domain.book.commands import BookNotFoundError
 from app.domain.chapter.commands import ChapterNotFoundError
 from app.domain.commands import CommandPreconditionError, IdempotencyConflictError
@@ -109,6 +110,23 @@ def install_error_handlers(app: FastAPI) -> None:
             status_code=422,
             code="profile_configuration_invalid",
             message=str(exc),
+        )
+
+    @app.exception_handler(ArcOutlineProjectionError)
+    async def arc_outline_projection_error(
+        request: Request,
+        exc: ArcOutlineProjectionError,
+    ) -> JSONResponse:
+        LOGGER.error(
+            "Arc outline projection failed on %s: %s",
+            request.url.path,
+            exc,
+        )
+        return _response(
+            status_code=500,
+            code=exc.code,
+            message=str(exc),
+            details={"reason_code": exc.reason_code},
         )
 
     @app.exception_handler(IntegrityError)

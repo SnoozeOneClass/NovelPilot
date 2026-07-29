@@ -11,7 +11,7 @@ from app.db.schema import (
     arc_closure_reviews,
     arc_closures,
     arc_parent_reviews,
-    book_boundary_reviews,
+    book_completion_reviews,
     book_parent_reviews,
     book_progress_handoffs,
     books,
@@ -153,7 +153,7 @@ class ArcClosureRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class BookBoundaryReviewRecord:
+class BookCompletionReviewRecord:
     id: str
     project_id: str
     book_id: str
@@ -169,7 +169,6 @@ class BookBoundaryReviewRecord:
     rubric_id: str
     rubric_version: int
     requirement_statuses_ref_id: str
-    ending_trajectory_judgment: str
     book_contract_judgment: str
     disposition: str
     resolution_owner: str
@@ -195,13 +194,10 @@ class BookProgressHandoffRecord:
     book_id: str
     handoff_version: int
     parent_handoff_id: str | None
-    source_boundary_review_id: str
-    arc_closure_id: str
+    source_arc_closure_id: str
     book_baseline_id: str
     canon_baseline_id: str
-    next_arc_purpose: str
-    remaining_requirements_ref_id: str
-    guidance_ref_id: str
+    next_arc_ordinal: int
     created_at_ms: int
 
 
@@ -566,6 +562,31 @@ class ArcClosureRepository:
         ).mappings().one_or_none()
         return None if row is None else _record(ArcClosureRecord, row)
 
+    async def list_current_for_book(
+        self,
+        *,
+        project_id: str,
+        book_id: str,
+    ) -> tuple[ArcClosureRecord, ...]:
+        rows = (
+            await self._connection.execute(
+                select(arc_closures)
+                .join(
+                    story_arcs,
+                    (story_arcs.c.project_id == arc_closures.c.project_id)
+                    & (story_arcs.c.id == arc_closures.c.arc_id)
+                    & (story_arcs.c.current_closure_id == arc_closures.c.id),
+                )
+                .where(
+                    arc_closures.c.project_id == project_id,
+                    arc_closures.c.book_id == book_id,
+                    story_arcs.c.lifecycle_status == "completed",
+                )
+                .order_by(story_arcs.c.ordinal.asc())
+            )
+        ).mappings().all()
+        return tuple(_record(ArcClosureRecord, row) for row in rows)
+
     async def compare_and_set_current(
         self,
         *,
@@ -596,33 +617,33 @@ class ArcClosureRepository:
         return result.rowcount == 1
 
 
-class BookBoundaryReviewRepository:
+class BookCompletionReviewRepository:
     def __init__(self, connection: AsyncConnection) -> None:
         self._connection = connection
 
-    async def insert(self, record: BookBoundaryReviewRecord) -> None:
+    async def insert(self, record: BookCompletionReviewRecord) -> None:
         await self._connection.execute(
-            book_boundary_reviews.insert().values(**asdict(record))
+            book_completion_reviews.insert().values(**asdict(record))
         )
 
     async def get(
         self, *, project_id: str, review_id: str
-    ) -> BookBoundaryReviewRecord | None:
+    ) -> BookCompletionReviewRecord | None:
         row = (
             await self._connection.execute(
-                select(book_boundary_reviews).where(
-                    book_boundary_reviews.c.project_id == project_id,
-                    book_boundary_reviews.c.id == review_id,
+                select(book_completion_reviews).where(
+                    book_completion_reviews.c.project_id == project_id,
+                    book_completion_reviews.c.id == review_id,
                 )
             )
         ).mappings().one_or_none()
-        return None if row is None else _record(BookBoundaryReviewRecord, row)
+        return None if row is None else _record(BookCompletionReviewRecord, row)
 
     async def get_latest_for_book(
         self, *, project_id: str, book_id: str
-    ) -> BookBoundaryReviewRecord | None:
+    ) -> BookCompletionReviewRecord | None:
         latest_id = (
-            select(books.c.latest_boundary_review_id)
+            select(books.c.latest_completion_review_id)
             .where(
                 books.c.project_id == project_id,
                 books.c.id == book_id,
@@ -631,14 +652,14 @@ class BookBoundaryReviewRepository:
         )
         row = (
             await self._connection.execute(
-                select(book_boundary_reviews).where(
-                    book_boundary_reviews.c.project_id == project_id,
-                    book_boundary_reviews.c.book_id == book_id,
-                    book_boundary_reviews.c.id == latest_id,
+                select(book_completion_reviews).where(
+                    book_completion_reviews.c.project_id == project_id,
+                    book_completion_reviews.c.book_id == book_id,
+                    book_completion_reviews.c.id == latest_id,
                 )
             )
         ).mappings().one_or_none()
-        return None if row is None else _record(BookBoundaryReviewRecord, row)
+        return None if row is None else _record(BookCompletionReviewRecord, row)
 
     async def get_latest_opened_revision_for_closure(
         self,
@@ -647,42 +668,42 @@ class BookBoundaryReviewRepository:
         book_id: str,
         arc_closure_id: str,
         workspace_id: str,
-    ) -> BookBoundaryReviewRecord | None:
+    ) -> BookCompletionReviewRecord | None:
         row = (
             await self._connection.execute(
-                select(book_boundary_reviews)
+                select(book_completion_reviews)
                 .where(
-                    book_boundary_reviews.c.project_id == project_id,
-                    book_boundary_reviews.c.book_id == book_id,
-                    book_boundary_reviews.c.arc_closure_id == arc_closure_id,
-                    book_boundary_reviews.c.disposition
+                    book_completion_reviews.c.project_id == project_id,
+                    book_completion_reviews.c.book_id == book_id,
+                    book_completion_reviews.c.arc_closure_id == arc_closure_id,
+                    book_completion_reviews.c.disposition
                     == "book_revision_warranted",
-                    book_boundary_reviews.c.opened_book_workspace_id
+                    book_completion_reviews.c.opened_book_workspace_id
                     == workspace_id,
                 )
                 .order_by(
-                    book_boundary_reviews.c.created_at_ms.desc(),
-                    book_boundary_reviews.c.id.desc(),
+                    book_completion_reviews.c.created_at_ms.desc(),
+                    book_completion_reviews.c.id.desc(),
                 )
                 .limit(1)
             )
         ).mappings().one_or_none()
-        return None if row is None else _record(BookBoundaryReviewRecord, row)
+        return None if row is None else _record(BookCompletionReviewRecord, row)
 
     async def get_for_exact_input(
         self, *, project_id: str, book_id: str, exact_input_fingerprint: str
-    ) -> BookBoundaryReviewRecord | None:
+    ) -> BookCompletionReviewRecord | None:
         row = (
             await self._connection.execute(
-                select(book_boundary_reviews).where(
-                    book_boundary_reviews.c.project_id == project_id,
-                    book_boundary_reviews.c.book_id == book_id,
-                    book_boundary_reviews.c.exact_input_fingerprint
+                select(book_completion_reviews).where(
+                    book_completion_reviews.c.project_id == project_id,
+                    book_completion_reviews.c.book_id == book_id,
+                    book_completion_reviews.c.exact_input_fingerprint
                     == exact_input_fingerprint,
                 )
             )
         ).mappings().one_or_none()
-        return None if row is None else _record(BookBoundaryReviewRecord, row)
+        return None if row is None else _record(BookCompletionReviewRecord, row)
 
     async def mark_workspace_opened(
         self,
@@ -692,12 +713,12 @@ class BookBoundaryReviewRepository:
         workspace_id: str,
     ) -> bool:
         result = await self._connection.execute(
-            update(book_boundary_reviews)
+            update(book_completion_reviews)
             .where(
-                book_boundary_reviews.c.project_id == project_id,
-                book_boundary_reviews.c.id == review_id,
-                book_boundary_reviews.c.disposition == "book_revision_warranted",
-                book_boundary_reviews.c.opened_book_workspace_id.is_(None),
+                book_completion_reviews.c.project_id == project_id,
+                book_completion_reviews.c.id == review_id,
+                book_completion_reviews.c.disposition == "book_revision_warranted",
+                book_completion_reviews.c.opened_book_workspace_id.is_(None),
             )
             .values(opened_book_workspace_id=workspace_id)
         )
@@ -714,9 +735,9 @@ class BookBoundaryReviewRepository:
         updated_at_ms: int,
     ) -> bool:
         expected = (
-            books.c.latest_boundary_review_id.is_(None)
+            books.c.latest_completion_review_id.is_(None)
             if expected_review_id is None
-            else books.c.latest_boundary_review_id == expected_review_id
+            else books.c.latest_completion_review_id == expected_review_id
         )
         result = await self._connection.execute(
             update(books)
@@ -729,7 +750,7 @@ class BookBoundaryReviewRepository:
                 expected,
             )
             .values(
-                latest_boundary_review_id=new_review_id,
+                latest_completion_review_id=new_review_id,
                 updated_at_ms=updated_at_ms,
             )
         )
@@ -739,12 +760,12 @@ class BookBoundaryReviewRepository:
         self, *, project_id: str, correction_lineage_id: str
     ) -> bool:
         value = await self._connection.scalar(
-            select(book_boundary_reviews.c.id)
+            select(book_completion_reviews.c.id)
             .where(
-                book_boundary_reviews.c.project_id == project_id,
-                book_boundary_reviews.c.correction_lineage_id
+                book_completion_reviews.c.project_id == project_id,
+                book_completion_reviews.c.correction_lineage_id
                 == correction_lineage_id,
-                book_boundary_reviews.c.automatic_correction_round == 1,
+                book_completion_reviews.c.automatic_correction_round == 1,
             )
             .limit(1)
         )
@@ -773,15 +794,15 @@ class BookProgressHandoffRepository:
         ).mappings().one_or_none()
         return None if row is None else _record(BookProgressHandoffRecord, row)
 
-    async def get_for_boundary_review(
-        self, *, project_id: str, boundary_review_id: str
+    async def get_for_arc_closure(
+        self, *, project_id: str, arc_closure_id: str
     ) -> BookProgressHandoffRecord | None:
         row = (
             await self._connection.execute(
                 select(book_progress_handoffs).where(
                     book_progress_handoffs.c.project_id == project_id,
-                    book_progress_handoffs.c.source_boundary_review_id
-                    == boundary_review_id,
+                    book_progress_handoffs.c.source_arc_closure_id
+                    == arc_closure_id,
                 )
             )
         ).mappings().one_or_none()
@@ -806,6 +827,24 @@ class BookProgressHandoffRepository:
         ).mappings().one_or_none()
         return None if row is None else _record(BookProgressHandoffRecord, row)
 
+    async def get_for_book_baseline_ordinal(
+        self,
+        *,
+        project_id: str,
+        book_baseline_id: str,
+        next_arc_ordinal: int,
+    ) -> BookProgressHandoffRecord | None:
+        row = (
+            await self._connection.execute(
+                select(book_progress_handoffs).where(
+                    book_progress_handoffs.c.project_id == project_id,
+                    book_progress_handoffs.c.book_baseline_id == book_baseline_id,
+                    book_progress_handoffs.c.next_arc_ordinal == next_arc_ordinal,
+                )
+            )
+        ).mappings().one_or_none()
+        return None if row is None else _record(BookProgressHandoffRecord, row)
+
     async def next_version(self, *, book_id: str) -> int:
         value = await self._connection.scalar(
             select(
@@ -820,7 +859,6 @@ class BookProgressHandoffRepository:
         project_id: str,
         book_id: str,
         book_baseline_id: str,
-        boundary_review_id: str,
         expected_handoff_id: str | None,
         new_handoff_id: str,
         updated_at_ms: int,
@@ -837,7 +875,6 @@ class BookProgressHandoffRepository:
                 books.c.id == book_id,
                 books.c.lifecycle_status == "active",
                 books.c.current_baseline_id == book_baseline_id,
-                books.c.latest_boundary_review_id == boundary_review_id,
                 books.c.current_completion_id.is_(None),
                 expected,
             )

@@ -172,14 +172,6 @@ class BookCompletionRequirement(BaseModel):
 class CompletionContract(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    minimum_chapter_count: int = Field(
-        ge=1,
-        description="Minimum chapter count permitted by the Book completion contract.",
-    )
-    maximum_chapter_count: int = Field(
-        ge=1,
-        description="Maximum chapter count; it must be at least minimum_chapter_count.",
-    )
     completion_requirements: list[BookCompletionRequirement] = Field(
         min_length=1,
         description=(
@@ -189,9 +181,7 @@ class CompletionContract(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _ordered_range(self) -> CompletionContract:
-        if self.maximum_chapter_count < self.minimum_chapter_count:
-            raise ValueError("maximum_chapter_count must be >= minimum_chapter_count")
+    def _unique_requirements(self) -> CompletionContract:
         keys = [item.requirement_key for item in self.completion_requirements]
         if len(keys) != len(set(keys)):
             raise ValueError("Book completion requirement keys must be unique.")
@@ -213,10 +203,122 @@ class BookRollingPlan(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     long_term_character_directions: list[str] = Field(min_length=1)
-    high_level_phase_strategy: list[str] = Field(min_length=1)
     whole_book_pacing_strategy: str = Field(min_length=1)
     ending_tendency: str = Field(min_length=1)
     arc_planning_guidelines: list[str] = Field(min_length=1)
+    whole_book_scale_guidance: str = Field(
+        min_length=1,
+        description=(
+            "Advisory whole-book scale guidance derived from creator intent. "
+            "It is context for planning, never a Chapter-count, routing, approval, "
+            "or completion predicate."
+        ),
+    )
+
+
+class BookArcContract(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    whole_book_role: str = Field(
+        min_length=1,
+        description=(
+            "The semantic role this Story Arc serves in the whole Book. Do not "
+            "include Chapter allocation, titles, events, or scenes."
+        ),
+    )
+    core_goal: str = Field(
+        min_length=1,
+        description="The Book-level outcome this Story Arc must achieve.",
+    )
+    handoff_from_previous: str = Field(
+        min_length=1,
+        description=(
+            "How this Story Arc semantically receives the prior Arc or the Book "
+            "opening. This is not a storage identity or an exact-copy protocol."
+        ),
+    )
+    exit_conditions: list[str] = Field(
+        min_length=1,
+        description=(
+            "Observable semantic conditions that permit this Story Arc to close. "
+            "Do not prescribe Chapter counts or a Chapter-by-Chapter outline."
+        ),
+    )
+    is_final: bool = Field(
+        description="True only for the last planned Story Arc in the Book topology."
+    )
+
+    @field_validator(
+        "whole_book_role",
+        "core_goal",
+        "handoff_from_previous",
+    )
+    @classmethod
+    def _non_blank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Book Arc contract text must be non-blank.")
+        return value
+
+    @field_validator("exit_conditions")
+    @classmethod
+    def _non_blank_exit_conditions(cls, value: list[str]) -> list[str]:
+        if any(not item.strip() for item in value):
+            raise ValueError("Book Arc exit conditions must be non-blank.")
+        return value
+
+
+class BookArcTopology(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    arcs: list[BookArcContract] = Field(
+        min_length=1,
+        description=(
+            "Complete ordered whole-book Story Arc topology. List position defines "
+            "the Harness-assigned one-based ordinal. Exactly the last Arc is final."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _one_final_last(self) -> BookArcTopology:
+        final_positions = [
+            index for index, contract in enumerate(self.arcs) if contract.is_final
+        ]
+        if final_positions != [len(self.arcs) - 1]:
+            raise ValueError(
+                "Book Arc topology requires exactly one final Arc in the last position."
+            )
+        return self
+
+
+class BookArcTopologySuffix(BaseModel):
+    """Model-authored mutable future suffix for a Book successor or repair."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    arcs: list[BookArcContract] = Field(
+        default_factory=list,
+        description=(
+            "Only the mutable future Arc suffix. Do not repeat the Harness-frozen "
+            "historical prefix, ordinals, baseline IDs, or storage metadata. A "
+            "non-empty suffix has exactly one final Arc in its last position. An "
+            "empty suffix is legal only when the Harness-preserved prefix can form "
+            "the complete approved topology."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _non_empty_suffix_has_one_final_last(self) -> BookArcTopologySuffix:
+        if not self.arcs:
+            return self
+        final_positions = [
+            index for index, contract in enumerate(self.arcs) if contract.is_final
+        ]
+        if final_positions != [len(self.arcs) - 1]:
+            raise ValueError(
+                "A non-empty Book Arc topology suffix requires exactly one final "
+                "Arc in the last position."
+            )
+        return self
 
 
 class BookCandidatePack(BaseModel):
@@ -237,6 +339,25 @@ class BookCandidatePack(BaseModel):
         description="Whole-book rolling-plan strategy without pre-writing every chapter.",
     )
     completion_contract: CompletionContract
+    arc_topology: BookArcTopology = Field(
+        description=(
+            "Ordered semantic Story Arc contracts owned by Book. It must not contain "
+            "per-Arc Chapter counts, Chapter titles, events, scenes, or identities."
+        )
+    )
+
+
+class BookSuccessorCandidateProposal(BaseModel):
+    """Book revision output that never asks the model to copy frozen Arc history."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    direction: str = Field(min_length=1)
+    constraints: BookCreativeConstraints
+    selected_title: str = Field(min_length=1)
+    rolling_plan: BookRollingPlan
+    completion_contract: CompletionContract
+    arc_topology_suffix: BookArcTopologySuffix
 
 
 BookRepairComponent = Literal[
@@ -244,6 +365,7 @@ BookRepairComponent = Literal[
     "constraints",
     "rolling_plan",
     "completion_contract",
+    "arc_topology",
 ]
 
 
@@ -277,11 +399,24 @@ class BookCompletionContractRepair(BaseModel):
     value: CompletionContract
 
 
+class BookArcTopologyRepair(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    component: Literal["arc_topology"]
+    value: BookArcTopologySuffix = Field(
+        description=(
+            "Replacement mutable future suffix only. The Harness preserves the "
+            "frozen historical prefix and composes the complete topology."
+        )
+    )
+
+
 BookRepairChange = Annotated[
     BookDirectionRepair
     | BookConstraintsRepair
     | BookRollingPlanRepair
-    | BookCompletionContractRepair,
+    | BookCompletionContractRepair
+    | BookArcTopologyRepair,
     Field(discriminator="component"),
 ]
 
@@ -291,7 +426,7 @@ class BookRepairPatch(BaseModel):
 
     changes: list[BookRepairChange] = Field(
         min_length=1,
-        max_length=4,
+        max_length=5,
         description=(
             "Only Book components authorized by the repair contract in frozen context. "
             "Every returned replacement must differ from its current value. "

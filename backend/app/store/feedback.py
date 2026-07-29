@@ -27,7 +27,7 @@ class FeedbackRecord:
     arc_parent_review_id: str | None
     book_parent_review_id: str | None
     arc_closure_review_id: str | None
-    book_boundary_review_id: str | None
+    book_completion_review_id: str | None
     resulting_correction_lineage_id: str | None
     dismiss_reason_code: str | None
     applied_command_id: str | None
@@ -60,7 +60,9 @@ def _feedback_record(row: RowMapping) -> FeedbackRecord:
         arc_parent_review_id=cast(str | None, row["arc_parent_review_id"]),
         book_parent_review_id=cast(str | None, row["book_parent_review_id"]),
         arc_closure_review_id=cast(str | None, row["arc_closure_review_id"]),
-        book_boundary_review_id=cast(str | None, row["book_boundary_review_id"]),
+        book_completion_review_id=cast(
+            str | None, row["book_completion_review_id"]
+        ),
         resulting_correction_lineage_id=cast(
             str | None, row["resulting_correction_lineage_id"]
         ),

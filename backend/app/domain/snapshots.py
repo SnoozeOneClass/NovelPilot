@@ -11,7 +11,6 @@ class ArcSnapshotIdentity(BaseModel):
 
     arc_id: str
     ordinal: int = Field(ge=1)
-    purpose: str
     lifecycle_status: str
     arc_baseline_id: str
 
@@ -90,7 +89,6 @@ class SnapshotQueryService:
                 ArcSnapshotIdentity(
                     arc_id=item.arc_id,
                     ordinal=item.ordinal,
-                    purpose=item.purpose,
                     lifecycle_status=item.lifecycle_status,
                     arc_baseline_id=item.arc_baseline_id,
                 )

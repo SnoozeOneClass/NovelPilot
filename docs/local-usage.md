@@ -76,10 +76,10 @@ scripts\python.cmd scripts/migrate_profile_config.py
 2. 点击 Start。浏览器仅发出一次显式命令；关闭页面不停止后端流程。
 3. BookStrategist 基于初始 Prompt 逐次提出一个高价值问题。可以选择推荐回答，也可以自由输入。
 4. Book 候选通过 Evaluator 后仍会等待显式批准；两种模式都不能跳过。
-5. full-auto 自动提交通过评审的当前 Arc 契约；participatory 对每个 Arc 显示一个批准动作，可以采用建议的收束检查章节数。
+5. Book 基线明确规划有序 Arc 拓扑；full-auto 自动提交通过评审的当前 Arc 契约，participatory 对每个 Arc 显示一个批准动作。Arc 的收束检查点由获批的完整逐章大纲自动推导，不需要用户填写章号。
 6. Chapter 自动执行 plan → draft → observe → evaluate → commit；没有章节人工审批。
-7. 达到 Arc 的 `closure_cumulative_chapter_count`（全书累计章号）只会触发收束评估。Arc 契约确实被正式 Chapter/Canon 事实满足后，Harness 才提交 formal closure。
-8. formal closure 触发 Book boundary evaluation：未完结时产生下一 Arc 的持久 handoff；满足全书终止契约时提交 formal completion。
+7. 耗尽 Arc 获批的完整逐章大纲、到达 Harness 派生的 `closure_cumulative_chapter_count` 时，只会触发收束评估。Arc 契约确实被正式 Chapter/Canon 事实满足后，Harness 才提交 formal closure。
+8. 非最终 formal closure 由 Harness 按 Book 拓扑确定性产生下一 Arc handoff；只有规划中的最终 Arc closure 才触发 Book completion evaluation。用户给出的章节数只是软规模建议，偏离本身不会创建额外 Arc 或阻止 formal completion。
 9. 用户反馈只会先排队，由 Run Engine 在当前原子动作结束后的安全边界按 FIFO 应用。页面会显示反馈是 queued、applied 还是 dismissed。
 10. 如果系统显示 creator question，回答会绑定具体 owning layer 和来源 review；系统执行或评估契约错误不会伪装成用户待办。
 11. 需要时 Pause。当前模型 activation 会正常收口，系统在下一个安全边界暂停。普通暂停可 Resume；失败暂停只能使用专用 Retry。

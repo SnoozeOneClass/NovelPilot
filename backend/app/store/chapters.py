@@ -9,7 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.db.schema import (
     arc_baselines,
     arc_closures,
-    book_baselines,
     book_progress_handoffs,
     chapter_baselines,
     chapter_arc_change_requests,
@@ -30,10 +29,9 @@ class ActiveArcContext:
     arc_baseline_id: str
     book_baseline_id: str
     canon_baseline_id: str
-    book_maximum_chapter_count: int
-    minimum_cumulative_chapter_count: int
-    recommended_closure_cumulative_chapter_count: int
-    maximum_cumulative_chapter_count: int
+    arc_plan_ref_id: str
+    planned_after_cumulative_chapter_count: int
+    planned_after_arc_chapter_count: int
     closure_cumulative_chapter_count: int
 
 
@@ -45,6 +43,7 @@ class ChapterRecord:
     arc_id: str
     book_ordinal: int
     arc_ordinal: int
+    outline_arc_baseline_id: str
     lifecycle_status: str
     current_baseline_id: str | None
     created_at_ms: int
@@ -180,6 +179,7 @@ def _chapter_record(row: RowMapping) -> ChapterRecord:
         arc_id=cast(str, row["arc_id"]),
         book_ordinal=cast(int, row["book_ordinal"]),
         arc_ordinal=cast(int, row["arc_ordinal"]),
+        outline_arc_baseline_id=cast(str, row["outline_arc_baseline_id"]),
         lifecycle_status=cast(str, row["lifecycle_status"]),
         current_baseline_id=cast(str | None, row["current_baseline_id"]),
         created_at_ms=cast(int, row["created_at_ms"]),
@@ -336,13 +336,10 @@ class ChapterRepository:
                     story_arcs.c.id.label("arc_id"),
                     story_arcs.c.current_baseline_id.label("arc_baseline_id"),
                     arc_baselines.c.book_baseline_id,
+                    arc_baselines.c.plan_ref_id.label("arc_plan_ref_id"),
+                    arc_baselines.c.planned_after_cumulative_chapter_count,
+                    arc_baselines.c.planned_after_arc_chapter_count,
                     projects.c.current_canon_baseline_id.label("canon_baseline_id"),
-                    book_baselines.c.maximum_chapter_count.label(
-                        "book_maximum_chapter_count"
-                    ),
-                    arc_baselines.c.minimum_cumulative_chapter_count,
-                    arc_baselines.c.recommended_closure_cumulative_chapter_count,
-                    arc_baselines.c.maximum_cumulative_chapter_count,
                     arc_baselines.c.closure_cumulative_chapter_count,
                 )
                 .join(
@@ -351,12 +348,6 @@ class ChapterRepository:
                     & (arc_baselines.c.book_id == story_arcs.c.book_id)
                     & (arc_baselines.c.arc_id == story_arcs.c.id)
                     & (arc_baselines.c.id == story_arcs.c.current_baseline_id),
-                )
-                .join(
-                    book_baselines,
-                    (book_baselines.c.project_id == arc_baselines.c.project_id)
-                    & (book_baselines.c.book_id == arc_baselines.c.book_id)
-                    & (book_baselines.c.id == arc_baselines.c.book_baseline_id),
                 )
                 .join(projects, projects.c.id == story_arcs.c.project_id)
                 .where(
@@ -376,17 +367,12 @@ class ChapterRepository:
             arc_baseline_id=cast(str, row["arc_baseline_id"]),
             book_baseline_id=cast(str, row["book_baseline_id"]),
             canon_baseline_id=cast(str, row["canon_baseline_id"]),
-            book_maximum_chapter_count=cast(
-                int, row["book_maximum_chapter_count"]
+            arc_plan_ref_id=cast(str, row["arc_plan_ref_id"]),
+            planned_after_cumulative_chapter_count=cast(
+                int, row["planned_after_cumulative_chapter_count"]
             ),
-            minimum_cumulative_chapter_count=cast(
-                int, row["minimum_cumulative_chapter_count"]
-            ),
-            recommended_closure_cumulative_chapter_count=cast(
-                int, row["recommended_closure_cumulative_chapter_count"]
-            ),
-            maximum_cumulative_chapter_count=cast(
-                int, row["maximum_cumulative_chapter_count"]
+            planned_after_arc_chapter_count=cast(
+                int, row["planned_after_arc_chapter_count"]
             ),
             closure_cumulative_chapter_count=cast(
                 int, row["closure_cumulative_chapter_count"]
@@ -427,6 +413,32 @@ class ChapterRepository:
 
     async def insert(self, record: ChapterRecord) -> None:
         await self._connection.execute(chapters.insert().values(**asdict(record)))
+
+    async def compare_and_set_outline_source(
+        self,
+        *,
+        project_id: str,
+        chapter_id: str,
+        expected_outline_arc_baseline_id: str,
+        new_outline_arc_baseline_id: str,
+        updated_at_ms: int,
+    ) -> bool:
+        result = await self._connection.execute(
+            update(chapters)
+            .where(
+                chapters.c.project_id == project_id,
+                chapters.c.id == chapter_id,
+                chapters.c.lifecycle_status == "drafting",
+                chapters.c.current_baseline_id.is_(None),
+                chapters.c.outline_arc_baseline_id
+                == expected_outline_arc_baseline_id,
+            )
+            .values(
+                outline_arc_baseline_id=new_outline_arc_baseline_id,
+                updated_at_ms=updated_at_ms,
+            )
+        )
+        return result.rowcount == 1
 
     async def get(self, *, project_id: str, chapter_id: str) -> ChapterRecord | None:
         row = (
@@ -489,6 +501,21 @@ class ChapterRepository:
             )
         ).mappings().one_or_none()
         return None if row is None else _chapter_record(row)
+
+    async def list_for_arc(
+        self, *, project_id: str, arc_id: str
+    ) -> list[ChapterRecord]:
+        rows = (
+            await self._connection.execute(
+                select(chapters)
+                .where(
+                    chapters.c.project_id == project_id,
+                    chapters.c.arc_id == arc_id,
+                )
+                .order_by(chapters.c.arc_ordinal)
+            )
+        ).mappings()
+        return [_chapter_record(row) for row in rows]
 
     async def get_non_idle_workspace_for_arc(
         self, *, project_id: str, arc_id: str
@@ -855,7 +882,10 @@ class ChapterRepository:
             .join(
                 arc_closures,
                 (arc_closures.c.project_id == book_progress_handoffs.c.project_id)
-                & (arc_closures.c.id == book_progress_handoffs.c.arc_closure_id),
+                & (
+                    arc_closures.c.id
+                    == book_progress_handoffs.c.source_arc_closure_id
+                ),
             )
             .where(
                 book_progress_handoffs.c.project_id == project_id,

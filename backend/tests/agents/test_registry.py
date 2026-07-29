@@ -9,6 +9,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from app.agents.contracts import (
     ACTIVATION_TIMEOUT_MS,
+    ArcChapterOutlineEntry,
     BookDiscussionContinue,
     BookDiscussionReady,
     BookDiscussionResult,
@@ -190,8 +191,9 @@ def test_cross_field_semantic_rules_are_present_in_model_visible_contracts() -> 
     )
 
     completion = book_candidate.output_schema["$defs"]["CompletionContract"]["properties"]
-    assert "at least minimum_chapter_count" in completion["maximum_chapter_count"]["description"]
-    assert "greater than or equal" in book_candidate.task_instructions
+    assert set(completion) == {"completion_requirements"}
+    assert "arc_topology" in book_candidate.output_schema["properties"]
+    assert "advisory" in book_candidate.task_instructions
 
     book_properties = book_evaluation.output_schema["properties"]
     assert "Required when decision is local_repair" in (
@@ -231,23 +233,27 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
     }
 
     expected_components = {
-        "book": {"direction", "constraints", "rolling_plan", "completion_contract"},
+        "book": {
+            "direction",
+            "constraints",
+            "rolling_plan",
+            "completion_contract",
+            "arc_topology",
+        },
         "arc": {
             "title",
-            "purpose",
             "desired_state_transition",
             "conflict_trajectory",
             "pacing_trajectory",
             "character_obligations",
             "foreshadowing_obligations",
             "prohibitions",
-            "chapter_range",
             "closure_signals",
-            "advisory_beats",
+            "chapter_outline",
         },
         "chapter": {"observations", "canon"},
     }
-    expected_versions = {"book": 2, "arc": 3, "chapter": 3}
+    expected_versions = {"book": 3, "arc": 5, "chapter": 3}
     for layer, definition in definitions.items():
         assert definition.output_schema_version == expected_versions[layer]
         assert set(definition.output_schema["properties"]) == {"changes"}
@@ -311,10 +317,10 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
         chapter_evaluation.task_instructions
     )
     assert "Harness derives" in chapter_evaluation.task_instructions
-    assert chapter_evaluation.output_schema_version == 3
-    assert chapter_evaluation.evaluation_strategy_version == 3
-    assert chapter_evaluation.rubric_id == "chapter-candidate-rubric-v4"
-    assert chapter_evaluation.context_policy_id == "chapter-evaluator-context-v3"
+    assert chapter_evaluation.output_schema_version == 4
+    assert chapter_evaluation.evaluation_strategy_version == 4
+    assert chapter_evaluation.rubric_id == "chapter-candidate-rubric-v5"
+    assert chapter_evaluation.context_policy_id == "chapter-evaluator-context-v4"
 
     chapter_repair_evaluation = DEFAULT_TASK_REGISTRY.get(
         role="evaluator",
@@ -324,12 +330,12 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
     chapter_repair_strategy = DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
         "verify_repair.chapter"
     )
-    assert chapter_repair_evaluation.output_schema_version == 3
-    assert chapter_repair_evaluation.evaluation_strategy_version == 3
-    assert chapter_repair_evaluation.rubric_id == "chapter-repair-rubric-v4"
+    assert chapter_repair_evaluation.output_schema_version == 4
+    assert chapter_repair_evaluation.evaluation_strategy_version == 4
+    assert chapter_repair_evaluation.rubric_id == "chapter-repair-rubric-v5"
     assert (
         chapter_repair_evaluation.context_policy_id
-        == "chapter-repair-verification-context-v3"
+        == "chapter-repair-verification-context-v4"
     )
     assert set(chapter_repair_strategy.legal_semantic_signals) == {
         "pass",
@@ -444,12 +450,12 @@ def test_frozen_evaluator_plan_contains_concrete_rubric_and_strategy_identity() 
 
     assert plan.evaluation_strategy_id == "evaluate.arc_closure-strategy"
     assert plan.evaluation_strategy_version == 1
-    assert plan.rubric_id == "arc-closure-rubric-v1"
+    assert plan.rubric_id == "arc-closure-rubric-v2"
     assert plan.rubric_text
     assert "Reaching the Chapter checkpoint is not semantic completion" in plan.rubric_text
 
 
-def test_route_c_arc_contract_exposes_range_checkpoint_and_no_fixed_chapter_map() -> None:
+def test_arc_contract_exposes_complete_semantic_chapter_outline() -> None:
     definition = DEFAULT_TASK_REGISTRY.get(
         role="arc_planner",
         task_kind="arc.plan",
@@ -461,13 +467,64 @@ def test_route_c_arc_contract_exposes_range_checkpoint_and_no_fixed_chapter_map(
         "desired_state_transition",
         "conflict_trajectory",
         "pacing_trajectory",
+        "closure_signals",
+        "chapter_outline",
+    }.issubset(properties)
+    assert not {
         "minimum_cumulative_chapter_count",
         "recommended_closure_cumulative_chapter_count",
         "maximum_cumulative_chapter_count",
         "closure_cumulative_chapter_count",
-        "closure_signals",
-        "advisory_beats",
-    }.issubset(properties)
+        "purpose",
+    } & set(properties)
     assert "beats" not in properties
     assert "target_chapter_count" not in properties
-    assert "not Chapter slots" in definition.task_instructions
+    assert "complete ordered chapter_outline" in definition.task_instructions
+    assert "Harness derives the closure checkpoint" in definition.task_instructions
+    outline_item = definition.output_schema["$defs"]["ArcChapterOutlineEntry"]
+    assert set(outline_item["properties"]) == {
+        "title",
+        "core_event",
+        "hook",
+        "scenes",
+    }
+    arc_evaluation = DEFAULT_TASK_REGISTRY.get(
+        role="evaluator",
+        task_kind="evaluate.arc",
+        contract_version=1,
+    )
+    assert "Arc chooses the complete remaining outline" in (
+        arc_evaluation.task_instructions
+    )
+    chapter_draft = DEFAULT_TASK_REGISTRY.get(
+        role="chapter_writer",
+        task_kind="chapter.draft",
+        contract_version=1,
+    )
+    assert "do not consume its core event early" in (
+        chapter_draft.task_instructions
+    )
+    with pytest.raises(ValidationError):
+        ArcChapterOutlineEntry(
+            title=" ",
+            core_event="Advance the evidence.",
+            hook="Hand off the unresolved trace.",
+            scenes=["Inspect the trace."],
+        )
+    with pytest.raises(ValidationError):
+        ArcChapterOutlineEntry(
+            title="The Trace",
+            core_event="Advance the evidence.",
+            hook="Hand off the unresolved trace.",
+            scenes=[" "],
+        )
+    with pytest.raises(ValidationError):
+        ArcChapterOutlineEntry.model_validate(
+            {
+                "title": "The Trace",
+                "core_event": "Advance the evidence.",
+                "hook": "Hand off the unresolved trace.",
+                "scenes": ["Inspect the trace."],
+                "outline_index": 1,
+            }
+        )

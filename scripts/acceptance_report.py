@@ -144,8 +144,9 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
     AcceptanceCriterion(
         id="hierarchical_loop_authority",
         requirement=(
-            "Book > Arc > Chapter authority, bounded downward correction, and explicit "
-            "parent reviews prevent lower layers from replacing upper baselines."
+            "Book owns an approved ordered Arc topology, Arc owns its complete Chapter "
+            "outline, and bounded parent reviews prevent lower layers from replacing "
+            "upper baselines."
         ),
         probes=(
             EvidenceProbe(
@@ -176,8 +177,9 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
     AcceptanceCriterion(
         id="completion_snapshot_export",
         requirement=(
-            "Formal Arc closure and Book boundary authority precede completion; snapshots "
-            "are immutable identities and Markdown uses committed Chapters only."
+            "Non-final Arc closure produces a deterministic topology handoff, final Arc "
+            "closure precedes Book completion, snapshots are immutable identities, and "
+            "Markdown uses committed Chapters only."
         ),
         probes=(
             EvidenceProbe(
@@ -186,7 +188,7 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
             ),
             EvidenceProbe(
                 "backend/tests/domain/test_completion.py",
-                ("_prepare_formal_arc_boundary", "complete_book"),
+                ("_prepare_formal_arc_closure", "evaluate.book_completion"),
             ),
             EvidenceProbe("backend/app/domain/snapshots.py", ("ProjectSnapshotManifest", "fingerprint")),
             EvidenceProbe("backend/app/domain/export.py", ("ManuscriptExportResult", "content_sha256")),

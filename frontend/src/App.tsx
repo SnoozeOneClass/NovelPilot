@@ -19,6 +19,8 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { workspaceApi } from "./api/workspace-client";
 import { ThemeToggle } from "./components/ui/ThemeToggle";
 import type {
+  ArcOutlineEntryView,
+  BookArcContractView,
   CommandId,
   MutationResponse,
   OperationMode,
@@ -305,23 +307,11 @@ function ProjectWorkspace(props: ProjectWorkspaceProps) {
   const [message, setMessage] = useState("");
   const [feedback, setFeedback] = useState("");
   const [feedbackLayer, setFeedbackLayer] = useState<"book" | "arc" | "chapter">("book");
-  const [arcTarget, setArcTarget] = useState(
-    state.current_arc?.recommended_closure_cumulative_chapter_count ?? 1
-  );
   const [mode, setMode] = useState<OperationMode>(state.project.operation_mode);
   const commands = useMemo(
     () => new Map(state.commands.map((item) => [item.command_id, item])),
     [state.commands]
   );
-
-  useEffect(() => {
-    setArcTarget(
-      state.current_arc?.recommended_closure_cumulative_chapter_count ?? 1
-    );
-  }, [
-    state.current_arc?.arc_id,
-    state.current_arc?.recommended_closure_cumulative_chapter_count
-  ]);
 
   useEffect(() => setMode(state.project.operation_mode), [state.project.operation_mode]);
 
@@ -383,8 +373,8 @@ function ProjectWorkspace(props: ProjectWorkspaceProps) {
         {state.run.status === "failure_paused" && <section className={styles.failure}><strong>流程已在失败边界暂停</strong><p>{state.run.failure_code ?? "未知错误"}。普通继续不会绕过失败来源，请使用当前启用的显式重试操作。</p></section>}
 
         <section id="control" className={styles.summaryGrid}>
-          <SummaryCard label="正式章节" value={`${state.project.committed_chapter_count}`} detail={state.book.minimum_chapter_count ? `目标 ${state.book.minimum_chapter_count}–${state.book.maximum_chapter_count} 章` : "等待 Book 基线"} />
-          <SummaryCard label="故事弧" value={state.current_arc ? `Arc ${state.current_arc.ordinal}` : "—"} detail={state.current_arc?.lifecycle_status ?? "尚未创建"} />
+          <SummaryCard label="正式章节" value={`${state.project.committed_chapter_count}`} detail={state.book.whole_book_scale_guidance ?? "等待 Book 基线"} />
+          <SummaryCard label="故事弧" value={state.current_arc ? `Arc ${state.current_arc.ordinal}` : "—"} detail={state.book.arc_contract_count ? `${state.current_arc?.ordinal ?? 0} / ${state.book.arc_contract_count} · ${state.current_arc?.lifecycle_status ?? "尚未创建"}` : "等待 Book 拓扑"} />
           <SummaryCard label="当前章节" value={state.current_chapter ? `第 ${state.current_chapter.book_ordinal} 章` : "—"} detail={state.current_chapter?.workspace_state ?? "尚未创建"} />
           <SummaryCard label="模型" value={state.default_profile_id ?? "未配置"} detail={`${state.recent_tasks[0]?.model_id ?? "尚无执行"}`} />
         </section>
@@ -396,13 +386,15 @@ function ProjectWorkspace(props: ProjectWorkspaceProps) {
           </div>
           {state.book.discussion.question && <div className={styles.question}><strong>{state.book.discussion.question}</strong><div>{state.book.discussion.suggestions.map((suggestion) => <button key={suggestion.id} disabled={!command(state, "send_book_input").enabled || busyAction !== null} onClick={() => void sendBookMessage(suggestion.message, suggestion.id)}><span>{suggestion.label}{suggestion.recommended && " · 推荐"}</span><small>{suggestion.rationale}</small></button>)}</div></div>}
           <form className={styles.composer} onSubmit={(event) => { event.preventDefault(); if (message.trim()) void sendBookMessage(message.trim()); }}><textarea rows={3} value={message} onChange={(event) => setMessage(event.target.value)} placeholder="补充你的决定或回答问题" disabled={!command(state, "send_book_input").enabled} /><button className={styles.primary} disabled={!message.trim() || !command(state, "send_book_input").enabled || busyAction !== null}><Send size={16} />发送</button></form>
+          {state.book.arc_topology.length > 0 && <BookTopologyList contracts={state.book.arc_topology} scaleGuidance={state.book.whole_book_scale_guidance} />}
           <div className={styles.gateRow}><div><strong>Book 正式基线</strong><span>{state.book.pending_review_decision === "pass" ? "独立 Evaluator 已通过，等待你的批准" : state.book.current_baseline_id ? `Baseline v${state.book.baseline_version}` : "尚未形成可批准候选"}</span></div><ActionButton icon={<Check size={16} />} label="批准全书规划" item={command(state, "approve_book")} busy={busyAction === "approve-book"} primary onClick={() => void onMutate("approve-book", () => workspaceApi.approveBook(projectId, idempotencyKey("approve-book")))} /></div>
         </section>
 
         <section id="arc" className={styles.section}>
           <div className={styles.sectionHeading}><div><span>Arc Loop</span><h2>故事弧</h2></div><StatePill text={state.current_arc?.lifecycle_status ?? "未创建"} /></div>
-          {state.current_arc ? <div className={styles.factGrid}><Fact label="Arc ID" value={state.current_arc.arc_id} /><Fact label="正式版本" value={state.current_arc.baseline_version ? `v${state.current_arc.baseline_version}` : "候选中"} /><Fact label="全书累计进度" value={`${state.current_arc.cumulative_committed_chapter_count} / ${state.current_arc.closure_cumulative_chapter_count ?? state.current_arc.recommended_closure_cumulative_chapter_count ?? "?"}`} /><Fact label="本弧已提交" value={String(state.current_arc.arc_committed_chapter_count)} /><Fact label="审阅" value={state.current_arc.pending_review_decision ?? "—"} /></div> : <p className={styles.muted}>Book 批准后由 Run Engine 创建首个 Story Arc。</p>}
-          {command(state, "approve_arc").enabled && <div className={styles.gateRow}><label>全书累计收束章号<input type="number" min={1} max={state.book.maximum_chapter_count ?? undefined} value={arcTarget} onChange={(event) => setArcTarget(Number(event.target.value))} /></label><ActionButton icon={<Check size={16} />} label="批准当前故事弧" item={command(state, "approve_arc")} busy={busyAction === "approve-arc"} primary onClick={() => void onMutate("approve-arc", () => workspaceApi.approveArc(projectId, arcTarget, idempotencyKey("approve-arc")))} /></div>}
+          {state.current_arc ? <div className={styles.factGrid}><Fact label="Arc ID" value={state.current_arc.arc_id} /><Fact label="正式版本" value={state.current_arc.baseline_version ? `v${state.current_arc.baseline_version}` : "候选中"} /><Fact label="拓扑位置" value={`Arc ${state.current_arc.ordinal}${state.current_arc.is_final ? " · 最终弧" : ""}`} /><Fact label="全书累计进度" value={`${state.current_arc.cumulative_committed_chapter_count} / ${state.current_arc.closure_cumulative_chapter_count ?? "待批准"}`} /><Fact label="本弧已提交" value={String(state.current_arc.arc_committed_chapter_count)} /><Fact label="审阅" value={state.current_arc.pending_review_decision ?? "—"} /></div> : <p className={styles.muted}>Book 批准后由 Run Engine 创建首个 Story Arc。</p>}
+          {state.current_arc?.outline && <ArcOutlineList entries={state.current_arc.outline.entries} />}
+          {command(state, "approve_arc").enabled && <div className={styles.gateRow}><div><strong>Story Arc 正式基线</strong><span>章节收束检查点由已批准的完整大纲确定，不需要手工填写章号。</span></div><ActionButton icon={<Check size={16} />} label="批准当前故事弧" item={command(state, "approve_arc")} busy={busyAction === "approve-arc"} primary onClick={() => void onMutate("approve-arc", () => workspaceApi.approveArc(projectId, idempotencyKey("approve-arc")))} /></div>}
         </section>
 
         <section id="chapter" className={styles.section}>
@@ -420,7 +412,7 @@ function ProjectWorkspace(props: ProjectWorkspaceProps) {
 
         <section id="evidence" className={styles.section}>
           <div className={styles.sectionHeading}><div><span>Execution Evidence</span><h2>最近 Agent 任务</h2></div><span>Cursor {state.latest_event_sequence}</span></div>
-          <div className={styles.taskTable}><div className={styles.taskHead}><span>任务</span><span>状态</span><span>请求 / 重试</span><span>Tokens</span></div>{state.recent_tasks.slice(0, 30).map((task) => <div key={task.task_id}><span><strong>{task.task_kind}</strong><small>{task.role} · {task.model_id}</small></span><span><StatePill text={task.attempt_status ?? task.status} />{task.error_code && <small className={styles.error}>{task.error_code}</small>}</span><span>{task.provider_request_count ?? 0} / {task.transport_retry_count ?? 0}</span><span>{task.input_tokens ?? 0} → {task.output_tokens ?? 0}</span></div>)}{state.recent_tasks.length === 0 && <p className={styles.muted}>还没有 Agent 执行证据。</p>}</div>
+          <div className={styles.taskTable}><div className={styles.taskHead}><span>任务</span><span>状态</span><span>请求 / 重试</span><span>Tokens</span></div>{state.recent_tasks.slice(0, 30).map((task) => <div key={task.task_id}><span><strong>{task.task_kind}</strong><small>{task.role} · {task.model_id}</small></span><span><StatePill text={task.attempt_status ?? task.task_status} />{task.error_code && <small className={styles.error}>{task.error_code}</small>}</span><span>{task.provider_request_count ?? 0} / {task.transport_retry_count ?? 0}</span><span>{task.input_tokens ?? 0} → {task.output_tokens ?? 0}</span></div>)}{state.recent_tasks.length === 0 && <p className={styles.muted}>还没有 Agent 执行证据。</p>}</div>
         </section>
 
         <section id="settings" className={styles.section}>
@@ -446,6 +438,67 @@ function Fact({ label, value }: { label: string; value: string }) {
 
 function StatePill({ text }: { text: string }) {
   return <span className={styles.pill} data-state={text}>{text}</span>;
+}
+
+function BookTopologyList({
+  contracts,
+  scaleGuidance
+}: {
+  contracts: BookArcContractView[];
+  scaleGuidance: string | null;
+}) {
+  return (
+    <div className={styles.bookTopology}>
+      <div>
+        <strong>正式 Arc 拓扑</strong>
+        <span>{scaleGuidance ?? "全书规模由内容完成度决定，章节数仅作参考。"}</span>
+      </div>
+      <ol>
+        {contracts.map((contract) => (
+          <li key={contract.ordinal} data-status={contract.lifecycle_status}>
+            <div>
+              <span>Arc {contract.ordinal}{contract.is_final ? " · 最终弧" : ""}</span>
+              <StatePill text={contract.lifecycle_status} />
+            </div>
+            <strong>{contract.whole_book_role}</strong>
+            <p>{contract.core_goal}</p>
+            <small>进入：{contract.handoff_from_previous}</small>
+            <small>退出：{contract.exit_conditions.join("；")}</small>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+function ArcOutlineList({ entries }: { entries: ArcOutlineEntryView[] }) {
+  if (entries.length === 0) {
+    return <p className={styles.muted}>当前 Arc 已到达大纲边界，正在等待语义收束评估。</p>;
+  }
+  return (
+    <ol className={styles.arcOutline}>
+      {entries.map((entry) => (
+        <li key={`${entry.arc_ordinal}:${entry.source_arc_baseline_id}`} data-status={entry.status}>
+          <div className={styles.arcOutlineIndex}>
+            <span>第 {entry.book_ordinal} 章</span>
+            <StatePill text={entry.status} />
+          </div>
+          <div className={styles.arcOutlineBody}>
+            <div>
+              <strong>{entry.actual_chapter_title ?? entry.assignment.title}</strong>
+              {entry.actual_chapter_title && entry.actual_chapter_title !== entry.assignment.title && (
+                <small>原规划：{entry.assignment.title}</small>
+              )}
+            </div>
+            <p>{entry.assignment.core_event}</p>
+            <small>场景：{entry.assignment.scenes.join(" → ")}</small>
+            <small>交接：{entry.assignment.hook}</small>
+            <span>Arc v{entry.source_arc_baseline_version}</span>
+          </div>
+        </li>
+      ))}
+    </ol>
+  );
 }
 
 function CenteredMessage({ icon, text, actionLabel, onAction }: { icon: React.ReactNode; text: string; actionLabel?: string; onAction?: () => void }) {

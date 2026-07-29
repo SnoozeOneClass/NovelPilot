@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
-
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.agents.contracts import ArcClosureSignal, ArcPlanProposal, ArcStateTransition
+from app.agents.contracts import (
+    ArcChapterOutlineEntry,
+    ArcClosureSignal,
+    ArcPlanProposal,
+    ArcStateTransition,
+)
 from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
 from app.db.schema import agent_task_attempts, agent_tasks
 from app.domain.arc.commands import ArcCommandService
@@ -22,6 +25,8 @@ from app.domain.book.commands import BookCommandService
 from app.domain.book.contracts import (
     ApplyBookCandidateRequest,
     ApproveBookRequest,
+    BookArcContract,
+    BookArcTopology,
     BookCandidatePack,
     BookCompletionRequirement,
     BookCreativeConstraints,
@@ -74,7 +79,7 @@ async def insert_successful_task(
     source_arc_parent_review_id: str | None = None,
     source_book_parent_review_id: str | None = None,
     source_arc_closure_review_id: str | None = None,
-    source_book_boundary_review_id: str | None = None,
+    source_book_completion_review_id: str | None = None,
     source_chapter_arc_request_id: str | None = None,
     source_arc_book_request_id: str | None = None,
     source_arc_closure_id: str | None = None,
@@ -121,7 +126,9 @@ async def insert_successful_task(
                 source_arc_parent_review_id=source_arc_parent_review_id,
                 source_book_parent_review_id=source_book_parent_review_id,
                 source_arc_closure_review_id=source_arc_closure_review_id,
-                source_book_boundary_review_id=source_book_boundary_review_id,
+                source_book_completion_review_id=(
+                    source_book_completion_review_id
+                ),
                 source_chapter_arc_request_id=source_chapter_arc_request_id,
                 source_arc_book_request_id=source_arc_book_request_id,
                 source_arc_closure_id=source_arc_closure_id,
@@ -209,8 +216,10 @@ async def seed_approved_book_and_arc(
     *,
     project_id: str = "project-a",
     target_chapter_count: int = 2,
-    arc_purpose: Literal["regular", "final"] = "regular",
+    arc_contract_count: int = 1,
 ) -> ApprovedFoundation:
+    if arc_contract_count < 1:
+        raise ValueError("arc_contract_count must be positive.")
     bus = CommandBus(engine)
     project = await ProjectCommandService(bus).create_project(
         CreateProjectRequest(
@@ -247,14 +256,15 @@ async def seed_approved_book_and_arc(
                 selected_title="Echo Testimony",
                 rolling_plan=BookRollingPlan(
                     long_term_character_directions=["Trust evidence over memory."],
-                    high_level_phase_strategy=["Expose the edit", "Confront its source"],
                     whole_book_pacing_strategy="Escalate through bounded rolling Arcs.",
                     ending_tendency="The investigator chooses truth at personal cost.",
                     arc_planning_guidelines=["Each Arc must close observable evidence."],
+                    whole_book_scale_guidance=(
+                        f"Around {target_chapter_count} Chapters is a creator "
+                        "preference, not a completion gate."
+                    ),
                 ),
                 completion_contract=CompletionContract(
-                    minimum_chapter_count=1,
-                    maximum_chapter_count=10,
                     completion_requirements=[
                         BookCompletionRequirement(
                             requirement_key="memory_conflict_resolved",
@@ -262,6 +272,36 @@ async def seed_approved_book_and_arc(
                             evidence_expectation="A final committed Chapter proves the resolution.",
                         )
                     ],
+                ),
+                arc_topology=BookArcTopology(
+                    arcs=[
+                        BookArcContract(
+                            whole_book_role=(
+                                "Develop the central memory mystery."
+                                if ordinal < arc_contract_count
+                                else "Resolve the central memory mystery."
+                            ),
+                            core_goal=(
+                                f"Advance evidence stage {ordinal} through "
+                                "physical investigation."
+                            ),
+                            handoff_from_previous=(
+                                "Open from the creator-approved mystery premise."
+                                if ordinal == 1
+                                else f"Receive the formal closure of Arc {ordinal - 1}."
+                            ),
+                            exit_conditions=[
+                                f"Evidence stage {ordinal} is resolved.",
+                                (
+                                    "The central memory conflict is resolved."
+                                    if ordinal == arc_contract_count
+                                    else "A stable handoff to the next Arc exists."
+                                ),
+                            ],
+                            is_final=ordinal == arc_contract_count,
+                        )
+                        for ordinal in range(1, arc_contract_count + 1)
+                    ]
                 ),
             ),
         ),
@@ -326,7 +366,7 @@ async def seed_approved_book_and_arc(
             book_id=project.result.book_id,
             expected_book_baseline_id=approved.result.baseline_id,
             expected_canon_baseline_id=project.result.canon_baseline_id,
-            purpose=arc_purpose,
+            expected_ordinal=1,
         ),
         idempotency_key=f"{project_id}:create-arc",
     )
@@ -347,7 +387,6 @@ async def seed_approved_book_and_arc(
         workspace_lock_version=created_arc.result.workspace_lock_version,
         result=ArcPlanProposal(
             title="The First Contradiction",
-            purpose="Expose the memory edit mechanism.",
             desired_state_transition=ArcStateTransition(
                 start_state="The first memory contradiction is unexplained.",
                 end_state="The first edit source is identified with physical evidence.",
@@ -357,10 +396,6 @@ async def seed_approved_book_and_arc(
             character_obligations=["The investigator changes one belief about memory."],
             foreshadowing_obligations=["Leave one clue for the next Arc."],
             prohibitions=["Do not contradict committed Canon."],
-            minimum_cumulative_chapter_count=1,
-            recommended_closure_cumulative_chapter_count=target_chapter_count,
-            maximum_cumulative_chapter_count=max(target_chapter_count, 3),
-            closure_cumulative_chapter_count=target_chapter_count,
             closure_signals=[
                 ArcClosureSignal(
                     signal_key="first_edit_identified",
@@ -368,9 +403,28 @@ async def seed_approved_book_and_arc(
                     evidence_expectation="Committed Chapter observations identify it.",
                 )
             ],
-            advisory_beats=[
-                "Witnesses disagree",
-                "The discrepancy leaves physical evidence",
+            chapter_outline=[
+                ArcChapterOutlineEntry(
+                    title=f"Chapter {index + 1}",
+                    core_event=(
+                        "Witnesses disagree"
+                        if index == 0
+                        else (
+                            "The discrepancy leaves physical evidence "
+                            f"at assignment {index + 1}"
+                        )
+                    ),
+                    hook=(
+                        "The surviving evidence demands another test."
+                        if index + 1 < target_chapter_count
+                        else "The stage is ready for semantic closure review."
+                    ),
+                    scenes=[
+                        "Investigate the current contradiction.",
+                        "Commit one verifiable consequence.",
+                    ],
+                )
+                for index in range(target_chapter_count)
             ],
         ),
     )

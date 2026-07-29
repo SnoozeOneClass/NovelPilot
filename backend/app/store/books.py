@@ -23,7 +23,7 @@ class BookRecord:
     project_id: str
     lifecycle_status: str
     current_baseline_id: str | None
-    latest_boundary_review_id: str | None
+    latest_completion_review_id: str | None
     current_progress_handoff_id: str | None
     current_completion_id: str | None
     created_at_ms: int
@@ -46,6 +46,7 @@ class BookWorkspaceRecord:
     candidate_titles_ref_id: str | None
     candidate_rolling_plan_ref_id: str | None
     candidate_completion_contract_ref_id: str | None
+    candidate_arc_topology_ref_id: str | None
     readiness_status: str
     repair_policy_id: str
     semantic_repair_count: int
@@ -71,6 +72,7 @@ class BookSubmissionRecord:
     titles_ref_id: str
     rolling_plan_ref_id: str
     completion_contract_ref_id: str
+    arc_topology_ref_id: str
     content_manifest_ref_id: str
     content_fingerprint: str
     disposition: str
@@ -125,8 +127,10 @@ class BookBaselineRecord:
     constraints_ref_id: str
     rolling_plan_ref_id: str
     completion_contract_ref_id: str
-    minimum_chapter_count: int
-    maximum_chapter_count: int
+    arc_topology_ref_id: str
+    arc_contract_count: int
+    final_arc_ordinal: int
+    topology_effective_after_arc_ordinal: int
     created_at_ms: int
 
 
@@ -136,8 +140,8 @@ def _book_record(row: RowMapping) -> BookRecord:
         project_id=cast(str, row["project_id"]),
         lifecycle_status=cast(str, row["lifecycle_status"]),
         current_baseline_id=cast(str | None, row["current_baseline_id"]),
-        latest_boundary_review_id=cast(
-            str | None, row["latest_boundary_review_id"]
+        latest_completion_review_id=cast(
+            str | None, row["latest_completion_review_id"]
         ),
         current_progress_handoff_id=cast(
             str | None, row["current_progress_handoff_id"]
@@ -166,6 +170,9 @@ def _workspace_record(row: RowMapping) -> BookWorkspaceRecord:
         candidate_completion_contract_ref_id=cast(
             str | None, row["candidate_completion_contract_ref_id"]
         ),
+        candidate_arc_topology_ref_id=cast(
+            str | None, row["candidate_arc_topology_ref_id"]
+        ),
         readiness_status=cast(str, row["readiness_status"]),
         repair_policy_id=cast(str, row["repair_policy_id"]),
         semantic_repair_count=cast(int, row["semantic_repair_count"]),
@@ -192,6 +199,7 @@ def _submission_record(row: RowMapping) -> BookSubmissionRecord:
         titles_ref_id=cast(str, row["titles_ref_id"]),
         rolling_plan_ref_id=cast(str, row["rolling_plan_ref_id"]),
         completion_contract_ref_id=cast(str, row["completion_contract_ref_id"]),
+        arc_topology_ref_id=cast(str, row["arc_topology_ref_id"]),
         content_manifest_ref_id=cast(str, row["content_manifest_ref_id"]),
         content_fingerprint=cast(str, row["content_fingerprint"]),
         disposition=cast(str, row["disposition"]),
@@ -235,8 +243,12 @@ def _baseline_record(row: RowMapping) -> BookBaselineRecord:
         constraints_ref_id=cast(str, row["constraints_ref_id"]),
         rolling_plan_ref_id=cast(str, row["rolling_plan_ref_id"]),
         completion_contract_ref_id=cast(str, row["completion_contract_ref_id"]),
-        minimum_chapter_count=cast(int, row["minimum_chapter_count"]),
-        maximum_chapter_count=cast(int, row["maximum_chapter_count"]),
+        arc_topology_ref_id=cast(str, row["arc_topology_ref_id"]),
+        arc_contract_count=cast(int, row["arc_contract_count"]),
+        final_arc_ordinal=cast(int, row["final_arc_ordinal"]),
+        topology_effective_after_arc_ordinal=cast(
+            int, row["topology_effective_after_arc_ordinal"]
+        ),
         created_at_ms=cast(int, row["created_at_ms"]),
     )
 
@@ -452,7 +464,7 @@ class BookRepository:
             .values(
                 lifecycle_status="active",
                 current_baseline_id=new_baseline_id,
-                latest_boundary_review_id=None,
+                latest_completion_review_id=None,
                 current_progress_handoff_id=None,
                 updated_at_ms=updated_at_ms,
             )

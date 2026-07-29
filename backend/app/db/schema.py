@@ -196,7 +196,7 @@ books = Table(
     Column("project_id", String, nullable=False),
     Column("lifecycle_status", String, nullable=False),
     Column("current_baseline_id", String),
-    Column("latest_boundary_review_id", String),
+    Column("latest_completion_review_id", String),
     Column("current_progress_handoff_id", String),
     Column("current_completion_id", String),
     Column("created_at_ms", Integer, nullable=False),
@@ -207,7 +207,7 @@ books = Table(
     _ck(
         "lifecycle_pointers",
         "((lifecycle_status = 'developing' AND current_baseline_id IS NULL "
-        "AND latest_boundary_review_id IS NULL "
+        "AND latest_completion_review_id IS NULL "
         "AND current_progress_handoff_id IS NULL AND current_completion_id IS NULL) "
         "OR (lifecycle_status = 'active' AND current_baseline_id IS NOT NULL "
         "AND current_completion_id IS NULL) "
@@ -222,11 +222,11 @@ books = Table(
         initially="DEFERRED",
     ),
     ForeignKeyConstraint(
-        ["project_id", "id", "latest_boundary_review_id"],
+        ["project_id", "id", "latest_completion_review_id"],
         [
-            "book_boundary_reviews.project_id",
-            "book_boundary_reviews.book_id",
-            "book_boundary_reviews.id",
+            "book_completion_reviews.project_id",
+            "book_completion_reviews.book_id",
+            "book_completion_reviews.id",
         ],
         deferrable=True,
         initially="DEFERRED",
@@ -256,7 +256,6 @@ story_arcs = Table(
     Column("project_id", String, nullable=False),
     Column("book_id", String, nullable=False),
     Column("ordinal", Integer, nullable=False),
-    Column("purpose", String, nullable=False),
     Column("lifecycle_status", String, nullable=False),
     Column("current_baseline_id", String),
     Column("latest_closure_review_id", String),
@@ -266,10 +265,8 @@ story_arcs = Table(
     Column("completed_at_ms", Integer),
     *_project_owned_constraints(),
     UniqueConstraint("project_id", "book_id", "id"),
-    UniqueConstraint("project_id", "book_id", "id", "purpose"),
     UniqueConstraint("book_id", "ordinal"),
     _ck("ordinal_positive", "ordinal >= 1"),
-    _enum_ck("purpose", "purpose", ("regular", "final")),
     _enum_ck(
         "lifecycle_status",
         "lifecycle_status",
@@ -339,6 +336,7 @@ chapters = Table(
     Column("arc_id", String, nullable=False),
     Column("book_ordinal", Integer, nullable=False),
     Column("arc_ordinal", Integer, nullable=False),
+    Column("outline_arc_baseline_id", String, nullable=False),
     Column("lifecycle_status", String, nullable=False),
     Column("current_baseline_id", String),
     Column("created_at_ms", Integer, nullable=False),
@@ -359,6 +357,15 @@ chapters = Table(
     ForeignKeyConstraint(
         ["project_id", "book_id", "arc_id"],
         ["story_arcs.project_id", "story_arcs.book_id", "story_arcs.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "outline_arc_baseline_id"],
+        [
+            "arc_baselines.project_id",
+            "arc_baselines.book_id",
+            "arc_baselines.arc_id",
+            "arc_baselines.id",
+        ],
     ),
     ForeignKeyConstraint(
         ["project_id", "book_id", "arc_id", "id", "current_baseline_id"],
@@ -458,6 +465,7 @@ book_workspaces = Table(
     Column("candidate_titles_ref_id", String),
     Column("candidate_rolling_plan_ref_id", String),
     Column("candidate_completion_contract_ref_id", String),
+    Column("candidate_arc_topology_ref_id", String),
     Column("guidance_ref_id", String),
     Column("readiness_status", String, nullable=False),
     Column("repair_policy_id", String, nullable=False),
@@ -476,10 +484,12 @@ book_workspaces = Table(
         "candidate_refs_all_or_none",
         "((candidate_constraints_ref_id IS NULL AND candidate_titles_ref_id IS NULL "
         "AND candidate_rolling_plan_ref_id IS NULL "
-        "AND candidate_completion_contract_ref_id IS NULL) "
+        "AND candidate_completion_contract_ref_id IS NULL "
+        "AND candidate_arc_topology_ref_id IS NULL) "
         "OR (candidate_constraints_ref_id IS NOT NULL AND candidate_titles_ref_id IS NOT NULL "
         "AND candidate_rolling_plan_ref_id IS NOT NULL "
-        "AND candidate_completion_contract_ref_id IS NOT NULL))",
+        "AND candidate_completion_contract_ref_id IS NOT NULL "
+        "AND candidate_arc_topology_ref_id IS NOT NULL))",
     ),
     ForeignKeyConstraint(
         ["project_id", "book_id"],
@@ -501,6 +511,7 @@ book_workspaces = Table(
         "candidate_titles_ref_id",
         "candidate_rolling_plan_ref_id",
         "candidate_completion_contract_ref_id",
+        "candidate_arc_topology_ref_id",
         "guidance_ref_id",
     ),
 )
@@ -520,6 +531,7 @@ book_review_submissions = Table(
     Column("titles_ref_id", String, nullable=False),
     Column("rolling_plan_ref_id", String, nullable=False),
     Column("completion_contract_ref_id", String, nullable=False),
+    Column("arc_topology_ref_id", String, nullable=False),
     Column("content_manifest_ref_id", String, nullable=False),
     Column("content_fingerprint", String, nullable=False),
     Column("disposition", String, nullable=False),
@@ -550,6 +562,7 @@ book_review_submissions = Table(
         "titles_ref_id",
         "rolling_plan_ref_id",
         "completion_contract_ref_id",
+        "arc_topology_ref_id",
         "content_manifest_ref_id",
     ),
 )
@@ -657,8 +670,10 @@ book_baselines = Table(
     Column("constraints_ref_id", String, nullable=False),
     Column("rolling_plan_ref_id", String, nullable=False),
     Column("completion_contract_ref_id", String, nullable=False),
-    Column("minimum_chapter_count", Integer, nullable=False),
-    Column("maximum_chapter_count", Integer, nullable=False),
+    Column("arc_topology_ref_id", String, nullable=False),
+    Column("arc_contract_count", Integer, nullable=False),
+    Column("final_arc_ordinal", Integer, nullable=False),
+    Column("topology_effective_after_arc_ordinal", Integer, nullable=False),
     Column("created_at_ms", Integer, nullable=False),
     *_project_owned_constraints(),
     UniqueConstraint("book_id", "baseline_version"),
@@ -672,8 +687,14 @@ book_baselines = Table(
         "OR (baseline_version >= 2 AND parent_baseline_id IS NOT NULL))",
     ),
     _ck(
-        "chapter_count_range",
-        "minimum_chapter_count >= 1 AND maximum_chapter_count >= minimum_chapter_count",
+        "arc_topology_metadata",
+        "arc_contract_count >= 1 "
+        "AND final_arc_ordinal = arc_contract_count "
+        "AND topology_effective_after_arc_ordinal >= 0 "
+        "AND topology_effective_after_arc_ordinal <= arc_contract_count "
+        "AND ((baseline_version = 1 "
+        "AND topology_effective_after_arc_ordinal = 0) "
+        "OR baseline_version >= 2)",
     ),
     _ck("approved_title_non_blank", _non_blank_expression("approved_title")),
     _enum_ck("title_source", "title_source", ("recommended", "custom")),
@@ -700,6 +721,7 @@ book_baselines = Table(
         "constraints_ref_id",
         "rolling_plan_ref_id",
         "completion_contract_ref_id",
+        "arc_topology_ref_id",
     ),
 )
 
@@ -712,7 +734,7 @@ book_completions = Table(
     Column("completion_version", Integer, nullable=False),
     Column("parent_completion_id", String),
     Column("book_baseline_id", String, nullable=False),
-    Column("book_boundary_review_id", String, nullable=False),
+    Column("book_completion_review_id", String, nullable=False),
     Column("arc_closure_id", String, nullable=False),
     Column("terminal_arc_id", String, nullable=False),
     Column("terminal_arc_baseline_id", String, nullable=False),
@@ -726,7 +748,7 @@ book_completions = Table(
     Column("created_at_ms", Integer, nullable=False),
     *_project_owned_constraints(),
     UniqueConstraint("book_id", "completion_version"),
-    UniqueConstraint("book_boundary_review_id"),
+    UniqueConstraint("book_completion_review_id"),
     UniqueConstraint("project_id", "book_id", "id"),
     _ck(
         "version_parent",
@@ -743,11 +765,11 @@ book_completions = Table(
         ["book_baselines.project_id", "book_baselines.book_id", "book_baselines.id"],
     ),
     ForeignKeyConstraint(
-        ["project_id", "book_id", "book_boundary_review_id"],
+        ["project_id", "book_id", "book_completion_review_id"],
         [
-            "book_boundary_reviews.project_id",
-            "book_boundary_reviews.book_id",
-            "book_boundary_reviews.id",
+            "book_completion_reviews.project_id",
+            "book_completion_reviews.book_id",
+            "book_completion_reviews.id",
         ],
     ),
     ForeignKeyConstraint(
@@ -822,15 +844,14 @@ arc_workspaces = Table(
     Column("source_arc_parent_review_id", String),
     Column("source_arc_closure_review_id", String),
     Column("source_book_parent_review_id", String),
-    Column("source_book_boundary_review_id", String),
+    Column("source_book_completion_review_id", String),
     Column("source_feedback_id", String),
     Column("correction_lineage_id", String),
     Column("correction_lineage_origin", String),
     Column("automatic_correction_round", Integer),
     Column("plan_ref_id", String),
-    Column("minimum_cumulative_chapter_count", Integer),
-    Column("recommended_closure_cumulative_chapter_count", Integer),
-    Column("maximum_cumulative_chapter_count", Integer),
+    Column("planned_after_cumulative_chapter_count", Integer),
+    Column("planned_after_arc_chapter_count", Integer),
     Column("closure_cumulative_chapter_count", Integer),
     Column("guidance_ref_id", String),
     Column("repair_policy_id", String, nullable=False),
@@ -850,7 +871,7 @@ arc_workspaces = Table(
         "(source_arc_parent_review_id IS NOT NULL) "
         "+ (source_arc_closure_review_id IS NOT NULL) "
         "+ (source_book_parent_review_id IS NOT NULL) "
-        "+ (source_book_boundary_review_id IS NOT NULL) <= 1",
+        "+ (source_book_completion_review_id IS NOT NULL) <= 1",
     ),
     _ck(
         "correction_lineage_shape",
@@ -862,18 +883,17 @@ arc_workspaces = Table(
     ),
     _ck(
         "plan_count_shape",
-        "((plan_ref_id IS NULL AND minimum_cumulative_chapter_count IS NULL "
-        "AND recommended_closure_cumulative_chapter_count IS NULL "
-        "AND maximum_cumulative_chapter_count IS NULL "
+        "((plan_ref_id IS NULL "
+        "AND planned_after_cumulative_chapter_count IS NULL "
+        "AND planned_after_arc_chapter_count IS NULL "
         "AND closure_cumulative_chapter_count IS NULL) "
-        "OR (plan_ref_id IS NOT NULL AND minimum_cumulative_chapter_count >= 1 "
-        "AND recommended_closure_cumulative_chapter_count "
-        ">= minimum_cumulative_chapter_count "
-        "AND maximum_cumulative_chapter_count "
-        ">= recommended_closure_cumulative_chapter_count "
+        "OR (plan_ref_id IS NOT NULL "
+        "AND planned_after_cumulative_chapter_count >= 0 "
+        "AND planned_after_arc_chapter_count >= 0 "
+        "AND planned_after_arc_chapter_count "
+        "<= planned_after_cumulative_chapter_count "
         "AND closure_cumulative_chapter_count "
-        "BETWEEN minimum_cumulative_chapter_count "
-        "AND maximum_cumulative_chapter_count))",
+        ">= planned_after_cumulative_chapter_count))",
     ),
     _ck(
         "prior_arc_pair",
@@ -945,11 +965,11 @@ arc_workspaces = Table(
         ],
     ),
     ForeignKeyConstraint(
-        ["project_id", "book_id", "source_book_boundary_review_id"],
+        ["project_id", "book_id", "source_book_completion_review_id"],
         [
-            "book_boundary_reviews.project_id",
-            "book_boundary_reviews.book_id",
-            "book_boundary_reviews.id",
+            "book_completion_reviews.project_id",
+            "book_completion_reviews.book_id",
+            "book_completion_reviews.id",
         ],
     ),
     ForeignKeyConstraint(
@@ -973,11 +993,9 @@ arc_review_submissions = Table(
     Column("canon_baseline_id", String, nullable=False),
     Column("prior_arc_id", String),
     Column("prior_arc_baseline_id", String),
-    Column("purpose", String, nullable=False),
     Column("plan_ref_id", String, nullable=False),
-    Column("minimum_cumulative_chapter_count", Integer, nullable=False),
-    Column("recommended_closure_cumulative_chapter_count", Integer, nullable=False),
-    Column("maximum_cumulative_chapter_count", Integer, nullable=False),
+    Column("planned_after_cumulative_chapter_count", Integer, nullable=False),
+    Column("planned_after_arc_chapter_count", Integer, nullable=False),
     Column("closure_cumulative_chapter_count", Integer, nullable=False),
     Column("content_manifest_ref_id", String, nullable=False),
     Column("content_fingerprint", String, nullable=False),
@@ -990,17 +1008,14 @@ arc_review_submissions = Table(
     _ck("workspace_lock_version_positive", "workspace_lock_version >= 1"),
     _ck(
         "chapter_count_ranges",
-        "minimum_cumulative_chapter_count >= 1 "
-        "AND recommended_closure_cumulative_chapter_count "
-        ">= minimum_cumulative_chapter_count "
-        "AND maximum_cumulative_chapter_count "
-        ">= recommended_closure_cumulative_chapter_count "
+        "planned_after_cumulative_chapter_count >= 0 "
+        "AND planned_after_arc_chapter_count >= 0 "
+        "AND planned_after_arc_chapter_count "
+        "<= planned_after_cumulative_chapter_count "
         "AND closure_cumulative_chapter_count "
-        "BETWEEN minimum_cumulative_chapter_count "
-        "AND maximum_cumulative_chapter_count",
+        ">= planned_after_cumulative_chapter_count",
     ),
     _ck("content_fingerprint", _sha_expression("content_fingerprint")),
-    _enum_ck("purpose", "purpose", ("regular", "final")),
     _enum_ck("disposition", "disposition", SUBMISSION_DISPOSITIONS),
     _submission_close_ck(),
     _ck(
@@ -1041,15 +1056,6 @@ arc_review_submissions = Table(
             "arc_baselines.book_id",
             "arc_baselines.arc_id",
             "arc_baselines.id",
-        ],
-    ),
-    ForeignKeyConstraint(
-        ["project_id", "book_id", "arc_id", "purpose"],
-        [
-            "story_arcs.project_id",
-            "story_arcs.book_id",
-            "story_arcs.id",
-            "story_arcs.purpose",
         ],
     ),
     *_content_ref_fks("plan_ref_id", "content_manifest_ref_id"),
@@ -1165,7 +1171,6 @@ arc_approvals = Table(
     Column("submission_id", String, nullable=False),
     Column("review_id", String, nullable=False),
     Column("decision", String, nullable=False),
-    Column("closure_cumulative_chapter_count", Integer),
     Column("created_at_ms", Integer, nullable=False),
     *_project_owned_constraints(),
     UniqueConstraint("gate_id"),
@@ -1181,12 +1186,6 @@ arc_approvals = Table(
         "id",
     ),
     _enum_ck("decision", "decision", ("approved", "rejected")),
-    _ck(
-        "approval_closure_count",
-        "((decision = 'approved' AND closure_cumulative_chapter_count >= 1) "
-        "OR (decision = 'rejected' "
-        "AND closure_cumulative_chapter_count IS NULL))",
-    ),
     ForeignKeyConstraint(
         ["project_id", "book_id", "arc_id", "submission_id", "review_id", "gate_id"],
         [
@@ -1216,11 +1215,9 @@ arc_baselines = Table(
     Column("book_progress_handoff_id", String),
     Column("prior_arc_id", String),
     Column("prior_arc_baseline_id", String),
-    Column("purpose", String, nullable=False),
     Column("plan_ref_id", String, nullable=False),
-    Column("minimum_cumulative_chapter_count", Integer, nullable=False),
-    Column("recommended_closure_cumulative_chapter_count", Integer, nullable=False),
-    Column("maximum_cumulative_chapter_count", Integer, nullable=False),
+    Column("planned_after_cumulative_chapter_count", Integer, nullable=False),
+    Column("planned_after_arc_chapter_count", Integer, nullable=False),
     Column("closure_cumulative_chapter_count", Integer, nullable=False),
     Column("revision_origin", String, nullable=False),
     Column("authorization_kind", String, nullable=False),
@@ -1240,29 +1237,24 @@ arc_baselines = Table(
     ),
     _ck(
         "chapter_count_ranges",
-        "minimum_cumulative_chapter_count >= 1 "
-        "AND recommended_closure_cumulative_chapter_count "
-        ">= minimum_cumulative_chapter_count "
-        "AND maximum_cumulative_chapter_count "
-        ">= recommended_closure_cumulative_chapter_count "
+        "planned_after_cumulative_chapter_count >= 0 "
+        "AND planned_after_arc_chapter_count >= 0 "
+        "AND planned_after_arc_chapter_count "
+        "<= planned_after_cumulative_chapter_count "
         "AND closure_cumulative_chapter_count "
-        "BETWEEN minimum_cumulative_chapter_count "
-        "AND maximum_cumulative_chapter_count",
+        ">= planned_after_cumulative_chapter_count",
     ),
     _ck(
         "prior_arc_pair",
         "((prior_arc_id IS NULL AND prior_arc_baseline_id IS NULL) "
         "OR (prior_arc_id IS NOT NULL AND prior_arc_baseline_id IS NOT NULL))",
     ),
-    _enum_ck("purpose", "purpose", ("regular", "final")),
     _enum_ck("revision_origin", "revision_origin", ARC_REVISION_ORIGINS),
     _enum_ck("authorization_kind", "authorization_kind", ("policy_auto", "human_approval")),
     _ck(
         "authorization",
         "((authorization_kind = 'policy_auto' AND approval_gate_id IS NULL "
-        "AND approval_id IS NULL "
-        "AND closure_cumulative_chapter_count "
-        "= recommended_closure_cumulative_chapter_count) "
+        "AND approval_id IS NULL) "
         "OR (authorization_kind = 'human_approval' AND approval_gate_id IS NOT NULL "
         "AND approval_id IS NOT NULL))",
     ),
@@ -1328,15 +1320,6 @@ arc_baselines = Table(
             "arc_baselines.book_id",
             "arc_baselines.arc_id",
             "arc_baselines.id",
-        ],
-    ),
-    ForeignKeyConstraint(
-        ["project_id", "book_id", "arc_id", "purpose"],
-        [
-            "story_arcs.project_id",
-            "story_arcs.book_id",
-            "story_arcs.id",
-            "story_arcs.purpose",
         ],
     ),
     *_content_ref_fks("plan_ref_id"),
@@ -1823,7 +1806,7 @@ user_feedback = Table(
     Column("arc_parent_review_id", String),
     Column("book_parent_review_id", String),
     Column("arc_closure_review_id", String),
-    Column("book_boundary_review_id", String),
+    Column("book_completion_review_id", String),
     Column("resulting_correction_lineage_id", String),
     Column("dismiss_reason_code", String),
     Column("applied_command_id", String),
@@ -1851,12 +1834,12 @@ user_feedback = Table(
         "review_source_shape",
         "((feedback_kind = 'unsolicited' "
         "AND arc_parent_review_id IS NULL AND book_parent_review_id IS NULL "
-        "AND arc_closure_review_id IS NULL AND book_boundary_review_id IS NULL) "
+        "AND arc_closure_review_id IS NULL AND book_completion_review_id IS NULL) "
         "OR (feedback_kind = 'correction_wait_response' "
         "AND ((arc_parent_review_id IS NOT NULL) "
         "+ (book_parent_review_id IS NOT NULL) "
         "+ (arc_closure_review_id IS NOT NULL) "
-        "+ (book_boundary_review_id IS NOT NULL) = 1)))",
+        "+ (book_completion_review_id IS NOT NULL) = 1)))",
     ),
     _ck(
         "captured_baseline_shape",
@@ -1945,8 +1928,8 @@ user_feedback = Table(
         ["arc_closure_reviews.project_id", "arc_closure_reviews.id"],
     ),
     ForeignKeyConstraint(
-        ["project_id", "book_boundary_review_id"],
-        ["book_boundary_reviews.project_id", "book_boundary_reviews.id"],
+        ["project_id", "book_completion_review_id"],
+        ["book_completion_reviews.project_id", "book_completion_reviews.id"],
     ),
     ForeignKeyConstraint(
         ["project_id", "applied_command_id"],
@@ -2158,7 +2141,7 @@ Index(
 )
 
 
-# Explicit parent, closure, and Book-boundary authority ----------------------------
+# Explicit parent, closure, and Book-completion authority --------------------------
 
 arc_parent_reviews = Table(
     "arc_parent_reviews",
@@ -2679,8 +2662,8 @@ arc_closures = Table(
     *_content_ref_fks("chapter_set_manifest_ref_id", "normalized_result_ref_id"),
 )
 
-book_boundary_reviews = Table(
-    "book_boundary_reviews",
+book_completion_reviews = Table(
+    "book_completion_reviews",
     metadata,
     Column("id", String, primary_key=True),
     Column("project_id", String, nullable=False),
@@ -2697,7 +2680,6 @@ book_boundary_reviews = Table(
     Column("rubric_id", String, nullable=False),
     Column("rubric_version", Integer, nullable=False),
     Column("requirement_statuses_ref_id", String, nullable=False),
-    Column("ending_trajectory_judgment", String, nullable=False),
     Column("book_contract_judgment", String, nullable=False),
     Column("disposition", String, nullable=False),
     Column("resolution_owner", String, nullable=False),
@@ -2728,16 +2710,6 @@ book_boundary_reviews = Table(
     _ck("exact_input_fingerprint", _sha_expression("exact_input_fingerprint")),
     _ck("strategy_versions_positive", "strategy_version >= 1 AND rubric_version >= 1"),
     _enum_ck(
-        "ending_trajectory_judgment",
-        "ending_trajectory_judgment",
-        (
-            "regular_arc_needed",
-            "final_arc_ready",
-            "completion_ready",
-            "unable_to_judge",
-        ),
-    ),
-    _enum_ck(
         "book_contract_judgment",
         "book_contract_judgment",
         ("remains_applicable", "revision_warranted", "unable_to_judge"),
@@ -2746,8 +2718,6 @@ book_boundary_reviews = Table(
         "disposition",
         "disposition",
         (
-            "continue_regular_arc",
-            "plan_final_arc",
             "complete_book",
             "book_revision_warranted",
             "waiting_for_user",
@@ -2757,7 +2727,7 @@ book_boundary_reviews = Table(
     _enum_ck(
         "resolution_owner",
         "resolution_owner",
-        ("none", "arc", "book", "creator"),
+        ("none", "book", "creator"),
     ),
     *_correction_lineage_checks(),
     ForeignKeyConstraint(
@@ -2783,17 +2753,17 @@ book_boundary_reviews = Table(
     ForeignKeyConstraint(
         ["project_id", "book_id", "predecessor_review_id"],
         [
-            "book_boundary_reviews.project_id",
-            "book_boundary_reviews.book_id",
-            "book_boundary_reviews.id",
+            "book_completion_reviews.project_id",
+            "book_completion_reviews.book_id",
+            "book_completion_reviews.id",
         ],
     ),
     ForeignKeyConstraint(
         ["project_id", "book_id", "source_exhausted_review_id"],
         [
-            "book_boundary_reviews.project_id",
-            "book_boundary_reviews.book_id",
-            "book_boundary_reviews.id",
+            "book_completion_reviews.project_id",
+            "book_completion_reviews.book_id",
+            "book_completion_reviews.id",
         ],
     ),
     ForeignKeyConstraint(
@@ -2824,24 +2794,22 @@ book_progress_handoffs = Table(
     Column("book_id", String, nullable=False),
     Column("handoff_version", Integer, nullable=False),
     Column("parent_handoff_id", String),
-    Column("source_boundary_review_id", String, nullable=False),
-    Column("arc_closure_id", String, nullable=False),
+    Column("source_arc_closure_id", String, nullable=False),
     Column("book_baseline_id", String, nullable=False),
     Column("canon_baseline_id", String, nullable=False),
-    Column("next_arc_purpose", String, nullable=False),
-    Column("remaining_requirements_ref_id", String, nullable=False),
-    Column("guidance_ref_id", String, nullable=False),
+    Column("next_arc_ordinal", Integer, nullable=False),
     Column("created_at_ms", Integer, nullable=False),
     *_project_owned_constraints(),
     UniqueConstraint("project_id", "book_id", "id"),
     UniqueConstraint("book_id", "handoff_version"),
-    UniqueConstraint("source_boundary_review_id"),
+    UniqueConstraint("source_arc_closure_id"),
+    UniqueConstraint("book_baseline_id", "next_arc_ordinal"),
     _ck(
         "version_parent",
         "((handoff_version = 1 AND parent_handoff_id IS NULL) "
         "OR (handoff_version >= 2 AND parent_handoff_id IS NOT NULL))",
     ),
-    _enum_ck("next_arc_purpose", "next_arc_purpose", ("regular", "final")),
+    _ck("next_arc_ordinal_positive", "next_arc_ordinal >= 1"),
     ForeignKeyConstraint(
         ["project_id", "book_id", "parent_handoff_id"],
         [
@@ -2851,15 +2819,7 @@ book_progress_handoffs = Table(
         ],
     ),
     ForeignKeyConstraint(
-        ["project_id", "book_id", "source_boundary_review_id"],
-        [
-            "book_boundary_reviews.project_id",
-            "book_boundary_reviews.book_id",
-            "book_boundary_reviews.id",
-        ],
-    ),
-    ForeignKeyConstraint(
-        ["project_id", "book_id", "arc_closure_id"],
+        ["project_id", "book_id", "source_arc_closure_id"],
         ["arc_closures.project_id", "arc_closures.book_id", "arc_closures.id"],
     ),
     ForeignKeyConstraint(
@@ -2870,7 +2830,6 @@ book_progress_handoffs = Table(
         ["project_id", "canon_baseline_id"],
         ["canon_baselines.project_id", "canon_baselines.id"],
     ),
-    *_content_ref_fks("remaining_requirements_ref_id", "guidance_ref_id"),
 )
 
 
@@ -3008,7 +2967,7 @@ agent_tasks = Table(
     Column("source_arc_parent_review_id", String),
     Column("source_book_parent_review_id", String),
     Column("source_arc_closure_review_id", String),
-    Column("source_book_boundary_review_id", String),
+    Column("source_book_completion_review_id", String),
     Column("source_chapter_arc_request_id", String),
     Column("source_arc_book_request_id", String),
     Column("source_arc_closure_id", String),
@@ -3097,7 +3056,7 @@ agent_tasks = Table(
         "(source_arc_parent_review_id IS NOT NULL) "
         "+ (source_book_parent_review_id IS NOT NULL) "
         "+ (source_arc_closure_review_id IS NOT NULL) "
-        "+ (source_book_boundary_review_id IS NOT NULL) <= 1",
+        "+ (source_book_completion_review_id IS NOT NULL) <= 1",
     ),
     _ck(
         "source_authority_at_most_one",
@@ -3238,8 +3197,8 @@ agent_tasks = Table(
         ["arc_closure_reviews.project_id", "arc_closure_reviews.id"],
     ),
     ForeignKeyConstraint(
-        ["project_id", "source_book_boundary_review_id"],
-        ["book_boundary_reviews.project_id", "book_boundary_reviews.id"],
+        ["project_id", "source_book_completion_review_id"],
+        ["book_completion_reviews.project_id", "book_completion_reviews.id"],
     ),
     ForeignKeyConstraint(
         ["project_id", "book_id", "arc_id", "source_chapter_arc_request_id"],
@@ -3653,9 +3612,9 @@ Index(
     arc_closures.c.closure_version,
 )
 Index(
-    "ix_book_boundary_reviews_book_created",
-    book_boundary_reviews.c.book_id,
-    book_boundary_reviews.c.created_at_ms,
+    "ix_book_completion_reviews_book_created",
+    book_completion_reviews.c.book_id,
+    book_completion_reviews.c.created_at_ms,
 )
 Index(
     "ix_book_progress_handoffs_book_version",
@@ -3773,7 +3732,7 @@ EXPECTED_TABLE_NAMES = frozenset(
         "book_parent_reviews",
         "arc_closure_reviews",
         "arc_closures",
-        "book_boundary_reviews",
+        "book_completion_reviews",
         "book_progress_handoffs",
         "generation_runs",
         "engine_slot",

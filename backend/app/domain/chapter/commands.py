@@ -10,6 +10,7 @@ from typing import cast
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from app.agents.contracts import (
+    ArcPlanProposal,
     ChapterDraftResult,
     ChapterEvaluationIssue,
     ChapterObservationRepairPatch,
@@ -221,10 +222,6 @@ class ChapterCommandService:
                     book_id=request.book_id
                 )
             )
-            if cumulative_committed >= context.book_maximum_chapter_count:
-                raise CommandPreconditionError(
-                    "The approved Book Chapter maximum has been reached."
-                )
             if (
                 cumulative_committed
                 >= context.closure_cumulative_chapter_count
@@ -236,6 +233,31 @@ class ChapterCommandService:
                 book_id=request.book_id,
                 arc_id=request.arc_id,
             )
+            arc_plan = ArcPlanProposal.model_validate_json(
+                (
+                    await session.content.get_packed(
+                        project_id=request.project_id,
+                        ref_id=context.arc_plan_ref_id,
+                    )
+                ).unpack_and_verify()
+            )
+            outline_offset = (
+                arc_ordinal - context.planned_after_arc_chapter_count - 1
+            )
+            expected_book_ordinal = (
+                context.planned_after_cumulative_chapter_count
+                + outline_offset
+                + 1
+            )
+            if (
+                outline_offset < 0
+                or outline_offset >= len(arc_plan.chapter_outline)
+                or book_ordinal != expected_book_ordinal
+            ):
+                raise CommandPreconditionError(
+                    "arc_outline_slot_missing: the next Chapter has no unique "
+                    "assignment in the current Arc baseline."
+                )
             await session.chapters.insert(
                 ChapterRecord(
                     id=chapter_id,
@@ -244,6 +266,7 @@ class ChapterCommandService:
                     arc_id=request.arc_id,
                     book_ordinal=book_ordinal,
                     arc_ordinal=arc_ordinal,
+                    outline_arc_baseline_id=context.arc_baseline_id,
                     lifecycle_status="drafting",
                     current_baseline_id=None,
                     created_at_ms=timestamp,
@@ -304,6 +327,7 @@ class ChapterCommandService:
                             "arc_id": request.arc_id,
                             "book_ordinal": book_ordinal,
                             "arc_ordinal": arc_ordinal,
+                            "outline_arc_baseline_id": context.arc_baseline_id,
                         },
                     ),
                 ),
@@ -2155,10 +2179,6 @@ class ChapterCommandService:
                 if chapter.lifecycle_status == "drafting"
                 else cumulative_committed_before
             )
-            if effective_cumulative_count > context.book_maximum_chapter_count:
-                raise CommandPreconditionError(
-                    "Chapter commit exceeds the approved Book Chapter maximum."
-                )
             if (
                 effective_cumulative_count
                 > context.closure_cumulative_chapter_count

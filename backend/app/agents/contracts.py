@@ -179,7 +179,7 @@ class AgentTaskPlan(BaseModel):
     source_arc_parent_review_id: str | None = None
     source_book_parent_review_id: str | None = None
     source_arc_closure_review_id: str | None = None
-    source_book_boundary_review_id: str | None = None
+    source_book_completion_review_id: str | None = None
     source_chapter_arc_request_id: str | None = None
     source_arc_book_request_id: str | None = None
     source_arc_closure_id: str | None = None
@@ -286,7 +286,7 @@ class AgentTaskPlan(BaseModel):
             self.source_arc_parent_review_id,
             self.source_book_parent_review_id,
             self.source_arc_closure_review_id,
-            self.source_book_boundary_review_id,
+            self.source_book_completion_review_id,
         )
         if sum(source is not None for source in review_sources) > 1:
             raise ValueError("A Task Plan may bind at most one source review.")
@@ -565,24 +565,49 @@ class ArcClosureSignal(BaseModel):
     )
 
 
+class ArcChapterOutlineEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    title: str = Field(
+        min_length=1,
+        description="Provisional creator-facing title for this Chapter assignment.",
+    )
+    core_event: str = Field(
+        min_length=1,
+        description="The macro narrative event this Chapter must materially advance.",
+    )
+    hook: str = Field(
+        min_length=1,
+        description="The intended semantic handoff into the next Chapter or Arc closure.",
+    )
+    scenes: list[str] = Field(
+        min_length=1,
+        description="Ordered broad scene intentions used to realize the core event.",
+    )
+
+    @field_validator("title", "core_event", "hook")
+    @classmethod
+    def _non_blank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Arc Chapter outline text must be non-blank.")
+        return value
+
+    @field_validator("scenes")
+    @classmethod
+    def _non_blank_scenes(cls, value: list[str]) -> list[str]:
+        if any(not scene.strip() for scene in value):
+            raise ValueError("Arc Chapter outline scenes must be non-blank.")
+        return value
+
+
 class ArcPlanProposal(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     title: str = Field(min_length=1, description="Creator-facing title for this Story Arc.")
-    purpose: str = Field(
-        min_length=1,
-        description=(
-            "The stage-level outcome this Story Arc owns within the approved "
-            "Book contract; never a Chapter-by-Chapter outline."
-        ),
-    )
     desired_state_transition: ArcStateTransition
     conflict_trajectory: list[str] = Field(
         min_length=1,
-        description=(
-            "Ordered stage-level escalation and resolution trajectory. Items are "
-            "not immutable Chapter slots."
-        ),
+        description="Ordered stage-level escalation and resolution trajectory.",
     )
     pacing_trajectory: list[str] = Field(
         min_length=1,
@@ -600,40 +625,18 @@ class ArcPlanProposal(BaseModel):
         min_length=1,
         description="Book constraints and outcomes this Arc must not violate.",
     )
-    minimum_cumulative_chapter_count: int = Field(
-        ge=1,
-        description=(
-            "Minimum whole-Book committed Chapter count at which this Arc may close."
-        ),
-    )
-    recommended_closure_cumulative_chapter_count: int = Field(
-        ge=1,
-        description=(
-            "Recommended whole-Book committed Chapter count for this Arc closure."
-        ),
-    )
-    maximum_cumulative_chapter_count: int = Field(
-        ge=1,
-        description=(
-            "Maximum whole-Book committed Chapter count allowed before this Arc closes."
-        ),
-    )
-    closure_cumulative_chapter_count: int = Field(
-        ge=1,
-        description=(
-            "Selected whole-Book committed Chapter checkpoint for the first mandatory "
-            "closure evaluation. Reaching it does not complete the Arc."
-        ),
-    )
     closure_signals: list[ArcClosureSignal] = Field(
         min_length=1,
         description="Observable contract used by the mandatory Arc closure evaluation.",
     )
-    advisory_beats: list[str] = Field(
+    chapter_outline: list[ArcChapterOutlineEntry] = Field(
         default_factory=list,
         description=(
-            "Optional planning hints only. They are neither Chapter identities nor "
-            "the authoritative closure checklist."
+            "Complete ordered macro assignments from the Harness-frozen effective "
+            "point through the Arc's semantic closure boundary. Initial Arc plans "
+            "must contain at least one entry; an authorized successor may be empty "
+            "only when the effective point is already ready for closure. Entries contain no "
+            "ordinals or storage identities."
         ),
     )
 
@@ -648,28 +651,6 @@ class ArcPlanProposal(BaseModel):
         if not any(signal.required for signal in value):
             raise ValueError("An Arc contract needs at least one required closure signal.")
         return value
-
-    @model_validator(mode="after")
-    def _chapter_range_contains_checkpoint(self) -> ArcPlanProposal:
-        if not (
-            self.minimum_cumulative_chapter_count
-            <= self.recommended_closure_cumulative_chapter_count
-            <= self.maximum_cumulative_chapter_count
-        ):
-            raise ValueError(
-                "Arc cumulative Chapter range must satisfy "
-                "minimum <= recommended <= maximum."
-            )
-        if not (
-            self.minimum_cumulative_chapter_count
-            <= self.closure_cumulative_chapter_count
-            <= self.maximum_cumulative_chapter_count
-        ):
-            raise ValueError(
-                "Arc closure cumulative checkpoint must fall inside its cumulative range."
-            )
-        return self
-
 
 class ChapterPlanProposal(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)

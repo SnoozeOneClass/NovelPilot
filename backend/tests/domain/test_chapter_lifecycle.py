@@ -4,8 +4,6 @@ import asyncio
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
-
 import pytest
 from alembic import command
 from sqlalchemy import func, select
@@ -77,7 +75,7 @@ async def _prepare_reviewed_chapter(
     target_chapter_count: int,
     canon_change: bool,
     evaluation: LayerEvaluationResult | None = None,
-    arc_purpose: Literal["regular", "final"] = "regular",
+    arc_contract_count: int = 1,
     foundation: ApprovedFoundation | None = None,
     idempotency_suffix: str = "",
     canon_evidence_hint: str = "The blue ink changed while she watched",
@@ -89,7 +87,7 @@ async def _prepare_reviewed_chapter(
             engine,
             project_id=project_id,
             target_chapter_count=target_chapter_count,
-            arc_purpose=arc_purpose,
+            arc_contract_count=arc_contract_count,
         )
     elif foundation.project_id != project_id:
         raise ValueError("The supplied Chapter foundation belongs to another project.")

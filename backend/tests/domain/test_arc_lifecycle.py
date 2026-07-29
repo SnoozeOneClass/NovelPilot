@@ -12,6 +12,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.agents.contracts import (
+    ArcChapterOutlineEntry,
     ArcClosureSignal,
     ArcPlanProposal,
     ArcStateTransition,
@@ -30,12 +31,12 @@ from app.db.schema import (
 )
 from app.domain.arc.commands import (
     ArcCommandService,
-    _require_cumulative_arc_budget,
+    _derive_outline_closure_checkpoint,
 )
 from app.domain.arc.contracts import (
     ApplyArcTaskRequest,
     ApproveArcRequest,
-    ArcAdvisoryBeatsRepair,
+    ArcChapterOutlineRepair,
     ArcEvaluation,
     ArcRepairPatch,
     ArcTitleRepair,
@@ -49,6 +50,8 @@ from app.domain.book.commands import BookCommandService
 from app.domain.book.contracts import (
     ApplyBookCandidateRequest,
     ApproveBookRequest,
+    BookArcContract,
+    BookArcTopology,
     BookCandidatePack,
     BookCompletionRequirement,
     BookCreativeConstraints,
@@ -92,13 +95,11 @@ class ReviewedArc:
 def _arc_plan(
     *,
     title: str,
-    purpose: str,
     target_chapter_count: int,
-    advisory_beats: list[str],
+    chapter_events: list[str],
 ) -> ArcPlanProposal:
     return ArcPlanProposal(
         title=title,
-        purpose=purpose,
         desired_state_transition=ArcStateTransition(
             start_state="The memory-edit source is unknown.",
             end_state="The first memory-edit source is identified.",
@@ -111,10 +112,6 @@ def _arc_plan(
         character_obligations=["The investigator commits to verifiable evidence."],
         foreshadowing_obligations=[],
         prohibitions=["Do not invalidate committed evidence as a dream."],
-        minimum_cumulative_chapter_count=target_chapter_count,
-        recommended_closure_cumulative_chapter_count=target_chapter_count,
-        maximum_cumulative_chapter_count=min(12, target_chapter_count + 2),
-        closure_cumulative_chapter_count=target_chapter_count,
         closure_signals=[
             ArcClosureSignal(
                 signal_key="first_edit_source_identified",
@@ -123,7 +120,26 @@ def _arc_plan(
                 required=True,
             )
         ],
-        advisory_beats=advisory_beats,
+        chapter_outline=[
+            ArcChapterOutlineEntry(
+                title=f"Chapter {index + 1}",
+                core_event=(
+                    chapter_events[index]
+                    if index < len(chapter_events)
+                    else f"Advance the Arc toward checkpoint {index + 1}."
+                ),
+                hook=(
+                    "Hand the unresolved consequence to the next assignment."
+                    if index + 1 < target_chapter_count
+                    else "Hand the completed stage to Arc closure review."
+                ),
+                scenes=[
+                    "Establish the assigned contradiction.",
+                    "Commit one causal consequence.",
+                ],
+            )
+            for index in range(target_chapter_count)
+        ],
     )
 
 
@@ -169,14 +185,14 @@ async def _seed_approved_book(
                 selected_title="Echo Testimony",
                 rolling_plan=BookRollingPlan(
                     long_term_character_directions=["Trust evidence over memory."],
-                    high_level_phase_strategy=["Expose the edit", "Confront its source"],
                     whole_book_pacing_strategy="Escalate through bounded rolling Arcs.",
                     ending_tendency="The investigator chooses truth at personal cost.",
                     arc_planning_guidelines=["Each Arc closes observable evidence."],
+                    whole_book_scale_guidance=(
+                        "Roughly twelve Chapters is advisory creator context."
+                    ),
                 ),
                 completion_contract=CompletionContract(
-                    minimum_chapter_count=1,
-                    maximum_chapter_count=12,
                     completion_requirements=[
                         BookCompletionRequirement(
                             requirement_key="memory_conflict_resolved",
@@ -186,6 +202,20 @@ async def _seed_approved_book(
                             ),
                         )
                     ],
+                ),
+                arc_topology=BookArcTopology(
+                    arcs=[
+                        BookArcContract(
+                            whole_book_role="Resolve the memory mystery.",
+                            core_goal="Identify the edit source with evidence.",
+                            handoff_from_previous="Begin from the approved premise.",
+                            exit_conditions=[
+                                "The edit source is identified.",
+                                "The central conflict is resolved.",
+                            ],
+                            is_final=True,
+                        )
+                    ]
                 ),
             ),
         ),
@@ -256,7 +286,6 @@ async def _prepare_reviewed_arc(
     *,
     project_id: str,
     operation_mode: Literal["full_auto", "participatory"],
-    purpose: Literal["regular", "final"] = "regular",
     target_chapter_count: int = 3,
     evaluation: ArcEvaluation | None = None,
     repair_count_before_review: int | None = None,
@@ -273,15 +302,14 @@ async def _prepare_reviewed_arc(
             book_id=book.book_id,
             expected_book_baseline_id=book.book_baseline_id,
             expected_canon_baseline_id=book.canon_baseline_id,
-            purpose=purpose,
+            expected_ordinal=1,
         ),
         idempotency_key=f"{project_id}:arc-create",
     )
     plan = _arc_plan(
         title="The First Contradiction",
-        purpose="Expose the memory edit mechanism.",
         target_chapter_count=target_chapter_count,
-        advisory_beats=[
+        chapter_events=[
             "Witnesses disagree",
             "The discrepancy leaves physical evidence",
         ],
@@ -392,37 +420,32 @@ async def _prepare_reviewed_arc(
     )
 
 
-def test_cumulative_arc_budget_must_move_forward_and_fit_book_maximum() -> None:
-    _require_cumulative_arc_budget(
-        current_book_chapter_count=10,
-        book_maximum_chapter_count=22,
-        minimum_cumulative_chapter_count=18,
-        recommended_closure_cumulative_chapter_count=20,
-        maximum_cumulative_chapter_count=22,
-        closure_cumulative_chapter_count=20,
+def test_arc_closure_checkpoint_is_derived_only_from_effective_point_and_outline() -> None:
+    plan = _arc_plan(
+        title="Derived checkpoint",
+        target_chapter_count=3,
+        chapter_events=["One", "Two", "Three"],
+    )
+    assert (
+        _derive_outline_closure_checkpoint(
+            proposal=plan,
+            planned_after_cumulative_chapter_count=10,
+            planned_after_arc_chapter_count=2,
+            initial_plan=False,
+        )
+        == 13
     )
 
-    with pytest.raises(CommandPreconditionError, match="approved Book maximum"):
-        _require_cumulative_arc_budget(
-            current_book_chapter_count=10,
-            book_maximum_chapter_count=22,
-            minimum_cumulative_chapter_count=18,
-            recommended_closure_cumulative_chapter_count=20,
-            maximum_cumulative_chapter_count=23,
-            closure_cumulative_chapter_count=20,
-        )
-    with pytest.raises(CommandPreconditionError, match="current Book count"):
-        _require_cumulative_arc_budget(
-            current_book_chapter_count=10,
-            book_maximum_chapter_count=22,
-            minimum_cumulative_chapter_count=10,
-            recommended_closure_cumulative_chapter_count=20,
-            maximum_cumulative_chapter_count=22,
-            closure_cumulative_chapter_count=20,
+    with pytest.raises(CommandPreconditionError, match="at least one Chapter"):
+        _derive_outline_closure_checkpoint(
+            proposal=plan.model_copy(update={"chapter_outline": []}),
+            planned_after_cumulative_chapter_count=0,
+            planned_after_arc_chapter_count=0,
+            initial_plan=True,
         )
 
 
-def test_full_auto_pass_commits_without_arc_gate_and_preserves_final_hint(
+def test_full_auto_pass_commits_without_arc_gate_under_book_topology(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "arc-auto.sqlite3"
@@ -435,7 +458,6 @@ def test_full_auto_pass_commits_without_arc_gate_and_preserves_final_hint(
                 engine,
                 project_id="project-auto",
                 operation_mode="full_auto",
-                purpose="final",
             )
             assert setup.review.next_action == "auto_commit"
             assert setup.review.approval_gate_id is None
@@ -465,7 +487,7 @@ def test_full_auto_pass_commits_without_arc_gate_and_preserves_final_hint(
                 arc = (
                     await connection.execute(
                         select(
-                            story_arcs.c.purpose,
+                            story_arcs.c.ordinal,
                             story_arcs.c.lifecycle_status,
                             story_arcs.c.current_baseline_id,
                         ).where(story_arcs.c.id == setup.arc_id)
@@ -474,22 +496,20 @@ def test_full_auto_pass_commits_without_arc_gate_and_preserves_final_hint(
                 baseline = (
                     await connection.execute(
                         select(
-                            arc_baselines.c.purpose,
-                            arc_baselines.c.recommended_closure_cumulative_chapter_count,
                             arc_baselines.c.closure_cumulative_chapter_count,
                             arc_baselines.c.authorization_kind,
                         ).where(arc_baselines.c.id == committed.result.baseline_id)
                     )
                 ).one()
-                assert tuple(arc) == ("final", "active", committed.result.baseline_id)
-                assert tuple(baseline) == ("final", 3, 3, "policy_auto")
+                assert tuple(arc) == (1, "active", committed.result.baseline_id)
+                assert tuple(baseline) == (3, "policy_auto")
         finally:
             await engine.dispose()
 
     asyncio.run(exercise())
 
 
-def test_participatory_pass_waits_for_exactly_one_adjustable_user_approval(
+def test_participatory_pass_waits_for_exactly_one_reviewed_checkpoint_approval(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "arc-participatory.sqlite3"
@@ -536,12 +556,11 @@ def test_participatory_pass_waits_for_exactly_one_adjustable_user_approval(
                     submission_id=setup.submission_id,
                     review_id=setup.review.review_id,
                     approval_gate_id=setup.review.approval_gate_id,
-                    closure_cumulative_chapter_count=4,
                 ),
                 idempotency_key="participatory:approve",
             )
             assert committed.result.authorization_kind == "human_approval"
-            assert committed.result.closure_cumulative_chapter_count == 4
+            assert committed.result.closure_cumulative_chapter_count == 3
             async with engine.connect() as connection:
                 assert await connection.scalar(select(func.count()).select_from(arc_approvals)) == 1
                 assert (
@@ -620,7 +639,6 @@ def test_full_auto_review_then_mode_switch_creates_persistent_gate(
                     submission_id=setup.submission_id,
                     review_id=setup.review.review_id,
                     approval_gate_id=gate_id,
-                    closure_cumulative_chapter_count=3,
                 ),
                 idempotency_key="race:approve",
             )
@@ -707,14 +725,14 @@ def test_stale_arc_plan_delivery_is_discarded_without_overwriting_workspace(
                     book_id=book.book_id,
                     expected_book_baseline_id=book.book_baseline_id,
                     expected_canon_baseline_id=book.canon_baseline_id,
+                    expected_ordinal=1,
                 ),
                 idempotency_key="stale:create",
             )
             first = _arc_plan(
                 title="First",
-                purpose="First accepted plan",
                 target_chapter_count=2,
-                advisory_beats=["A"],
+                chapter_events=["A"],
             )
             stale = first.model_copy(update={"title": "Stale"})
             tasks: list[tuple[str, str]] = []
@@ -793,32 +811,45 @@ def test_arc_local_repair_is_bounded_by_components_and_five_attempts(
                 evaluation=ArcEvaluation(
                     decision="local_repair",
                     summary="Only the beats need a bounded repair.",
-                    repair_scope=["advisory_beats"],
+                    repair_scope=["chapter_outline"],
                 ),
             )
             assert setup.review.next_action == "repair"
+            repaired_outline = [
+                (
+                    ArcChapterOutlineEntry(
+                        title="Repaired Chapter 1",
+                        core_event="Repaired beat",
+                        hook="Hand off to the next assignment.",
+                        scenes=["Repair the causal setup."],
+                    )
+                    if index == 0
+                    else entry
+                )
+                for index, entry in enumerate(setup.plan.chapter_outline)
+            ]
             unauthorized = ArcRepairPatch(
                 changes=[
                     ArcTitleRepair(component="title", value="Unauthorized title"),
-                    ArcAdvisoryBeatsRepair(
-                        component="advisory_beats",
-                        value=["Repaired beat"],
+                    ArcChapterOutlineRepair(
+                        component="chapter_outline",
+                        value=repaired_outline,
                     ),
                 ]
             )
             authorized = ArcRepairPatch(
                 changes=[
-                    ArcAdvisoryBeatsRepair(
-                        component="advisory_beats",
-                        value=["Repaired beat"],
+                    ArcChapterOutlineRepair(
+                        component="chapter_outline",
+                        value=repaired_outline,
                     ),
                 ]
             )
             no_op = ArcRepairPatch(
                 changes=[
-                    ArcAdvisoryBeatsRepair(
-                        component="advisory_beats",
-                        value=setup.plan.advisory_beats,
+                    ArcChapterOutlineRepair(
+                        component="chapter_outline",
+                        value=setup.plan.chapter_outline,
                     ),
                 ]
             )
@@ -907,12 +938,10 @@ def test_arc_local_repair_is_bounded_by_components_and_five_attempts(
                 )
                 assert workspace.semantic_repair_count == 1
                 assert unauthorized_state == "pending"
-                assert merged_plan.advisory_beats == ["Repaired beat"]
-                assert merged_plan.purpose == setup.plan.purpose
+                assert merged_plan.chapter_outline[0].core_event == "Repaired beat"
                 assert merged_plan.title == setup.plan.title
-                assert (
-                    merged_plan.closure_cumulative_chapter_count
-                    == setup.plan.closure_cumulative_chapter_count
+                assert len(merged_plan.chapter_outline) == len(
+                    setup.plan.chapter_outline
                 )
                 assert merged_plan.closure_signals == setup.plan.closure_signals
 
@@ -923,7 +952,7 @@ def test_arc_local_repair_is_bounded_by_components_and_five_attempts(
                 evaluation=ArcEvaluation(
                     decision="local_repair",
                     summary="The sixth repair must not start.",
-                    repair_scope=["advisory_beats"],
+                    repair_scope=["chapter_outline"],
                 ),
                 repair_count_before_review=5,
             )

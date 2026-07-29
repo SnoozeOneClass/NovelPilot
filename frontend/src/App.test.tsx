@@ -86,13 +86,16 @@ function failureState(): ProjectStateView {
       book_id: "book-a",
       lifecycle_status: "planning",
       current_baseline_id: null,
-      latest_boundary_review_id: null,
+      latest_completion_review_id: null,
       current_progress_handoff_id: null,
       current_completion_id: null,
       baseline_version: null,
       approved_title: null,
-      minimum_chapter_count: null,
-      maximum_chapter_count: null,
+      whole_book_scale_guidance: null,
+      arc_contract_count: null,
+      final_arc_ordinal: null,
+      topology_effective_after_arc_ordinal: null,
+      arc_topology: [],
       workspace_state: "drafting",
       workspace_lock_version: 1,
       semantic_repair_count: 0,
@@ -181,6 +184,107 @@ function creatorWaitState(): ProjectStateView {
   };
 }
 
+function arcOutlineState(): ProjectStateView {
+  const state = failureState();
+  return {
+    ...state,
+    book: {
+      ...state.book,
+      lifecycle_status: "active",
+      current_baseline_id: "book-baseline-a",
+      baseline_version: 1,
+      approved_title: "测试小说",
+      whole_book_scale_guidance: "约二十章，仅作为创作者的规模建议。",
+      arc_contract_count: 2,
+      final_arc_ordinal: 2,
+      topology_effective_after_arc_ordinal: 0,
+      arc_topology: [
+        {
+          ordinal: 1,
+          whole_book_role: "建立核心谜团",
+          core_goal: "取得第一组可验证物证",
+          handoff_from_previous: "承接创作者批准的前提",
+          exit_conditions: ["形成通往终局弧的稳定交接"],
+          is_final: false,
+          lifecycle_status: "active"
+        },
+        {
+          ordinal: 2,
+          whole_book_role: "解决核心谜团",
+          core_goal: "用正式证据完成全书承诺",
+          handoff_from_previous: "承接 Arc 1 的正式收束",
+          exit_conditions: ["所有 Book 完成要求均有正式证据"],
+          is_final: true,
+          lifecycle_status: "planned"
+        }
+      ]
+    },
+    current_arc: {
+      arc_id: "arc-a",
+      ordinal: 1,
+      is_final: false,
+      assigned_book_baseline_id: "book-baseline-a",
+      lifecycle_status: "active",
+      current_baseline_id: "arc-v2",
+      latest_closure_review_id: null,
+      current_closure_id: null,
+      baseline_version: 2,
+      closure_cumulative_chapter_count: 2,
+      cumulative_committed_chapter_count: 1,
+      arc_committed_chapter_count: 1,
+      workspace_state: "idle",
+      workspace_lock_version: 4,
+      semantic_repair_count: 0,
+      semantic_repair_limit: 5,
+      pending_submission_id: null,
+      pending_review_id: null,
+      pending_review_decision: null,
+      approval_gate_id: null,
+      approval_gate_state: null,
+      revision_origin: "automatic_arc_recovery",
+      automatic_correction_round: 1,
+      outline: {
+        arc_id: "arc-a",
+        arc_ordinal: 1,
+        current_baseline_id: "arc-v2",
+        current_baseline_version: 2,
+        entries: [
+          {
+            book_ordinal: 1,
+            arc_ordinal: 1,
+            status: "committed",
+            chapter_id: "chapter-1",
+            actual_chapter_title: "正式第一章",
+            assignment: {
+              title: "第一章计划",
+              core_event: "建立第一份矛盾证词。",
+              hook: "把物证问题交给下一章。",
+              scenes: ["发现矛盾", "保全证词"]
+            },
+            source_arc_baseline_id: "arc-v1",
+            source_arc_baseline_version: 1
+          },
+          {
+            book_ordinal: 2,
+            arc_ordinal: 2,
+            status: "planned",
+            chapter_id: null,
+            actual_chapter_title: null,
+            assignment: {
+              title: "未来章",
+              core_event: "验证后继 Arc 计划中的物证。",
+              hook: "把完整证据交给收束评估。",
+              scenes: ["复核物证", "形成结论"]
+            },
+            source_arc_baseline_id: "arc-v2",
+            source_arc_baseline_version: 2
+          }
+        ]
+      }
+    }
+  };
+}
+
 describe("App authoritative workspace", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -266,7 +370,7 @@ describe("App authoritative workspace", () => {
       arc_parent_review_id: null,
       book_parent_review_id: null,
       arc_closure_review_id: null,
-      book_boundary_review_id: null,
+      book_completion_review_id: null,
       resulting_correction_lineage_id: null,
       dismiss_reason_code: null,
       applied_command_id: null,
@@ -312,5 +416,29 @@ describe("App authoritative workspace", () => {
       },
       expect.any(String)
     ));
+  });
+
+  it("renders one coherent Arc outline with status and version provenance", async () => {
+    api.getProject.mockResolvedValue(arcOutlineState());
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <ThemeProvider><App /></ThemeProvider>
+      </QueryClientProvider>
+    );
+
+    expect(await screen.findByText("正式第一章")).toBeInTheDocument();
+    expect(screen.getByText("原规划：第一章计划")).toBeInTheDocument();
+    expect(screen.getByText("未来章")).toBeInTheDocument();
+    expect(screen.getByText("场景：发现矛盾 → 保全证词")).toBeInTheDocument();
+    expect(screen.getByText("Arc v1")).toBeInTheDocument();
+    expect(screen.getByText("Arc v2")).toBeInTheDocument();
+    expect(screen.getByText("正式 Arc 拓扑")).toBeInTheDocument();
+    expect(
+      screen.getAllByText("约二十章，仅作为创作者的规模建议。")
+    ).toHaveLength(2);
+    expect(screen.getByText("建立核心谜团")).toBeInTheDocument();
+    expect(screen.getByText("用正式证据完成全书承诺")).toBeInTheDocument();
+    expect(screen.getByText("Arc 2 · 最终弧")).toBeInTheDocument();
   });
 });

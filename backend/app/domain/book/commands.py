@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import cast
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from app.agents.contracts import BookDiscussionResult
 from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
@@ -22,10 +22,14 @@ from app.domain.book.contracts import (
     ApproveBookRequest,
     ApproveBookResult,
     BookCandidatePack,
+    BookArcContract,
+    BookArcTopology,
+    BookArcTopologySuffix,
     BookDiscussionState,
     BookEvaluation,
     BookRepairContract,
     BookRepairPatch,
+    BookSuccessorCandidateProposal,
     BookTranscript,
     CompletionContract,
     RecordBookUserInputRequest,
@@ -86,6 +90,7 @@ def _merge_book_repair(
     current: BookCandidatePack,
     patch: BookRepairPatch,
     contract: BookRepairContract,
+    topology_effective_after_arc_ordinal: int,
 ) -> BookCandidatePack:
     authorized = set(contract.authorized_components)
     requested = {change.component for change in patch.changes}
@@ -97,11 +102,120 @@ def _merge_book_repair(
         )
     merged = current.model_dump(mode="python")
     for change in patch.changes:
-        merged[change.component] = change.value
+        if change.component == "arc_topology":
+            merged[change.component] = _compose_book_arc_topology(
+                current=current.arc_topology,
+                effective_after_arc_ordinal=topology_effective_after_arc_ordinal,
+                suffix=change.value,
+            )
+        else:
+            merged[change.component] = change.value
     candidate = BookCandidatePack.model_validate(merged)
     if candidate == current:
         raise CommandPreconditionError("Book repair result made no authorized change.")
     return candidate
+
+
+def _compose_book_arc_topology(
+    *,
+    current: BookArcTopology | None,
+    effective_after_arc_ordinal: int,
+    suffix: BookArcTopologySuffix,
+) -> BookArcTopology:
+    if effective_after_arc_ordinal < 0:
+        raise CommandPreconditionError("Book topology effective boundary is invalid.")
+    if current is None:
+        if effective_after_arc_ordinal != 0:
+            raise CommandPreconditionError(
+                "An initial Book topology must start at effective ordinal zero."
+            )
+        prefix: list[BookArcContract] = []
+    else:
+        if effective_after_arc_ordinal > len(current.arcs):
+            raise CommandPreconditionError(
+                "Book topology effective boundary exceeds the current topology."
+            )
+        prefix = list(current.arcs[:effective_after_arc_ordinal])
+
+    if suffix.arcs:
+        normalized_prefix = [
+            item.model_copy(update={"is_final": False}) if item.is_final else item
+            for item in prefix
+        ]
+        composed = [*normalized_prefix, *suffix.arcs]
+    else:
+        if not prefix:
+            raise CommandPreconditionError(
+                "An empty Book topology suffix requires a preserved historical prefix."
+            )
+        composed = [
+            *[
+                item.model_copy(update={"is_final": False}) if item.is_final else item
+                for item in prefix[:-1]
+            ],
+            prefix[-1].model_copy(update={"is_final": True}),
+        ]
+    return BookArcTopology(arcs=composed)
+
+
+async def _topology_effective_after_arc_ordinal(
+    session: StoreSession,
+    *,
+    project_id: str,
+    book_id: str,
+    base_book_baseline_id: str | None,
+) -> int:
+    arcs = await session.arcs.list_for_book(project_id=project_id, book_id=book_id)
+    if base_book_baseline_id is None:
+        if arcs:
+            raise CommandPreconditionError(
+                "An initial Book workspace cannot have existing Story Arcs."
+            )
+        return 0
+    unfinished = [arc for arc in arcs if arc.lifecycle_status != "completed"]
+    if len(unfinished) > 1:
+        raise CommandPreconditionError(
+            "Book topology authority contains multiple unfinished Story Arcs."
+        )
+    if unfinished:
+        return unfinished[0].ordinal - 1
+    return 0 if not arcs else arcs[-1].ordinal
+
+
+async def _load_book_arc_topology(
+    session: StoreSession,
+    *,
+    project_id: str,
+    book_id: str,
+    baseline_id: str | None,
+) -> BookArcTopology | None:
+    if baseline_id is None:
+        return None
+    baseline = await session.books.get_baseline(
+        project_id=project_id,
+        book_id=book_id,
+        baseline_id=baseline_id,
+    )
+    if baseline is None:
+        raise CommandPreconditionError("Book topology baseline does not exist.")
+    packed = await session.content.get_packed(
+        project_id=project_id,
+        ref_id=baseline.arc_topology_ref_id,
+    )
+    try:
+        topology = BookArcTopology.model_validate_json(packed.unpack_and_verify())
+    except ValidationError as error:
+        raise CommandPreconditionError(
+            "The current Book baseline contains an invalid Arc topology."
+        ) from error
+    if (
+        len(topology.arcs) != baseline.arc_contract_count
+        or baseline.final_arc_ordinal != len(topology.arcs)
+    ):
+        raise CommandPreconditionError(
+            "Book Arc topology content disagrees with routing metadata."
+        )
+    return topology
 
 
 class BookCommandService:
@@ -257,6 +371,7 @@ class BookCommandService:
                 candidate_titles_ref_id=None,
                 candidate_rolling_plan_ref_id=None,
                 candidate_completion_contract_ref_id=None,
+                candidate_arc_topology_ref_id=None,
                 readiness_status="continue",
                 stale_reason_code=None,
                 stale_at_ms=None,
@@ -456,6 +571,7 @@ class BookCommandService:
                 candidate_titles_ref_id=None,
                 candidate_rolling_plan_ref_id=None,
                 candidate_completion_contract_ref_id=None,
+                candidate_arc_topology_ref_id=None,
                 readiness_status=updated_state.readiness_status,
                 stale_reason_code=None,
                 stale_at_ms=None,
@@ -580,6 +696,7 @@ class BookCommandService:
                         workspace_snapshot.candidate_constraints_ref_id,
                         workspace_snapshot.candidate_rolling_plan_ref_id,
                         workspace_snapshot.candidate_completion_contract_ref_id,
+                        workspace_snapshot.candidate_arc_topology_ref_id,
                     )
                     if (
                         state.selected_title is None
@@ -590,9 +707,25 @@ class BookCommandService:
                         raise CommandPreconditionError(
                             "Book repair has no complete current candidate."
                         )
-                    direction_ref, constraints_ref, rolling_ref, completion_ref = cast(
-                        tuple[str, str, str, str],
+                    (
+                        direction_ref,
+                        constraints_ref,
+                        rolling_ref,
+                        completion_ref,
+                        topology_ref,
+                    ) = cast(
+                        tuple[str, str, str, str, str],
                         component_refs,
+                    )
+                    topology_effective_after = (
+                        await _topology_effective_after_arc_ordinal(
+                            session,
+                            project_id=request.project_id,
+                            book_id=request.book_id,
+                            base_book_baseline_id=(
+                                workspace_snapshot.base_book_baseline_id
+                            ),
+                        )
                     )
                     current = BookCandidatePack(
                         direction=(
@@ -628,11 +761,22 @@ class BookCommandService:
                                 )
                             ).unpack_and_verify()
                         ),
+                        arc_topology=BookArcTopology.model_validate_json(
+                            (
+                                await session.content.get_packed(
+                                    project_id=request.project_id,
+                                    ref_id=topology_ref,
+                                )
+                            ).unpack_and_verify()
+                        ),
                     )
                     candidate = _merge_book_repair(
                         current=current,
                         patch=patch,
                         contract=repair_contract,
+                        topology_effective_after_arc_ordinal=(
+                            topology_effective_after
+                        ),
                     )
                     prepared_repair = (
                         prepare_exact_text(candidate.direction),
@@ -645,11 +789,53 @@ class BookCommandService:
                         ),
                         prepare_canonical_json(candidate.rolling_plan),
                         prepare_canonical_json(candidate.completion_contract),
+                        prepare_canonical_json(candidate.arc_topology),
+                    )
+        elif task.task_kind == "book.revise":
+            proposal = BookSuccessorCandidateProposal.model_validate_json(raw)
+            candidate = None
+            async with self._command_bus.read_unit_of_work() as session:
+                workspace_snapshot = await session.books.get_workspace(
+                    project_id=request.project_id,
+                    book_id=request.book_id,
+                )
+                if workspace_snapshot is not None and _task_matches_workspace(
+                    task,
+                    workspace_snapshot,
+                    expected_lock_version=request.expected_workspace_lock_version,
+                ):
+                    current_topology = await _load_book_arc_topology(
+                        session,
+                        project_id=request.project_id,
+                        book_id=request.book_id,
+                        baseline_id=workspace_snapshot.base_book_baseline_id,
+                    )
+                    topology_effective_after = (
+                        await _topology_effective_after_arc_ordinal(
+                            session,
+                            project_id=request.project_id,
+                            book_id=request.book_id,
+                            base_book_baseline_id=(
+                                workspace_snapshot.base_book_baseline_id
+                            ),
+                        )
+                    )
+                    candidate = BookCandidatePack(
+                        direction=proposal.direction,
+                        constraints=proposal.constraints,
+                        selected_title=proposal.selected_title,
+                        rolling_plan=proposal.rolling_plan,
+                        completion_contract=proposal.completion_contract,
+                        arc_topology=_compose_book_arc_topology(
+                            current=current_topology,
+                            effective_after_arc_ordinal=topology_effective_after,
+                            suffix=proposal.arc_topology_suffix,
+                        ),
                     )
         else:
             candidate = BookCandidatePack.model_validate_json(raw)
         timestamp = self._now_ms()
-        ref_ids = [self._id_factory() for _ in range(5)]
+        ref_ids = [self._id_factory() for _ in range(6)]
         envelope = self._envelope(
             request=request,
             project_id=request.project_id,
@@ -731,6 +917,7 @@ class BookCommandService:
                 ),
                 prepare_canonical_json(candidate.rolling_plan),
                 prepare_canonical_json(candidate.completion_contract),
+                prepare_canonical_json(candidate.arc_topology),
             )
             repair_increment = 0
             if task.task_kind == "book.repair":
@@ -767,11 +954,17 @@ class BookCommandService:
                 ("book.direction", "text/plain; charset=utf-8", None, None),
                 ("book.constraints", "application/json", "book-constraints", 1),
                 ("book.title", "application/json", "book-title", 1),
-                ("book.rolling_plan", "application/json", "book-rolling-plan", 1),
+                ("book.rolling_plan", "application/json", "book-rolling-plan", 2),
                 (
                     "book.completion_contract",
                     "application/json",
                     "book-completion-contract",
+                    2,
+                ),
+                (
+                    "book.arc_topology",
+                    "application/json",
+                    "book-arc-topology",
                     1,
                 ),
             )
@@ -802,6 +995,7 @@ class BookCommandService:
                 candidate_titles_ref_id=refs[2].id,
                 candidate_rolling_plan_ref_id=refs[3].id,
                 candidate_completion_contract_ref_id=refs[4].id,
+                candidate_arc_topology_ref_id=refs[5].id,
                 readiness_status="ready",
                 semantic_repair_count=workspace.semantic_repair_count + repair_increment,
                 stale_reason_code=None,
@@ -876,6 +1070,7 @@ class BookCommandService:
             ),
             prepare_canonical_json(request.candidate.rolling_plan),
             prepare_canonical_json(request.candidate.completion_contract),
+            prepare_canonical_json(request.candidate.arc_topology),
         )
         ref_ids = [self._id_factory() for _ in prepared]
 
@@ -915,11 +1110,17 @@ class BookCommandService:
                 ("book.direction", "text/plain; charset=utf-8", None, None),
                 ("book.constraints", "application/json", "book-constraints", 1),
                 ("book.title", "application/json", "book-title", 1),
-                ("book.rolling_plan", "application/json", "book-rolling-plan", 1),
+                ("book.rolling_plan", "application/json", "book-rolling-plan", 2),
                 (
                     "book.completion_contract",
                     "application/json",
                     "book-completion-contract",
+                    2,
+                ),
+                (
+                    "book.arc_topology",
+                    "application/json",
+                    "book-arc-topology",
                     1,
                 ),
             )
@@ -950,6 +1151,7 @@ class BookCommandService:
                 candidate_titles_ref_id=refs[2].id,
                 candidate_rolling_plan_ref_id=refs[3].id,
                 candidate_completion_contract_ref_id=refs[4].id,
+                candidate_arc_topology_ref_id=refs[5].id,
                 readiness_status="ready",
                 stale_reason_code=None,
                 stale_at_ms=None,
@@ -1005,6 +1207,7 @@ class BookCommandService:
             workspace_snapshot.candidate_titles_ref_id,
             workspace_snapshot.candidate_rolling_plan_ref_id,
             workspace_snapshot.candidate_completion_contract_ref_id,
+            workspace_snapshot.candidate_arc_topology_ref_id,
         )
         if (
             workspace_snapshot.lock_version != request.expected_workspace_lock_version
@@ -1013,7 +1216,7 @@ class BookCommandService:
         ):
             raise CommandPreconditionError("Book workspace is not ready for review.")
         manifest = {
-            "schema": "book-review-manifest-v1",
+            "schema": "book-review-manifest-v2",
             "workspace_id": workspace_snapshot.id,
             "workspace_lock_version": workspace_snapshot.lock_version,
             "base_book_baseline_id": workspace_snapshot.base_book_baseline_id,
@@ -1023,6 +1226,7 @@ class BookCommandService:
             "titles_ref_id": required_refs[1],
             "rolling_plan_ref_id": required_refs[2],
             "completion_contract_ref_id": required_refs[3],
+            "arc_topology_ref_id": required_refs[4],
         }
         prepared_manifest = prepare_canonical_json(manifest)
         envelope = self._envelope(
@@ -1055,7 +1259,7 @@ class BookCommandService:
                 semantic_kind="book.review_manifest",
                 media_type="application/json",
                 schema_id="book-review-manifest",
-                schema_version=1,
+                schema_version=2,
                 ref_id=manifest_ref_id,
                 created_at_ms=timestamp,
             )
@@ -1074,6 +1278,7 @@ class BookCommandService:
                     titles_ref_id=cast(str, required_refs[1]),
                     rolling_plan_ref_id=cast(str, required_refs[2]),
                     completion_contract_ref_id=cast(str, required_refs[3]),
+                    arc_topology_ref_id=cast(str, required_refs[4]),
                     content_manifest_ref_id=manifest_ref.id,
                     content_fingerprint=prepared_manifest.sha256,
                     disposition="pending",
@@ -1366,6 +1571,10 @@ class BookCommandService:
                 project_id=request.project_id,
                 ref_id=submission_snapshot.completion_contract_ref_id,
             )
+            packed_topology = await read_session.content.get_packed(
+                project_id=request.project_id,
+                ref_id=submission_snapshot.arc_topology_ref_id,
+            )
             packed_discussion = await read_session.content.get_packed(
                 project_id=request.project_id,
                 ref_id=workspace_snapshot.discussion_state_ref_id,
@@ -1381,7 +1590,10 @@ class BookCommandService:
             or title_source not in {"recommended", "custom"}
         ):
             raise CommandPreconditionError("Reviewed title payload contains an invalid title.")
-        contract = CompletionContract.model_validate_json(packed_contract.unpack_and_verify())
+        CompletionContract.model_validate_json(packed_contract.unpack_and_verify())
+        topology = BookArcTopology.model_validate_json(
+            packed_topology.unpack_and_verify()
+        )
         discussion = BookDiscussionState.model_validate_json(
             packed_discussion.unpack_and_verify()
         ).model_copy(
@@ -1451,12 +1663,28 @@ class BookCommandService:
                 expected_version = current_version + 1
             if baseline_version != expected_version:
                 raise CommandPreconditionError("Book baseline version does not follow current head.")
-            committed_chapter_count = await session.chapters.count_committed_for_book(
-                book_id=request.book_id
+            topology_effective_after = await _topology_effective_after_arc_ordinal(
+                session,
+                project_id=request.project_id,
+                book_id=request.book_id,
+                base_book_baseline_id=request.expected_current_baseline_id,
             )
-            if contract.maximum_chapter_count < committed_chapter_count:
+            current_topology = await _load_book_arc_topology(
+                session,
+                project_id=request.project_id,
+                book_id=request.book_id,
+                baseline_id=request.expected_current_baseline_id,
+            )
+            expected_topology = _compose_book_arc_topology(
+                current=current_topology,
+                effective_after_arc_ordinal=topology_effective_after,
+                suffix=BookArcTopologySuffix(
+                    arcs=topology.arcs[topology_effective_after:]
+                ),
+            )
+            if topology != expected_topology:
                 raise CommandPreconditionError(
-                    "Book completion maximum cannot exclude committed Chapters."
+                    "Book successor topology changed the frozen historical prefix."
                 )
             await session.books.insert_approval(
                 BookApprovalRecord(
@@ -1487,8 +1715,12 @@ class BookCommandService:
                     constraints_ref_id=submission.constraints_ref_id,
                     rolling_plan_ref_id=submission.rolling_plan_ref_id,
                     completion_contract_ref_id=submission.completion_contract_ref_id,
-                    minimum_chapter_count=contract.minimum_chapter_count,
-                    maximum_chapter_count=contract.maximum_chapter_count,
+                    arc_topology_ref_id=submission.arc_topology_ref_id,
+                    arc_contract_count=len(topology.arcs),
+                    final_arc_ordinal=len(topology.arcs),
+                    topology_effective_after_arc_ordinal=(
+                        topology_effective_after
+                    ),
                     created_at_ms=timestamp,
                 )
             )

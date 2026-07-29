@@ -97,8 +97,6 @@ class BookInputBody(BaseModel):
 class ArcApprovalBody(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    closure_cumulative_chapter_count: int | None = Field(default=None, ge=1)
-
 
 class FeedbackBody(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -468,12 +466,6 @@ async def approve_arc(
         or arc.approval_gate_id is None
     ):
         raise CommandPreconditionError("The current Story Arc has no approval gate.")
-    checkpoint = (
-        body.closure_cumulative_chapter_count
-        or arc.closure_cumulative_chapter_count
-    )
-    if checkpoint is None:
-        raise CommandPreconditionError("The Story Arc has no closure checkpoint.")
     execution = await ArcCommandService(
         CommandBus(resources.database_engine)
     ).approve_and_commit(
@@ -484,7 +476,6 @@ async def approve_arc(
             submission_id=arc.pending_submission_id,
             review_id=arc.pending_review_id,
             approval_gate_id=arc.approval_gate_id,
-            closure_cumulative_chapter_count=checkpoint,
             expected_current_baseline_id=arc.current_baseline_id,
         ),
         idempotency_key=idempotency_key,
@@ -555,10 +546,10 @@ async def submit_feedback(
                 and creator_request.review_kind == "arc_closure"
                 else None
             ),
-            book_boundary_review_id=(
+            book_completion_review_id=(
                 creator_request.review_id
                 if creator_request is not None
-                and creator_request.review_kind == "book_boundary"
+                and creator_request.review_kind == "book_completion"
                 else None
             ),
         ),

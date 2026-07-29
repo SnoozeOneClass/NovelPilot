@@ -6,9 +6,20 @@ from typing import Any, Literal, cast
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.agents.contracts import ArcPlanProposal
 from app.db.uow import UnitOfWork
-from app.domain.book.contracts import BookDiscussionState, BookTranscript
+from app.domain.arc.outline import (
+    ArcOutlineProjectionError,
+    resolve_outline_entry,
+)
+from app.domain.book.contracts import (
+    BookArcTopology,
+    BookDiscussionState,
+    BookRollingPlan,
+    BookTranscript,
+)
 from app.domain.evaluation import CreatorInputNeed
+from app.store.arcs import ArcBaselineRecord, ArcRecord
 
 
 class ProjectListItem(BaseModel):
@@ -45,19 +56,34 @@ class RunStateView(BaseModel):
     finished_at_ms: int | None
 
 
+class BookArcContractView(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    ordinal: int
+    whole_book_role: str
+    core_goal: str
+    handoff_from_previous: str
+    exit_conditions: list[str]
+    is_final: bool
+    lifecycle_status: Literal["planned", "active", "completed"]
+
+
 class BookStateView(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     book_id: str
     lifecycle_status: str
     current_baseline_id: str | None
-    latest_boundary_review_id: str | None
+    latest_completion_review_id: str | None
     current_progress_handoff_id: str | None
     current_completion_id: str | None
     baseline_version: int | None
     approved_title: str | None
-    minimum_chapter_count: int | None
-    maximum_chapter_count: int | None
+    whole_book_scale_guidance: str | None
+    arc_contract_count: int | None
+    final_arc_ordinal: int | None
+    topology_effective_after_arc_ordinal: int | None
+    arc_topology: list[BookArcContractView]
     workspace_state: str
     workspace_lock_version: int
     semantic_repair_count: int
@@ -69,20 +95,50 @@ class BookStateView(BaseModel):
     pending_review_decision: str | None
 
 
+class ArcOutlineAssignmentView(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    title: str
+    core_event: str
+    hook: str
+    scenes: list[str]
+
+
+class ArcOutlineEntryView(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    book_ordinal: int
+    arc_ordinal: int
+    status: Literal["committed", "drafting", "planned"]
+    chapter_id: str | None
+    actual_chapter_title: str | None
+    assignment: ArcOutlineAssignmentView
+    source_arc_baseline_id: str
+    source_arc_baseline_version: int
+
+
+class ArcOutlineView(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    arc_id: str
+    arc_ordinal: int
+    current_baseline_id: str
+    current_baseline_version: int
+    entries: list[ArcOutlineEntryView]
+
+
 class ArcStateView(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     arc_id: str
     ordinal: int
-    purpose: str
+    is_final: bool
+    assigned_book_baseline_id: str | None
     lifecycle_status: str
     current_baseline_id: str | None
     latest_closure_review_id: str | None
     current_closure_id: str | None
     baseline_version: int | None
-    minimum_cumulative_chapter_count: int | None
-    recommended_closure_cumulative_chapter_count: int | None
-    maximum_cumulative_chapter_count: int | None
     closure_cumulative_chapter_count: int | None
     cumulative_committed_chapter_count: int
     arc_committed_chapter_count: int
@@ -97,6 +153,7 @@ class ArcStateView(BaseModel):
     approval_gate_state: str | None
     revision_origin: str
     automatic_correction_round: int | None
+    outline: ArcOutlineView | None
 
 
 class ChapterStateView(BaseModel):
@@ -127,7 +184,7 @@ AuthorityReviewKind = Literal[
     "arc_parent",
     "book_parent",
     "arc_closure",
-    "book_boundary",
+    "book_completion",
 ]
 
 
@@ -161,7 +218,7 @@ class FeedbackStateView(BaseModel):
     arc_parent_review_id: str | None
     book_parent_review_id: str | None
     arc_closure_review_id: str | None
-    book_boundary_review_id: str | None
+    book_completion_review_id: str | None
     resulting_correction_lineage_id: str | None
     dismiss_reason_code: str | None
     applied_command_id: str | None
@@ -294,6 +351,301 @@ class ProjectStateView(BaseModel):
     latest_event_sequence: int
     commands: list[ExecutableCommand]
     recent_tasks: list[AgentTaskStateView] = Field(default_factory=list)
+
+
+async def _load_arc_plan(
+    *,
+    store: Any,
+    project_id: str,
+    baseline: ArcBaselineRecord,
+) -> ArcPlanProposal:
+    try:
+        return ArcPlanProposal.model_validate_json(
+            (
+                await store.content.get_packed(
+                    project_id=project_id,
+                    ref_id=baseline.plan_ref_id,
+                )
+            ).unpack_and_verify()
+        )
+    except ValueError as exc:
+        raise ArcOutlineProjectionError(
+            "source_plan_invalid",
+            (
+                f"Arc baseline v{baseline.baseline_version} contains an invalid "
+                "typed plan."
+            ),
+        ) from exc
+
+
+async def project_arc_outline(
+    *,
+    store: Any,
+    project_id: str,
+    arc: ArcRecord,
+    current_baseline: ArcBaselineRecord,
+) -> ArcOutlineView:
+    baselines = await store.arcs.list_baselines(
+        project_id=project_id,
+        arc_id=arc.id,
+    )
+    baseline_by_id = {item.id: item for item in baselines}
+    lineage: list[ArcBaselineRecord] = []
+    cursor: ArcBaselineRecord | None = current_baseline
+    seen: set[str] = set()
+    while cursor is not None:
+        if cursor.id in seen:
+            raise ArcOutlineProjectionError(
+                "baseline_lineage_cycle",
+                "The current Arc baseline lineage contains a cycle.",
+            )
+        seen.add(cursor.id)
+        lineage.append(cursor)
+        if cursor.parent_baseline_id is None:
+            cursor = None
+        else:
+            cursor = baseline_by_id.get(cursor.parent_baseline_id)
+            if cursor is None:
+                raise ArcOutlineProjectionError(
+                    "baseline_parent_missing",
+                    "The current Arc baseline lineage lost an immutable parent.",
+                )
+    expected_versions = list(
+        range(current_baseline.baseline_version, 0, -1)
+    )
+    if [item.baseline_version for item in lineage] != expected_versions:
+        raise ArcOutlineProjectionError(
+            "baseline_versions_not_contiguous",
+            "The current Arc baseline lineage is not version-contiguous.",
+        )
+    lineage_ids = {item.id for item in lineage}
+    chronological_lineage = list(reversed(lineage))
+    plans: dict[str, ArcPlanProposal] = {}
+
+    async def plan_for(baseline: ArcBaselineRecord) -> ArcPlanProposal:
+        plan = plans.get(baseline.id)
+        if plan is None:
+            plan = await _load_arc_plan(
+                store=store,
+                project_id=project_id,
+                baseline=baseline,
+            )
+            plans[baseline.id] = plan
+        return plan
+
+    arc_book_ordinal_offset = (
+        chronological_lineage[0].planned_after_cumulative_chapter_count
+        - chronological_lineage[0].planned_after_arc_chapter_count
+    )
+    previous_baseline: ArcBaselineRecord | None = None
+    for baseline in chronological_lineage:
+        plan = await plan_for(baseline)
+        required_length = (
+            baseline.closure_cumulative_chapter_count
+            - baseline.planned_after_cumulative_chapter_count
+        )
+        if required_length < 0 or len(plan.chapter_outline) != required_length:
+            raise ArcOutlineProjectionError(
+                "outline_coverage_invalid",
+                (
+                    f"Arc baseline v{baseline.baseline_version} does not cover "
+                    "its frozen future interval."
+                ),
+            )
+        if (
+            baseline.planned_after_cumulative_chapter_count
+            - baseline.planned_after_arc_chapter_count
+            != arc_book_ordinal_offset
+        ):
+            raise ArcOutlineProjectionError(
+                "effective_point_coordinate_mismatch",
+                "Arc baseline effective points do not share one Book/Arc coordinate.",
+            )
+        if previous_baseline is not None and (
+            baseline.planned_after_cumulative_chapter_count
+            < previous_baseline.planned_after_cumulative_chapter_count
+            or baseline.planned_after_arc_chapter_count
+            < previous_baseline.planned_after_arc_chapter_count
+            or baseline.planned_after_cumulative_chapter_count
+            > previous_baseline.closure_cumulative_chapter_count
+        ):
+            raise ArcOutlineProjectionError(
+                "effective_point_not_continuous",
+                (
+                    f"Arc baseline v{baseline.baseline_version} begins outside "
+                    "the future interval of its parent."
+                ),
+            )
+        previous_baseline = baseline
+
+    current_plan = await plan_for(current_baseline)
+
+    chapters = await store.chapters.list_for_arc(
+        project_id=project_id,
+        arc_id=arc.id,
+    )
+    if [item.arc_ordinal for item in chapters] != list(
+        range(1, len(chapters) + 1)
+    ):
+        raise ArcOutlineProjectionError(
+            "chapter_arc_ordinal_gap",
+            "The Story Arc contains a duplicate or missing Chapter ordinal.",
+        )
+    if chapters:
+        if chapters[0].book_ordinal != arc_book_ordinal_offset + 1:
+            raise ArcOutlineProjectionError(
+                "chapter_book_origin_mismatch",
+                "The Story Arc Chapter sequence starts outside its frozen Book offset.",
+            )
+        expected_book_ordinals = list(
+            range(
+                chapters[0].book_ordinal,
+                chapters[0].book_ordinal + len(chapters),
+            )
+        )
+        if [item.book_ordinal for item in chapters] != expected_book_ordinals:
+            raise ArcOutlineProjectionError(
+                "chapter_book_ordinal_gap",
+                "The Story Arc Chapter identities are not Book-ordinal contiguous.",
+            )
+
+    committed_prefix = [
+        item
+        for item in chapters
+        if item.arc_ordinal
+        <= current_baseline.planned_after_arc_chapter_count
+    ]
+    if (
+        len(committed_prefix)
+        != current_baseline.planned_after_arc_chapter_count
+        or any(item.lifecycle_status != "committed" for item in committed_prefix)
+    ):
+        raise ArcOutlineProjectionError(
+            "current_effective_point_mismatch",
+            "The current Arc baseline effective point does not match committed history.",
+        )
+
+    projected: list[ArcOutlineEntryView] = []
+    chapter_by_arc_ordinal = {item.arc_ordinal: item for item in chapters}
+    for chapter in chapters:
+        source_baseline = baseline_by_id.get(chapter.outline_arc_baseline_id)
+        if source_baseline is None or source_baseline.id not in lineage_ids:
+            raise ArcOutlineProjectionError(
+                "chapter_source_not_in_current_lineage",
+                (
+                    f"Chapter {chapter.book_ordinal} references an Arc baseline "
+                    "outside the current lineage."
+                ),
+            )
+        source_plan = await plan_for(source_baseline)
+        resolved = resolve_outline_entry(
+            baseline=source_baseline,
+            plan=source_plan,
+            arc_ordinal=chapter.arc_ordinal,
+            book_ordinal=chapter.book_ordinal,
+        )
+        governing_baseline = next(
+            (
+                item
+                for item in reversed(chronological_lineage)
+                if item.planned_after_arc_chapter_count < chapter.arc_ordinal
+            ),
+            None,
+        )
+        if governing_baseline is None:
+            raise ArcOutlineProjectionError(
+                "chapter_has_no_governing_interval",
+                f"Chapter {chapter.book_ordinal} has no governing Arc interval.",
+            )
+        if source_baseline.id != governing_baseline.id:
+            raise ArcOutlineProjectionError(
+                "chapter_source_not_governing_interval",
+                (
+                    f"Chapter {chapter.book_ordinal} references Arc baseline "
+                    f"v{source_baseline.baseline_version}, but its governing "
+                    f"interval is v{governing_baseline.baseline_version}."
+                ),
+            )
+        actual_title = None
+        if chapter.lifecycle_status == "committed":
+            if chapter.current_baseline_id is None:
+                raise ArcOutlineProjectionError(
+                    "committed_chapter_baseline_missing",
+                    f"Committed Chapter {chapter.book_ordinal} has no baseline.",
+                )
+            chapter_baseline = await store.chapters.get_baseline(
+                project_id=project_id,
+                chapter_id=chapter.id,
+                baseline_id=chapter.current_baseline_id,
+            )
+            if chapter_baseline is None:
+                raise ArcOutlineProjectionError(
+                    "committed_chapter_baseline_missing",
+                    f"Committed Chapter {chapter.book_ordinal} lost its baseline.",
+                )
+            actual_title = chapter_baseline.chapter_title
+        projected.append(
+            ArcOutlineEntryView(
+                book_ordinal=resolved.book_ordinal,
+                arc_ordinal=resolved.arc_ordinal,
+                status=cast(
+                    Literal["committed", "drafting"],
+                    chapter.lifecycle_status,
+                ),
+                chapter_id=chapter.id,
+                actual_chapter_title=actual_title,
+                assignment=ArcOutlineAssignmentView.model_validate(
+                    resolved.assignment.model_dump(mode="json")
+                ),
+                source_arc_baseline_id=resolved.source_arc_baseline_id,
+                source_arc_baseline_version=(
+                    resolved.source_arc_baseline_version
+                ),
+            )
+        )
+
+    for offset, _assignment in enumerate(current_plan.chapter_outline):
+        arc_ordinal = (
+            current_baseline.planned_after_arc_chapter_count + offset + 1
+        )
+        if arc_ordinal in chapter_by_arc_ordinal:
+            continue
+        resolved = resolve_outline_entry(
+            baseline=current_baseline,
+            plan=current_plan,
+            arc_ordinal=arc_ordinal,
+        )
+        projected.append(
+            ArcOutlineEntryView(
+                book_ordinal=resolved.book_ordinal,
+                arc_ordinal=resolved.arc_ordinal,
+                status="planned",
+                chapter_id=None,
+                actual_chapter_title=None,
+                assignment=ArcOutlineAssignmentView.model_validate(
+                    resolved.assignment.model_dump(mode="json")
+                ),
+                source_arc_baseline_id=resolved.source_arc_baseline_id,
+                source_arc_baseline_version=(
+                    resolved.source_arc_baseline_version
+                ),
+            )
+        )
+    projected.sort(key=lambda item: item.arc_ordinal)
+    if [item.arc_ordinal for item in projected] != list(
+        range(1, len(projected) + 1)
+    ):
+        raise ArcOutlineProjectionError(
+            "coherent_outline_gap",
+            "The merged Arc outline is not one continuous ordinal sequence.",
+        )
+    return ArcOutlineView(
+        arc_id=arc.id,
+        arc_ordinal=arc.ordinal,
+        current_baseline_id=current_baseline.id,
+        current_baseline_version=current_baseline.baseline_version,
+        entries=projected,
+    )
 
 
 class ProjectStateQuery:
@@ -442,6 +794,63 @@ class ProjectStateQuery:
                     baseline_id=book.current_baseline_id,
                 )
             )
+            all_arcs = await store.arcs.list_for_book(
+                project_id=project_id,
+                book_id=book.id,
+            )
+            whole_book_scale_guidance: str | None = None
+            arc_topology_view: list[BookArcContractView] = []
+            if baseline is not None:
+                rolling_plan = BookRollingPlan.model_validate_json(
+                    (
+                        await store.content.get_packed(
+                            project_id=project_id,
+                            ref_id=baseline.rolling_plan_ref_id,
+                        )
+                    ).unpack_and_verify()
+                )
+                topology = BookArcTopology.model_validate_json(
+                    (
+                        await store.content.get_packed(
+                            project_id=project_id,
+                            ref_id=baseline.arc_topology_ref_id,
+                        )
+                    ).unpack_and_verify()
+                )
+                if (
+                    len(topology.arcs) != baseline.arc_contract_count
+                    or baseline.final_arc_ordinal
+                    != baseline.arc_contract_count
+                ):
+                    raise ValueError(
+                        "Book Arc topology content disagrees with routing metadata."
+                    )
+                arcs_by_ordinal = {item.ordinal: item for item in all_arcs}
+                whole_book_scale_guidance = (
+                    rolling_plan.whole_book_scale_guidance
+                )
+                arc_topology_view = [
+                    BookArcContractView(
+                        ordinal=ordinal,
+                        whole_book_role=contract.whole_book_role,
+                        core_goal=contract.core_goal,
+                        handoff_from_previous=contract.handoff_from_previous,
+                        exit_conditions=list(contract.exit_conditions),
+                        is_final=contract.is_final,
+                        lifecycle_status=(
+                            "planned"
+                            if ordinal not in arcs_by_ordinal
+                            else "completed"
+                            if arcs_by_ordinal[ordinal].lifecycle_status
+                            == "completed"
+                            else "active"
+                        ),
+                    )
+                    for ordinal, contract in enumerate(
+                        topology.arcs,
+                        start=1,
+                    )
+                ]
             book_submission = await store.books.find_pending_submission(
                 project_id=project_id,
                 book_id=book.id,
@@ -499,31 +908,21 @@ class ProjectStateQuery:
                     arc_view = ArcStateView(
                         arc_id=arc.id,
                         ordinal=arc.ordinal,
-                        purpose=arc.purpose,
+                        is_final=(
+                            baseline is not None
+                            and arc.ordinal == baseline.final_arc_ordinal
+                        ),
+                        assigned_book_baseline_id=(
+                            arc_workspace.book_baseline_id
+                            if arc_baseline is None
+                            else arc_baseline.book_baseline_id
+                        ),
                         lifecycle_status=arc.lifecycle_status,
                         current_baseline_id=arc.current_baseline_id,
                         latest_closure_review_id=arc.latest_closure_review_id,
                         current_closure_id=arc.current_closure_id,
                         baseline_version=(
                             None if arc_baseline is None else arc_baseline.baseline_version
-                        ),
-                        minimum_cumulative_chapter_count=(
-                            arc_workspace.minimum_cumulative_chapter_count
-                            if arc_baseline is None
-                            else arc_baseline.minimum_cumulative_chapter_count
-                        ),
-                        recommended_closure_cumulative_chapter_count=(
-                            arc_workspace.recommended_closure_cumulative_chapter_count
-                            if arc_baseline is None
-                            else (
-                                arc_baseline
-                                .recommended_closure_cumulative_chapter_count
-                            )
-                        ),
-                        maximum_cumulative_chapter_count=(
-                            arc_workspace.maximum_cumulative_chapter_count
-                            if arc_baseline is None
-                            else arc_baseline.maximum_cumulative_chapter_count
                         ),
                         closure_cumulative_chapter_count=(
                             arc_workspace.closure_cumulative_chapter_count
@@ -558,6 +957,16 @@ class ProjectStateQuery:
                         revision_origin=arc_workspace.revision_origin,
                         automatic_correction_round=(
                             arc_workspace.automatic_correction_round
+                        ),
+                        outline=(
+                            None
+                            if arc_baseline is None
+                            else await project_arc_outline(
+                                store=store,
+                                project_id=project_id,
+                                arc=arc,
+                                current_baseline=arc_baseline,
+                            )
                         ),
                     )
                     active_chapter = await store.chapters.get_non_idle_workspace_for_arc(
@@ -716,7 +1125,9 @@ class ProjectStateQuery:
                     arc_parent_review_id=item.arc_parent_review_id,
                     book_parent_review_id=item.book_parent_review_id,
                     arc_closure_review_id=item.arc_closure_review_id,
-                    book_boundary_review_id=item.book_boundary_review_id,
+                    book_completion_review_id=(
+                        item.book_completion_review_id
+                    ),
                     resulting_correction_lineage_id=(
                         item.resulting_correction_lineage_id
                     ),
@@ -771,17 +1182,26 @@ class ProjectStateQuery:
                     book_id=book.id,
                     lifecycle_status=book.lifecycle_status,
                     current_baseline_id=book.current_baseline_id,
-                    latest_boundary_review_id=book.latest_boundary_review_id,
+                    latest_completion_review_id=(
+                        book.latest_completion_review_id
+                    ),
                     current_progress_handoff_id=book.current_progress_handoff_id,
                     current_completion_id=book.current_completion_id,
                     baseline_version=None if baseline is None else baseline.baseline_version,
                     approved_title=None if baseline is None else baseline.approved_title,
-                    minimum_chapter_count=(
-                        None if baseline is None else baseline.minimum_chapter_count
+                    whole_book_scale_guidance=whole_book_scale_guidance,
+                    arc_contract_count=(
+                        None if baseline is None else baseline.arc_contract_count
                     ),
-                    maximum_chapter_count=(
-                        None if baseline is None else baseline.maximum_chapter_count
+                    final_arc_ordinal=(
+                        None if baseline is None else baseline.final_arc_ordinal
                     ),
+                    topology_effective_after_arc_ordinal=(
+                        None
+                        if baseline is None
+                        else baseline.topology_effective_after_arc_ordinal
+                    ),
+                    arc_topology=arc_topology_view,
                     workspace_state=workspace.state,
                     workspace_lock_version=workspace.lock_version,
                     semantic_repair_count=workspace.semantic_repair_count,
@@ -854,18 +1274,18 @@ async def _creator_input_request(
         )
         if closure_review is not None:
             candidates.append(("arc_closure", "arc", closure_review))
-    boundary_review = await store.book_boundary_reviews.get_latest_for_book(
+    completion_review = await store.book_completion_reviews.get_latest_for_book(
         project_id=project_id,
         book_id=book_id,
     )
-    if boundary_review is not None:
-        candidates.append(("book_boundary", "book", boundary_review))
+    if completion_review is not None:
+        candidates.append(("book_completion", "book", completion_review))
 
     initial_reasons: dict[AuthorityReviewKind, str] = {
         "arc_parent": "arc_parent_review_needs_user",
         "book_parent": "book_parent_review_needs_user",
         "arc_closure": "arc_closure_needs_user",
-        "book_boundary": "book_boundary_needs_user",
+        "book_completion": "book_completion_needs_user",
     }
     matching: list[
         tuple[AuthorityReviewKind, Literal["book", "arc"], object]

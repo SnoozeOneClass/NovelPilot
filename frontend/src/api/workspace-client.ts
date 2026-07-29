@@ -104,17 +104,10 @@ export const workspaceApi = {
   ),
   approveBook: (projectId: string, idempotencyKey: string) =>
     postMutation(`/api/projects/${encodeURIComponent(projectId)}/book/approve`, idempotencyKey),
-  approveArc: (
-    projectId: string,
-    closureCumulativeChapterCount: number | null,
-    idempotencyKey: string
-  ) => postMutation(
+  approveArc: (projectId: string, idempotencyKey: string) => postMutation(
     `/api/projects/${encodeURIComponent(projectId)}/arc/approve`,
     idempotencyKey,
-    {
-      closure_cumulative_chapter_count:
-        closureCumulativeChapterCount
-    }
+    {}
   ),
   submitFeedback: (
     projectId: string,

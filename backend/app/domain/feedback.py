@@ -60,7 +60,7 @@ class QueueFeedbackRequest(BaseModel):
     arc_parent_review_id: str | None = None
     book_parent_review_id: str | None = None
     arc_closure_review_id: str | None = None
-    book_boundary_review_id: str | None = None
+    book_completion_review_id: str | None = None
 
     @field_validator("project_id", "content", "book_id")
     @classmethod
@@ -92,7 +92,7 @@ class QueueFeedbackRequest(BaseModel):
                 self.arc_parent_review_id,
                 self.book_parent_review_id,
                 self.arc_closure_review_id,
-                self.book_boundary_review_id,
+                self.book_completion_review_id,
             )
         )
         if self.feedback_kind == "unsolicited" and review_count != 0:
@@ -333,7 +333,7 @@ class FeedbackCommandService:
                     arc_parent_review_id=request.arc_parent_review_id,
                     book_parent_review_id=request.book_parent_review_id,
                     arc_closure_review_id=request.arc_closure_review_id,
-                    book_boundary_review_id=request.book_boundary_review_id,
+                    book_completion_review_id=request.book_completion_review_id,
                     resulting_correction_lineage_id=None,
                     dismiss_reason_code=None,
                     applied_command_id=None,
@@ -426,7 +426,7 @@ class FeedbackCommandService:
                     arc_parent_review_id=None,
                     book_parent_review_id=None,
                     arc_closure_review_id=None,
-                    book_boundary_review_id=None,
+                    book_completion_review_id=None,
                     resulting_correction_lineage_id=None,
                     dismiss_reason_code=None,
                     applied_command_id=None,
@@ -832,13 +832,13 @@ class FeedbackCommandService:
             expected_layer = "book"
             initial_wait_reason = "book_parent_review_needs_user"
         else:
-            assert request.book_boundary_review_id is not None
-            review = await session.book_boundary_reviews.get(
+            assert request.book_completion_review_id is not None
+            review = await session.book_completion_reviews.get(
                 project_id=request.project_id,
-                review_id=request.book_boundary_review_id,
+                review_id=request.book_completion_review_id,
             )
             expected_layer = "book"
-            initial_wait_reason = "book_boundary_needs_user"
+            initial_wait_reason = "book_completion_needs_user"
         expected_wait_reason = FeedbackCommandService._authority_wait_reason(
             review=review,
             initial_wait_reason=initial_wait_reason,
@@ -1027,18 +1027,18 @@ class FeedbackCommandService:
             )
             initial_wait_reason = "arc_closure_needs_user"
         else:
-            assert feedback.book_boundary_review_id is not None
+            assert feedback.book_completion_review_id is not None
             review = cast(
                 object | None,
-                await session.book_boundary_reviews.get(
+                await session.book_completion_reviews.get(
                     project_id=feedback.project_id,
-                    review_id=feedback.book_boundary_review_id,
+                    review_id=feedback.book_completion_review_id,
                 ),
             )
-            latest_book_boundary = (
+            latest_book_completion = (
                 None
                 if feedback.book_id is None
-                else await session.book_boundary_reviews.get_latest_for_book(
+                else await session.book_completion_reviews.get_latest_for_book(
                     project_id=feedback.project_id,
                     book_id=feedback.book_id,
                 )
@@ -1053,10 +1053,11 @@ class FeedbackCommandService:
                 )
             )
             is_latest = (
-                latest_book_boundary is not None
-                and latest_book_boundary.id == feedback.book_boundary_review_id
+                latest_book_completion is not None
+                and latest_book_completion.id
+                == feedback.book_completion_review_id
             )
-            initial_wait_reason = "book_boundary_needs_user"
+            initial_wait_reason = "book_completion_needs_user"
         expected_wait_reason = FeedbackCommandService._authority_wait_reason(
             review=review,
             initial_wait_reason=initial_wait_reason,
@@ -1139,6 +1140,7 @@ class FeedbackCommandService:
             candidate_titles_ref_id=None,
             candidate_rolling_plan_ref_id=None,
             candidate_completion_contract_ref_id=None,
+            candidate_arc_topology_ref_id=None,
             guidance_ref_id=feedback.content_ref_id,
             semantic_repair_count=0,
             stale_reason_code=None,
@@ -1214,11 +1216,6 @@ class FeedbackCommandService:
             canon_baseline_id=canon_baseline_id,
             plan_ref_id=(
                 None if arc.current_baseline_id is None else workspace.plan_ref_id
-            ),
-            recommended_closure_cumulative_chapter_count=(
-                None
-                if arc.current_baseline_id is None
-                else workspace.recommended_closure_cumulative_chapter_count
             ),
             guidance_ref_id=feedback.content_ref_id,
             semantic_repair_count=0,

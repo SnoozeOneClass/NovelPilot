@@ -26,7 +26,7 @@ class TerminalArcRecord:
     arc_id: str
     arc_baseline_id: str
     arc_closure_id: str | None
-    purpose: str
+    ordinal: int
     lifecycle_status: str
 
 
@@ -46,7 +46,7 @@ class BookCompletionRecord:
     completion_version: int
     parent_completion_id: str | None
     book_baseline_id: str
-    book_boundary_review_id: str
+    book_completion_review_id: str
     arc_closure_id: str
     terminal_arc_id: str
     terminal_arc_baseline_id: str
@@ -73,7 +73,7 @@ class CompletionRepository:
                     story_arcs.c.id,
                     story_arcs.c.current_baseline_id,
                     story_arcs.c.current_closure_id,
-                    story_arcs.c.purpose,
+                    story_arcs.c.ordinal,
                     story_arcs.c.lifecycle_status,
                 )
                 .where(
@@ -90,7 +90,7 @@ class CompletionRepository:
             arc_id=cast(str, row["id"]),
             arc_baseline_id=cast(str, row["current_baseline_id"]),
             arc_closure_id=cast(str | None, row["current_closure_id"]),
-            purpose=cast(str, row["purpose"]),
+            ordinal=cast(int, row["ordinal"]),
             lifecycle_status=cast(str, row["lifecycle_status"]),
         )
 
