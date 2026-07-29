@@ -268,6 +268,25 @@ class AgentTaskPlan(BaseModel):
         }[self.scope_layer]
         if (self.arc_id is not None, self.chapter_id is not None) != expected_scope:
             raise ValueError("Scope IDs do not match scope_layer.")
+        baseline_shape_is_valid = (
+            (
+                self.scope_layer == "book"
+                and self.arc_baseline_id is None
+                and self.chapter_baseline_id is None
+            )
+            or (
+                self.scope_layer == "arc"
+                and self.book_baseline_id is not None
+                and self.chapter_baseline_id is None
+            )
+            or (
+                self.scope_layer == "chapter"
+                and self.book_baseline_id is not None
+                and self.arc_baseline_id is not None
+            )
+        )
+        if not baseline_shape_is_valid:
+            raise ValueError("Baseline IDs do not match scope_layer.")
         if (self.rubric_id is None) != (self.rubric_version is None):
             raise ValueError("rubric_id and rubric_version must be present together.")
         if (self.evaluation_strategy_id is None) != (

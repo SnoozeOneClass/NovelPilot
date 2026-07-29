@@ -6,6 +6,7 @@ import re
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal
 from unittest.mock import AsyncMock
 
 import pytest
@@ -64,6 +65,7 @@ from app.runtime.context import ContextFactError
 from app.runtime.driver import (
     DomainRunDriver,
     HarnessInvariantError,
+    _book_parent_review_instruction,
     _normalize_delivery_failure,
 )
 from app.runtime.engine import RunEngine
@@ -121,6 +123,91 @@ class DeterministicNovelResolver:
             budget=budget,
         )
         return ResolvedModelBinding(model=model, budget=budget, adapter_key="offline-function")
+
+
+@pytest.mark.parametrize(
+    (
+        "lineage_origin",
+        "automatic_round",
+        "source_parent_review_id",
+        "source_feedback_id",
+    ),
+    (
+        ("review_initiated", 0, None, None),
+        ("user_initiated", 0, "book-parent-review", "creator-feedback"),
+        ("review_initiated", 1, "book-parent-review", None),
+    ),
+    ids=("open-request", "user-feedback-successor", "automatic-round-one-successor"),
+)
+def test_book_parent_review_instruction_freezes_only_book_scope(
+    lineage_origin: Literal["review_initiated", "user_initiated"],
+    automatic_round: Literal[0, 1],
+    source_parent_review_id: str | None,
+    source_feedback_id: str | None,
+) -> None:
+    instruction = _book_parent_review_instruction(
+        book_id="book",
+        workspace_lock_version=7,
+        book_baseline_id="book-baseline",
+        canon_baseline_id="canon-baseline",
+        correction_lineage_id="book-parent-lineage",
+        correction_lineage_origin=lineage_origin,
+        automatic_correction_round=automatic_round,
+        source_arc_book_request_id="arc-book-request",
+        source_book_parent_review_id=source_parent_review_id,
+        source_feedback_id=source_feedback_id,
+    )
+
+    assert instruction.arc_id is None
+    assert instruction.arc_baseline_id is None
+    assert instruction.chapter_id is None
+    assert instruction.chapter_baseline_id is None
+    assert instruction.source_arc_book_request_id == "arc-book-request"
+    assert instruction.source_book_parent_review_id == source_parent_review_id
+    assert instruction.source_feedback_id == source_feedback_id
+
+    profile = ProfileSnapshot.create(
+        profile_id="book-parent-profile",
+        display_name="Book Parent Profile",
+        api_family="openai_responses",
+        base_url="https://provider.example/v1",
+        model_id="opaque-model",
+        capabilities=ProfileCapabilities(
+            text_streaming=True,
+            native_json_schema=True,
+        ),
+    )
+    plan = DEFAULT_TASK_REGISTRY.freeze_plan(
+        task_id=f"book-parent-{automatic_round}-{lineage_origin}",
+        project_id="project",
+        run_id="run",
+        task_key=f"book-parent:{automatic_round}:{lineage_origin}",
+        action_key="evaluate.book_parent_contract:book",
+        role=instruction.role,
+        task_kind=instruction.task_kind,
+        contract_version=1,
+        book_id=instruction.book_id,
+        canon_baseline_id="canon-baseline",
+        semantic_goal="Review one Arc-to-Book request at Book authority.",
+        prompt="Evaluate the frozen Arc-to-Book evidence.",
+        context_manifest={"source_arc_book_request_id": "arc-book-request"},
+        profile_snapshot=profile,
+        workspace_lock_version=instruction.workspace_lock_version,
+        book_baseline_id=instruction.book_baseline_id,
+        arc_baseline_id=instruction.arc_baseline_id,
+        chapter_baseline_id=instruction.chapter_baseline_id,
+        correction_lineage_id=instruction.correction_lineage_id,
+        correction_lineage_origin=instruction.correction_lineage_origin,
+        automatic_correction_round=instruction.automatic_correction_round,
+        source_book_parent_review_id=instruction.source_book_parent_review_id,
+        source_arc_book_request_id=instruction.source_arc_book_request_id,
+        source_feedback_id=instruction.source_feedback_id,
+    )
+
+    assert plan.scope_layer == "book"
+    assert plan.book_baseline_id == "book-baseline"
+    assert plan.arc_baseline_id is None
+    assert plan.chapter_baseline_id is None
 
 
 def test_delivery_validation_failure_diagnostics_do_not_copy_model_input() -> None:

@@ -9,6 +9,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from app.agents.contracts import (
     ACTIVATION_TIMEOUT_MS,
+    AgentRole,
     ArcChapterOutlineEntry,
     BookDiscussionContinue,
     BookDiscussionReady,
@@ -101,6 +102,88 @@ def test_registry_freezes_s1_output_and_t1_without_domain_tools() -> None:
         READ_TIMEOUT_MS,
         ACTIVATION_TIMEOUT_MS,
     )
+
+
+@pytest.mark.parametrize(
+    ("role", "task_kind", "scope_kwargs"),
+    (
+        (
+            "evaluator",
+            "evaluate.book",
+            {"book_id": "book-a", "arc_baseline_id": "arc-baseline-a"},
+        ),
+        (
+            "evaluator",
+            "evaluate.book",
+            {"book_id": "book-a", "chapter_baseline_id": "chapter-baseline-a"},
+        ),
+        (
+            "arc_planner",
+            "arc.plan",
+            {"book_id": "book-a", "arc_id": "arc-a"},
+        ),
+        (
+            "arc_planner",
+            "arc.plan",
+            {
+                "book_id": "book-a",
+                "arc_id": "arc-a",
+                "book_baseline_id": "book-baseline-a",
+                "chapter_baseline_id": "chapter-baseline-a",
+            },
+        ),
+        (
+            "chapter_writer",
+            "chapter.plan",
+            {
+                "book_id": "book-a",
+                "arc_id": "arc-a",
+                "chapter_id": "chapter-a",
+                "arc_baseline_id": "arc-baseline-a",
+            },
+        ),
+        (
+            "chapter_writer",
+            "chapter.plan",
+            {
+                "book_id": "book-a",
+                "arc_id": "arc-a",
+                "chapter_id": "chapter-a",
+                "book_baseline_id": "book-baseline-a",
+            },
+        ),
+    ),
+    ids=(
+        "book-with-arc-baseline",
+        "book-with-chapter-baseline",
+        "arc-without-book-baseline",
+        "arc-with-chapter-baseline",
+        "chapter-without-book-baseline",
+        "chapter-without-arc-baseline",
+    ),
+)
+def test_registry_rejects_baseline_ids_outside_the_owning_scope(
+    role: AgentRole,
+    task_kind: str,
+    scope_kwargs: dict[str, str],
+) -> None:
+    with pytest.raises(ValidationError, match="Baseline IDs do not match scope_layer"):
+        DEFAULT_TASK_REGISTRY.freeze_plan(
+            task_id=f"invalid-{task_kind}",
+            project_id="project-a",
+            run_id="run-a",
+            task_key=f"invalid:{task_kind}",
+            action_key=task_kind,
+            role=role,
+            task_kind=task_kind,
+            contract_version=1,
+            canon_baseline_id="canon-a",
+            semantic_goal="Exercise the frozen scope contract.",
+            prompt="Return the requested semantic result.",
+            context_manifest={"schema_id": "scope-contract-test"},
+            profile_snapshot=_profile(),
+            **scope_kwargs,
+        )
 
 
 def test_role_agent_has_no_function_tools_and_no_shared_history() -> None:
@@ -206,11 +289,24 @@ def test_cross_field_semantic_rules_are_present_in_model_visible_contracts() -> 
         arc_properties["repair_scope"]["description"]
     )
     assert "repair_scope contains at least one" in arc_evaluation.task_instructions
+    assert "required conclusion must be no stronger than the observable evidence" in (
+        arc_evaluation.task_instructions
+    )
+    assert arc_evaluation.output_schema_version == 3
+    assert arc_evaluation.evaluation_strategy_version == 4
+    assert arc_evaluation.rubric_id == "arc-candidate-rubric-v4"
 
     chapter_properties = chapter_evaluation.output_schema["properties"]
     assert "escalation_target" not in chapter_properties
     assert "escalate_to_arc" in chapter_properties["decision"]["description"]
     assert "Never judge or route directly to Book" in chapter_evaluation.task_instructions
+    assert "First distinguish candidate execution failure from plan failure" in (
+        chapter_evaluation.task_instructions
+    )
+    assert "Do not repair an unsupported claim merely by weakening" in (
+        chapter_evaluation.task_instructions
+    )
+    assert "new assignment-fulfillment issue" in chapter_evaluation.task_instructions
 
 
 def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
@@ -318,8 +414,8 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
     )
     assert "Harness derives" in chapter_evaluation.task_instructions
     assert chapter_evaluation.output_schema_version == 4
-    assert chapter_evaluation.evaluation_strategy_version == 4
-    assert chapter_evaluation.rubric_id == "chapter-candidate-rubric-v5"
+    assert chapter_evaluation.evaluation_strategy_version == 5
+    assert chapter_evaluation.rubric_id == "chapter-candidate-rubric-v6"
     assert chapter_evaluation.context_policy_id == "chapter-evaluator-context-v4"
 
     chapter_repair_evaluation = DEFAULT_TASK_REGISTRY.get(
@@ -331,8 +427,8 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
         "verify_repair.chapter"
     )
     assert chapter_repair_evaluation.output_schema_version == 4
-    assert chapter_repair_evaluation.evaluation_strategy_version == 4
-    assert chapter_repair_evaluation.rubric_id == "chapter-repair-rubric-v5"
+    assert chapter_repair_evaluation.evaluation_strategy_version == 5
+    assert chapter_repair_evaluation.rubric_id == "chapter-repair-rubric-v6"
     assert (
         chapter_repair_evaluation.context_policy_id
         == "chapter-repair-verification-context-v4"
@@ -342,6 +438,9 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
         "local_repair",
         "escalate_to_arc",
     }
+    assert "new assignment-fulfillment issue" in (
+        chapter_repair_evaluation.task_instructions
+    )
 
     chapter_plan_repair = DEFAULT_TASK_REGISTRY.get(
         role="chapter_writer",
@@ -351,6 +450,24 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
     assert chapter_plan_repair.output_model is ChapterPlanProposal
     assert "complete replacement" in chapter_plan_repair.task_instructions
     assert "invalidates and regenerates" in chapter_plan_repair.task_instructions
+    assert "Do not weaken or abandon the assignment" in (
+        chapter_plan_repair.task_instructions
+    )
+    chapter_prose_repair = DEFAULT_TASK_REGISTRY.get(
+        role="chapter_writer",
+        task_kind="chapter.repair.prose",
+        contract_version=1,
+    )
+    assert "instead of merely weakening" in chapter_prose_repair.task_instructions
+
+    arc_repair_evaluation = DEFAULT_TASK_REGISTRY.get(
+        role="evaluator",
+        task_kind="verify_repair.arc",
+        contract_version=1,
+    )
+    assert arc_repair_evaluation.output_schema_version == 3
+    assert arc_repair_evaluation.evaluation_strategy_version == 4
+    assert arc_repair_evaluation.rubric_id == "arc-repair-rubric-v5"
 
 
 def test_local_repair_patch_contracts_reject_empty_and_duplicate_changes() -> None:
@@ -481,6 +598,7 @@ def test_arc_contract_exposes_complete_semantic_chapter_outline() -> None:
     assert "target_chapter_count" not in properties
     assert "complete ordered chapter_outline" in definition.task_instructions
     assert "Harness derives the closure checkpoint" in definition.task_instructions
+    assert "do not assign a categorical conclusion" in definition.task_instructions
     outline_item = definition.output_schema["$defs"]["ArcChapterOutlineEntry"]
     assert set(outline_item["properties"]) == {
         "title",

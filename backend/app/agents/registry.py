@@ -74,14 +74,20 @@ ARC_EVALUATION_CONTRACT = (
 CHAPTER_EVALUATION_CONTRACT = (
     "Every blocking issue must name a natural-language semantic subject and a unique non-empty "
     "affected_components set. The Harness derives local repair authorization from the union; "
-    "do not return a separate repair scope. Use plan as the only affected component when the "
-    "mutable Chapter plan itself is infeasible but can be replaced under the same frozen Arc "
-    "and Canon; the Harness will invalidate and regenerate all downstream Chapter components. "
-    "During verify_repair.chapter, mark recurrence='persists_after_authorized_repair' only when "
-    "the same semantic issue remains after its authorized correction; otherwise use 'new'. "
-    "Use escalate_to_arc only for a concrete evidence-bound concern that the immediate parent "
-    "Arc cannot remain applicable. Chapter evaluation cannot create a user wait. Never judge "
-    "or route directly to Book. The Harness owns approval, routing, IDs, and state changes."
+    "do not return a separate repair scope. First distinguish candidate execution failure from "
+    "plan failure and parent-assignment infeasibility. Use non-plan components when the current "
+    "plan can still fulfill the assigned Arc function; use plan as the only affected component "
+    "when the mutable Chapter plan fails to schedule sufficient evidence but can be replaced "
+    "under the same frozen Arc and Canon. The Harness then invalidates and regenerates all "
+    "downstream Chapter components. Use escalate_to_arc only for a concrete evidence-bound "
+    "concern that the frozen Arc assignment itself cannot be executed under its prohibitions, "
+    "Canon, or committed facts; report the concern without judging or replacing the Arc. During "
+    "verify_repair.chapter, mark recurrence='persists_after_authorized_repair' only when the "
+    "same semantic defect remains. If an unsupported claim was removed but the repair instead "
+    "left the assigned Arc function unfulfilled, report a new assignment-fulfillment issue with "
+    "recurrence='new', then select component repair, plan-only repair, or Arc review using the "
+    "same boundary. Chapter evaluation cannot create a user wait. Never judge or route directly "
+    "to Book. The Harness owns approval, routing, IDs, and state changes."
 )
 
 BOOK_CANDIDATE_RUBRIC = (
@@ -100,10 +106,15 @@ ARC_CANDIDATE_RUBRIC = (
     "observable. "
     "Review the complete current-Arc Chapter outline as a causal sequence: required setup "
     "must precede payoff, evidence must be scheduled before conclusions, each Chapter load "
-    "must be feasible, and the sequence must be capable of reaching closure. Treat outline "
-    "entries as strong semantic assignments, not exact wording or field-copy protocols. The "
-    "Arc chooses the complete remaining outline; the Harness derives its closure checkpoint "
-    "from the frozen effective count plus outline length."
+    "must be feasible, and the sequence must be capable of reaching closure. For every "
+    "confirmation, exclusion of alternatives, culpability judgment, or causal closure assigned "
+    "to a Chapter, the required conclusion must be no stronger than the observable evidence "
+    "that the same entry schedules under the Arc prohibitions and Canon. Reject an outline whose "
+    "core event requires a categorical conclusion while its scenes can establish only "
+    "compatibility or likelihood, or whose prohibitions make the required verification "
+    "impossible. Treat outline entries as strong semantic assignments, not exact wording or "
+    "field-copy protocols. The Arc chooses the complete remaining outline; the Harness derives "
+    "its closure checkpoint from the frozen effective count plus outline length."
 )
 CHAPTER_CANDIDATE_RUBRIC = (
     "Apply a minimum completion gate to the complete Chapter candidate against its frozen goal, "
@@ -115,15 +126,21 @@ CHAPTER_CANDIDATE_RUBRIC = (
     "statement that a character has not recorded an event for twelve years is admissible when "
     "the scene establishes it and committed history contains no affirmative record of that "
     "event; history need not separately prove the non-recording. Require stronger support only "
-    "for a claim that changes an upper contract, closes a core mystery, assigns culpability, or "
-    "contradicts an explicitly uncertain governing fact. Report only blocking issues. If the "
-    "mutable Chapter plan is infeasible but the same Arc and Canon remain applicable, authorize "
-    "plan-only local repair. Evaluate semantic fulfillment of the assigned Arc outline entry: "
-    "allow title changes, scene regrouping, equivalent hooks, and locally better execution "
-    "that preserves the same macro function. Reject a current candidate that abandons, reverses, "
-    "prematurely consumes, or skips its assignment, and repair that candidate locally. Question "
-    "the Arc only when already committed facts make its current or future assignment infeasible, "
-    "and never judge Book."
+    "for a claim that changes an upper contract, closes a core mystery, assigns culpability, "
+    "excludes viable alternatives, or contradicts an explicitly uncertain governing fact. "
+    "Report only blocking issues. Evaluate semantic fulfillment of the assigned Arc outline "
+    "entry while allowing title changes, scene regrouping, equivalent hooks, and locally better "
+    "execution that preserves the same macro function. Do not repair an unsupported claim merely "
+    "by weakening a confirmation or exclusion that the frozen assignment requires. If the "
+    "current Chapter plan already schedules sufficient obtainable evidence, repair only the "
+    "candidate components that failed to realize it. If the plan itself does not schedule enough "
+    "evidence but can be replaced under the same Arc and Canon, authorize plan-only local repair. "
+    "If the frozen assignment requires a conclusion that cannot be supported under the Arc "
+    "prohibitions, Canon, or committed facts, submit an evidence-bound concern to Arc authority "
+    "instead of pretending Chapter can repair or judge the Arc. Reject a current candidate that "
+    "abandons, reverses, prematurely consumes, or skips its assignment. During repair "
+    "verification, an eliminated overclaim followed by an unfulfilled assignment is a new "
+    "assignment-fulfillment issue, not persistence of the original overclaim. Never judge Book."
 )
 ARC_PARENT_REVIEW_RUBRIC = (
     "Review one evidence-bound Chapter-to-Arc request against the current Arc baseline and "
@@ -593,7 +610,7 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "harness_route_commands",
                 "unrelated_execution_evidence",
             ),
-            rubric_id="arc-candidate-rubric-v3",
+            rubric_id="arc-candidate-rubric-v4",
             rubric_text=ARC_CANDIDATE_RUBRIC,
             deterministic_prechecks=(
                 "arc_workspace_version_current",
@@ -608,7 +625,7 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "needs_user",
             ),
             output_model=ArcEvaluation,
-            strategy_version=3,
+            strategy_version=4,
             output_schema_version=3,
         ),
         _strategy(
@@ -629,7 +646,7 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "unrelated_future_secrets",
                 "harness_storage_protocol",
             ),
-            rubric_id="chapter-candidate-rubric-v5",
+            rubric_id="chapter-candidate-rubric-v6",
             rubric_text=CHAPTER_CANDIDATE_RUBRIC,
             deterministic_prechecks=(
                 "frozen_submission_loaded",
@@ -642,7 +659,7 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "escalate_to_arc",
             ),
             output_model=LayerEvaluationResult,
-            strategy_version=4,
+            strategy_version=5,
             output_schema_version=4,
         ),
         _strategy(
@@ -844,10 +861,10 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                     "harness_route_commands",
                 ),
                 rubric_id=(
-                    "chapter-repair-rubric-v5"
+                    "chapter-repair-rubric-v6"
                     if layer == "chapter"
                     else (
-                        "arc-repair-rubric-v4"
+                        "arc-repair-rubric-v5"
                         if layer == "arc"
                         else "book-repair-rubric-v3"
                     )
@@ -878,7 +895,7 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                     else ArcEvaluation if layer == "arc" else LayerEvaluationResult
                 ),
                 strategy_version=(
-                    4 if layer == "chapter" else 3 if layer == "arc" else 2
+                    5 if layer == "chapter" else 4 if layer == "arc" else 2
                 ),
                 output_schema_version=(
                     4 if layer == "chapter" else 3 if layer == "arc" else 2
@@ -966,8 +983,12 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
                     "hook, and scenes. The Harness derives the closure checkpoint from the "
                     "approved outline length and owns ordinals and identities. Expand the "
                     "assigned Book contract semantically; do not copy its wording or redefine "
-                    "its whole-book role. The outline is a strong semantic plan, not an exact "
-                    "wording protocol.",
+                    "its whole-book role. When an entry requires confirmation, exclusion, "
+                    "culpability, or causal closure, schedule observable evidence strong enough "
+                    "for that conclusion without violating the Arc prohibitions or Canon; do not "
+                    "assign a categorical conclusion to scenes that establish only compatibility "
+                    "or likelihood. The outline is a strong semantic plan, not an exact wording "
+                    "protocol.",
                 ),
                 (
                     "arc.revise",
@@ -976,7 +997,9 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
                     "complete remaining future chapter_outline from the frozen "
                     "effective point through semantic closure, without copying historical "
                     "prefixes, ordinals, IDs, or baseline versions. The Harness derives the "
-                    "new closure checkpoint from the effective count plus outline length.",
+                    "new closure checkpoint from the effective count plus outline length. Every "
+                    "required confirmation or exclusion must have sufficient obtainable evidence "
+                    "scheduled in the same entry under the revised Arc prohibitions and Canon.",
                 ),
             )
         ],
@@ -992,8 +1015,11 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
                 "Arc components; the Harness preserves them exactly. Every returned replacement "
                 "must actually differ from the current component; an unchanged replacement is "
                 "rejected as a no-op. Replacing chapter_outline replaces the complete mutable "
-                "future interval; the Harness derives the closure checkpoint from its length. Do not "
-                "invent storage IDs, approval state, routes, or commands."
+                "future interval; the Harness derives the closure checkpoint from its length. "
+                "When repairing closure_signals, prohibitions, or chapter_outline, keep every "
+                "required conclusion no stronger than the observable evidence its Chapter entry "
+                "can obtain without violating the other Arc components. Do not invent storage "
+                "IDs, approval state, routes, or commands."
             ),
             output_schema_version=5,
         ),
@@ -1007,8 +1033,11 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
                 "Refine the current assigned Arc outline entry into one executable Chapter "
                 "plan under the frozen Book, Arc, and Canon contracts. Use the optional next "
                 "entry only to create a natural hook and handoff; do not consume its core event "
-                "early. Preserve semantic intent without copying outline wording or returning "
-                "an outline index, ID, or stored locator."
+                "early. If the current assignment requires confirmation, exclusion, culpability, "
+                "or causal closure, schedule observable scene evidence sufficient for that "
+                "conclusion under the Arc prohibitions; do not plan a conclusion supported only "
+                "by compatibility or likelihood. Preserve semantic intent without copying "
+                "outline wording or returning an outline index, ID, or stored locator."
             ),
         ),
         _native(
@@ -1020,7 +1049,9 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             instructions=(
                 "Revise the Chapter plan only within the explicit Chapter-level request while "
                 "still fulfilling the current assigned Arc outline entry. Use the optional next "
-                "entry only for handoff and return no outline index, ID, or stored locator."
+                "entry only for handoff. Ensure every required strong conclusion is preceded by "
+                "sufficient obtainable scene evidence under the same Arc prohibitions and Canon. "
+                "Return no outline index, ID, or stored locator."
             ),
         ),
         _text(
@@ -1029,7 +1060,9 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
                 "Write only the complete chapter prose. Fulfill the current assigned Arc "
                 "outline entry through the approved Chapter plan. Use the optional next "
                 "entry only for a natural handoff and do not consume its core event early. "
-                "Do not emit JSON, metadata, or commentary."
+                "Show the planned observable evidence before asserting any required confirmation, "
+                "exclusion, culpability, or causal closure. Do not emit JSON, metadata, or "
+                "commentary."
             ),
         ),
         _text(
@@ -1079,18 +1112,24 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             context_policy_id="chapter-plan-repair-context-v2",
             instructions=(
                 "Return one complete replacement for the evaluator-authorized mutable Chapter "
-                "plan. The replacement must remain within the same frozen Arc and Canon. Do not "
-                "repair prose or observations, change upstream authority, or return storage and "
-                "Route metadata; the Harness invalidates and regenerates every downstream working "
-                "component."
+                "plan. The replacement must remain within the same frozen Arc and Canon, preserve "
+                "the assigned outline function, and schedule obtainable observable evidence strong "
+                "enough for every required confirmation or exclusion. Do not weaken or abandon the "
+                "assignment to make the plan easier. Do not repair prose or observations, change "
+                "upstream authority, or return storage and Route metadata; the Harness invalidates "
+                "and regenerates every downstream working component."
             ),
         ),
         _text(
             "chapter.repair.prose",
             instructions=(
                 "Return the complete repaired prose only, changing only the authorized "
-                "repair scope while preserving the current assigned Arc outline function. "
-                "The optional next entry is handoff context, not permission to consume it."
+                "repair scope while preserving every obligation of the current assigned Arc "
+                "outline function. For an unsupported conclusion, realize the sufficient "
+                "observable evidence already allowed by the Chapter plan instead of merely "
+                "weakening a confirmation or exclusion that the assignment requires. Never "
+                "invent evidence outside the frozen plan, Arc, or Canon. The optional next entry "
+                "is handoff context, not permission to consume it."
             ),
         ),
         _native(

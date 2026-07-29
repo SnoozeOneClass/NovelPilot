@@ -210,6 +210,37 @@ class _TaskInstruction:
     source_feedback_id: str | None = None
 
 
+def _book_parent_review_instruction(
+    *,
+    book_id: str,
+    workspace_lock_version: int,
+    book_baseline_id: str | None,
+    correction_lineage_id: str,
+    correction_lineage_origin: Literal["review_initiated", "user_initiated"],
+    automatic_correction_round: Literal[0, 1],
+    source_arc_book_request_id: str,
+    canon_baseline_id: str | None = None,
+    source_book_parent_review_id: str | None = None,
+    source_feedback_id: str | None = None,
+) -> _TaskInstruction:
+    """Freeze Book authority while binding lower evidence through its request."""
+
+    return _TaskInstruction(
+        role="evaluator",
+        task_kind="evaluate.book_parent_contract",
+        book_id=book_id,
+        workspace_lock_version=workspace_lock_version,
+        book_baseline_id=book_baseline_id,
+        canon_baseline_id=canon_baseline_id,
+        correction_lineage_id=correction_lineage_id,
+        correction_lineage_origin=correction_lineage_origin,
+        automatic_correction_round=automatic_correction_round,
+        source_book_parent_review_id=source_book_parent_review_id,
+        source_arc_book_request_id=source_arc_book_request_id,
+        source_feedback_id=source_feedback_id,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _CommandInstruction:
     kind: Literal[
@@ -1027,25 +1058,14 @@ class DomainRunDriver:
                         project_id=project.id,
                         request_id=book_parent_review.request_id,
                     )
-                    subject_arc = (
-                        None
-                        if book_change is None
-                        else await store.arcs.get(
-                            project_id=project.id,
-                            arc_id=book_change.arc_id,
-                        )
-                    )
-                    if book_change is None or subject_arc is None:
+                    if book_change is None:
                         raise HarnessInvariantError(
                             "Applied Book-parent feedback lost its source Arc."
                         )
-                    return _TaskInstruction(
-                        role="evaluator",
-                        task_kind="evaluate.book_parent_contract",
+                    return _book_parent_review_instruction(
                         book_id=book.id,
                         workspace_lock_version=book_workspace.lock_version,
                         book_baseline_id=book.current_baseline_id,
-                        arc_baseline_id=subject_arc.current_baseline_id,
                         correction_lineage_id=lineage_id,
                         correction_lineage_origin="user_initiated",
                         automatic_correction_round=0,
@@ -1150,25 +1170,14 @@ class DomainRunDriver:
                     project_id=project.id,
                     request_id=change.id,
                 )
-                source_arc = (
-                    None
-                    if full_change is None
-                    else await store.arcs.get(
-                        project_id=project.id,
-                        arc_id=full_change.arc_id,
-                    )
-                )
-                if full_change is None or source_arc is None:
+                if full_change is None:
                     raise HarnessInvariantError(
                         "Open Arc-to-Book request lost its source Arc."
                     )
-                return _TaskInstruction(
-                    role="evaluator",
-                    task_kind="evaluate.book_parent_contract",
+                return _book_parent_review_instruction(
                     book_id=book.id,
                     workspace_lock_version=book_workspace.lock_version,
                     book_baseline_id=change.target_baseline_id,
-                    arc_baseline_id=source_arc.current_baseline_id,
                     correction_lineage_id=lineage_id,
                     correction_lineage_origin="review_initiated",
                     automatic_correction_round=0,
@@ -1343,13 +1352,10 @@ class DomainRunDriver:
                                 "Book parent successor lost its correction lineage."
                             )
                         if arc_correction_workspace.state == "idle":
-                            return _TaskInstruction(
-                                role="evaluator",
-                                task_kind="evaluate.book_parent_contract",
+                            return _book_parent_review_instruction(
                                 book_id=book.id,
                                 workspace_lock_version=book_workspace.lock_version,
                                 book_baseline_id=book.current_baseline_id,
-                                arc_baseline_id=correction_arc.current_baseline_id,
                                 canon_baseline_id=project.current_canon_baseline_id,
                                 correction_lineage_id=(
                                     book_parent_review.correction_lineage_id
