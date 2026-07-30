@@ -74,6 +74,7 @@ def _task_matches_workspace(
         and task.arc_id == workspace.arc_id
         and task.chapter_id is None
         and task.workspace_lock_version == expected_lock_version == workspace.lock_version
+        and task.workspace_work_cycle_id == workspace.work_cycle_id
         and task.book_baseline_id == workspace.book_baseline_id
         and task.arc_baseline_id == workspace.base_arc_baseline_id
         and task.canon_baseline_id == workspace.canon_baseline_id
@@ -355,6 +356,8 @@ class ArcCommandService:
                     arc_id=arc_id,
                     state="active",
                     lock_version=1,
+                    work_cycle_id=uuid.uuid4().hex,
+                    active_repair_review_id=None,
                     base_arc_baseline_id=None,
                     book_baseline_id=request.expected_book_baseline_id,
                     canon_baseline_id=request.expected_canon_baseline_id,
@@ -378,7 +381,7 @@ class ArcCommandService:
                     closure_cumulative_chapter_count=None,
                     repair_policy_id="semantic-repair-v1",
                     semantic_repair_count=0,
-                    semantic_repair_limit=5,
+                    semantic_repair_limit=1,
                     stale_reason_code=None,
                     stale_at_ms=None,
                     created_at_ms=timestamp,
@@ -491,6 +494,8 @@ class ArcCommandService:
                 workspace,
                 state="active",
                 lock_version=workspace.lock_version + 1,
+                work_cycle_id=uuid.uuid4().hex,
+                active_repair_review_id=None,
                 base_arc_baseline_id=parent_arc_baseline_id,
                 book_baseline_id=request.expected_book_baseline_id,
                 canon_baseline_id=request.expected_canon_baseline_id,
@@ -587,12 +592,17 @@ class ArcCommandService:
                     workspace_snapshot,
                     expected_lock_version=request.expected_workspace_lock_version,
                 ):
-                    review_snapshot = await session.arcs.get_latest_review(
-                        project_id=request.project_id,
-                        arc_id=request.arc_id,
+                    review_snapshot = (
+                        None
+                        if workspace_snapshot.active_repair_review_id is None
+                        else await session.arcs.get_review(
+                            project_id=request.project_id,
+                            review_id=workspace_snapshot.active_repair_review_id,
+                        )
                     )
                     if (
                         review_snapshot is None
+                        or task.source_arc_candidate_review_id != review_snapshot.id
                         or review_snapshot.decision != "local_repair"
                         or review_snapshot.repair_contract_ref_id is None
                         or workspace_snapshot.plan_ref_id is None
@@ -729,15 +739,20 @@ class ArcCommandService:
             )
             repair_increment = 0
             if task.task_kind == "arc.repair":
-                review = await session.arcs.get_latest_review(
-                    project_id=request.project_id,
-                    arc_id=request.arc_id,
+                review = (
+                    None
+                    if workspace.active_repair_review_id is None
+                    else await session.arcs.get_review(
+                        project_id=request.project_id,
+                        review_id=workspace.active_repair_review_id,
+                    )
                 )
                 if (
                     workspace_snapshot is None
                     or workspace != workspace_snapshot
                     or review_snapshot is None
                     or review != review_snapshot
+                    or task.source_arc_candidate_review_id != review_snapshot.id
                     or workspace.semantic_repair_count >= workspace.semantic_repair_limit
                 ):
                     raise CommandPreconditionError(
@@ -897,10 +912,30 @@ class ArcCommandService:
                 is not None
             ):
                 raise CommandPreconditionError("An Arc submission is already pending.")
+            source_feedback = (
+                None
+                if workspace.source_feedback_id is None
+                else await session.feedback.get(
+                    project_id=request.project_id,
+                    feedback_id=workspace.source_feedback_id,
+                )
+            )
+            if workspace.source_feedback_id is not None and (
+                source_feedback is None
+                or source_feedback.status != "applied"
+                or source_feedback.route_layer != "arc"
+                or source_feedback.book_id != request.book_id
+                or source_feedback.arc_id != request.arc_id
+                or source_feedback.content_ref_id != workspace.guidance_ref_id
+            ):
+                raise CommandPreconditionError(
+                    "Arc guidance lost its exact applied feedback source."
+                )
             manifest = {
-                "schema": "arc-review-manifest-v4",
+                "schema": "arc-review-manifest-v6",
                 "workspace_id": workspace.id,
                 "workspace_lock_version": workspace.lock_version,
+                "work_cycle_id": workspace.work_cycle_id,
                 "base_arc_baseline_id": workspace.base_arc_baseline_id,
                 "book_baseline_id": workspace.book_baseline_id,
                 "canon_baseline_id": workspace.canon_baseline_id,
@@ -916,6 +951,10 @@ class ArcCommandService:
                 "closure_cumulative_chapter_count": (
                     workspace.closure_cumulative_chapter_count
                 ),
+                "guidance_ref_id": workspace.guidance_ref_id,
+                "source_feedback_id": (
+                    None if source_feedback is None else source_feedback.id
+                ),
             }
             prepared_manifest = prepare_canonical_json(manifest)
             manifest_ref = await session.content.put(
@@ -924,7 +963,7 @@ class ArcCommandService:
                 semantic_kind="arc.review_manifest",
                 media_type="application/json",
                 schema_id="arc-review-manifest",
-                schema_version=4,
+                schema_version=6,
                 ref_id=manifest_ref_id,
                 created_at_ms=timestamp,
             )
@@ -936,6 +975,7 @@ class ArcCommandService:
                     arc_id=request.arc_id,
                     workspace_id=workspace.id,
                     workspace_lock_version=workspace.lock_version,
+                    work_cycle_id=workspace.work_cycle_id,
                     base_arc_baseline_id=workspace.base_arc_baseline_id,
                     book_baseline_id=workspace.book_baseline_id,
                     canon_baseline_id=workspace.canon_baseline_id,
@@ -1028,7 +1068,7 @@ class ArcCommandService:
         prepared_failure = prepare_canonical_json(
             {
                 "code": "semantic_repair_exhausted",
-                "message": "Arc semantic repair limit of five has been exhausted.",
+                "message": "Arc semantic correction for this frozen review is exhausted.",
                 "arc_id": request.arc_id,
             }
         )
@@ -1102,6 +1142,10 @@ class ArcCommandService:
                 or task.book_id != request.book_id
                 or task.arc_id != request.arc_id
                 or task.workspace_lock_version != submission.workspace_lock_version
+                or task.workspace_work_cycle_id != submission.work_cycle_id
+                or workspace.work_cycle_id != submission.work_cycle_id
+                or task.source_arc_candidate_review_id
+                != workspace.active_repair_review_id
                 or task.book_baseline_id != submission.book_baseline_id
                 or task.arc_baseline_id != submission.base_arc_baseline_id
                 or task.canon_baseline_id != submission.canon_baseline_id
@@ -1169,7 +1213,7 @@ class ArcCommandService:
                         semantic_kind="arc.repair_contract",
                         media_type="application/json",
                         schema_id="arc-repair-contract",
-                        schema_version=1,
+                        schema_version=2,
                         ref_id=repair_ref_id,
                         created_at_ms=timestamp,
                     )
@@ -1286,6 +1330,9 @@ class ArcCommandService:
                     workspace,
                     state=state,
                     lock_version=workspace.lock_version + 1,
+                    active_repair_review_id=(
+                        review_id if evaluation.decision == "local_repair" else None
+                    ),
                     updated_at_ms=timestamp,
                 )
                 if not await session.arcs.compare_and_set_workspace(
@@ -1673,6 +1720,8 @@ class ArcCommandService:
                     drafting_workspace,
                     state="active",
                     lock_version=drafting_workspace.lock_version + 1,
+                    work_cycle_id=uuid.uuid4().hex,
+                    active_repair_review_id=None,
                     base_chapter_baseline_id=None,
                     book_baseline_id=submission.book_baseline_id,
                     arc_baseline_id=baseline_id,
@@ -1734,6 +1783,7 @@ class ArcCommandService:
                 workspace,
                 state="idle",
                 lock_version=workspace.lock_version + 1,
+                active_repair_review_id=None,
                 base_arc_baseline_id=baseline_id,
                 book_baseline_id=submission.book_baseline_id,
                 canon_baseline_id=submission.canon_baseline_id,
@@ -1746,6 +1796,7 @@ class ArcCommandService:
                 ),
                 closure_cumulative_chapter_count=final_checkpoint,
                 guidance_ref_id=None,
+                source_feedback_id=None,
                 semantic_repair_count=0,
                 stale_reason_code=None,
                 stale_at_ms=None,

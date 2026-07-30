@@ -70,6 +70,8 @@ class CanonEntry(BaseModel):
     semantic_state: str
     resolved: bool
     source_chapter_id: str
+    source_chapter_baseline_id: str
+    source_prose_ref_id: str
     evidence: CanonEvidence
 
 
@@ -123,8 +125,11 @@ def bind_canon_patch(
 def apply_canon_patch(
     *,
     chapter_id: str,
+    chapter_baseline_id: str,
+    prose_ref_id: str,
     current: dict[CanonCategory, list[CanonEntry]],
     patch: BoundCanonPatch,
+    replace_evidence_for_chapter_baseline_id: str | None = None,
 ) -> AppliedCanonPatch:
     if patch.chapter_id != chapter_id:
         raise CanonPatchConflictError(
@@ -161,15 +166,46 @@ def apply_canon_patch(
             None,
         )
         if matching_index is None:
-            entries.append(_entry(chapter_id, operation))
+            entries.append(
+                _entry(
+                    chapter_id,
+                    chapter_baseline_id,
+                    prose_ref_id,
+                    operation,
+                )
+            )
             changed.add(operation.category)
         else:
             existing = entries[matching_index]
             if (
+                replace_evidence_for_chapter_baseline_id is not None
+                and existing.source_chapter_baseline_id
+                != replace_evidence_for_chapter_baseline_id
+            ):
+                # Evidence correction is historical-index maintenance, not a
+                # license to rewind a later Chapter's current Canon projection.
+                continue
+            if (
                 existing.semantic_state != operation.semantic_change
                 or existing.resolved != operation.resolved
+                or (
+                    replace_evidence_for_chapter_baseline_id is not None
+                    and existing.source_chapter_baseline_id
+                    == replace_evidence_for_chapter_baseline_id
+                    and (
+                        existing.evidence != operation.evidence
+                        or existing.source_chapter_baseline_id
+                        != chapter_baseline_id
+                        or existing.source_prose_ref_id != prose_ref_id
+                    )
+                )
             ):
-                entries[matching_index] = _entry(chapter_id, operation)
+                entries[matching_index] = _entry(
+                    chapter_id,
+                    chapter_baseline_id,
+                    prose_ref_id,
+                    operation,
+                )
                 changed.add(operation.category)
         entries.sort(key=lambda item: item.entity_id)
     return AppliedCanonPatch(
@@ -249,6 +285,8 @@ def _find_unique_exact_span(prose: str, hint: str) -> ExactEvidenceSpan | None:
 
 def _entry(
     chapter_id: str,
+    chapter_baseline_id: str,
+    prose_ref_id: str,
     operation: BoundCanonOperation,
 ) -> CanonEntry:
     return CanonEntry(
@@ -257,5 +295,7 @@ def _entry(
         semantic_state=operation.semantic_change,
         resolved=operation.resolved,
         source_chapter_id=chapter_id,
+        source_chapter_baseline_id=chapter_baseline_id,
+        source_prose_ref_id=prose_ref_id,
         evidence=operation.evidence,
     )

@@ -159,6 +159,7 @@ class BookCompletionReviewRecord:
     book_id: str
     book_baseline_id: str
     arc_closure_id: str
+    book_progress_handoff_id: str | None
     canon_baseline_id: str
     committed_chapter_count: int
     chapter_set_fingerprint: str

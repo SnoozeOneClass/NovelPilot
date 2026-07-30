@@ -60,6 +60,8 @@ class ChapterWorkspaceRecord:
     chapter_id: str
     state: str
     lock_version: int
+    work_cycle_id: str
+    active_repair_review_id: str | None
     base_chapter_baseline_id: str | None
     book_baseline_id: str
     arc_baseline_id: str
@@ -94,6 +96,7 @@ class ChapterSubmissionRecord:
     chapter_id: str
     workspace_id: str
     workspace_lock_version: int
+    work_cycle_id: str
     base_chapter_baseline_id: str | None
     book_baseline_id: str
     arc_baseline_id: str
@@ -197,6 +200,8 @@ def _workspace_record(row: RowMapping) -> ChapterWorkspaceRecord:
         chapter_id=cast(str, row["chapter_id"]),
         state=cast(str, row["state"]),
         lock_version=cast(int, row["lock_version"]),
+        work_cycle_id=cast(str, row["work_cycle_id"]),
+        active_repair_review_id=cast(str | None, row["active_repair_review_id"]),
         base_chapter_baseline_id=cast(str | None, row["base_chapter_baseline_id"]),
         book_baseline_id=cast(str, row["book_baseline_id"]),
         arc_baseline_id=cast(str, row["arc_baseline_id"]),
@@ -242,6 +247,7 @@ def _submission_record(row: RowMapping) -> ChapterSubmissionRecord:
         chapter_id=cast(str, row["chapter_id"]),
         workspace_id=cast(str, row["workspace_id"]),
         workspace_lock_version=cast(int, row["workspace_lock_version"]),
+        work_cycle_id=cast(str, row["work_cycle_id"]),
         base_chapter_baseline_id=cast(str | None, row["base_chapter_baseline_id"]),
         book_baseline_id=cast(str, row["book_baseline_id"]),
         arc_baseline_id=cast(str, row["arc_baseline_id"]),
@@ -719,6 +725,19 @@ class ChapterRepository:
                 select(chapter_reviews).where(
                     chapter_reviews.c.project_id == project_id,
                     chapter_reviews.c.id == review_id,
+                )
+            )
+        ).mappings().one_or_none()
+        return None if row is None else _review_record(row)
+
+    async def get_review_for_submission(
+        self, *, project_id: str, submission_id: str
+    ) -> ChapterReviewRecord | None:
+        row = (
+            await self._connection.execute(
+                select(chapter_reviews).where(
+                    chapter_reviews.c.project_id == project_id,
+                    chapter_reviews.c.submission_id == submission_id,
                 )
             )
         ).mappings().one_or_none()

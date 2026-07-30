@@ -42,6 +42,8 @@ class ArcWorkspaceRecord:
     arc_id: str
     state: str
     lock_version: int
+    work_cycle_id: str
+    active_repair_review_id: str | None
     base_arc_baseline_id: str | None
     book_baseline_id: str
     canon_baseline_id: str
@@ -79,6 +81,7 @@ class ArcSubmissionRecord:
     arc_id: str
     workspace_id: str
     workspace_lock_version: int
+    work_cycle_id: str
     base_arc_baseline_id: str | None
     book_baseline_id: str
     canon_baseline_id: str
@@ -209,6 +212,8 @@ def _workspace_record(row: RowMapping) -> ArcWorkspaceRecord:
         arc_id=cast(str, row["arc_id"]),
         state=cast(str, row["state"]),
         lock_version=cast(int, row["lock_version"]),
+        work_cycle_id=cast(str, row["work_cycle_id"]),
+        active_repair_review_id=cast(str | None, row["active_repair_review_id"]),
         base_arc_baseline_id=cast(str | None, row["base_arc_baseline_id"]),
         book_baseline_id=cast(str, row["book_baseline_id"]),
         canon_baseline_id=cast(str, row["canon_baseline_id"]),
@@ -267,6 +272,7 @@ def _submission_record(row: RowMapping) -> ArcSubmissionRecord:
         arc_id=cast(str, row["arc_id"]),
         workspace_id=cast(str, row["workspace_id"]),
         workspace_lock_version=cast(int, row["workspace_lock_version"]),
+        work_cycle_id=cast(str, row["work_cycle_id"]),
         base_arc_baseline_id=cast(str | None, row["base_arc_baseline_id"]),
         book_baseline_id=cast(str, row["book_baseline_id"]),
         canon_baseline_id=cast(str, row["canon_baseline_id"]),
@@ -550,6 +556,19 @@ class ArcRepository:
                 select(arc_reviews).where(
                     arc_reviews.c.project_id == project_id,
                     arc_reviews.c.id == review_id,
+                )
+            )
+        ).mappings().one_or_none()
+        return None if row is None else _review_record(row)
+
+    async def get_review_for_submission(
+        self, *, project_id: str, submission_id: str
+    ) -> ArcReviewRecord | None:
+        row = (
+            await self._connection.execute(
+                select(arc_reviews).where(
+                    arc_reviews.c.project_id == project_id,
+                    arc_reviews.c.submission_id == submission_id,
                 )
             )
         ).mappings().one_or_none()

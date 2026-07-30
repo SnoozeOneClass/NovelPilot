@@ -156,39 +156,6 @@ class FeedbackRepository:
         ).mappings().one_or_none()
         return None if row is None else _feedback_record(row)
 
-    async def list_applied_guidance(
-        self,
-        *,
-        project_id: str,
-        route_layer: str,
-        book_id: str,
-        arc_id: str | None,
-        chapter_id: str | None,
-    ) -> list[FeedbackRecord]:
-        rows = (
-            await self._connection.execute(
-                select(user_feedback)
-                .where(
-                    user_feedback.c.project_id == project_id,
-                    user_feedback.c.status == "applied",
-                    user_feedback.c.route_layer == route_layer,
-                    user_feedback.c.book_id == book_id,
-                    (
-                        user_feedback.c.arc_id.is_(None)
-                        if arc_id is None
-                        else user_feedback.c.arc_id == arc_id
-                    ),
-                    (
-                        user_feedback.c.chapter_id.is_(None)
-                        if chapter_id is None
-                        else user_feedback.c.chapter_id == chapter_id
-                    ),
-                )
-                .order_by(user_feedback.c.applied_at_ms, user_feedback.c.id)
-            )
-        ).mappings()
-        return [_feedback_record(row) for row in rows]
-
     async def get_unstarted_correction_lineage(
         self,
         *,

@@ -46,6 +46,7 @@ from app.domain.chapter.contracts import (
     RebaseStaleChapterResult,
     SubmitChapterRequest,
     SubmitChapterResult,
+    bind_committed_chapter_observation,
 )
 from app.domain.commands import (
     Actor,
@@ -112,7 +113,7 @@ def _merge_chapter_observation_repair(
     for change in patch.changes:
         if change.component == "observations":
             merged["summary"] = change.summary
-            merged["continuity_observations"] = change.continuity_observations
+            merged["established_facts"] = change.established_facts
         else:
             merged["canon_proposals"] = change.canon_proposals
     observations = ChapterObservationResult.model_validate(merged)
@@ -145,6 +146,7 @@ def _chapter_issue_fingerprint(issue: ChapterEvaluationIssue) -> str:
 
     return prepare_canonical_json(
         {
+            "kind": issue.kind,
             "code": normalize(issue.code),
             "subject": normalize(issue.subject),
         }
@@ -283,6 +285,8 @@ class ChapterCommandService:
                     chapter_id=chapter_id,
                     state="active",
                     lock_version=1,
+                    work_cycle_id=uuid.uuid4().hex,
+                    active_repair_review_id=None,
                     base_chapter_baseline_id=None,
                     book_baseline_id=context.book_baseline_id,
                     arc_baseline_id=context.arc_baseline_id,
@@ -300,7 +304,7 @@ class ChapterCommandService:
                     candidate_canon_patch_ref_id=None,
                     repair_policy_id="semantic-repair-v1",
                     semantic_repair_count=0,
-                    semantic_repair_limit=5,
+                    semantic_repair_limit=1,
                     stale_reason_code=None,
                     stale_at_ms=None,
                     created_at_ms=timestamp,
@@ -408,6 +412,8 @@ class ChapterCommandService:
                 workspace,
                 state="active",
                 lock_version=workspace.lock_version + 1,
+                work_cycle_id=uuid.uuid4().hex,
+                active_repair_review_id=None,
                 base_chapter_baseline_id=chapter.current_baseline_id,
                 book_baseline_id=request.expected_book_baseline_id,
                 arc_baseline_id=request.expected_arc_baseline_id,
@@ -663,7 +669,7 @@ class ChapterCommandService:
                     "chapter.observations",
                     "application/json",
                     "chapter-observations",
-                    2,
+                    3,
                 ),
                 (
                     "chapter.candidate_canon_patch",
@@ -688,13 +694,20 @@ class ChapterCommandService:
                 project_id=request.project_id,
                 chapter_id=request.chapter_id,
             )
-            review_snapshot = await session.chapters.get_latest_review(
-                project_id=request.project_id,
-                chapter_id=request.chapter_id,
+            review_snapshot = (
+                None
+                if workspace_snapshot is None
+                or workspace_snapshot.active_repair_review_id is None
+                else await session.chapters.get_review(
+                    project_id=request.project_id,
+                    review_id=workspace_snapshot.active_repair_review_id,
+                )
             )
             if (
                 workspace_snapshot is None
                 or review_snapshot is None
+                or task.source_chapter_candidate_review_id != review_snapshot.id
+                or task.workspace_work_cycle_id != workspace_snapshot.work_cycle_id
                 or review_snapshot.decision != "local_repair"
                 or review_snapshot.repair_contract_ref_id is None
             ):
@@ -819,7 +832,7 @@ class ChapterCommandService:
                     "chapter.observations",
                     "application/json",
                     "chapter-observations",
-                    2,
+                    3,
                 ),
                 (
                     "chapter.candidate_canon_patch",
@@ -854,11 +867,20 @@ class ChapterCommandService:
             session: StoreSession,
             workspace: ChapterWorkspaceRecord,
         ) -> None:
-            latest = await session.chapters.get_latest_review(
-                project_id=request.project_id,
-                chapter_id=request.chapter_id,
+            active = (
+                None
+                if workspace.active_repair_review_id is None
+                else await session.chapters.get_review(
+                    project_id=request.project_id,
+                    review_id=workspace.active_repair_review_id,
+                )
             )
-            if latest != review_snapshot or workspace.state != "active":
+            if (
+                active != review_snapshot
+                or task.source_chapter_candidate_review_id != review_snapshot.id
+                or task.workspace_work_cycle_id != workspace.work_cycle_id
+                or workspace.state != "active"
+            ):
                 raise CommandPreconditionError("Chapter repair authorization is no longer current.")
 
         return await self._apply_prepared_task(
@@ -1051,6 +1073,14 @@ class ChapterCommandService:
                 project_id=request.project_id,
                 chapter_id=request.chapter_id,
             )
+            source_feedback = (
+                None
+                if workspace is None or workspace.source_feedback_id is None
+                else await session.feedback.get(
+                    project_id=request.project_id,
+                    feedback_id=workspace.source_feedback_id,
+                )
+            )
         if workspace is None:
             raise ChapterNotFoundError(request.chapter_id)
         required = (
@@ -1065,10 +1095,23 @@ class ChapterCommandService:
             or any(reference is None for reference in required)
         ):
             raise CommandPreconditionError("Chapter workspace is not complete for review.")
+        if workspace.source_feedback_id is not None and (
+            source_feedback is None
+            or source_feedback.status != "applied"
+            or source_feedback.route_layer != "chapter"
+            or source_feedback.book_id != workspace.book_id
+            or source_feedback.arc_id != workspace.arc_id
+            or source_feedback.chapter_id != request.chapter_id
+            or source_feedback.content_ref_id != workspace.guidance_ref_id
+        ):
+            raise CommandPreconditionError(
+                "Chapter guidance lost its exact applied feedback source."
+            )
         manifest = {
-            "schema": "chapter-review-manifest-v1",
+            "schema": "chapter-review-manifest-v3",
             "workspace_id": workspace.id,
             "workspace_lock_version": workspace.lock_version,
+            "work_cycle_id": workspace.work_cycle_id,
             "base_chapter_baseline_id": workspace.base_chapter_baseline_id,
             "book_baseline_id": workspace.book_baseline_id,
             "arc_baseline_id": workspace.arc_baseline_id,
@@ -1077,6 +1120,10 @@ class ChapterCommandService:
             "draft_ref_id": required[1],
             "observations_ref_id": required[2],
             "candidate_canon_patch_ref_id": required[3],
+            "guidance_ref_id": workspace.guidance_ref_id,
+            "source_feedback_id": (
+                None if source_feedback is None else source_feedback.id
+            ),
         }
         prepared_manifest = prepare_canonical_json(manifest)
         envelope = self._envelope(
@@ -1126,7 +1173,7 @@ class ChapterCommandService:
                 semantic_kind="chapter.review_manifest",
                 media_type="application/json",
                 schema_id="chapter-review-manifest",
-                schema_version=1,
+                schema_version=3,
                 ref_id=manifest_ref_id,
                 created_at_ms=timestamp,
             )
@@ -1140,6 +1187,7 @@ class ChapterCommandService:
                     chapter_id=request.chapter_id,
                     workspace_id=workspace.id,
                     workspace_lock_version=workspace.lock_version,
+                    work_cycle_id=workspace.work_cycle_id,
                     base_chapter_baseline_id=workspace.base_chapter_baseline_id,
                     book_baseline_id=workspace.book_baseline_id,
                     arc_baseline_id=workspace.arc_baseline_id,
@@ -1220,6 +1268,8 @@ class ChapterCommandService:
         try:
             apply_canon_patch(
                 chapter_id=submission.chapter_id,
+                chapter_baseline_id="deterministic-precheck",
+                prose_ref_id=submission.draft_ref_id,
                 current=current_categories,
                 patch=patch,
             )
@@ -1230,7 +1280,7 @@ class ChapterCommandService:
                 ) from error
             operation = error.operation
             return {
-                "schema_id": "chapter-submission-precheck-v3",
+                "schema_id": "chapter-submission-precheck-v4",
                 "passed": False,
                 "checks": {
                     "frozen_submission_loaded": True,
@@ -1239,6 +1289,7 @@ class ChapterCommandService:
                 },
                 "issues": [
                     {
+                        "kind": "contract_unfulfilled",
                         "code": error.code,
                         "subject": (
                             "candidate Canon assertion"
@@ -1246,13 +1297,20 @@ class ChapterCommandService:
                             else operation.subject
                         ),
                         "summary": str(error),
-                        "evidence_hint": (
-                            None
-                            if operation is None
-                            else (
+                        "evidence": [
+                            (
+                                "The candidate Canon patch contains incompatible "
+                                "assertions for one exact semantic subject."
+                                if operation is None
+                                else (
                                 f"{operation.category} subject "
                                 f"{operation.subject!r} has incompatible assertions."
                             )
+                            )
+                        ],
+                        "contract_item": (
+                            "One Chapter candidate must propose at most one coherent "
+                            "current meaning for each exact Canon subject."
                         ),
                         "affected_components": ["canon"],
                         "recurrence": "new",
@@ -1260,7 +1318,7 @@ class ChapterCommandService:
                 ],
             }
         return {
-            "schema_id": "chapter-submission-precheck-v3",
+            "schema_id": "chapter-submission-precheck-v4",
             "passed": True,
             "checks": {
                 "frozen_submission_loaded": True,
@@ -1298,9 +1356,18 @@ class ChapterCommandService:
                 project_id=request.project_id,
                 submission_id=request.submission_id,
             )
-            previous_review = await session.chapters.get_latest_review(
+            workspace_snapshot = await session.chapters.get_workspace(
                 project_id=request.project_id,
                 chapter_id=request.chapter_id,
+            )
+            previous_review = (
+                None
+                if workspace_snapshot is None
+                or workspace_snapshot.active_repair_review_id is None
+                else await session.chapters.get_review(
+                    project_id=request.project_id,
+                    review_id=workspace_snapshot.active_repair_review_id,
+                )
             )
             if task is None:
                 raise CommandPreconditionError("Evaluator task has no successful result.")
@@ -1376,7 +1443,7 @@ class ChapterCommandService:
         prepared_detail = prepare_canonical_json(evaluation)
         repair_contract = (
             {
-                "schema": "chapter-repair-contract-v3",
+                "schema": "chapter-repair-contract-v4",
                 "authorized_components": repair_scope,
                 "issues": [issue.model_dump(mode="json") for issue in evaluation.issues],
                 "issue_fingerprints": issue_fingerprints,
@@ -1399,7 +1466,10 @@ class ChapterCommandService:
                     "The same Chapter semantic issue persisted after its one "
                     "authorized correction."
                     if semantic_repair_stalled
-                    else "Chapter semantic repair limit of five has been exhausted."
+                    else (
+                        "Chapter semantic correction for this frozen review "
+                        "is exhausted."
+                    )
                 ),
                 "chapter_id": request.chapter_id,
                 "issue_fingerprints": stalled_issue_fingerprints,
@@ -1429,9 +1499,13 @@ class ChapterCommandService:
                 project_id=request.project_id,
                 chapter_id=request.chapter_id,
             )
-            current_previous_review = await session.chapters.get_latest_review(
-                project_id=request.project_id,
-                chapter_id=request.chapter_id,
+            current_previous_review = (
+                None
+                if workspace is None or workspace.active_repair_review_id is None
+                else await session.chapters.get_review(
+                    project_id=request.project_id,
+                    review_id=workspace.active_repair_review_id,
+                )
             )
             expected_task_kind = (
                 "verify_repair.chapter"
@@ -1457,10 +1531,14 @@ class ChapterCommandService:
                 or submission.disposition != "pending"
                 or submission.chapter_id != request.chapter_id
                 or task.chapter_id != request.chapter_id
+                or workspace is None
+                or task.workspace_work_cycle_id != submission.work_cycle_id
+                or workspace.work_cycle_id != submission.work_cycle_id
+                or task.source_chapter_candidate_review_id
+                != workspace.active_repair_review_id
                 or task.book_baseline_id != submission.book_baseline_id
                 or task.arc_baseline_id != submission.arc_baseline_id
                 or task.canon_baseline_id != submission.canon_before_id
-                or workspace is None
                 or workspace.id != submission.workspace_id
                 or workspace.lock_version != submission.workspace_lock_version
                 or current_previous_review != previous_review
@@ -1472,7 +1550,7 @@ class ChapterCommandService:
                 semantic_kind="chapter.deterministic_precheck",
                 media_type="application/json",
                 schema_id="chapter-precheck",
-                schema_version=3,
+                schema_version=4,
                 ref_id=precheck_ref_id,
                 created_at_ms=timestamp,
             )
@@ -1482,7 +1560,7 @@ class ChapterCommandService:
                 semantic_kind="chapter.review_detail",
                 media_type="application/json",
                 schema_id="chapter-evaluation-result",
-                schema_version=3,
+                schema_version=4,
                 ref_id=detail_ref_id,
                 created_at_ms=timestamp,
             )
@@ -1494,7 +1572,7 @@ class ChapterCommandService:
                     semantic_kind="chapter.repair_contract",
                     media_type="application/json",
                     schema_id="chapter-repair-contract",
-                    schema_version=3,
+                    schema_version=4,
                     ref_id=repair_ref_id,
                     created_at_ms=timestamp,
                 )
@@ -1562,6 +1640,9 @@ class ChapterCommandService:
                     workspace,
                     state=state,
                     lock_version=workspace.lock_version + 1,
+                    active_repair_review_id=(
+                        review_id if decision == "local_repair" else None
+                    ),
                     updated_at_ms=timestamp,
                 )
                 if not await session.chapters.compare_and_set_workspace(
@@ -1962,16 +2043,42 @@ class ChapterCommandService:
             )
             if submission is None or review is None or canon_before is None:
                 raise CommandPreconditionError("Chapter commit facts are incomplete.")
+            evaluator_task = await session.execution.get_successful_task(
+                project_id=request.project_id,
+                task_id=review.evaluator_task_id,
+                attempt_id=review.evaluator_attempt_id,
+            )
+            if evaluator_task is None:
+                raise CommandPreconditionError(
+                    "Chapter commit evaluator evidence is incomplete."
+                )
+            evidence_correction_source_baseline_id = (
+                evaluator_task.chapter_baseline_id
+                if evaluator_task.task_kind == "verify_evidence.chapter"
+                else None
+            )
+            if (
+                evaluator_task.task_kind == "verify_evidence.chapter"
+                and evidence_correction_source_baseline_id is None
+            ):
+                raise CommandPreconditionError(
+                    "Evidence correction lost its source Chapter baseline."
+                )
             plan_bytes = (
                 await session.content.get_packed(
                     project_id=request.project_id,
                     ref_id=submission.plan_ref_id,
                 )
             ).unpack_and_verify()
-            prose_bytes = (
+            packed_prose = await session.content.get_packed(
+                project_id=request.project_id,
+                ref_id=submission.draft_ref_id,
+            )
+            prose_bytes = packed_prose.unpack_and_verify()
+            observations_bytes = (
                 await session.content.get_packed(
                     project_id=request.project_id,
-                    ref_id=submission.draft_ref_id,
+                    ref_id=submission.observations_ref_id,
                 )
             ).unpack_and_verify()
             patch_bytes = (
@@ -1988,12 +2095,31 @@ class ChapterCommandService:
             )
         plan = ChapterPlanProposal.model_validate_json(plan_bytes)
         prose = prose_bytes.decode("utf-8")
+        observation_candidate = ChapterObservationResult.model_validate_json(
+            observations_bytes
+        )
         patch = BoundCanonPatch.model_validate_json(patch_bytes)
         applied = apply_canon_patch(
             chapter_id=request.chapter_id,
+            chapter_baseline_id=chapter_baseline_id,
+            prose_ref_id=submission.draft_ref_id,
             current=current_categories,
             patch=patch,
+            replace_evidence_for_chapter_baseline_id=(
+                evidence_correction_source_baseline_id
+            ),
         )
+        committed_observation = bind_committed_chapter_observation(
+            candidate=observation_candidate,
+            chapter_id=request.chapter_id,
+            chapter_baseline_id=chapter_baseline_id,
+            prose_ref_id=submission.draft_ref_id,
+            prose_sha256=packed_prose.reference.blob_sha256,
+        )
+        prepared_committed_observation = prepare_canonical_json(
+            committed_observation
+        )
+        committed_observations_ref_id = self._id_factory()
         prepared_commit = _PreparedCanonCommit(
             before=canon_before,
             applied=applied,
@@ -2194,12 +2320,22 @@ class ChapterCommandService:
                     semantic_kind=f"canon.{category}",
                     media_type="application/json",
                     schema_id=f"canon-{category.replace('_', '-')}",
-                    schema_version=2,
+                    schema_version=3,
                     ref_id=new_ref_ids[category],
                     created_at_ms=timestamp,
                 )
                 if reference.id != resulting_ref_ids[category]:  # pragma: no cover
                     raise RuntimeError("Canon content reference identity changed.")
+            committed_observations_ref = await session.content.put(
+                project_id=request.project_id,
+                prepared=prepared_committed_observation,
+                semantic_kind="chapter.committed_observations",
+                media_type="application/json",
+                schema_id="chapter-committed-observation",
+                schema_version=1,
+                ref_id=committed_observations_ref_id,
+                created_at_ms=timestamp,
+            )
             canon_after_id = (
                 canon_baseline_id if prepared_commit.applied.changed else canon_before.id
             )
@@ -2223,7 +2359,7 @@ class ChapterCommandService:
                     source_arc_closure_review_id=workspace.source_arc_closure_review_id,
                     plan_ref_id=submission.plan_ref_id,
                     prose_ref_id=submission.draft_ref_id,
-                    observations_ref_id=submission.observations_ref_id,
+                    observations_ref_id=committed_observations_ref.id,
                     accepted_canon_patch_ref_id=submission.candidate_canon_patch_ref_id,
                     chapter_title=plan.title.strip(),
                     character_count=len(prose),
@@ -2282,9 +2418,11 @@ class ChapterCommandService:
                 workspace,
                 state="idle",
                 lock_version=workspace.lock_version + 1,
+                active_repair_review_id=None,
                 base_chapter_baseline_id=chapter_baseline_id,
                 canon_baseline_id=canon_after_id,
                 guidance_ref_id=None,
+                source_feedback_id=None,
                 semantic_repair_count=0,
                 updated_at_ms=timestamp,
             )
@@ -2379,6 +2517,7 @@ def _task_matches_workspace(
         and task.chapter_id == workspace.chapter_id
         and task.workspace_lock_version == expected_lock_version
         and workspace.lock_version == expected_lock_version
+        and task.workspace_work_cycle_id == workspace.work_cycle_id
         and task.book_baseline_id == workspace.book_baseline_id
         and task.arc_baseline_id == workspace.arc_baseline_id
         and task.chapter_baseline_id == workspace.base_chapter_baseline_id

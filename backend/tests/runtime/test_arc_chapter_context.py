@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from typing import cast
 
+import pytest
 from alembic import command
 
 from app.db.engine import create_sqlite_async_engine
@@ -11,7 +12,7 @@ from app.db.maintenance import alembic_config
 from app.domain.chapter.commands import ChapterCommandService
 from app.domain.chapter.contracts import CreateChapterRequest
 from app.domain.project_state import ProjectStateQuery
-from app.runtime.context import HarnessContextBuilder
+from app.runtime.context import ContextFactError, HarnessContextBuilder
 from app.store.command_bus import CommandBus
 from tests.helpers.lifecycle_seed import seed_approved_book_and_arc
 
@@ -65,8 +66,13 @@ def test_chapter_context_projects_current_and_next_without_full_arc_outline(
             assert "approved_story_arc_plan" not in plan_context.prompt
             assert (
                 plan_context.manifest["schema_id"]
-                == "novelpilot-task-context-manifest-v3"
+                == "novelpilot-task-context-manifest-v4"
             )
+            assert (
+                '<NOVELPILOT_CONTEXT role="current_assignment" '
+                'scope="chapter" time="current" use="constraint" '
+                'access="read_only" target="false">'
+            ) in plan_context.prompt
             projection = cast(
                 dict[str, object],
                 plan_context.manifest["arc_chapter_window"],
@@ -76,24 +82,19 @@ def test_chapter_context_projects_current_and_next_without_full_arc_outline(
             assert projection["includes_next"] is True
             assert len(cast(list[object], projection["sources"])) == 1
 
-            observation_context = await builder.build(
-                task_kind="chapter.observe",
-                project_id=foundation.project_id,
-                book_id=foundation.book_id,
-                arc_id=foundation.arc_id,
-                chapter_id=created.result.chapter_id,
-                semantic_goal="Observe the assigned Chapter.",
-            )
-            assert "Witnesses disagree" in observation_context.prompt
-            assert (
-                "physical evidence at assignment 2"
-                not in observation_context.prompt
-            )
-            observation_projection = cast(
-                dict[str, object],
-                observation_context.manifest["arc_chapter_window"],
-            )
-            assert observation_projection["includes_next"] is False
+            with pytest.raises(
+                ContextFactError,
+                match="chapter_plan, chapter_prose",
+            ) as captured:
+                await builder.build(
+                    task_kind="chapter.observe",
+                    project_id=foundation.project_id,
+                    book_id=foundation.book_id,
+                    arc_id=foundation.arc_id,
+                    chapter_id=created.result.chapter_id,
+                    semantic_goal="Observe the assigned Chapter.",
+                )
+            assert captured.value.invariant == "context_required_group_present"
 
             arc_context = await builder.build(
                 task_kind="evaluate.arc",

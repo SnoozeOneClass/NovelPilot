@@ -38,6 +38,7 @@ from app.domain.arc.contracts import (
     ApproveArcRequest,
     ArcChapterOutlineRepair,
     ArcEvaluation,
+    ArcEvaluationIssue,
     ArcRepairPatch,
     ArcTitleRepair,
     CommitArcAutoRequest,
@@ -795,7 +796,7 @@ def test_stale_arc_plan_delivery_is_discarded_without_overwriting_workspace(
     asyncio.run(exercise())
 
 
-def test_arc_local_repair_is_bounded_by_components_and_five_attempts(
+def test_arc_local_repair_is_bounded_by_components_and_one_correction(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "arc-repair.sqlite3"
@@ -811,6 +812,21 @@ def test_arc_local_repair_is_bounded_by_components_and_five_attempts(
                 evaluation=ArcEvaluation(
                     decision="local_repair",
                     summary="Only the beats need a bounded repair.",
+                    issues=[
+                        ArcEvaluationIssue(
+                            kind="contract_unfulfilled",
+                            code="arc_outline_causal_gap",
+                            subject="Arc Chapter outline",
+                            summary="The first outline entry lacks required causal setup.",
+                            evidence=[
+                                "The current outline reaches payoff before its required setup."
+                            ],
+                            contract_item=(
+                                "The Arc outline must schedule setup before causal payoff."
+                            ),
+                            repair_component="chapter_outline",
+                        )
+                    ],
                     repair_scope=["chapter_outline"],
                 ),
             )
@@ -951,10 +967,25 @@ def test_arc_local_repair_is_bounded_by_components_and_five_attempts(
                 operation_mode="full_auto",
                 evaluation=ArcEvaluation(
                     decision="local_repair",
-                    summary="The sixth repair must not start.",
+                            summary="A second repair must not start.",
+                    issues=[
+                        ArcEvaluationIssue(
+                            kind="contract_unfulfilled",
+                            code="arc_outline_still_incomplete",
+                            subject="Arc Chapter outline",
+                            summary="The Arc outline still omits required setup.",
+                            evidence=[
+                                "The reviewed outline does not fulfill its explicit Arc obligation."
+                            ],
+                            contract_item=(
+                                "The Arc outline must cover every explicit Arc obligation."
+                            ),
+                            repair_component="chapter_outline",
+                        )
+                    ],
                     repair_scope=["chapter_outline"],
                 ),
-                repair_count_before_review=5,
+                    repair_count_before_review=1,
             )
             assert exhausted.review.next_action == "failure_paused"
             async with engine.connect() as connection:

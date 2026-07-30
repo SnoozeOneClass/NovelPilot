@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from pydantic import ValidationError
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.agents.contracts import (
@@ -44,6 +44,7 @@ from app.domain.book.contracts import (
     BookDirectionRepair,
     BookDiscussionState,
     BookEvaluation,
+    BookEvaluationIssue,
     BookRepairContract,
     BookRepairPatch,
     BookRollingPlan,
@@ -674,7 +675,7 @@ def test_late_book_discussion_result_is_discarded_without_overwriting_user_input
     asyncio.run(exercise())
 
 
-def test_book_local_repair_is_scope_bounded_and_sixth_cycle_failure_pauses_run(
+def test_book_local_repair_is_scope_bounded_and_second_review_failure_pauses_run(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "book-repair.sqlite3"
@@ -781,6 +782,24 @@ def test_book_local_repair_is_scope_bounded_and_sixth_cycle_failure_pauses_run(
             local_repair = BookEvaluation(
                 decision="local_repair",
                 summary="The causal direction needs one precise repair.",
+                findings=[
+                    BookEvaluationIssue(
+                        kind="contract_unfulfilled",
+                        code="causal_direction_incomplete",
+                        subject="Book causal direction",
+                        summary=(
+                            "The candidate does not explain how the witness can "
+                            "detect the memory edit."
+                        ),
+                        evidence=[
+                            "The candidate direction names detection without a causal mechanism."
+                        ],
+                        contract_item=(
+                            "The Book direction must provide a usable causal story engine."
+                        ),
+                        repair_component="direction",
+                    )
+                ],
                 repair_contract=BookRepairContract(
                     authorized_components=["direction"],
                     issue_summary="Clarify why the witness can detect the memory edit.",
@@ -935,12 +954,6 @@ def test_book_local_repair_is_scope_bounded_and_sixth_cycle_failure_pauses_run(
                 ),
                 idempotency_key="submit-exhausted-book",
             )
-            async with engine.begin() as connection:
-                await connection.execute(
-                    update(book_workspaces)
-                    .where(book_workspaces.c.book_id == project.result.book_id)
-                    .values(semantic_repair_count=5)
-                )
             await insert_successful_task(
                 engine,
                 project_id="project-repair",

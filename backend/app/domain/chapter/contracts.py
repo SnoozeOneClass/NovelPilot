@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.agents.contracts import ChapterObservationResult
+
 ChapterComponent = Literal[
     "plan",
     "draft",
@@ -165,3 +167,64 @@ class ChapterTextView(BaseModel):
         if not value.strip():
             raise ValueError("Committed Chapter title and prose must be non-blank.")
         return value
+
+
+class CommittedChapterObservationSource(BaseModel):
+    """Harness-owned authority binding for one committed observation document."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    chapter_id: str
+    chapter_baseline_id: str
+    prose_ref_id: str
+    prose_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class CommittedEstablishedFact(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    fact_ordinal: int = Field(ge=1)
+    statement: str = Field(min_length=1)
+    evidence_hint: str = Field(min_length=1)
+
+
+class CommittedChapterObservation(BaseModel):
+    """Correctable historical index derived from one exact formal Chapter prose."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_id: Literal["chapter-committed-observation-v1"] = (
+        "chapter-committed-observation-v1"
+    )
+    source: CommittedChapterObservationSource
+    summary: str = Field(min_length=1)
+    established_facts: list[CommittedEstablishedFact]
+
+
+def bind_committed_chapter_observation(
+    *,
+    candidate: ChapterObservationResult,
+    chapter_id: str,
+    chapter_baseline_id: str,
+    prose_ref_id: str,
+    prose_sha256: str,
+) -> CommittedChapterObservation:
+    """Bind untrusted semantic candidates to exact Harness-owned formal authority."""
+
+    return CommittedChapterObservation(
+        source=CommittedChapterObservationSource(
+            chapter_id=chapter_id,
+            chapter_baseline_id=chapter_baseline_id,
+            prose_ref_id=prose_ref_id,
+            prose_sha256=prose_sha256,
+        ),
+        summary=candidate.summary.strip(),
+        established_facts=[
+            CommittedEstablishedFact(
+                fact_ordinal=ordinal,
+                statement=fact.statement,
+                evidence_hint=fact.evidence_hint,
+            )
+            for ordinal, fact in enumerate(candidate.established_facts, start=1)
+        ],
+    )

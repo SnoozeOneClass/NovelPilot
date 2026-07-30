@@ -167,6 +167,7 @@ class AgentTaskPlan(BaseModel):
     arc_id: str | None = None
     chapter_id: str | None = None
     workspace_lock_version: int | None = Field(default=None, ge=1)
+    workspace_work_cycle_id: str | None = None
     book_baseline_id: str | None = None
     arc_baseline_id: str | None = None
     chapter_baseline_id: str | None = None
@@ -180,6 +181,10 @@ class AgentTaskPlan(BaseModel):
     source_book_parent_review_id: str | None = None
     source_arc_closure_review_id: str | None = None
     source_book_completion_review_id: str | None = None
+    source_book_candidate_review_id: str | None = None
+    source_arc_candidate_review_id: str | None = None
+    source_chapter_candidate_review_id: str | None = None
+    source_book_progress_handoff_id: str | None = None
     source_chapter_arc_request_id: str | None = None
     source_arc_book_request_id: str | None = None
     source_arc_closure_id: str | None = None
@@ -309,6 +314,24 @@ class AgentTaskPlan(BaseModel):
         )
         if sum(source is not None for source in review_sources) > 1:
             raise ValueError("A Task Plan may bind at most one source review.")
+        candidate_review_sources = (
+            self.source_book_candidate_review_id,
+            self.source_arc_candidate_review_id,
+            self.source_chapter_candidate_review_id,
+        )
+        if sum(source is not None for source in candidate_review_sources) > 1:
+            raise ValueError("A Task Plan may bind at most one candidate review.")
+        if (self.workspace_lock_version is None) != (
+            self.workspace_work_cycle_id is None
+        ):
+            raise ValueError(
+                "Workspace lock and semantic work-cycle identity must be frozen together."
+            )
+        if (
+            self.workspace_work_cycle_id is not None
+            and not self.workspace_work_cycle_id.strip()
+        ):
+            raise ValueError("Workspace semantic work-cycle identity must be non-blank.")
         authority_sources = (
             self.source_chapter_arc_request_id,
             self.source_arc_book_request_id,
@@ -321,12 +344,11 @@ class AgentTaskPlan(BaseModel):
             self.correction_lineage_origin,
             self.automatic_correction_round,
         )
-        if all(value is None for value in lineage_fields):
-            if self.source_feedback_id is not None:
-                raise ValueError("Source feedback requires a correction lineage.")
-        elif any(value is None for value in lineage_fields):
+        if not all(value is None for value in lineage_fields) and any(
+            value is None for value in lineage_fields
+        ):
             raise ValueError("Correction lineage identity, origin, and round are atomic.")
-        elif (
+        if (
             self.correction_lineage_origin == "review_initiated"
             and self.source_feedback_id is not None
         ):
@@ -722,6 +744,36 @@ class SemanticCanonProposal(BaseModel):
     )
 
 
+class EstablishedFactCandidate(BaseModel):
+    """A model-authored fact candidate with no storage or authority identity."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    statement: str = Field(
+        min_length=1,
+        description=(
+            "One semantic fact established by the frozen Chapter prose. Preserve "
+            "character claims and beliefs as scoped statements rather than upgrading "
+            "them to objective truth. Do not return IDs, hashes, offsets, or locators."
+        ),
+    )
+    evidence_hint: str = Field(
+        min_length=1,
+        description=(
+            "A concise natural-language rationale from the frozen prose. Do not copy "
+            "an exact quote, byte offset, storage reference, or Harness locator."
+        ),
+    )
+
+    @field_validator("statement", "evidence_hint")
+    @classmethod
+    def _trim_non_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Established fact text must be non-blank.")
+        return stripped
+
+
 class ChapterObservationResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -729,9 +781,13 @@ class ChapterObservationResult(BaseModel):
         min_length=1,
         description="Semantic summary of what the frozen chapter establishes.",
     )
-    continuity_observations: list[str] = Field(
+    established_facts: list[EstablishedFactCandidate] = Field(
         default_factory=list,
-        description="Continuity facts observed in the chapter, not Harness commands.",
+        description=(
+            "Ordinary semantic facts established by the current frozen prose. Earlier "
+            "silence does not make a fact false. These are unbound candidates; the "
+            "Harness attaches exact Chapter, baseline, and prose provenance at commit."
+        ),
     )
     canon_proposals: list[SemanticCanonProposal] = Field(
         default_factory=list,
@@ -753,9 +809,11 @@ class ChapterObservationsRepair(BaseModel):
         min_length=1,
         description="Replacement semantic summary of what the frozen chapter establishes.",
     )
-    continuity_observations: list[str] = Field(
+    established_facts: list[EstablishedFactCandidate] = Field(
         default_factory=list,
-        description="Replacement continuity observations for the frozen chapter.",
+        description=(
+            "Replacement unbound facts established by the same frozen Chapter prose."
+        ),
     )
 
 
@@ -799,37 +857,117 @@ class ChapterObservationRepairPatch(BaseModel):
         return value
 
 
+EvaluationIssueKind = Literal[
+    "explicit_conflict",
+    "contract_unfulfilled",
+    "unsupported_strong_conclusion",
+    "derived_evidence_mismatch",
+    "parent_authority_concern",
+    "creator_owned_unknown",
+]
+
+
 class EvaluationIssue(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    code: str = Field(min_length=1, description="Stable semantic issue category.")
-    summary: str = Field(min_length=1, description="Clear explanation of the rubric failure.")
-    evidence_hint: str | None = Field(
-        default=None,
-        description="Human-readable evidence in the frozen candidate.",
-    )
-    repair_component: str | None = Field(
-        default=None,
-        description="Semantic candidate component that needs repair, never a storage locator.",
-    )
-
-
-class ChapterEvaluationIssue(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    code: str = Field(min_length=1, description="Stable semantic issue category.")
-    subject: str = Field(
-        min_length=1,
+    kind: EvaluationIssueKind = Field(
         description=(
-            "Concise semantic fact or obligation affected by this issue; never an ID, "
-            "locator, exact quote, or storage key."
+            "The closed EP1 blocker kind. Literary preference, style, pacing, and "
+            "advisory deviation are not blocker kinds."
         ),
     )
-    summary: str = Field(min_length=1, description="Clear explanation of the rubric failure.")
-    evidence_hint: str | None = Field(
-        default=None,
-        description="Human-readable evidence in the frozen candidate or committed history.",
+    code: str = Field(
+        min_length=1,
+        description="Stable issue code inside the selected EP1 blocker kind.",
     )
+    subject: str = Field(
+        min_length=1,
+        description="The concrete semantic fact, contract item, or conclusion at issue.",
+    )
+    summary: str = Field(min_length=1, description="Clear explanation of the rubric failure.")
+    evidence: list[str] = Field(
+        min_length=1,
+        description=(
+            "Affirmative model-visible evidence from the current candidate and allowed "
+            "formal sources. Prior silence is not contrary evidence."
+        ),
+    )
+    candidate_claim: str | None = Field(
+        default=None,
+        description=(
+            "Required for explicit_conflict and derived_evidence_mismatch: the "
+            "affirmative candidate or derived statement being judged."
+        ),
+    )
+    contrary_formal_statement: str | None = Field(
+        default=None,
+        description=(
+            "Required for explicit_conflict and derived_evidence_mismatch: the "
+            "affirmative contradictory formal source, never mere historical silence."
+        ),
+    )
+    contract_item: str | None = Field(
+        default=None,
+        description="Required only when an explicit closed-world contract item is unfulfilled.",
+    )
+    support_gap: str | None = Field(
+        default=None,
+        description=(
+            "Required for unsupported_strong_conclusion: the missing support for "
+            "culpability, exclusion, core causal closure, certainty escalation, or an "
+            "upper-contract change."
+        ),
+    )
+    creator_question: str | None = Field(
+        default=None,
+        description=(
+            "Required only for creator_owned_unknown: one concrete answerable "
+            "creator-owned question."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _ep1_shape(self) -> EvaluationIssue:
+        conflict_shape = (
+            self.candidate_claim is not None
+            and bool(self.candidate_claim.strip())
+            and self.contrary_formal_statement is not None
+            and bool(self.contrary_formal_statement.strip())
+        )
+        if self.kind in {"explicit_conflict", "derived_evidence_mismatch"}:
+            if not conflict_shape:
+                raise ValueError(
+                    f"{self.kind} requires affirmative candidate and formal statements."
+                )
+        elif self.candidate_claim is not None or self.contrary_formal_statement is not None:
+            raise ValueError(
+                "Candidate/formal statement pairs are reserved for conflict or "
+                "derived-evidence mismatch issues."
+            )
+        if (self.kind == "contract_unfulfilled") != (
+            self.contract_item is not None and bool(self.contract_item.strip())
+        ):
+            raise ValueError(
+                "Exactly contract_unfulfilled requires one explicit contract item."
+            )
+        if (self.kind == "unsupported_strong_conclusion") != (
+            self.support_gap is not None and bool(self.support_gap.strip())
+        ):
+            raise ValueError(
+                "Exactly unsupported_strong_conclusion requires one support gap."
+            )
+        if (self.kind == "creator_owned_unknown") != (
+            self.creator_question is not None and bool(self.creator_question.strip())
+        ):
+            raise ValueError(
+                "Exactly creator_owned_unknown requires one concrete creator question."
+            )
+        return self
+
+
+class ChapterEvaluationIssue(EvaluationIssue):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
     affected_components: list[ChapterRepairComponent] = Field(
         min_length=1,
         description=(
@@ -854,6 +992,12 @@ class ChapterEvaluationIssue(BaseModel):
         if len(value) != len(set(value)):
             raise ValueError("Chapter issue affected components must be unique.")
         return value
+
+    @model_validator(mode="after")
+    def _chapter_authority_boundary(self) -> ChapterEvaluationIssue:
+        if self.kind == "creator_owned_unknown":
+            raise ValueError("Chapter evaluation cannot create a creator wait.")
+        return self
 
 
 class LayerEvaluationResult(BaseModel):
@@ -888,6 +1032,24 @@ class LayerEvaluationResult(BaseModel):
         }
         if self.decision == "local_repair" and not repair_scope:
             raise ValueError("local_repair requires affected Chapter components.")
+        if self.decision == "local_repair" and any(
+            issue.kind == "parent_authority_concern" for issue in self.issues
+        ):
+            raise ValueError(
+                "A parent-authority concern cannot authorize a Chapter-local repair."
+            )
+        if self.decision == "escalate_to_arc" and not any(
+            issue.kind == "parent_authority_concern" for issue in self.issues
+        ):
+            raise ValueError(
+                "escalate_to_arc requires an evidence-bound parent-authority concern."
+            )
+        if self.decision == "escalate_to_arc" and any(
+            issue.kind != "parent_authority_concern" for issue in self.issues
+        ):
+            raise ValueError(
+                "escalate_to_arc may carry only direct-parent concerns."
+            )
         if "plan" in repair_scope and repair_scope != {"plan"}:
             raise ValueError(
                 "A Chapter plan repair must be the only repair component; the Harness "

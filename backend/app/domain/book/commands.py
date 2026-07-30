@@ -79,6 +79,7 @@ def _task_matches_workspace(
         and task.arc_id is None
         and task.chapter_id is None
         and task.workspace_lock_version == expected_lock_version == workspace.lock_version
+        and task.workspace_work_cycle_id == workspace.work_cycle_id
         and task.book_baseline_id == workspace.base_book_baseline_id
         and task.canon_baseline_id == workspace.base_canon_baseline_id
         and workspace.state == "active"
@@ -661,12 +662,17 @@ class BookCommandService:
                     workspace_snapshot,
                     expected_lock_version=request.expected_workspace_lock_version,
                 ):
-                    review_snapshot = await session.books.get_latest_review(
-                        project_id=request.project_id,
-                        book_id=request.book_id,
+                    review_snapshot = (
+                        None
+                        if workspace_snapshot.active_repair_review_id is None
+                        else await session.books.get_review(
+                            project_id=request.project_id,
+                            review_id=workspace_snapshot.active_repair_review_id,
+                        )
                     )
                     if (
                         review_snapshot is None
+                        or task.source_book_candidate_review_id != review_snapshot.id
                         or review_snapshot.decision != "local_repair"
                         or review_snapshot.repair_contract_ref_id is None
                         or workspace_snapshot.semantic_repair_count
@@ -921,15 +927,20 @@ class BookCommandService:
             )
             repair_increment = 0
             if task.task_kind == "book.repair":
-                review = await session.books.get_latest_review(
-                    project_id=request.project_id,
-                    book_id=request.book_id,
+                review = (
+                    None
+                    if workspace.active_repair_review_id is None
+                    else await session.books.get_review(
+                        project_id=request.project_id,
+                        review_id=workspace.active_repair_review_id,
+                    )
                 )
                 if (
                     workspace_snapshot is None
                     or workspace != workspace_snapshot
                     or review_snapshot is None
                     or review != review_snapshot
+                    or task.source_book_candidate_review_id != review_snapshot.id
                     or prepared_repair is None
                     or workspace.semantic_repair_count >= workspace.semantic_repair_limit
                 ):
@@ -1200,6 +1211,15 @@ class BookCommandService:
                 project_id=request.project_id,
                 book_id=request.book_id,
             )
+            source_feedback = (
+                None
+                if workspace_snapshot is None
+                or workspace_snapshot.source_feedback_id is None
+                else await read_session.feedback.get(
+                    project_id=request.project_id,
+                    feedback_id=workspace_snapshot.source_feedback_id,
+                )
+            )
         if workspace_snapshot is None:
             raise BookNotFoundError(request.book_id)
         required_refs = (
@@ -1215,10 +1235,21 @@ class BookCommandService:
             or any(reference is None for reference in required_refs)
         ):
             raise CommandPreconditionError("Book workspace is not ready for review.")
+        if workspace_snapshot.source_feedback_id is not None and (
+            source_feedback is None
+            or source_feedback.status != "applied"
+            or source_feedback.route_layer != "book"
+            or source_feedback.book_id != request.book_id
+            or source_feedback.content_ref_id != workspace_snapshot.guidance_ref_id
+        ):
+            raise CommandPreconditionError(
+                "Book guidance lost its exact applied feedback source."
+            )
         manifest = {
-            "schema": "book-review-manifest-v2",
+            "schema": "book-review-manifest-v4",
             "workspace_id": workspace_snapshot.id,
             "workspace_lock_version": workspace_snapshot.lock_version,
+            "work_cycle_id": workspace_snapshot.work_cycle_id,
             "base_book_baseline_id": workspace_snapshot.base_book_baseline_id,
             "canon_baseline_id": workspace_snapshot.base_canon_baseline_id,
             "direction_ref_id": workspace_snapshot.direction_draft_ref_id,
@@ -1227,6 +1258,19 @@ class BookCommandService:
             "rolling_plan_ref_id": required_refs[2],
             "completion_contract_ref_id": required_refs[3],
             "arc_topology_ref_id": required_refs[4],
+            "guidance_ref_id": workspace_snapshot.guidance_ref_id,
+            "source_feedback_id": (
+                None if source_feedback is None else source_feedback.id
+            ),
+            "source_book_parent_review_id": (
+                workspace_snapshot.source_book_parent_review_id
+            ),
+            "source_book_completion_review_id": (
+                workspace_snapshot.source_book_completion_review_id
+            ),
+            "source_book_progress_handoff_id": (
+                workspace_snapshot.source_book_progress_handoff_id
+            ),
         }
         prepared_manifest = prepare_canonical_json(manifest)
         envelope = self._envelope(
@@ -1259,7 +1303,7 @@ class BookCommandService:
                 semantic_kind="book.review_manifest",
                 media_type="application/json",
                 schema_id="book-review-manifest",
-                schema_version=2,
+                schema_version=4,
                 ref_id=manifest_ref_id,
                 created_at_ms=timestamp,
             )
@@ -1271,6 +1315,7 @@ class BookCommandService:
                     book_id=request.book_id,
                     workspace_id=workspace_snapshot.id,
                     workspace_lock_version=workspace_snapshot.lock_version,
+                    work_cycle_id=workspace_snapshot.work_cycle_id,
                     base_book_baseline_id=workspace_snapshot.base_book_baseline_id,
                     canon_baseline_id=workspace_snapshot.base_canon_baseline_id,
                     direction_ref_id=workspace_snapshot.direction_draft_ref_id,
@@ -1346,7 +1391,7 @@ class BookCommandService:
         prepared_failure = prepare_canonical_json(
             {
                 "code": "semantic_repair_exhausted",
-                "message": "Book semantic repair limit of five has been exhausted.",
+                "message": "Book semantic correction for this frozen review is exhausted.",
                 "book_id": request.book_id,
             }
         )
@@ -1399,10 +1444,14 @@ class BookCommandService:
                 or request.rubric_version != strategy.rubric_version
                 or task_snapshot.scope_layer != "book"
                 or task_snapshot.book_id != request.book_id
+                or workspace is None
                 or task_snapshot.workspace_lock_version != submission.workspace_lock_version
+                or task_snapshot.workspace_work_cycle_id != submission.work_cycle_id
+                or workspace.work_cycle_id != submission.work_cycle_id
+                or task_snapshot.source_book_candidate_review_id
+                != workspace.active_repair_review_id
                 or task_snapshot.book_baseline_id != submission.base_book_baseline_id
                 or task_snapshot.canon_baseline_id != submission.canon_baseline_id
-                or workspace is None
                 or workspace.id != submission.workspace_id
                 or workspace.lock_version != submission.workspace_lock_version
             ):
@@ -1462,6 +1511,11 @@ class BookCommandService:
                     workspace,
                     state=state,
                     lock_version=workspace.lock_version + 1,
+                    active_repair_review_id=(
+                        review_id
+                        if evaluation.decision == "local_repair"
+                        else None
+                    ),
                     updated_at_ms=timestamp,
                 )
                 if not await session.books.compare_and_set_workspace(
@@ -1754,6 +1808,7 @@ class BookCommandService:
                 workspace,
                 state="idle",
                 lock_version=workspace.lock_version + 1,
+                active_repair_review_id=None,
                 base_book_baseline_id=baseline_id,
                 base_canon_baseline_id=submission.canon_baseline_id,
                 direction_draft_ref_id=submission.direction_ref_id,

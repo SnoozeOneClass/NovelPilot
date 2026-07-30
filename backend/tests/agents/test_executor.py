@@ -36,7 +36,12 @@ from app.agents.transport import (
 from app.db.engine import create_sqlite_async_engine
 from app.db.maintenance import alembic_config
 from app.db.uow import UnitOfWork
-from app.db.schema import agent_evidence_items, agent_task_attempts, agent_tasks
+from app.db.schema import (
+    agent_evidence_items,
+    agent_task_attempts,
+    agent_tasks,
+    content_refs,
+)
 from app.domain.projects import CreateProjectRequest, ProjectCommandService
 from app.store.agent_tasks import AgentTaskStore
 from app.store.command_bus import CommandBus
@@ -277,6 +282,7 @@ def test_executor_persists_complete_task_evidence_without_token_deltas(tmp_path:
                 context_manifest={"candidate": {"direction": "Memory changes testimony."}},
                 profile_snapshot=profile,
                 workspace_lock_version=1,
+                workspace_work_cycle_id="evaluate-book-work-cycle",
             )
             await AgentTaskStore(engine).create_initial(
                 plan=plan,
@@ -313,6 +319,22 @@ def test_executor_persists_complete_task_evidence_without_token_deltas(tmp_path:
                         ).where(agent_tasks.c.id == plan.task_id)
                     )
                 ).one()
+                task_plan_schema = (
+                    await connection.execute(
+                        select(
+                            content_refs.c.schema_id,
+                            content_refs.c.schema_version,
+                        )
+                        .select_from(
+                            agent_tasks.join(
+                                content_refs,
+                                agent_tasks.c.task_plan_ref_id == content_refs.c.id,
+                            )
+                        )
+                        .where(agent_tasks.c.id == plan.task_id)
+                    )
+                ).one()
+                assert tuple(task_plan_schema) == ("agent-task-plan", 2)
                 attempt_row = (
                     await connection.execute(
                         select(
@@ -421,6 +443,7 @@ def test_executor_persists_failed_typed_output_messages_and_exact_validation(
                 context_manifest={"creator_brief": "A mystery about edited testimony."},
                 profile_snapshot=profile,
                 workspace_lock_version=1,
+                workspace_work_cycle_id="book-discussion-work-cycle",
             )
             await AgentTaskStore(engine).create_initial(
                 plan=plan,
@@ -582,6 +605,7 @@ def test_transient_failure_exhaustion_is_six_visible_requests_and_terminal_failu
                 context_manifest={"candidate": {"direction": "An unreachable archive."}},
                 profile_snapshot=profile,
                 workspace_lock_version=1,
+                workspace_work_cycle_id="retry-exhaustion-work-cycle",
             )
             await AgentTaskStore(engine).create_initial(
                 plan=plan,
@@ -727,6 +751,7 @@ def test_prose_replay_discards_partial_text_and_restarts_from_frozen_plan(
             context_manifest={"plan": {"goal": "Recover the archive."}},
             profile_snapshot=profile,
             workspace_lock_version=1,
+            workspace_work_cycle_id="chapter-draft-work-cycle",
         )
         definition = DEFAULT_TASK_REGISTRY.get(
             role=plan.role,
@@ -859,6 +884,7 @@ def test_empty_http_success_replays_same_prose_task_then_succeeds(
             context_manifest={"plan": {"goal": "Recover the archive."}},
             profile_snapshot=profile,
             workspace_lock_version=1,
+            workspace_work_cycle_id="empty-chapter-draft-work-cycle",
         )
         definition = DEFAULT_TASK_REGISTRY.get(
             role=plan.role,
@@ -954,6 +980,7 @@ def test_six_empty_http_successes_exhaust_stream_replay_budget(
                 context_manifest={"candidate": {"direction": "An empty archive."}},
                 profile_snapshot=profile,
                 workspace_lock_version=1,
+                workspace_work_cycle_id="empty-retry-exhaustion-work-cycle",
             )
             await AgentTaskStore(engine).create_initial(
                 plan=plan,

@@ -105,6 +105,8 @@ def test_new_semantic_subjects_are_harness_upserts(
 
     applied = apply_canon_patch(
         chapter_id="chapter-new-subject",
+        chapter_baseline_id="chapter-baseline-new-subject",
+        prose_ref_id="prose-ref-new-subject",
         current={canon_category: [] for canon_category in CANON_CATEGORIES},
         patch=patch,
     )
@@ -113,6 +115,8 @@ def test_new_semantic_subjects_are_harness_upserts(
     assert len(entries) == 1
     assert entries[0].subject == subject
     assert entries[0].semantic_state == proposal.semantic_change
+    assert entries[0].source_chapter_baseline_id == "chapter-baseline-new-subject"
+    assert entries[0].source_prose_ref_id == "prose-ref-new-subject"
 
 
 def test_same_semantic_subject_is_replaced_by_harness() -> None:
@@ -124,6 +128,8 @@ def test_same_semantic_subject_is_replaced_by_harness() -> None:
     )
     initial = apply_canon_patch(
         chapter_id="chapter-1",
+        chapter_baseline_id="chapter-baseline-1",
+        prose_ref_id="prose-ref-1",
         current={category: [] for category in CANON_CATEGORIES},
         patch=initial_patch,
     )
@@ -142,6 +148,8 @@ def test_same_semantic_subject_is_replaced_by_harness() -> None:
 
     applied = apply_canon_patch(
         chapter_id="chapter-2",
+        chapter_baseline_id="chapter-baseline-2",
+        prose_ref_id="prose-ref-2",
         current=initial.categories,
         patch=changed_patch,
     )
@@ -151,6 +159,126 @@ def test_same_semantic_subject_is_replaced_by_harness() -> None:
     assert entries[0].semantic_state == changed.semantic_change
     assert entries[0].resolved
     assert entries[0].source_chapter_id == "chapter-2"
+    assert entries[0].source_chapter_baseline_id == "chapter-baseline-2"
+    assert entries[0].source_prose_ref_id == "prose-ref-2"
+
+
+def test_evidence_only_correction_rebinds_only_the_entry_from_its_source_baseline() -> None:
+    proposal = _proposal(hint="The original derived evidence hint.")
+    initial = apply_canon_patch(
+        chapter_id="chapter-1",
+        chapter_baseline_id="chapter-baseline-1",
+        prose_ref_id="prose-ref-1",
+        current={category: [] for category in CANON_CATEGORIES},
+        patch=bind_canon_patch(
+            chapter_id="chapter-1",
+            prose="The page visibly changes in Mara's hands.",
+            observations=_observations(proposal),
+        ),
+    )
+    corrected = proposal.model_copy(
+        update={"evidence_hint": "Mara directly witnesses the page change."}
+    )
+    corrected_patch = bind_canon_patch(
+        chapter_id="chapter-1",
+        prose="The page visibly changes in Mara's hands.",
+        observations=_observations(corrected),
+    )
+
+    ordinary_repeat = apply_canon_patch(
+        chapter_id="chapter-1",
+        chapter_baseline_id="chapter-baseline-2",
+        prose_ref_id="prose-ref-1",
+        current=initial.categories,
+        patch=corrected_patch,
+    )
+    assert not ordinary_repeat.changed
+    assert (
+        ordinary_repeat.categories["world_facts"][0].source_chapter_baseline_id
+        == "chapter-baseline-1"
+    )
+
+    evidence_correction = apply_canon_patch(
+        chapter_id="chapter-1",
+        chapter_baseline_id="chapter-baseline-2",
+        prose_ref_id="prose-ref-1",
+        current=initial.categories,
+        patch=corrected_patch,
+        replace_evidence_for_chapter_baseline_id="chapter-baseline-1",
+    )
+    corrected_entry = evidence_correction.categories["world_facts"][0]
+    assert evidence_correction.changed
+    assert corrected_entry.evidence.hint == corrected.evidence_hint
+    assert corrected_entry.source_chapter_baseline_id == "chapter-baseline-2"
+    assert corrected_entry.source_prose_ref_id == "prose-ref-1"
+
+    wrong_source = apply_canon_patch(
+        chapter_id="chapter-1",
+        chapter_baseline_id="chapter-baseline-3",
+        prose_ref_id="prose-ref-1",
+        current=initial.categories,
+        patch=corrected_patch,
+        replace_evidence_for_chapter_baseline_id="another-baseline",
+    )
+    assert not wrong_source.changed
+
+
+def test_evidence_only_correction_cannot_rewind_a_descendant_canon_state() -> None:
+    initial_proposal = _proposal(hint="The first Chapter establishes mutable testimony.")
+    initial = apply_canon_patch(
+        chapter_id="chapter-1",
+        chapter_baseline_id="chapter-baseline-1",
+        prose_ref_id="prose-ref-1",
+        current={category: [] for category in CANON_CATEGORIES},
+        patch=bind_canon_patch(
+            chapter_id="chapter-1",
+            prose="The testimony changes while Mara watches.",
+            observations=_observations(initial_proposal),
+        ),
+    )
+    descendant_proposal = initial_proposal.model_copy(
+        update={
+            "semantic_change": "The mutable testimony is independently corroborated.",
+            "resolved": True,
+            "evidence_hint": "A later Chapter confirms the alteration independently.",
+        }
+    )
+    descendant = apply_canon_patch(
+        chapter_id="chapter-2",
+        chapter_baseline_id="chapter-baseline-2",
+        prose_ref_id="prose-ref-2",
+        current=initial.categories,
+        patch=bind_canon_patch(
+            chapter_id="chapter-2",
+            prose="An analogue copy independently confirms the alteration.",
+            observations=_observations(descendant_proposal),
+        ),
+    )
+    corrected_ancestor = initial_proposal.model_copy(
+        update={
+            "semantic_change": "The testimony appears mutable to Mara.",
+            "evidence_hint": "The corrected historical index preserves Mara's limited view.",
+        }
+    )
+
+    applied = apply_canon_patch(
+        chapter_id="chapter-1",
+        chapter_baseline_id="chapter-baseline-3",
+        prose_ref_id="prose-ref-1",
+        current=descendant.categories,
+        patch=bind_canon_patch(
+            chapter_id="chapter-1",
+            prose="The testimony changes while Mara watches.",
+            observations=_observations(corrected_ancestor),
+        ),
+        replace_evidence_for_chapter_baseline_id="chapter-baseline-1",
+    )
+
+    assert not applied.changed
+    preserved = applied.categories["world_facts"][0]
+    assert preserved.semantic_state == descendant_proposal.semantic_change
+    assert preserved.source_chapter_baseline_id == "chapter-baseline-2"
+    assert preserved.source_prose_ref_id == "prose-ref-2"
 
 
 def test_incompatible_assertions_for_one_subject_are_rejected() -> None:
@@ -173,6 +301,8 @@ def test_incompatible_assertions_for_one_subject_are_rejected() -> None:
     ):
         apply_canon_patch(
             chapter_id="chapter-conflict",
+            chapter_baseline_id="chapter-baseline-conflict",
+            prose_ref_id="prose-ref-conflict",
             current={category: [] for category in CANON_CATEGORIES},
             patch=patch,
         )

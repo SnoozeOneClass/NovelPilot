@@ -60,6 +60,7 @@ def test_registry_freezes_s1_output_and_t1_without_domain_tools() -> None:
         context_manifest={"candidate_ref": "candidate-a"},
         profile_snapshot=profile,
         workspace_lock_version=1,
+        workspace_work_cycle_id="book-evaluation-work-cycle",
     )
     prose = DEFAULT_TASK_REGISTRY.freeze_plan(
         task_id="task-prose",
@@ -283,18 +284,24 @@ def test_cross_field_semantic_rules_are_present_in_model_visible_contracts() -> 
         book_properties["repair_contract"]["description"]
     )
     assert "local_repair" in book_evaluation.task_instructions
+    assert "authorized components equal that exact union" in (
+        book_evaluation.task_instructions
+    )
+    assert "Book is the top creative authority" in book_evaluation.task_instructions
 
     arc_properties = arc_evaluation.output_schema["properties"]
     assert "only when decision is local_repair" in (
         arc_properties["repair_scope"]["description"]
     )
     assert "repair_scope contains at least one" in arc_evaluation.task_instructions
+    assert "repair_scope equals that exact union" in arc_evaluation.task_instructions
+    assert "escalate_to_book carries only" in arc_evaluation.task_instructions
     assert "required conclusion must be no stronger than the observable evidence" in (
         arc_evaluation.task_instructions
     )
-    assert arc_evaluation.output_schema_version == 3
-    assert arc_evaluation.evaluation_strategy_version == 4
-    assert arc_evaluation.rubric_id == "arc-candidate-rubric-v4"
+    assert arc_evaluation.output_schema_version == 4
+    assert arc_evaluation.evaluation_strategy_version == 5
+    assert arc_evaluation.rubric_id == "arc-candidate-rubric-v5"
 
     chapter_properties = chapter_evaluation.output_schema["properties"]
     assert "escalation_target" not in chapter_properties
@@ -307,6 +314,7 @@ def test_cross_field_semantic_rules_are_present_in_model_visible_contracts() -> 
         chapter_evaluation.task_instructions
     )
     assert "new assignment-fulfillment issue" in chapter_evaluation.task_instructions
+    assert "escalate_to_arc carries only" in chapter_evaluation.task_instructions
 
 
 def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
@@ -349,7 +357,7 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
         },
         "chapter": {"observations", "canon"},
     }
-    expected_versions = {"book": 3, "arc": 5, "chapter": 3}
+    expected_versions = {"book": 3, "arc": 5, "chapter": 4}
     for layer, definition in definitions.items():
         assert definition.output_schema_version == expected_versions[layer]
         assert set(definition.output_schema["properties"]) == {"changes"}
@@ -387,7 +395,9 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
     ]["properties"]
     assert "operation" not in canon_properties
     assert "resolved" in canon_properties
-    assert chapter_observation.output_schema_version == 2
+    assert "established_facts" in chapter_observation.output_schema["properties"]
+    assert "continuity_observations" not in chapter_observation.output_schema["properties"]
+    assert chapter_observation.output_schema_version == 3
 
     chapter_evaluation = DEFAULT_TASK_REGISTRY.get(
         role="evaluator",
@@ -400,6 +410,14 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
     assert set(
         chapter_issue_properties["affected_components"]["items"]["enum"]
     ) == {"plan", "prose", "observations", "canon"}
+    assert set(chapter_issue_properties["kind"]["enum"]) == {
+        "explicit_conflict",
+        "contract_unfulfilled",
+        "unsupported_strong_conclusion",
+        "derived_evidence_mismatch",
+        "parent_authority_concern",
+        "creator_owned_unknown",
+    }
     assert "repair_scope" not in chapter_evaluation.output_schema["properties"]
     assert set(chapter_issue_properties["recurrence"]["enum"]) == {
         "new",
@@ -413,9 +431,9 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
         chapter_evaluation.task_instructions
     )
     assert "Harness derives" in chapter_evaluation.task_instructions
-    assert chapter_evaluation.output_schema_version == 4
-    assert chapter_evaluation.evaluation_strategy_version == 5
-    assert chapter_evaluation.rubric_id == "chapter-candidate-rubric-v6"
+    assert chapter_evaluation.output_schema_version == 5
+    assert chapter_evaluation.evaluation_strategy_version == 6
+    assert chapter_evaluation.rubric_id == "chapter-candidate-rubric-v7"
     assert chapter_evaluation.context_policy_id == "chapter-evaluator-context-v4"
 
     chapter_repair_evaluation = DEFAULT_TASK_REGISTRY.get(
@@ -426,9 +444,9 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
     chapter_repair_strategy = DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
         "verify_repair.chapter"
     )
-    assert chapter_repair_evaluation.output_schema_version == 4
-    assert chapter_repair_evaluation.evaluation_strategy_version == 5
-    assert chapter_repair_evaluation.rubric_id == "chapter-repair-rubric-v6"
+    assert chapter_repair_evaluation.output_schema_version == 5
+    assert chapter_repair_evaluation.evaluation_strategy_version == 6
+    assert chapter_repair_evaluation.rubric_id == "chapter-repair-rubric-v7"
     assert (
         chapter_repair_evaluation.context_policy_id
         == "chapter-repair-verification-context-v4"
@@ -465,9 +483,9 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
         task_kind="verify_repair.arc",
         contract_version=1,
     )
-    assert arc_repair_evaluation.output_schema_version == 3
-    assert arc_repair_evaluation.evaluation_strategy_version == 4
-    assert arc_repair_evaluation.rubric_id == "arc-repair-rubric-v5"
+    assert arc_repair_evaluation.output_schema_version == 4
+    assert arc_repair_evaluation.evaluation_strategy_version == 5
+    assert arc_repair_evaluation.rubric_id == "arc-repair-rubric-v6"
 
 
 def test_local_repair_patch_contracts_reject_empty_and_duplicate_changes() -> None:
@@ -495,12 +513,12 @@ def test_local_repair_patch_contracts_reject_empty_and_duplicate_changes() -> No
                 {
                     "component": "observations",
                     "summary": "First summary",
-                    "continuity_observations": [],
+                    "established_facts": [],
                 },
                 {
                     "component": "observations",
                     "summary": "Second summary",
-                    "continuity_observations": [],
+                    "established_facts": [],
                 },
             ],
         ),
@@ -553,6 +571,7 @@ def test_frozen_evaluator_plan_contains_concrete_rubric_and_strategy_identity() 
         book_id="book-a",
         arc_id="arc-a",
         workspace_lock_version=3,
+        workspace_work_cycle_id="arc-closure-work-cycle",
         book_baseline_id="book-baseline-a",
         arc_baseline_id="arc-baseline-a",
         canon_baseline_id="canon-a",
@@ -566,10 +585,152 @@ def test_frozen_evaluator_plan_contains_concrete_rubric_and_strategy_identity() 
     )
 
     assert plan.evaluation_strategy_id == "evaluate.arc_closure-strategy"
-    assert plan.evaluation_strategy_version == 1
-    assert plan.rubric_id == "arc-closure-rubric-v2"
+    assert plan.evaluation_strategy_version == 3
+    assert plan.rubric_id == "arc-closure-rubric-v4"
     assert plan.rubric_text
     assert "Reaching the Chapter checkpoint is not semantic completion" in plan.rubric_text
+    assert (
+        "book_review_required and a parent_authority_concern issue are atomic"
+        in plan.rubric_text
+    )
+
+
+def test_feedback_binding_distinguishes_guidance_from_correction_authority() -> None:
+    common = {
+        "project_id": "project-a",
+        "run_id": "run-a",
+        "role": "book_strategist",
+        "task_kind": "book.discuss",
+        "contract_version": 1,
+        "book_id": "book-a",
+        "canon_baseline_id": "canon-a",
+        "semantic_goal": "Discuss the current Book workspace.",
+        "prompt": "Continue the Book discussion.",
+        "context_manifest": {"schema_id": "test-context"},
+        "profile_snapshot": _profile(),
+        "workspace_lock_version": 4,
+        "workspace_work_cycle_id": "book-feedback-work-cycle",
+    }
+
+    guidance_plan = DEFAULT_TASK_REGISTRY.freeze_plan(
+        task_id="task-guidance",
+        task_key="book:discuss:guidance",
+        action_key="book.discuss:guidance",
+        source_feedback_id="feedback-guidance",
+        **common,
+    )
+    assert guidance_plan.source_feedback_id == "feedback-guidance"
+    assert guidance_plan.correction_lineage_id is None
+
+    user_correction_plan = DEFAULT_TASK_REGISTRY.freeze_plan(
+        task_id="task-user-correction",
+        task_key="book:discuss:user-correction",
+        action_key="book.discuss:user-correction",
+        correction_lineage_id="lineage-user",
+        correction_lineage_origin="user_initiated",
+        automatic_correction_round=0,
+        source_feedback_id="feedback-correction",
+        **common,
+    )
+    assert user_correction_plan.source_feedback_id == "feedback-correction"
+    assert user_correction_plan.correction_lineage_origin == "user_initiated"
+
+    with pytest.raises(
+        ValidationError,
+        match="User-initiated correction must bind its feedback item",
+    ):
+        DEFAULT_TASK_REGISTRY.freeze_plan(
+            task_id="task-user-correction-without-feedback",
+            task_key="book:discuss:user-correction-without-feedback",
+            action_key="book.discuss:user-correction-without-feedback",
+            correction_lineage_id="lineage-user",
+            correction_lineage_origin="user_initiated",
+            automatic_correction_round=0,
+            **common,
+        )
+
+    with pytest.raises(
+        ValidationError,
+        match="Review-initiated correction cannot bind user feedback",
+    ):
+        DEFAULT_TASK_REGISTRY.freeze_plan(
+            task_id="task-review-correction-with-feedback",
+            task_key="book:discuss:review-correction-with-feedback",
+            action_key="book.discuss:review-correction-with-feedback",
+            correction_lineage_id="lineage-review",
+            correction_lineage_origin="review_initiated",
+            automatic_correction_round=0,
+            source_feedback_id="feedback-guidance",
+            **common,
+        )
+
+
+def test_parent_and_evidence_review_rubrics_expose_harness_route_shape() -> None:
+    expected = {
+        "evaluate.arc_parent_contract": (
+            "book_review_required and a parent_authority_concern issue are atomic",
+            "chapter_evidence_review_required and a derived_evidence_mismatch issue "
+            "are atomic",
+            3,
+            3,
+            "arc-parent-contract-rubric-v4",
+        ),
+        "evaluate.book_parent_contract": (
+            "Book is the top authority",
+            "arc_evidence_review_required and a derived_evidence_mismatch issue "
+            "are atomic",
+            3,
+            3,
+            "book-parent-contract-rubric-v3",
+        ),
+        "evaluate.arc_closure": (
+            "book_review_required and a parent_authority_concern issue are atomic",
+            "chapter_evidence_review_required and a derived_evidence_mismatch issue "
+            "are atomic",
+            3,
+            3,
+            "arc-closure-rubric-v4",
+        ),
+        "evaluate.book_completion": (
+            "Book is the top authority",
+            "never emit parent_authority_concern",
+            3,
+            3,
+            "book-completion-rubric-v3",
+        ),
+        "verify_evidence.chapter": (
+            "When all three checks pass, return no issues",
+            "cannot create a creator wait",
+            3,
+            3,
+            "chapter-evidence-correction-rubric-v3",
+        ),
+    }
+
+    for task_kind, (
+        first_rule,
+        second_rule,
+        strategy_version,
+        output_version,
+        rubric_id,
+    ) in expected.items():
+        definition = DEFAULT_TASK_REGISTRY.get(
+            role="evaluator",
+            task_kind=task_kind,
+            contract_version=1,
+        )
+        assert first_rule in definition.task_instructions
+        assert second_rule in definition.task_instructions
+        assert definition.evaluation_strategy_version == strategy_version
+        assert definition.output_schema_version == output_version
+        assert definition.rubric_id == rubric_id
+
+    evidence_definition = DEFAULT_TASK_REGISTRY.get(
+        role="evaluator",
+        task_kind="verify_evidence.chapter",
+        contract_version=1,
+    )
+    assert "creator_input_need" not in evidence_definition.output_schema["properties"]
 
 
 def test_arc_contract_exposes_complete_semantic_chapter_outline() -> None:

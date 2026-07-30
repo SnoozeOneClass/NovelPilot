@@ -1572,6 +1572,8 @@ class LoopAuthorityCommandService:
                 workspace,
                 state="active",
                 lock_version=workspace.lock_version + 1,
+                work_cycle_id=uuid.uuid4().hex,
+                active_repair_review_id=None,
                 base_arc_baseline_id=arc.current_baseline_id,
                 book_baseline_id=review.book_baseline_id,
                 canon_baseline_id=review.canon_baseline_id,
@@ -1681,6 +1683,38 @@ class LoopAuthorityCommandService:
                     arc_id=closure.arc_id,
                 )
             )
+            review_handoff = (
+                None
+                if review is None or review.book_progress_handoff_id is None
+                else await session.book_progress_handoffs.get(
+                    project_id=request.project_id,
+                    handoff_id=review.book_progress_handoff_id,
+                )
+            )
+            prior_closure = (
+                None
+                if review_handoff is None
+                else await session.arc_closures.get(
+                    project_id=request.project_id,
+                    closure_id=review_handoff.source_arc_closure_id,
+                )
+            )
+            prior_arc = (
+                None
+                if prior_closure is None
+                else await session.arcs.get(
+                    project_id=request.project_id,
+                    arc_id=prior_closure.arc_id,
+                )
+            )
+            terminal_workspace = (
+                None
+                if terminal_arc is None
+                else await session.arcs.get_workspace(
+                    project_id=request.project_id,
+                    arc_id=terminal_arc.id,
+                )
+            )
             if (
                 review is None
                 or review.book_id != request.book_id
@@ -1694,7 +1728,8 @@ class LoopAuthorityCommandService:
                 or book.lifecycle_status != "active"
                 or book.current_baseline_id != review.book_baseline_id
                 or book.latest_completion_review_id != review.id
-                or book.current_progress_handoff_id is not None
+                or book.current_progress_handoff_id
+                != review.book_progress_handoff_id
                 or book.current_completion_id is not None
                 or workspace is None
                 or workspace.state != "idle"
@@ -1704,6 +1739,27 @@ class LoopAuthorityCommandService:
                 or terminal_arc is None
                 or terminal_arc.current_closure_id != closure.id
                 or terminal_arc.lifecycle_status != "completed"
+                or (
+                    terminal_arc.ordinal == 1
+                    and review.book_progress_handoff_id is not None
+                )
+                or (
+                    terminal_arc.ordinal > 1
+                    and (
+                        review_handoff is None
+                        or review_handoff.book_baseline_id
+                        != review.book_baseline_id
+                        or review_handoff.next_arc_ordinal
+                        != terminal_arc.ordinal
+                        or prior_closure is None
+                        or prior_arc is None
+                        or prior_arc.ordinal != terminal_arc.ordinal - 1
+                        or prior_arc.current_closure_id != prior_closure.id
+                        or terminal_workspace is None
+                        or terminal_workspace.book_progress_handoff_id
+                        != review_handoff.id
+                    )
+                )
             ):
                 raise CommandPreconditionError(
                     "Book completion revision authorization is stale."
@@ -1720,6 +1776,8 @@ class LoopAuthorityCommandService:
                 workspace,
                 state="active",
                 lock_version=workspace.lock_version + 1,
+                work_cycle_id=uuid.uuid4().hex,
+                active_repair_review_id=None,
                 base_book_baseline_id=review.book_baseline_id,
                 base_canon_baseline_id=project.current_canon_baseline_id,
                 candidate_constraints_ref_id=None,
@@ -1728,6 +1786,10 @@ class LoopAuthorityCommandService:
                 candidate_completion_contract_ref_id=None,
                 candidate_arc_topology_ref_id=None,
                 guidance_ref_id=review.detail_ref_id,
+                source_feedback_id=None,
+                source_book_parent_review_id=None,
+                source_book_completion_review_id=review.id,
+                source_book_progress_handoff_id=review.book_progress_handoff_id,
                 semantic_repair_count=0,
                 stale_reason_code=None,
                 stale_at_ms=None,
@@ -1802,7 +1864,15 @@ class LoopAuthorityCommandService:
                     )
                 ).unpack_and_verify()
             )
-            book, baseline, workspace, closures, terminal_arc, chapter_count = (
+            (
+                book,
+                baseline,
+                workspace,
+                closures,
+                terminal_arc,
+                progress_handoff,
+                chapter_count,
+            ) = (
                 await self._book_completion_snapshot(
                     session,
                     request=request,
@@ -1845,12 +1915,16 @@ class LoopAuthorityCommandService:
             )
             prepared_precheck = prepare_canonical_json(
                 {
-                    "schema_id": "book-completion-precheck-v2",
+                    "schema_id": "book-completion-precheck-v3",
                     "passed": True,
                     "planned_final_arc_closed": True,
                     "formal_arc_closure_count": len(closures),
                     "book_baseline_current": True,
                     "closure_inputs_frozen": True,
+                    "progress_handoff_frozen": (
+                        terminal_arc.ordinal == 1
+                        or progress_handoff is not None
+                    ),
                     "committed_chapter_count": chapter_count,
                 }
             )
@@ -1874,6 +1948,9 @@ class LoopAuthorityCommandService:
                         for closure in closures
                     ],
                     "closure_canon_baseline_id": terminal_closure.canon_baseline_id,
+                    "book_progress_handoff_id": (
+                        None if progress_handoff is None else progress_handoff.id
+                    ),
                     "committed_chapter_count": chapter_count,
                     "strategy_id": task.evaluation_strategy_id,
                     "strategy_version": task.evaluation_strategy_version,
@@ -1914,6 +1991,7 @@ class LoopAuthorityCommandService:
                 workspace,
                 closures,
                 terminal_arc,
+                progress_handoff,
                 chapter_count,
             ):
                 raise CommandPreconditionError(
@@ -1957,7 +2035,7 @@ class LoopAuthorityCommandService:
                 semantic_kind="book.completion_requirement_statuses",
                 media_type="application/json",
                 schema_id="book-completion-requirement-statuses",
-                schema_version=2,
+                schema_version=3,
                 ref_id=statuses_ref_id,
                 created_at_ms=timestamp,
             )
@@ -1990,6 +2068,9 @@ class LoopAuthorityCommandService:
                     book_id=request.book_id,
                     book_baseline_id=baseline.id,
                     arc_closure_id=terminal_closure.id,
+                    book_progress_handoff_id=(
+                        None if progress_handoff is None else progress_handoff.id
+                    ),
                     canon_baseline_id=terminal_closure.canon_baseline_id,
                     committed_chapter_count=chapter_count,
                     chapter_set_fingerprint=prepare_canonical_json(
@@ -2717,6 +2798,7 @@ class LoopAuthorityCommandService:
         BookWorkspaceRecord,
         tuple[ArcClosureRecord, ...],
         ArcRecord,
+        BookProgressHandoffRecord | None,
         int,
     ]:
         book = await session.books.get_for_project(request.project_id)
@@ -2761,6 +2843,22 @@ class LoopAuthorityCommandService:
                 review_id=task.source_book_completion_review_id,
             )
         )
+        progress_handoff = (
+            None
+            if task.source_book_progress_handoff_id is None
+            else await session.book_progress_handoffs.get(
+                project_id=request.project_id,
+                handoff_id=task.source_book_progress_handoff_id,
+            )
+        )
+        terminal_workspace = (
+            None
+            if terminal_arc is None
+            else await session.arcs.get_workspace(
+                project_id=request.project_id,
+                arc_id=terminal_arc.id,
+            )
+        )
         arcs = await session.arcs.list_for_book(
             project_id=request.project_id,
             book_id=request.book_id,
@@ -2791,6 +2889,48 @@ class LoopAuthorityCommandService:
         chapter_count = await session.completion.count_committed_chapters(
             book_id=request.book_id
         )
+        handoff_matches_terminal_arc = False
+        if terminal_arc is not None and baseline is not None:
+            if terminal_arc.ordinal == 1:
+                handoff_matches_terminal_arc = (
+                    progress_handoff is None
+                    and task.source_book_progress_handoff_id is None
+                )
+            elif (
+                progress_handoff is not None
+                and len(closures) >= 2
+                and terminal_workspace is not None
+            ):
+                expected_handoff_baseline_id = (
+                    baseline.id
+                    if source_review is None
+                    else source_review.book_baseline_id
+                )
+                handoff_matches_terminal_arc = (
+                    progress_handoff.book_id == request.book_id
+                    and progress_handoff.next_arc_ordinal == terminal_arc.ordinal
+                    and progress_handoff.source_arc_closure_id == closures[-2].id
+                    and progress_handoff.book_baseline_id
+                    == expected_handoff_baseline_id
+                    and terminal_workspace.book_progress_handoff_id
+                    == progress_handoff.id
+                    and (
+                        (
+                            source_review is None
+                            and book is not None
+                            and book.current_progress_handoff_id
+                            == progress_handoff.id
+                        )
+                        or (
+                            source_review is not None
+                            and source_review.book_progress_handoff_id
+                            == progress_handoff.id
+                            and workspace is not None
+                            and workspace.source_book_progress_handoff_id
+                            == progress_handoff.id
+                        )
+                    )
+                )
         if (
             book is None
             or book.id != request.book_id
@@ -2811,6 +2951,7 @@ class LoopAuthorityCommandService:
             or terminal_arc.current_closure_id != terminal_closure.id
             or terminal_arc.lifecycle_status != "completed"
             or terminal_arc.ordinal != baseline.final_arc_ordinal
+            or not handoff_matches_terminal_arc
             or len(arcs) != baseline.final_arc_ordinal
             or tuple(arc.ordinal for arc in arcs)
             != tuple(range(1, baseline.final_arc_ordinal + 1))
@@ -2823,7 +2964,15 @@ class LoopAuthorityCommandService:
             raise CommandPreconditionError(
                 "Book completion facts are stale or incomplete."
             )
-        return book, baseline, workspace, closures, terminal_arc, chapter_count
+        return (
+            book,
+            baseline,
+            workspace,
+            closures,
+            terminal_arc,
+            progress_handoff,
+            chapter_count,
+        )
 
     @staticmethod
     async def _open_chapter_correction(
@@ -2931,6 +3080,8 @@ class LoopAuthorityCommandService:
             workspace,
             state="active",
             lock_version=workspace.lock_version + 1,
+            work_cycle_id=uuid.uuid4().hex,
+            active_repair_review_id=None,
             base_chapter_baseline_id=chapter.current_baseline_id,
             book_baseline_id=task.book_baseline_id or workspace.book_baseline_id,
             arc_baseline_id=arc.current_baseline_id,
@@ -3051,6 +3202,8 @@ class LoopAuthorityCommandService:
             workspace,
             state="active",
             lock_version=workspace.lock_version + 1,
+            work_cycle_id=uuid.uuid4().hex,
+            active_repair_review_id=None,
             base_arc_baseline_id=arc.current_baseline_id,
             book_baseline_id=review.target_book_baseline_id,
             canon_baseline_id=project.current_canon_baseline_id,
@@ -3143,7 +3296,7 @@ class LoopAuthorityCommandService:
             evaluation.arc_contract_judgment == "remains_applicable"
             and required_satisfied
         ):
-            return "pass"
+            return "pass" if not evaluation.issues else "no_legal_route"
         if evaluation.arc_contract_judgment == "remains_applicable":
             return "arc_revision_warranted"
         return "no_legal_route"

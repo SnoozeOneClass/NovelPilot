@@ -462,3 +462,45 @@ def test_arc_outline_revision_requires_reset_for_existing_story_history(
         }
     finally:
         engine.dispose()
+
+
+def test_exact_work_cycle_revision_rejects_populated_pre_release_history(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "incompatible-work-cycle.sqlite3"
+    config = _alembic_config(database_path)
+    command.upgrade(config, "d82f1c4a7b90")
+    seed_engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    try:
+        with seed_engine.begin() as connection:
+            connection.execute(
+                projects.insert().values(
+                    id="pre-work-cycle-project",
+                    operation_mode="full_auto",
+                    lifecycle_status="active",
+                    settings_lock_version=1,
+                    current_canon_baseline_id="pre-work-cycle-canon",
+                    created_at_ms=1,
+                    updated_at_ms=1,
+                )
+            )
+    finally:
+        seed_engine.dispose()
+
+    with pytest.raises(
+        RuntimeError,
+        match="exact semantic work-cycle refactor",
+    ):
+        command.upgrade(config, "head")
+
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    try:
+        with engine.connect() as connection:
+            assert (
+                connection.exec_driver_sql(
+                    "SELECT version_num FROM alembic_version"
+                ).scalar_one()
+                == "d82f1c4a7b90"
+            )
+    finally:
+        engine.dispose()

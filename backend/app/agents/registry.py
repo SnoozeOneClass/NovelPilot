@@ -63,13 +63,23 @@ BOOK_CANDIDATE_CONTRACT = (
 )
 BOOK_EVALUATION_CONTRACT = (
     "Use decision='local_repair' exactly when a non-null bounded repair_contract is needed; "
-    "for pass or needs_user, repair_contract must be null. Report semantic findings only; "
-    "the Harness owns approval, routing, IDs, and state changes."
+    "for pass or needs_user, repair_contract must be null. A pass has no findings and every "
+    "non-pass has at least one typed EP1 finding. Every local-repair finding names one repair "
+    "component, and the repair contract's authorized components equal that exact union. "
+    "needs_user carries only creator_owned_unknown findings, each with one concrete answerable "
+    "creator question. Book is the top creative authority, so never emit a "
+    "parent_authority_concern. Report no literary preference, style, pacing, or advisory "
+    "deviation as a blocker. The Harness owns approval, routing, IDs, and state changes."
 )
 ARC_EVALUATION_CONTRACT = (
     "Use decision='local_repair' exactly when repair_scope contains at least one bounded Arc "
-    "component; otherwise repair_scope must be empty. Use escalate_to_book only for a Book-level "
-    "semantic conflict. The Harness owns approval, routing, IDs, and state changes."
+    "component; otherwise repair_scope must be empty. A pass has no issues and every non-pass "
+    "has at least one typed EP1 issue. Every local-repair issue names one repair component, and "
+    "repair_scope equals that exact union. escalate_to_book carries only "
+    "parent_authority_concern issues supported by concrete evidence; do not declare the Book "
+    "baseline wrong. needs_user carries only creator_owned_unknown issues, each with one "
+    "concrete answerable question. Report no literary preference, style, pacing, or advisory "
+    "deviation as a blocker. The Harness owns approval, routing, IDs, and state changes."
 )
 CHAPTER_EVALUATION_CONTRACT = (
     "Every blocking issue must name a natural-language semantic subject and a unique non-empty "
@@ -87,7 +97,29 @@ CHAPTER_EVALUATION_CONTRACT = (
     "left the assigned Arc function unfulfilled, report a new assignment-fulfillment issue with "
     "recurrence='new', then select component repair, plan-only repair, or Arc review using the "
     "same boundary. Chapter evaluation cannot create a user wait. Never judge or route directly "
-    "to Book. The Harness owns approval, routing, IDs, and state changes."
+    "to Book. escalate_to_arc carries only parent_authority_concern issues and does not "
+    "authorize local repair; local_repair carries no parent concern. Report no literary "
+    "preference, style, pacing, or advisory deviation as a blocker. The Harness owns approval, "
+    "routing, IDs, and state changes."
+)
+
+EP1_BLOCKER_PROTOCOL = (
+    "Use only these blocker kinds: explicit_conflict, contract_unfulfilled, "
+    "unsupported_strong_conclusion, derived_evidence_mismatch, "
+    "parent_authority_concern, creator_owned_unknown. Ordinary narrative facts use an "
+    "open world: previous silence is not falsehood, and the current Chapter may establish "
+    "an ordinary fact for the first time. explicit_conflict requires both an affirmative "
+    "candidate claim and an affirmative contradictory formal source. Closed fulfillment "
+    "applies only to explicit Book, Arc, or Chapter contract items, Arc closure signals, and "
+    "Book completion requirements. unsupported_strong_conclusion is limited to culpability, "
+    "exclusion of viable alternatives, core mystery or causal closure, converting an explicitly "
+    "uncertain governing fact into certainty, or changing an upper contract. "
+    "derived_evidence_mismatch corrects Observation or Canon against formal prose; it never "
+    "authorizes rewriting correct prose. parent_authority_concern only asks the immediate "
+    "parent to review evidence. creator_owned_unknown requires one concrete answerable "
+    "creator-owned question. Discussion history, old reviews, execution logs, soft guidance, "
+    "quality preferences, style, pacing, and advisory deviations are not conflict evidence "
+    "or blockers."
 )
 
 BOOK_CANDIDATE_RUBRIC = (
@@ -97,7 +129,8 @@ BOOK_CANDIDATE_RUBRIC = (
     "substantive, mutually coherent, feasible, and usable by later Arc planning. Verify "
     "adjacent Arc handoff coherence, observable exit conditions, and exactly one final last "
     "Arc. Empty placeholders and Book-authored Chapter allocation fail. Do not request "
-    "Chapter counts, Chapter titles, scenes, or a Chapter-by-Chapter outline."
+    "Chapter counts, Chapter titles, scenes, or a Chapter-by-Chapter outline. "
+    + EP1_BLOCKER_PROTOCOL
 )
 ARC_CANDIDATE_RUBRIC = (
     "Check that the desired state transition serves the exact assigned Book Arc contract; "
@@ -114,7 +147,8 @@ ARC_CANDIDATE_RUBRIC = (
     "compatibility or likelihood, or whose prohibitions make the required verification "
     "impossible. Treat outline entries as strong semantic assignments, not exact wording or "
     "field-copy protocols. The Arc chooses the complete remaining outline; the Harness derives "
-    "its closure checkpoint from the frozen effective count plus outline length."
+    "its closure checkpoint from the frozen effective count plus outline length. "
+    + EP1_BLOCKER_PROTOCOL
 )
 CHAPTER_CANDIDATE_RUBRIC = (
     "Apply a minimum completion gate to the complete Chapter candidate against its frozen goal, "
@@ -140,7 +174,8 @@ CHAPTER_CANDIDATE_RUBRIC = (
     "instead of pretending Chapter can repair or judge the Arc. Reject a current candidate that "
     "abandons, reverses, prematurely consumes, or skips its assignment. During repair "
     "verification, an eliminated overclaim followed by an unfulfilled assignment is a new "
-    "assignment-fulfillment issue, not persistence of the original overclaim. Never judge Book."
+    "assignment-fulfillment issue, not persistence of the original overclaim. Never judge Book. "
+    + EP1_BLOCKER_PROTOCOL
 )
 ARC_PARENT_REVIEW_RUBRIC = (
     "Review one evidence-bound Chapter-to-Arc request against the current Arc baseline and "
@@ -149,13 +184,28 @@ ARC_PARENT_REVIEW_RUBRIC = (
     "specific creator-owned fact, or raises a concern requiring Book review. If lower evidence "
     "review is required, identify exactly one human-visible Chapter ordinal and a scoped "
     "observations/Canon correction goal; never emit a storage ID. Do not author a replacement "
-    "Arc or claim the Book contract is invalid."
+    "Arc or claim the Book contract is invalid. book_review_required and a "
+    "parent_authority_concern issue are atomic. chapter_evidence_review_required and a "
+    "derived_evidence_mismatch issue are atomic, except when the bounded correction has already "
+    "been consumed and only a creator-owned fact can resolve the recurrence; then return only "
+    "creator_owned_unknown with its creator_input_need. Select one disposition; do not combine "
+    "revision, parent review, evidence review, or creator wait, except for that evidence-review "
+    "creator recurrence. A remains-applicable result with no route carries no blockers. "
+    + EP1_BLOCKER_PROTOCOL
 )
 BOOK_PARENT_REVIEW_RUBRIC = (
     "Review one evidence-bound Arc-to-Book request against the current Book baseline and "
     "committed history. Judge whether the Book contract remains applicable, warrants its "
     "normal human-approved revision workflow, requires Arc evidence review, or cannot be "
-    "judged without a specific creator-owned fact. Do not author replacement Book content."
+    "judged without a specific creator-owned fact. arc_evidence_review_required and a "
+    "derived_evidence_mismatch issue are atomic, except when the bounded correction has already "
+    "been consumed and only a creator-owned fact can resolve the recurrence; then return only "
+    "creator_owned_unknown with its creator_input_need. Book is the top authority, so never "
+    "emit parent_authority_concern. Select one disposition; do not combine revision, evidence "
+    "review, or creator wait, except for that evidence-review creator recurrence. A "
+    "remains-applicable result with no route carries no blockers. Do not author replacement "
+    "Book content. "
+    + EP1_BLOCKER_PROTOCOL
 )
 ARC_CLOSURE_RUBRIC = (
     "For every frozen Arc closure signal, return satisfied, unresolved, or contradicted with "
@@ -163,19 +213,36 @@ ARC_CLOSURE_RUBRIC = (
     "immediate Book-review concern, and any Chapter evidence concern. If Chapter evidence "
     "correction is required, identify exactly one human-visible Chapter ordinal and a scoped "
     "observations/Canon correction goal; never emit a storage ID. Reaching the Chapter "
-    "checkpoint is not semantic completion and you must not select a Domain command."
+    "checkpoint is not semantic completion and you must not select a Domain command. "
+    "book_review_required and a parent_authority_concern issue are atomic. "
+    "chapter_evidence_review_required and a derived_evidence_mismatch issue are atomic, except "
+    "when the bounded correction has already been consumed and only a creator-owned fact can "
+    "resolve the recurrence; then return only creator_owned_unknown with its creator_input_need. "
+    "Select one disposition; do not combine revision, parent review, evidence review, or creator "
+    "wait, except for that evidence-review creator recurrence. A fully satisfied closure with "
+    "no route carries no blockers. "
+    + EP1_BLOCKER_PROTOCOL
 )
 BOOK_COMPLETION_RUBRIC = (
     "For every frozen Book completion requirement, return satisfied, unresolved, or "
     "contradicted using cumulative evidence from every formal Arc closure and current Canon. "
     "Separately judge whether the current Book contract remains applicable, warrants its "
     "normal human-approved revision workflow, or cannot be judged. Do not invent another "
-    "Arc, author replacement Book content, or select a Domain route."
+    "Arc, author replacement Book content, or select a Domain route. Book is the top authority, "
+    "so never emit parent_authority_concern. This task exposes no lower evidence-correction "
+    "route, so never emit derived_evidence_mismatch. Do not combine revision and creator wait. "
+    "A fully satisfied completion with no route carries no blockers. "
+    + EP1_BLOCKER_PROTOCOL
 )
 CHAPTER_EVIDENCE_RUBRIC = (
     "Verify only whether corrected observations and Canon intent are supported by byte-frozen "
     "approved prose and remain consistent with committed descendant facts. Do not apply the "
-    "general literary Chapter rubric, propose prose changes, or reopen unrelated findings."
+    "general literary Chapter rubric, propose prose changes, or reopen unrelated findings. "
+    "When all three checks pass, return no issues; when any check fails, return at least one "
+    "typed EP1 issue. This task has no parent-authority route, so never emit "
+    "parent_authority_concern. It is Chapter-scoped and cannot create a creator wait, so never "
+    "emit creator_owned_unknown. "
+    + EP1_BLOCKER_PROTOCOL
 )
 
 
@@ -316,6 +383,8 @@ class TaskRegistry:
                 expected = (
                     strategy.strategy_id,
                     strategy.strategy_version,
+                    strategy.context_policy_id,
+                    strategy.context_policy_version,
                     strategy.rubric_id,
                     strategy.rubric_version,
                     strategy.rubric_text,
@@ -324,6 +393,8 @@ class TaskRegistry:
                 actual = (
                     definition.evaluation_strategy_id,
                     definition.evaluation_strategy_version,
+                    definition.context_policy_id,
+                    definition.context_policy_version,
                     definition.rubric_id,
                     definition.rubric_version,
                     definition.rubric_text,
@@ -376,6 +447,7 @@ class TaskRegistry:
         arc_id: str | None = None,
         chapter_id: str | None = None,
         workspace_lock_version: int | None = None,
+        workspace_work_cycle_id: str | None = None,
         book_baseline_id: str | None = None,
         arc_baseline_id: str | None = None,
         chapter_baseline_id: str | None = None,
@@ -389,6 +461,10 @@ class TaskRegistry:
         source_book_parent_review_id: str | None = None,
         source_arc_closure_review_id: str | None = None,
         source_book_completion_review_id: str | None = None,
+        source_book_candidate_review_id: str | None = None,
+        source_arc_candidate_review_id: str | None = None,
+        source_chapter_candidate_review_id: str | None = None,
+        source_book_progress_handoff_id: str | None = None,
         source_chapter_arc_request_id: str | None = None,
         source_arc_book_request_id: str | None = None,
         source_arc_closure_id: str | None = None,
@@ -414,6 +490,7 @@ class TaskRegistry:
             arc_id=arc_id,
             chapter_id=chapter_id,
             workspace_lock_version=workspace_lock_version,
+            workspace_work_cycle_id=workspace_work_cycle_id,
             book_baseline_id=book_baseline_id,
             arc_baseline_id=arc_baseline_id,
             chapter_baseline_id=chapter_baseline_id,
@@ -425,6 +502,10 @@ class TaskRegistry:
             source_book_parent_review_id=source_book_parent_review_id,
             source_arc_closure_review_id=source_arc_closure_review_id,
             source_book_completion_review_id=source_book_completion_review_id,
+            source_book_candidate_review_id=source_book_candidate_review_id,
+            source_arc_candidate_review_id=source_arc_candidate_review_id,
+            source_chapter_candidate_review_id=source_chapter_candidate_review_id,
+            source_book_progress_handoff_id=source_book_progress_handoff_id,
             source_chapter_arc_request_id=source_chapter_arc_request_id,
             source_arc_book_request_id=source_arc_book_request_id,
             source_arc_closure_id=source_arc_closure_id,
@@ -463,6 +544,7 @@ def _native(
     evaluation_strategy_id: str | None = None,
     evaluation_strategy_version: int | None = None,
     output_schema_version: int = 1,
+    context_policy_version: int = 2,
 ) -> TaskDefinition:
     return TaskDefinition(
         role=role,
@@ -474,7 +556,7 @@ def _native(
         output_schema_id=f"{task_kind}-result",
         output_schema_version=output_schema_version,
         context_policy_id=context_policy_id,
-        context_policy_version=1,
+        context_policy_version=context_policy_version,
         task_instructions=instructions,
         evaluation_strategy_id=evaluation_strategy_id,
         evaluation_strategy_version=evaluation_strategy_version,
@@ -499,7 +581,7 @@ def _text(
         output_schema_id=f"{task_kind}-result",
         output_schema_version=1,
         context_policy_id="chapter-prose-context-v2",
-        context_policy_version=1,
+        context_policy_version=2,
         task_instructions=instructions,
         text_finalizer=finalize_chapter_prose,
     )
@@ -551,7 +633,7 @@ def _strategy(
         scope_layer=scope_layer,
         objective=objective,
         context_policy_id=context_policy_id,
-        context_policy_version=1,
+        context_policy_version=2,
         context_includes=context_includes,
         context_excludes=context_excludes,
         rubric_id=rubric_id,
@@ -581,7 +663,7 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "harness_route_commands",
                 "storage_identifiers",
             ),
-            rubric_id="book-candidate-rubric-v2",
+            rubric_id="book-candidate-rubric-v3",
             rubric_text=BOOK_CANDIDATE_RUBRIC,
             deterministic_prechecks=(
                 "candidate_components_present",
@@ -591,6 +673,8 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
             ),
             legal_semantic_signals=("pass", "local_repair", "needs_user"),
             output_model=BookEvaluation,
+            strategy_version=2,
+            output_schema_version=2,
         ),
         _strategy(
             task_kind="evaluate.arc",
@@ -605,12 +689,13 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "current_canon",
                 "prior_formal_arc_closure",
                 "current_book_progress_handoff",
+                "committed_current_arc_facts",
             ),
             context_excludes=(
                 "harness_route_commands",
                 "unrelated_execution_evidence",
             ),
-            rubric_id="arc-candidate-rubric-v4",
+            rubric_id="arc-candidate-rubric-v5",
             rubric_text=ARC_CANDIDATE_RUBRIC,
             deterministic_prechecks=(
                 "arc_workspace_version_current",
@@ -625,8 +710,8 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "needs_user",
             ),
             output_model=ArcEvaluation,
-            strategy_version=4,
-            output_schema_version=3,
+            strategy_version=5,
+            output_schema_version=4,
         ),
         _strategy(
             task_kind="evaluate.chapter",
@@ -640,13 +725,14 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "observations_and_canon_intent",
                 "current_arc_contract",
                 "relevant_canon",
+                "committed_current_arc_facts",
             ),
             context_excludes=(
                 "book_revision_authority",
                 "unrelated_future_secrets",
                 "harness_storage_protocol",
             ),
-            rubric_id="chapter-candidate-rubric-v6",
+            rubric_id="chapter-candidate-rubric-v7",
             rubric_text=CHAPTER_CANDIDATE_RUBRIC,
             deterministic_prechecks=(
                 "frozen_submission_loaded",
@@ -659,8 +745,8 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "escalate_to_arc",
             ),
             output_model=LayerEvaluationResult,
-            strategy_version=5,
-            output_schema_version=4,
+            strategy_version=6,
+            output_schema_version=5,
         ),
         _strategy(
             task_kind="evaluate.arc_parent_contract",
@@ -681,7 +767,7 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "book_revision_commands",
                 "unrelated_agent_history",
             ),
-            rubric_id="arc-parent-contract-rubric-v2",
+            rubric_id="arc-parent-contract-rubric-v4",
             rubric_text=ARC_PARENT_REVIEW_RUBRIC,
             deterministic_prechecks=(
                 "request_open_and_current",
@@ -697,6 +783,8 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "unable_to_judge",
             ),
             output_model=ArcParentContractEvaluation,
+            strategy_version=3,
+            output_schema_version=3,
         ),
         _strategy(
             task_kind="evaluate.book_parent_contract",
@@ -708,7 +796,6 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "source_arc_request_and_evidence",
                 "predecessor_book_parent_review",
                 "formal_arc_closures",
-                "committed_chapter_set",
                 "current_canon",
             ),
             context_excludes=(
@@ -716,7 +803,7 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "chapter_repair_details",
                 "harness_route_commands",
             ),
-            rubric_id="book-parent-contract-rubric-v1",
+            rubric_id="book-parent-contract-rubric-v3",
             rubric_text=BOOK_PARENT_REVIEW_RUBRIC,
             deterministic_prechecks=(
                 "request_open_and_current",
@@ -730,6 +817,8 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "unable_to_judge",
             ),
             output_model=BookParentContractEvaluation,
+            strategy_version=3,
+            output_schema_version=3,
         ),
         _strategy(
             task_kind="evaluate.arc_closure",
@@ -750,7 +839,7 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "replacement_arc_content",
                 "later_mutable_canon",
             ),
-            rubric_id="arc-closure-rubric-v2",
+            rubric_id="arc-closure-rubric-v4",
             rubric_text=ARC_CLOSURE_RUBRIC,
             deterministic_prechecks=(
                 "closure_checkpoint_reached_exactly",
@@ -767,6 +856,8 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "creator_input_need",
             ),
             output_model=ArcClosureEvaluation,
+            strategy_version=3,
+            output_schema_version=3,
         ),
         _strategy(
             task_kind="evaluate.book_completion",
@@ -777,7 +868,7 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "current_book_baseline",
                 "complete_book_arc_topology",
                 "ordered_formal_arc_closures",
-                "cumulative_committed_chapter_evidence",
+                "cumulative_formal_arc_closure_evidence",
                 "current_canon",
                 "completion_requirements",
                 "predecessor_book_completion_review",
@@ -787,7 +878,7 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "replacement_book_content",
                 "chapter_count_completion_gate",
             ),
-            rubric_id="book-completion-rubric-v1",
+            rubric_id="book-completion-rubric-v3",
             rubric_text=BOOK_COMPLETION_RUBRIC,
             deterministic_prechecks=(
                 "planned_final_arc_formally_closed",
@@ -801,6 +892,8 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "creator_input_need",
             ),
             output_model=BookCompletionEvaluation,
+            strategy_version=3,
+            output_schema_version=3,
         ),
         _strategy(
             task_kind="verify_evidence.chapter",
@@ -819,7 +912,7 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "prose_rewrite_tools",
                 "unrelated_parent_concerns",
             ),
-            rubric_id="chapter-evidence-correction-rubric-v1",
+            rubric_id="chapter-evidence-correction-rubric-v3",
             rubric_text=CHAPTER_EVIDENCE_RUBRIC,
             deterministic_prechecks=(
                 "plan_and_prose_bytes_unchanged",
@@ -830,9 +923,10 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "observations_supported_by_frozen_prose",
                 "canon_intent_supported_by_frozen_prose",
                 "descendant_facts_remain_consistent",
-                "creator_input_need",
             ),
             output_model=ChapterEvidenceCorrectionEvaluation,
+            strategy_version=3,
+            output_schema_version=3,
         ),
         *[
             _strategy(
@@ -861,12 +955,12 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                     "harness_route_commands",
                 ),
                 rubric_id=(
-                    "chapter-repair-rubric-v6"
+                    "chapter-repair-rubric-v7"
                     if layer == "chapter"
                     else (
-                        "arc-repair-rubric-v5"
+                        "arc-repair-rubric-v6"
                         if layer == "arc"
-                        else "book-repair-rubric-v3"
+                        else "book-repair-rubric-v4"
                     )
                 ),
                 rubric_text=(
@@ -895,10 +989,10 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                     else ArcEvaluation if layer == "arc" else LayerEvaluationResult
                 ),
                 strategy_version=(
-                    5 if layer == "chapter" else 4 if layer == "arc" else 2
+                    6 if layer == "chapter" else 5 if layer == "arc" else 3
                 ),
                 output_schema_version=(
-                    4 if layer == "chapter" else 3 if layer == "arc" else 2
+                    5 if layer == "chapter" else 4 if layer == "arc" else 3
                 ),
             )
             for layer in ("book", "arc", "chapter")
@@ -1080,14 +1174,18 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             ChapterObservationResult,
             context_policy_id="chapter-observation-context-v2",
             instructions=(
-                "Observe the frozen prose and propose semantic Canon assertions without choosing "
+                "Observe the frozen prose. Return established_facts as ordinary semantic "
+                "statements plus natural evidence hints; preserve claims and beliefs as scoped "
+                "facts and do not upgrade them to objective truth. Earlier silence is not "
+                "contrary evidence. Also propose semantic Canon assertions without choosing "
                 "add, update, or resolve commands and without inventing IDs. For each subject, "
                 "state its complete current meaning and whether the chapter semantically resolves "
                 "it. Write evidence_hint as a natural semantic rationale; do not copy exact quotes, "
                 "offsets, locators, or stored source strings. The Harness owns subject upsert and "
-                "optional exact-span binding."
+                "optional exact-span binding, and it binds every committed fact to the exact "
+                "Chapter baseline and prose source."
             ),
-            output_schema_version=2,
+            output_schema_version=3,
         ),
         _native(
             "chapter_writer",
@@ -1096,13 +1194,16 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             ChapterObservationResult,
             context_policy_id="chapter-revision-observation-context-v2",
             instructions=(
-                "Re-observe the revised prose and propose only semantically evidence-bound Canon "
+                "Re-observe the revised prose and return established_facts as ordinary semantic "
+                "statements plus natural evidence hints. Preserve claims and beliefs as scoped "
+                "facts and treat the repaired prose as the only current narrative source. "
+                "Propose only semantically evidence-bound Canon "
                 "assertions. Do not choose storage operations: state each subject's complete current "
                 "meaning and resolved status. Write evidence_hint as a natural rationale, not an "
                 "exact quote, offset, locator, or stored source string; the Harness owns subject "
-                "upsert and optional exact-span binding."
+                "upsert, optional exact-span binding, and formal source provenance."
             ),
-            output_schema_version=2,
+            output_schema_version=3,
         ),
         _native(
             "chapter_writer",
@@ -1141,13 +1242,15 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             instructions=(
                 "Return only a semantic patch whose change components are a subset of the "
                 "authorized Chapter repair scope in frozen context. Use observations for the "
-                "summary and continuity observations, and canon for Canon proposals. Do not "
+                "summary and established_facts, and canon for Canon proposals. Facts remain "
+                "unbound semantic candidates; do not return Chapter IDs, baseline IDs, refs, "
+                "hashes, offsets, or locators. Do not "
                 "repeat omitted components; the Harness preserves them. Canon evidence_hint is "
                 "a natural semantic rationale, never an exact quote, offset, locator, or stored "
                 "source string. Canon changes are semantic assertions with a resolved state, not "
                 "model-authored storage operations."
             ),
-            output_schema_version=3,
+            output_schema_version=4,
         ),
         *[
             _evaluation(

@@ -222,6 +222,22 @@ def test_book_revision_requires_review_and_user_approval_then_stales_active_arc_
                     )
                     == foundation.book_baseline_id
                 )
+                historical_book_binding = (
+                    await connection.execute(
+                        select(
+                            book_baselines.c.submission_id,
+                            book_baselines.c.review_id,
+                            book_baselines.c.approval_id,
+                            book_baselines.c.direction_ref_id,
+                            book_baselines.c.constraints_ref_id,
+                            book_baselines.c.rolling_plan_ref_id,
+                            book_baselines.c.completion_contract_ref_id,
+                            book_baselines.c.arc_topology_ref_id,
+                        ).where(
+                            book_baselines.c.id == foundation.book_baseline_id
+                        )
+                    )
+                ).one()
             committed = await book_service.approve_and_commit(
                 ApproveBookRequest(
                     project_id=foundation.project_id,
@@ -254,6 +270,30 @@ def test_book_revision_requires_review_and_user_approval_then_stales_active_arc_
                 assert tuple(arc) == (None, "planning")
                 assert await connection.scalar(select(func.count()).select_from(book_baselines)) == 2
                 assert await connection.scalar(select(func.count()).select_from(arc_baselines)) == 1
+                assert (
+                    await connection.scalar(
+                        select(books.c.current_baseline_id).where(
+                            books.c.id == foundation.book_id
+                        )
+                    )
+                    == committed.result.baseline_id
+                )
+                assert (
+                    await connection.execute(
+                        select(
+                            book_baselines.c.submission_id,
+                            book_baselines.c.review_id,
+                            book_baselines.c.approval_id,
+                            book_baselines.c.direction_ref_id,
+                            book_baselines.c.constraints_ref_id,
+                            book_baselines.c.rolling_plan_ref_id,
+                            book_baselines.c.completion_contract_ref_id,
+                            book_baselines.c.arc_topology_ref_id,
+                        ).where(
+                            book_baselines.c.id == foundation.book_baseline_id
+                        )
+                    )
+                ).one() == historical_book_binding
         finally:
             await engine.dispose()
 
@@ -305,6 +345,23 @@ def test_chapter_revision_creates_v2_without_increasing_committed_chapter_count(
                         chapter_workspaces.c.chapter_id == ready.chapter_id
                     )
                 )
+                historical_chapter_binding = (
+                    await connection.execute(
+                        select(
+                            chapter_baselines.c.book_baseline_id,
+                            chapter_baselines.c.arc_baseline_id,
+                            chapter_baselines.c.canon_before_id,
+                            chapter_baselines.c.canon_after_id,
+                            chapter_baselines.c.plan_ref_id,
+                            chapter_baselines.c.prose_ref_id,
+                            chapter_baselines.c.observations_ref_id,
+                            chapter_baselines.c.accepted_canon_patch_ref_id,
+                        ).where(
+                            chapter_baselines.c.id
+                            == first.result.chapter_baseline_id
+                        )
+                    )
+                ).one()
             assert workspace_lock is not None
             activated = await feedback_service.apply(
                 ApplyFeedbackRequest(
@@ -402,7 +459,14 @@ def test_chapter_revision_creates_v2_without_increasing_committed_chapter_count(
                 workspace_lock_version=draft_applied.result.workspace_lock_version,
                 result=ChapterObservationResult(
                     summary="The tighter reveal preserves the established outcome.",
-                    continuity_observations=["Mara still distrusts her written notes."],
+                    established_facts=[
+                        {
+                            "statement": "Mara still distrusts her written notes.",
+                            "evidence_hint": (
+                                "The Chapter shows Mara verifying notes before relying on them."
+                            ),
+                        }
+                    ],
                     canon_proposals=[],
                 ),
             )
@@ -499,6 +563,31 @@ def test_chapter_revision_creates_v2_without_increasing_committed_chapter_count(
                     await connection.scalar(select(func.count()).select_from(chapter_baselines))
                     == 2
                 )
+                assert (
+                    await connection.scalar(
+                        select(chapters.c.current_baseline_id).where(
+                            chapters.c.id == ready.chapter_id
+                        )
+                    )
+                    == second.result.chapter_baseline_id
+                )
+                assert (
+                    await connection.execute(
+                        select(
+                            chapter_baselines.c.book_baseline_id,
+                            chapter_baselines.c.arc_baseline_id,
+                            chapter_baselines.c.canon_before_id,
+                            chapter_baselines.c.canon_after_id,
+                            chapter_baselines.c.plan_ref_id,
+                            chapter_baselines.c.prose_ref_id,
+                            chapter_baselines.c.observations_ref_id,
+                            chapter_baselines.c.accepted_canon_patch_ref_id,
+                        ).where(
+                            chapter_baselines.c.id
+                            == first.result.chapter_baseline_id
+                        )
+                    )
+                ).one() == historical_chapter_binding
         finally:
             await engine.dispose()
 

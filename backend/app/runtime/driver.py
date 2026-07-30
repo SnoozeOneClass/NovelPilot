@@ -204,6 +204,10 @@ class _TaskInstruction:
     source_book_parent_review_id: str | None = None
     source_arc_closure_review_id: str | None = None
     source_book_completion_review_id: str | None = None
+    source_book_candidate_review_id: str | None = None
+    source_arc_candidate_review_id: str | None = None
+    source_chapter_candidate_review_id: str | None = None
+    source_book_progress_handoff_id: str | None = None
     source_chapter_arc_request_id: str | None = None
     source_arc_book_request_id: str | None = None
     source_arc_closure_id: str | None = None
@@ -577,8 +581,41 @@ class DomainRunDriver:
     ) -> None:
         async with UnitOfWork(self._engine) as store:
             project = await store.projects.get(run.project_id)
+            workspace_lock_version: int | None = None
+            workspace_work_cycle_id: str | None = None
+            if instruction.chapter_id is not None:
+                chapter_workspace = await store.chapters.get_workspace(
+                    project_id=run.project_id,
+                    chapter_id=instruction.chapter_id,
+                )
+                if chapter_workspace is not None:
+                    workspace_lock_version = chapter_workspace.lock_version
+                    workspace_work_cycle_id = chapter_workspace.work_cycle_id
+            elif instruction.arc_id is not None:
+                arc_workspace = await store.arcs.get_workspace(
+                    project_id=run.project_id,
+                    arc_id=instruction.arc_id,
+                )
+                if arc_workspace is not None:
+                    workspace_lock_version = arc_workspace.lock_version
+                    workspace_work_cycle_id = arc_workspace.work_cycle_id
+            else:
+                book_workspace = await store.books.get_workspace(
+                    project_id=run.project_id,
+                    book_id=instruction.book_id,
+                )
+                if book_workspace is not None:
+                    workspace_lock_version = book_workspace.lock_version
+                    workspace_work_cycle_id = book_workspace.work_cycle_id
         if project is None:
             raise HarnessInvariantError("Runnable project no longer exists.")
+        if (
+            workspace_lock_version != instruction.workspace_lock_version
+            or workspace_work_cycle_id is None
+        ):
+            raise HarnessInvariantError(
+                "Task freeze lost its exact workspace semantic work cycle."
+            )
         profile_id = self._profile_id(project, instruction.role)
         if profile_id is None:
             raise HarnessInvariantError(
@@ -627,6 +664,18 @@ class DomainRunDriver:
                 source_book_completion_review_id=(
                     instruction.source_book_completion_review_id
                 ),
+                source_book_candidate_review_id=(
+                    instruction.source_book_candidate_review_id
+                ),
+                source_arc_candidate_review_id=(
+                    instruction.source_arc_candidate_review_id
+                ),
+                source_chapter_candidate_review_id=(
+                    instruction.source_chapter_candidate_review_id
+                ),
+                source_book_progress_handoff_id=(
+                    instruction.source_book_progress_handoff_id
+                ),
                 source_chapter_arc_request_id=instruction.source_chapter_arc_request_id,
                 source_arc_book_request_id=instruction.source_arc_book_request_id,
                 source_arc_closure_id=instruction.source_arc_closure_id,
@@ -644,6 +693,7 @@ class DomainRunDriver:
                 instruction.task_kind,
                 scope_id,
                 str(instruction.workspace_lock_version),
+                workspace_work_cycle_id,
                 instruction.book_baseline_id or "none",
                 instruction.arc_baseline_id or "none",
                 instruction.chapter_baseline_id or "none",
@@ -655,6 +705,10 @@ class DomainRunDriver:
                 instruction.source_book_parent_review_id or "none",
                 instruction.source_arc_closure_review_id or "none",
                 instruction.source_book_completion_review_id or "none",
+                instruction.source_book_candidate_review_id or "none",
+                instruction.source_arc_candidate_review_id or "none",
+                instruction.source_chapter_candidate_review_id or "none",
+                instruction.source_book_progress_handoff_id or "none",
                 instruction.source_chapter_arc_request_id or "none",
                 instruction.source_arc_book_request_id or "none",
                 instruction.source_arc_closure_id or "none",
@@ -684,6 +738,7 @@ class DomainRunDriver:
             arc_id=instruction.arc_id,
             chapter_id=instruction.chapter_id,
             workspace_lock_version=instruction.workspace_lock_version,
+            workspace_work_cycle_id=workspace_work_cycle_id,
             book_baseline_id=instruction.book_baseline_id,
             arc_baseline_id=instruction.arc_baseline_id,
             chapter_baseline_id=instruction.chapter_baseline_id,
@@ -695,6 +750,16 @@ class DomainRunDriver:
             source_arc_closure_review_id=instruction.source_arc_closure_review_id,
             source_book_completion_review_id=(
                 instruction.source_book_completion_review_id
+            ),
+            source_book_candidate_review_id=(
+                instruction.source_book_candidate_review_id
+            ),
+            source_arc_candidate_review_id=instruction.source_arc_candidate_review_id,
+            source_chapter_candidate_review_id=(
+                instruction.source_chapter_candidate_review_id
+            ),
+            source_book_progress_handoff_id=(
+                instruction.source_book_progress_handoff_id
             ),
             source_chapter_arc_request_id=instruction.source_chapter_arc_request_id,
             source_arc_book_request_id=instruction.source_arc_book_request_id,
@@ -1126,6 +1191,9 @@ class DomainRunDriver:
                         automatic_correction_round=0,
                         source_book_completion_review_id=book_completion_review.id,
                         source_arc_closure_id=book_completion_review.arc_closure_id,
+                        source_book_progress_handoff_id=(
+                            book_completion_review.book_progress_handoff_id
+                        ),
                         source_feedback_id=correction_feedback.id,
                     )
                 raise HarnessInvariantError(
@@ -1411,11 +1479,21 @@ class DomainRunDriver:
         project_id = cast(str, getattr(project, "id"))
         book_id = cast(str, getattr(book, "id"))
         pending = await books.find_pending_submission(project_id=project_id, book_id=book_id)
-        latest_review = await books.get_latest_review(project_id=project_id, book_id=book_id)
+        submission_review = (
+            None
+            if pending is None
+            else await books.get_review_for_submission(
+                project_id=project_id,
+                submission_id=pending.id,
+            )
+        )
         lock_version = cast(int, getattr(workspace, "lock_version"))
         current_baseline = cast(str | None, getattr(book, "current_baseline_id"))
         if pending is not None:
-            if latest_review is None or latest_review.submission_id != pending.id:
+            if (
+                submission_review is None
+                or submission_review.submission_id != pending.id
+            ):
                 task_kind = (
                     "verify_repair.book"
                     if cast(int, getattr(workspace, "semantic_repair_count")) > 0
@@ -1427,6 +1505,9 @@ class DomainRunDriver:
                     book_id=book_id,
                     workspace_lock_version=lock_version,
                     book_baseline_id=pending.base_book_baseline_id,
+                    source_book_candidate_review_id=cast(
+                        str | None, getattr(workspace, "active_repair_review_id")
+                    ),
                 )
             raise HarnessInvariantError("Reviewed Book submission remained on a runnable Run.")
 
@@ -1464,22 +1545,41 @@ class DomainRunDriver:
                 "candidate_arc_topology_ref_id",
             )
         )
-        if latest_review is not None and latest_review.decision == "local_repair":
+        active_repair_review = (
+            None
+            if getattr(workspace, "active_repair_review_id") is None
+            else await books.get_review(
+                project_id=project_id,
+                review_id=cast(str, getattr(workspace, "active_repair_review_id")),
+            )
+        )
+        if active_repair_review is not None:
             repaired = await execution.has_applied_task(
                 project_id=project_id,
                 run_id=run.id,
                 task_kind="book.repair",
                 book_id=book_id,
                 book_baseline_id=current_baseline,
-                created_after_ms=latest_review.created_at_ms,
+                workspace_work_cycle_id=cast(
+                    str, getattr(workspace, "work_cycle_id")
+                ),
+                source_book_candidate_review_id=active_repair_review.id,
             )
             if not repaired:
+                if cast(int, getattr(workspace, "semantic_repair_count")) >= cast(
+                    int, getattr(workspace, "semantic_repair_limit")
+                ):
+                    raise HarnessInvariantError(
+                        "Book semantic correction for this frozen review is exhausted.",
+                        failure_code="semantic_repair_exhausted",
+                    )
                 return _TaskInstruction(
                     role="book_strategist",
                     task_kind="book.repair",
                     book_id=book_id,
                     workspace_lock_version=lock_version,
                     book_baseline_id=current_baseline,
+                    source_book_candidate_review_id=active_repair_review.id,
                 )
             if not candidate_ready:
                 raise HarnessInvariantError(
@@ -1500,6 +1600,23 @@ class DomainRunDriver:
                 task_kind="book.revise",
                 book_id=book_id,
                 book_baseline_id=current_baseline,
+                workspace_work_cycle_id=cast(
+                    str, getattr(workspace, "work_cycle_id")
+                ),
+                source_feedback_id=cast(
+                    str | None, getattr(workspace, "source_feedback_id")
+                ),
+                source_book_parent_review_id=cast(
+                    str | None, getattr(workspace, "source_book_parent_review_id")
+                ),
+                source_book_completion_review_id=cast(
+                    str | None,
+                    getattr(workspace, "source_book_completion_review_id"),
+                ),
+                source_book_progress_handoff_id=cast(
+                    str | None,
+                    getattr(workspace, "source_book_progress_handoff_id"),
+                ),
             )
             if not revised and (has_open_book_change or state_name == "active"):
                 return _TaskInstruction(
@@ -1508,6 +1625,21 @@ class DomainRunDriver:
                     book_id=book_id,
                     workspace_lock_version=lock_version,
                     book_baseline_id=current_baseline,
+                    source_feedback_id=cast(
+                        str | None, getattr(workspace, "source_feedback_id")
+                    ),
+                    source_book_parent_review_id=cast(
+                        str | None,
+                        getattr(workspace, "source_book_parent_review_id"),
+                    ),
+                    source_book_completion_review_id=cast(
+                        str | None,
+                        getattr(workspace, "source_book_completion_review_id"),
+                    ),
+                    source_book_progress_handoff_id=cast(
+                        str | None,
+                        getattr(workspace, "source_book_progress_handoff_id"),
+                    ),
                 )
         if candidate_ready:
             return _CommandInstruction(
@@ -1706,6 +1838,14 @@ class DomainRunDriver:
                         None if predecessor is None else predecessor.id
                     ),
                     source_arc_closure_id=closure.id,
+                    source_book_progress_handoff_id=(
+                        predecessor.book_progress_handoff_id
+                        if predecessor is not None
+                        else cast(
+                            str | None,
+                            getattr(book, "current_progress_handoff_id"),
+                        )
+                    ),
                     source_feedback_id=(
                         None
                         if predecessor is None
@@ -1777,9 +1917,19 @@ class DomainRunDriver:
                 ),
             )
         pending = await arcs.find_pending_submission(project_id=project_id, arc_id=arc.id)
-        latest_review = await arcs.get_latest_review(project_id=project_id, arc_id=arc.id)
+        submission_review = (
+            None
+            if pending is None
+            else await arcs.get_review_for_submission(
+                project_id=project_id,
+                submission_id=pending.id,
+            )
+        )
         if pending is not None:
-            if latest_review is None or latest_review.submission_id != pending.id:
+            if (
+                submission_review is None
+                or submission_review.submission_id != pending.id
+            ):
                 task_kind = (
                     "verify_repair.arc"
                     if workspace.semantic_repair_count > 0
@@ -1793,8 +1943,11 @@ class DomainRunDriver:
                     workspace_lock_version=workspace.lock_version,
                     book_baseline_id=pending.book_baseline_id,
                     arc_baseline_id=pending.base_arc_baseline_id,
+                    source_arc_candidate_review_id=(
+                        workspace.active_repair_review_id
+                    ),
                 )
-            if latest_review.decision == "pass":
+            if submission_review.decision == "pass":
                 gate = await arcs.find_pending_gate(project_id=project_id, arc_id=arc.id)
                 if gate is not None:
                     raise HarnessInvariantError("Pending Arc approval gate remained runnable.")
@@ -1807,17 +1960,27 @@ class DomainRunDriver:
                         book_id=book_id,
                         arc_id=arc.id,
                         submission_id=pending.id,
-                        review_id=latest_review.id,
+                        review_id=submission_review.id,
                         expected_current_baseline_id=arc.current_baseline_id,
                     ),
-                    idempotency_key=f"engine:commit-arc:{pending.id}:{latest_review.id}",
+                    idempotency_key=(
+                        f"engine:commit-arc:{pending.id}:{submission_review.id}"
+                    ),
                 )
             raise HarnessInvariantError("Rejected Arc submission remained pending.")
 
         if workspace.state in {"blocked_by_user", "blocked_by_upstream", "stale"}:
             raise HarnessInvariantError("Blocked Story Arc workspace remained runnable.")
         if workspace.state == "active":
-            if latest_review is not None and latest_review.decision == "local_repair":
+            active_repair_review = (
+                None
+                if workspace.active_repair_review_id is None
+                else await arcs.get_review(
+                    project_id=project_id,
+                    review_id=workspace.active_repair_review_id,
+                )
+            )
+            if active_repair_review is not None:
                 repaired = await execution.has_applied_task(
                     project_id=project_id,
                     run_id=run.id,
@@ -1826,9 +1989,18 @@ class DomainRunDriver:
                     arc_id=arc.id,
                     book_baseline_id=workspace.book_baseline_id,
                     arc_baseline_id=workspace.base_arc_baseline_id,
-                    created_after_ms=latest_review.created_at_ms,
+                    workspace_work_cycle_id=workspace.work_cycle_id,
+                    source_arc_candidate_review_id=active_repair_review.id,
                 )
                 if not repaired:
+                    if (
+                        workspace.semantic_repair_count
+                        >= workspace.semantic_repair_limit
+                    ):
+                        raise HarnessInvariantError(
+                            "Arc semantic correction for this frozen review is exhausted.",
+                            failure_code="semantic_repair_exhausted",
+                        )
                     return _TaskInstruction(
                         role="arc_planner",
                         task_kind="arc.repair",
@@ -1837,6 +2009,7 @@ class DomainRunDriver:
                         workspace_lock_version=workspace.lock_version,
                         book_baseline_id=workspace.book_baseline_id,
                         arc_baseline_id=workspace.base_arc_baseline_id,
+                        source_arc_candidate_review_id=active_repair_review.id,
                     )
                 if workspace.plan_ref_id is None:
                     raise HarnessInvariantError(
@@ -1851,6 +2024,16 @@ class DomainRunDriver:
                     arc_id=arc.id,
                     book_baseline_id=workspace.book_baseline_id,
                     arc_baseline_id=workspace.base_arc_baseline_id,
+                    workspace_work_cycle_id=workspace.work_cycle_id,
+                    source_feedback_id=workspace.source_feedback_id,
+                    source_arc_parent_review_id=workspace.source_arc_parent_review_id,
+                    source_arc_closure_review_id=(
+                        workspace.source_arc_closure_review_id
+                    ),
+                    source_book_parent_review_id=workspace.source_book_parent_review_id,
+                    source_book_completion_review_id=(
+                        workspace.source_book_completion_review_id
+                    ),
                 )
                 if not revised:
                     return _TaskInstruction(
@@ -1861,6 +2044,19 @@ class DomainRunDriver:
                         workspace_lock_version=workspace.lock_version,
                         book_baseline_id=workspace.book_baseline_id,
                         arc_baseline_id=workspace.base_arc_baseline_id,
+                        source_feedback_id=workspace.source_feedback_id,
+                        source_arc_parent_review_id=(
+                            workspace.source_arc_parent_review_id
+                        ),
+                        source_arc_closure_review_id=(
+                            workspace.source_arc_closure_review_id
+                        ),
+                        source_book_parent_review_id=(
+                            workspace.source_book_parent_review_id
+                        ),
+                        source_book_completion_review_id=(
+                            workspace.source_book_completion_review_id
+                        ),
                     )
             elif workspace.plan_ref_id is None:
                 return _TaskInstruction(
@@ -2207,12 +2403,19 @@ class DomainRunDriver:
             project_id=project_id,
             chapter_id=chapter.id,
         )
-        latest_review = await chapters.get_latest_review(
-            project_id=project_id,
-            chapter_id=chapter.id,
+        submission_review = (
+            None
+            if pending is None
+            else await chapters.get_review_for_submission(
+                project_id=project_id,
+                submission_id=pending.id,
+            )
         )
         if pending is not None:
-            if latest_review is None or latest_review.submission_id != pending.id:
+            if (
+                submission_review is None
+                or submission_review.submission_id != pending.id
+            ):
                 task_kind = (
                     "verify_evidence.chapter"
                     if evidence_correction
@@ -2247,21 +2450,24 @@ class DomainRunDriver:
                     source_arc_closure_review_id=(
                         workspace.source_arc_closure_review_id
                     ),
+                    source_chapter_candidate_review_id=(
+                        workspace.active_repair_review_id
+                    ),
                     source_feedback_id=workspace.source_feedback_id,
                 )
-            if latest_review.decision == "pass":
+            if submission_review.decision == "pass":
                 return _CommandInstruction(
                     kind="commit_chapter",
                     request=CommitChapterRequest(
                         project_id=project_id,
                         chapter_id=chapter.id,
                         submission_id=pending.id,
-                        review_id=latest_review.id,
+                        review_id=submission_review.id,
                         expected_current_chapter_baseline_id=chapter.current_baseline_id,
                         expected_canon_baseline_id=canon_baseline_id,
                     ),
                     idempotency_key=(
-                        f"engine:commit-chapter:{pending.id}:{latest_review.id}:"
+                        f"engine:commit-chapter:{pending.id}:{submission_review.id}:"
                         f"{canon_baseline_id}"
                     ),
                 )
@@ -2299,14 +2505,22 @@ class DomainRunDriver:
                 ),
             )
 
-        if latest_review is not None and latest_review.decision == "local_repair":
-            if latest_review.repair_contract_ref_id is None:
+        active_repair_review = (
+            None
+            if workspace.active_repair_review_id is None
+            else await chapters.get_review(
+                project_id=project_id,
+                review_id=workspace.active_repair_review_id,
+            )
+        )
+        if active_repair_review is not None:
+            if active_repair_review.repair_contract_ref_id is None:
                 raise HarnessInvariantError("Chapter local repair has no contract.")
             repair = json.loads(
                 (
                     await content.get_packed(
                         project_id=project_id,
-                        ref_id=latest_review.repair_contract_ref_id,
+                        ref_id=active_repair_review.repair_contract_ref_id,
                     )
                 ).unpack_and_verify()
             )
@@ -2321,7 +2535,8 @@ class DomainRunDriver:
                 book_baseline_id=workspace.book_baseline_id,
                 arc_baseline_id=workspace.arc_baseline_id,
                 chapter_baseline_id=workspace.base_chapter_baseline_id,
-                created_after_ms=latest_review.created_at_ms,
+                workspace_work_cycle_id=workspace.work_cycle_id,
+                source_chapter_candidate_review_id=active_repair_review.id,
             )
             prose_repaired = await execution.has_applied_task(
                 project_id=project_id,
@@ -2333,7 +2548,8 @@ class DomainRunDriver:
                 book_baseline_id=workspace.book_baseline_id,
                 arc_baseline_id=workspace.arc_baseline_id,
                 chapter_baseline_id=workspace.base_chapter_baseline_id,
-                created_after_ms=latest_review.created_at_ms,
+                workspace_work_cycle_id=workspace.work_cycle_id,
+                source_chapter_candidate_review_id=active_repair_review.id,
             )
             observations_repaired = await execution.has_applied_task(
                 project_id=project_id,
@@ -2345,16 +2561,25 @@ class DomainRunDriver:
                 book_baseline_id=workspace.book_baseline_id,
                 arc_baseline_id=workspace.arc_baseline_id,
                 chapter_baseline_id=workspace.base_chapter_baseline_id,
-                created_after_ms=latest_review.created_at_ms,
+                workspace_work_cycle_id=workspace.work_cycle_id,
+                source_chapter_candidate_review_id=active_repair_review.id,
             )
-            if "plan" in scope and not plan_repaired:
+            if (
+                not any((plan_repaired, prose_repaired, observations_repaired))
+                and workspace.semantic_repair_count >= workspace.semantic_repair_limit
+            ):
+                raise HarnessInvariantError(
+                    "Chapter semantic correction for this frozen review is exhausted.",
+                    failure_code="semantic_repair_exhausted",
+                )
+            repairs_plan = "plan" in scope
+            repairs_prose = "prose" in scope and not repairs_plan
+            if repairs_plan and not plan_repaired:
                 return self._chapter_task("chapter.repair.plan", chapter, workspace)
-            if "prose" in scope and not prose_repaired:
+            if repairs_prose and not prose_repaired:
                 return self._chapter_task("chapter.repair.prose", chapter, workspace)
-            if scope.intersection({"observations", "canon"}) and not observations_repaired:
-                return self._chapter_task("chapter.repair.observation", chapter, workspace)
             if workspace.draft_ref_id is None:
-                if "plan" not in scope:
+                if not repairs_plan:
                     raise HarnessInvariantError(
                         "Chapter repair lost prose without a plan replacement."
                     )
@@ -2371,6 +2596,15 @@ class DomainRunDriver:
                     else "chapter.observe"
                 )
                 return self._chapter_task(observe_kind, chapter, workspace)
+            if (
+                not repairs_plan
+                and not repairs_prose
+                and scope.intersection({"observations", "canon"})
+                and not observations_repaired
+            ):
+                return self._chapter_task(
+                    "chapter.repair.observation", chapter, workspace
+                )
             return _CommandInstruction(
                 kind="submit_chapter",
                 request=SubmitChapterRequest(
@@ -2392,6 +2626,10 @@ class DomainRunDriver:
                 book_baseline_id=workspace.book_baseline_id,
                 arc_baseline_id=workspace.arc_baseline_id,
                 chapter_baseline_id=workspace.base_chapter_baseline_id,
+                workspace_work_cycle_id=workspace.work_cycle_id,
+                source_feedback_id=workspace.source_feedback_id,
+                source_arc_parent_review_id=workspace.source_arc_parent_review_id,
+                source_arc_closure_review_id=workspace.source_arc_closure_review_id,
             )
             if not revised_plan:
                 return self._chapter_task("chapter.revise.plan", chapter, workspace)
@@ -2448,6 +2686,9 @@ class DomainRunDriver:
             ),
             source_arc_closure_review_id=cast(
                 str | None, getattr(workspace, "source_arc_closure_review_id")
+            ),
+            source_chapter_candidate_review_id=cast(
+                str | None, getattr(workspace, "active_repair_review_id")
             ),
             source_feedback_id=cast(
                 str | None, getattr(workspace, "source_feedback_id")

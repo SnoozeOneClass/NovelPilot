@@ -4,6 +4,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.agents.contracts import EvaluationIssue
+
 
 class BookSuggestion(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -458,6 +460,30 @@ class BookRepairContract(BaseModel):
         description="Why these Book components require local repair.",
     )
 
+    @field_validator("authorized_components")
+    @classmethod
+    def _unique_authorized_components(
+        cls,
+        value: list[BookRepairComponent],
+    ) -> list[BookRepairComponent]:
+        if len(value) != len(set(value)):
+            raise ValueError("Book repair components must be unique.")
+        return value
+
+
+class BookEvaluationIssue(EvaluationIssue):
+    """One EP1 blocker judged at Book authority."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    repair_component: BookRepairComponent | None = Field(
+        default=None,
+        description=(
+            "The bounded Book component that may be repaired. It is required for "
+            "local repair findings and absent for creator-owned unknowns."
+        ),
+    )
+
 
 class BookEvaluation(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -468,7 +494,10 @@ class BookEvaluation(BaseModel):
         ),
     )
     summary: str = Field(min_length=1, description="Evidence-based Book rubric assessment.")
-    findings: list[dict[str, object]] = Field(default_factory=list)
+    findings: list[BookEvaluationIssue] = Field(
+        default_factory=list,
+        description="Blocking EP1 findings only; never a literary-quality scorecard.",
+    )
     repair_contract: BookRepairContract | None = Field(
         default=None,
         description=(
@@ -480,6 +509,60 @@ class BookEvaluation(BaseModel):
     def _repair_shape(self) -> BookEvaluation:
         if (self.decision == "local_repair") != (self.repair_contract is not None):
             raise ValueError("Only local_repair carries a repair_contract")
+        if self.decision == "pass" and self.findings:
+            raise ValueError("A passing Book evaluation cannot carry blockers.")
+        if self.decision != "pass" and not self.findings:
+            raise ValueError("A non-passing Book evaluation requires an EP1 blocker.")
+        if self.decision == "local_repair":
+            assert self.repair_contract is not None
+            finding_components = {
+                finding.repair_component
+                for finding in self.findings
+                if finding.repair_component is not None
+            }
+            if len(finding_components) == 0 or any(
+                finding.repair_component is None for finding in self.findings
+            ):
+                raise ValueError(
+                    "Every Book local-repair finding requires one bounded component."
+                )
+            if finding_components != set(
+                self.repair_contract.authorized_components
+            ):
+                raise ValueError(
+                    "Book repair authorization must equal the finding component union."
+                )
+            if any(
+                finding.kind
+                in {"creator_owned_unknown", "parent_authority_concern"}
+                for finding in self.findings
+            ):
+                raise ValueError(
+                    "Creator-owned and parent-authority blockers cannot be Book-local repair."
+                )
+        elif any(finding.repair_component is not None for finding in self.findings):
+            raise ValueError(
+                "Book repair components are legal only for a local-repair decision."
+            )
+        if self.decision == "needs_user":
+            if any(
+                finding.kind != "creator_owned_unknown"
+                for finding in self.findings
+            ):
+                raise ValueError(
+                    "Book needs_user may carry only concrete creator-owned unknowns."
+                )
+        elif any(
+            finding.kind == "creator_owned_unknown" for finding in self.findings
+        ):
+            raise ValueError(
+                "Creator-owned unknowns must use the Book needs_user decision."
+            )
+        if any(
+            finding.kind == "parent_authority_concern"
+            for finding in self.findings
+        ):
+            raise ValueError("Book is the top creative authority and has no parent route.")
         return self
 
 

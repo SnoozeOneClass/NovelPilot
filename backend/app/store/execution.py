@@ -29,6 +29,7 @@ class SuccessfulTaskRecord:
     arc_id: str | None
     chapter_id: str | None
     workspace_lock_version: int | None
+    workspace_work_cycle_id: str | None
     book_baseline_id: str | None
     arc_baseline_id: str | None
     chapter_baseline_id: str | None
@@ -40,6 +41,10 @@ class SuccessfulTaskRecord:
     source_book_parent_review_id: str | None
     source_arc_closure_review_id: str | None
     source_book_completion_review_id: str | None
+    source_book_candidate_review_id: str | None
+    source_arc_candidate_review_id: str | None
+    source_chapter_candidate_review_id: str | None
+    source_book_progress_handoff_id: str | None
     source_chapter_arc_request_id: str | None
     source_arc_book_request_id: str | None
     source_arc_closure_id: str | None
@@ -130,6 +135,7 @@ class ActionableTaskRecord:
     arc_id: str | None
     chapter_id: str | None
     workspace_lock_version: int | None
+    workspace_work_cycle_id: str | None
     book_baseline_id: str | None
     arc_baseline_id: str | None
     chapter_baseline_id: str | None
@@ -141,6 +147,10 @@ class ActionableTaskRecord:
     source_book_parent_review_id: str | None
     source_arc_closure_review_id: str | None
     source_book_completion_review_id: str | None
+    source_book_candidate_review_id: str | None
+    source_arc_candidate_review_id: str | None
+    source_chapter_candidate_review_id: str | None
+    source_book_progress_handoff_id: str | None
     source_chapter_arc_request_id: str | None
     source_arc_book_request_id: str | None
     source_arc_closure_id: str | None
@@ -244,6 +254,7 @@ class ExecutionRepository:
                     agent_tasks.c.arc_id,
                     agent_tasks.c.chapter_id,
                     agent_tasks.c.workspace_lock_version,
+                    agent_tasks.c.workspace_work_cycle_id,
                     agent_tasks.c.book_baseline_id,
                     agent_tasks.c.arc_baseline_id,
                     agent_tasks.c.chapter_baseline_id,
@@ -255,6 +266,10 @@ class ExecutionRepository:
                     agent_tasks.c.source_book_parent_review_id,
                     agent_tasks.c.source_arc_closure_review_id,
                     agent_tasks.c.source_book_completion_review_id,
+                    agent_tasks.c.source_book_candidate_review_id,
+                    agent_tasks.c.source_arc_candidate_review_id,
+                    agent_tasks.c.source_chapter_candidate_review_id,
+                    agent_tasks.c.source_book_progress_handoff_id,
                     agent_tasks.c.source_chapter_arc_request_id,
                     agent_tasks.c.source_arc_book_request_id,
                     agent_tasks.c.source_arc_closure_id,
@@ -318,6 +333,9 @@ class ExecutionRepository:
             arc_id=cast(str | None, row["arc_id"]),
             chapter_id=cast(str | None, row["chapter_id"]),
             workspace_lock_version=cast(int | None, row["workspace_lock_version"]),
+            workspace_work_cycle_id=cast(
+                str | None, row["workspace_work_cycle_id"]
+            ),
             book_baseline_id=cast(str | None, row["book_baseline_id"]),
             arc_baseline_id=cast(str | None, row["arc_baseline_id"]),
             chapter_baseline_id=cast(str | None, row["chapter_baseline_id"]),
@@ -340,6 +358,18 @@ class ExecutionRepository:
             ),
             source_book_completion_review_id=cast(
                 str | None, row["source_book_completion_review_id"]
+            ),
+            source_book_candidate_review_id=cast(
+                str | None, row["source_book_candidate_review_id"]
+            ),
+            source_arc_candidate_review_id=cast(
+                str | None, row["source_arc_candidate_review_id"]
+            ),
+            source_chapter_candidate_review_id=cast(
+                str | None, row["source_chapter_candidate_review_id"]
+            ),
+            source_book_progress_handoff_id=cast(
+                str | None, row["source_book_progress_handoff_id"]
             ),
             source_chapter_arc_request_id=cast(
                 str | None, row["source_chapter_arc_request_id"]
@@ -375,7 +405,16 @@ class ExecutionRepository:
         book_baseline_id: str | None = None,
         arc_baseline_id: str | None = None,
         chapter_baseline_id: str | None = None,
-        created_after_ms: int | None = None,
+        workspace_work_cycle_id: str | None = None,
+        source_book_candidate_review_id: str | None = None,
+        source_arc_candidate_review_id: str | None = None,
+        source_chapter_candidate_review_id: str | None = None,
+        source_feedback_id: str | None = None,
+        source_arc_parent_review_id: str | None = None,
+        source_arc_closure_review_id: str | None = None,
+        source_book_parent_review_id: str | None = None,
+        source_book_completion_review_id: str | None = None,
+        source_book_progress_handoff_id: str | None = None,
     ) -> bool:
         conditions = [
             agent_tasks.c.project_id == project_id,
@@ -391,10 +430,36 @@ class ExecutionRepository:
             (agent_tasks.c.book_baseline_id, book_baseline_id),
             (agent_tasks.c.arc_baseline_id, arc_baseline_id),
             (agent_tasks.c.chapter_baseline_id, chapter_baseline_id),
+            (agent_tasks.c.workspace_work_cycle_id, workspace_work_cycle_id),
+            (
+                agent_tasks.c.source_book_candidate_review_id,
+                source_book_candidate_review_id,
+            ),
+            (
+                agent_tasks.c.source_arc_candidate_review_id,
+                source_arc_candidate_review_id,
+            ),
+            (
+                agent_tasks.c.source_chapter_candidate_review_id,
+                source_chapter_candidate_review_id,
+            ),
+            (agent_tasks.c.source_feedback_id, source_feedback_id),
+            (agent_tasks.c.source_arc_parent_review_id, source_arc_parent_review_id),
+            (
+                agent_tasks.c.source_arc_closure_review_id,
+                source_arc_closure_review_id,
+            ),
+            (agent_tasks.c.source_book_parent_review_id, source_book_parent_review_id),
+            (
+                agent_tasks.c.source_book_completion_review_id,
+                source_book_completion_review_id,
+            ),
+            (
+                agent_tasks.c.source_book_progress_handoff_id,
+                source_book_progress_handoff_id,
+            ),
         ):
             conditions.append(column.is_(None) if value is None else column == value)
-        if created_after_ms is not None:
-            conditions.append(agent_tasks.c.created_at_ms >= created_after_ms)
         return (
             await self._connection.scalar(select(agent_tasks.c.id).where(*conditions).limit(1))
             is not None
@@ -625,6 +690,7 @@ class ExecutionRepository:
                 arc_id=plan.arc_id,
                 chapter_id=plan.chapter_id,
                 workspace_lock_version=plan.workspace_lock_version,
+                workspace_work_cycle_id=plan.workspace_work_cycle_id,
                 book_baseline_id=plan.book_baseline_id,
                 arc_baseline_id=plan.arc_baseline_id,
                 chapter_baseline_id=plan.chapter_baseline_id,
@@ -636,6 +702,14 @@ class ExecutionRepository:
                 source_book_parent_review_id=plan.source_book_parent_review_id,
                 source_arc_closure_review_id=plan.source_arc_closure_review_id,
                 source_book_completion_review_id=plan.source_book_completion_review_id,
+                source_book_candidate_review_id=plan.source_book_candidate_review_id,
+                source_arc_candidate_review_id=plan.source_arc_candidate_review_id,
+                source_chapter_candidate_review_id=(
+                    plan.source_chapter_candidate_review_id
+                ),
+                source_book_progress_handoff_id=(
+                    plan.source_book_progress_handoff_id
+                ),
                 source_chapter_arc_request_id=plan.source_chapter_arc_request_id,
                 source_arc_book_request_id=plan.source_arc_book_request_id,
                 source_arc_closure_id=plan.source_arc_closure_id,
@@ -1260,6 +1334,7 @@ class ExecutionRepository:
                     agent_tasks.c.arc_id,
                     agent_tasks.c.chapter_id,
                     agent_tasks.c.workspace_lock_version,
+                    agent_tasks.c.workspace_work_cycle_id,
                     agent_tasks.c.book_baseline_id,
                     agent_tasks.c.arc_baseline_id,
                     agent_tasks.c.chapter_baseline_id,
@@ -1271,6 +1346,10 @@ class ExecutionRepository:
                     agent_tasks.c.source_book_parent_review_id,
                     agent_tasks.c.source_arc_closure_review_id,
                     agent_tasks.c.source_book_completion_review_id,
+                    agent_tasks.c.source_book_candidate_review_id,
+                    agent_tasks.c.source_arc_candidate_review_id,
+                    agent_tasks.c.source_chapter_candidate_review_id,
+                    agent_tasks.c.source_book_progress_handoff_id,
                     agent_tasks.c.source_chapter_arc_request_id,
                     agent_tasks.c.source_arc_book_request_id,
                     agent_tasks.c.source_arc_closure_id,
@@ -1309,6 +1388,9 @@ class ExecutionRepository:
             arc_id=cast(str | None, row["arc_id"]),
             chapter_id=cast(str | None, row["chapter_id"]),
             workspace_lock_version=cast(int | None, row["workspace_lock_version"]),
+            workspace_work_cycle_id=cast(
+                str | None, row["workspace_work_cycle_id"]
+            ),
             book_baseline_id=cast(str | None, row["book_baseline_id"]),
             arc_baseline_id=cast(str | None, row["arc_baseline_id"]),
             chapter_baseline_id=cast(str | None, row["chapter_baseline_id"]),
@@ -1331,6 +1413,18 @@ class ExecutionRepository:
             ),
             source_book_completion_review_id=cast(
                 str | None, row["source_book_completion_review_id"]
+            ),
+            source_book_candidate_review_id=cast(
+                str | None, row["source_book_candidate_review_id"]
+            ),
+            source_arc_candidate_review_id=cast(
+                str | None, row["source_arc_candidate_review_id"]
+            ),
+            source_chapter_candidate_review_id=cast(
+                str | None, row["source_chapter_candidate_review_id"]
+            ),
+            source_book_progress_handoff_id=cast(
+                str | None, row["source_book_progress_handoff_id"]
             ),
             source_chapter_arc_request_id=cast(
                 str | None, row["source_chapter_arc_request_id"]

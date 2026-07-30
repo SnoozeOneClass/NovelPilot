@@ -37,6 +37,8 @@ class BookWorkspaceRecord:
     book_id: str
     state: str
     lock_version: int
+    work_cycle_id: str
+    active_repair_review_id: str | None
     base_book_baseline_id: str | None
     base_canon_baseline_id: str
     direction_draft_ref_id: str
@@ -56,6 +58,10 @@ class BookWorkspaceRecord:
     created_at_ms: int
     updated_at_ms: int
     guidance_ref_id: str | None = None
+    source_feedback_id: str | None = None
+    source_book_parent_review_id: str | None = None
+    source_book_completion_review_id: str | None = None
+    source_book_progress_handoff_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +71,7 @@ class BookSubmissionRecord:
     book_id: str
     workspace_id: str
     workspace_lock_version: int
+    work_cycle_id: str
     base_book_baseline_id: str | None
     canon_baseline_id: str
     direction_ref_id: str
@@ -159,6 +166,8 @@ def _workspace_record(row: RowMapping) -> BookWorkspaceRecord:
         book_id=cast(str, row["book_id"]),
         state=cast(str, row["state"]),
         lock_version=cast(int, row["lock_version"]),
+        work_cycle_id=cast(str, row["work_cycle_id"]),
+        active_repair_review_id=cast(str | None, row["active_repair_review_id"]),
         base_book_baseline_id=cast(str | None, row["base_book_baseline_id"]),
         base_canon_baseline_id=cast(str, row["base_canon_baseline_id"]),
         direction_draft_ref_id=cast(str, row["direction_draft_ref_id"]),
@@ -182,6 +191,16 @@ def _workspace_record(row: RowMapping) -> BookWorkspaceRecord:
         created_at_ms=cast(int, row["created_at_ms"]),
         updated_at_ms=cast(int, row["updated_at_ms"]),
         guidance_ref_id=cast(str | None, row["guidance_ref_id"]),
+        source_feedback_id=cast(str | None, row["source_feedback_id"]),
+        source_book_parent_review_id=cast(
+            str | None, row["source_book_parent_review_id"]
+        ),
+        source_book_completion_review_id=cast(
+            str | None, row["source_book_completion_review_id"]
+        ),
+        source_book_progress_handoff_id=cast(
+            str | None, row["source_book_progress_handoff_id"]
+        ),
     )
 
 
@@ -192,6 +211,7 @@ def _submission_record(row: RowMapping) -> BookSubmissionRecord:
         book_id=cast(str, row["book_id"]),
         workspace_id=cast(str, row["workspace_id"]),
         workspace_lock_version=cast(int, row["workspace_lock_version"]),
+        work_cycle_id=cast(str, row["work_cycle_id"]),
         base_book_baseline_id=cast(str | None, row["base_book_baseline_id"]),
         canon_baseline_id=cast(str, row["canon_baseline_id"]),
         direction_ref_id=cast(str, row["direction_ref_id"]),
@@ -369,6 +389,19 @@ class BookRepository:
                 select(book_reviews).where(
                     book_reviews.c.project_id == project_id,
                     book_reviews.c.id == review_id,
+                )
+            )
+        ).mappings().one_or_none()
+        return None if row is None else _review_record(row)
+
+    async def get_review_for_submission(
+        self, *, project_id: str, submission_id: str
+    ) -> BookReviewRecord | None:
+        row = (
+            await self._connection.execute(
+                select(book_reviews).where(
+                    book_reviews.c.project_id == project_id,
+                    book_reviews.c.submission_id == submission_id,
                 )
             )
         ).mappings().one_or_none()

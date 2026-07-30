@@ -196,6 +196,7 @@ def test_partial_unique_indexes_reject_duplicate_pending_work(tmp_path: Path) ->
                         book_id=seeded.book_id,
                         state="active",
                         lock_version=1,
+                        work_cycle_id="cycle-a",
                         base_canon_baseline_id=seeded.canon_id,
                         direction_draft_ref_id=seeded.seed_ref_id,
                         discussion_state_ref_id=seeded.seed_ref_id,
@@ -208,7 +209,7 @@ def test_partial_unique_indexes_reject_duplicate_pending_work(tmp_path: Path) ->
                         readiness_status="ready",
                         repair_policy_id="semantic-repair-v1",
                         semantic_repair_count=0,
-                        semantic_repair_limit=5,
+                        semantic_repair_limit=1,
                         created_at_ms=1,
                         updated_at_ms=1,
                     )
@@ -221,6 +222,7 @@ def test_partial_unique_indexes_reject_duplicate_pending_work(tmp_path: Path) ->
                     "book_id": seeded.book_id,
                     "workspace_id": workspace_id,
                     "workspace_lock_version": 1,
+                    "work_cycle_id": "cycle-a",
                     "canon_baseline_id": seeded.canon_id,
                     "direction_ref_id": seeded.seed_ref_id,
                     "constraints_ref_id": seeded.seed_ref_id,
@@ -325,6 +327,22 @@ def test_delivery_failure_states_require_result_and_error_consistency(
                         update(agent_tasks)
                         .where(agent_tasks.c.id == task_id)
                         .values(delivery_state="failed")
+                    )
+
+            with pytest.raises(IntegrityError, match="CHECK constraint failed"):
+                async with engine.begin() as connection:
+                    await connection.execute(
+                        update(agent_tasks)
+                        .where(agent_tasks.c.id == task_id)
+                        .values(workspace_work_cycle_id=None)
+                    )
+
+            with pytest.raises(IntegrityError, match="CHECK constraint failed"):
+                async with engine.begin() as connection:
+                    await connection.execute(
+                        update(agent_tasks)
+                        .where(agent_tasks.c.id == task_id)
+                        .values(workspace_lock_version=None)
                     )
         finally:
             await engine.dispose()

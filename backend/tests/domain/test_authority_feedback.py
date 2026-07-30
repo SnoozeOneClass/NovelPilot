@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -13,7 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.agents.contracts import (
     ChapterEvaluationIssue,
     ChapterObservationResult,
+    EvaluationIssue,
     LayerEvaluationResult,
+    SemanticCanonProposal,
 )
 from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
 from app.db.engine import create_sqlite_async_engine
@@ -22,6 +24,7 @@ from app.db.schema import (
     arc_baselines,
     arc_parent_reviews,
     arc_workspaces,
+    canon_baselines,
     chapter_baselines,
     chapter_arc_change_requests,
     chapter_reviews,
@@ -39,6 +42,7 @@ from app.domain.chapter.commands import (
     ChapterCommandService,
     ChapterEvidenceVerificationFailure,
 )
+from app.domain.chapter.canon import CanonEntry
 from app.domain.chapter.contracts import (
     ApplyChapterTaskRequest,
     CommitChapterRequest,
@@ -61,6 +65,7 @@ from app.domain.feedback import (
     QueueFeedbackRequest,
 )
 from app.domain.project_state import ProjectStateQuery
+from app.runtime.context import HarnessContextBuilder
 from app.store.command_bus import CommandBus
 from app.store.content import ContentRepository
 from tests.domain.test_chapter_lifecycle import (
@@ -92,9 +97,13 @@ async def _prepare_arc_parent_fixture(
             summary="The Chapter preserves evidence that requires Arc authority.",
             issues=[
                 ChapterEvaluationIssue(
+                    kind="parent_authority_concern",
                     code="arc_authority_required",
                     subject="preserved Chapter evidence",
                     summary="The Chapter evidence requires Arc authority.",
+                    evidence=[
+                        "The frozen Chapter evidence raises a concern about its direct Arc."
+                    ],
                     affected_components=["observations", "canon"],
                 )
             ],
@@ -179,6 +188,22 @@ def _creator_need() -> CreatorInputNeed:
     )
 
 
+def _derived_evidence_issue() -> EvaluationIssue:
+    return EvaluationIssue(
+        kind="derived_evidence_mismatch",
+        code="chapter_evidence_mismatch",
+        subject="committed Chapter observation",
+        summary="The derived Chapter evidence overstates the approved prose.",
+        evidence=[
+            "The committed observation and the approved prose make contrary statements."
+        ],
+        candidate_claim="The observation records knowledge the prose does not establish.",
+        contrary_formal_statement=(
+            "The approved prose explicitly leaves the witness's knowledge unresolved."
+        ),
+    )
+
+
 def test_initial_authority_creator_wait_projects_and_starts_user_lineage(
     tmp_path: Path,
 ) -> None:
@@ -202,6 +227,18 @@ def test_initial_authority_creator_wait_projects_and_starts_user_lineage(
                     book_review_concern="not_required",
                     chapter_evidence_concern="not_required",
                     summary="Only the creator controls the missing intent.",
+                    issues=[
+                        EvaluationIssue(
+                            kind="creator_owned_unknown",
+                            code="creator_intent_required",
+                            subject="creator-controlled story intent",
+                            summary="Only the creator can decide the missing intent.",
+                            evidence=[
+                                "Committed story evidence cannot resolve this preference."
+                            ],
+                            creator_question=_creator_need().question,
+                        )
+                    ],
                     creator_input_need=_creator_need(),
                 ),
                 lineage_id="initial-wait-lineage",
@@ -296,6 +333,7 @@ def test_round_one_recurrence_needs_creator_question_and_cannot_open_round_two(
                     chapter_evidence_concern="chapter_evidence_review_required",
                     chapter_evidence_target=target,
                     summary="The frozen prose needs one evidence-only clarification.",
+                    issues=[_derived_evidence_issue()],
                 ),
                 lineage_id="bounded-correction-lineage",
                 correction_round=0,
@@ -324,6 +362,7 @@ def test_round_one_recurrence_needs_creator_question_and_cannot_open_round_two(
                         ),
                         chapter_evidence_target=target,
                         summary="The same correction is requested again.",
+                        issues=[_derived_evidence_issue()],
                     ),
                     lineage_id="bounded-correction-lineage",
                     correction_round=1,
@@ -348,6 +387,20 @@ def test_round_one_recurrence_needs_creator_question_and_cannot_open_round_two(
                     chapter_evidence_concern="chapter_evidence_review_required",
                     chapter_evidence_target=target,
                     summary="The remaining ambiguity belongs to creator intent.",
+                    issues=[
+                        EvaluationIssue(
+                            kind="creator_owned_unknown",
+                            code="creator_intent_required_after_correction",
+                            subject="witness intent",
+                            summary=(
+                                "Committed evidence cannot determine the creator-owned intent."
+                            ),
+                            evidence=[
+                                "The bounded evidence correction has already been consumed."
+                            ],
+                            creator_question=_creator_need().question,
+                        )
+                    ],
                     creator_input_need=_creator_need(),
                 ),
                 lineage_id="bounded-correction-lineage",
@@ -421,7 +474,7 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
                 engine,
                 project_id="chapter-evidence-correction",
                 target_chapter_count=4,
-                canon_change=False,
+                canon_change=True,
             )
             chapter_service = ChapterCommandService(CommandBus(engine))
             first_commit = await chapter_service.commit_chapter_and_canon(
@@ -434,12 +487,16 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
                 ),
                 idempotency_key="evidence:first-commit",
             )
+            current_foundation = replace(
+                first.foundation,
+                canon_baseline_id=first_commit.result.canon_after_id,
+            )
             second = await _prepare_reviewed_chapter(
                 engine,
                 project_id=first.foundation.project_id,
                 target_chapter_count=4,
                 canon_change=False,
-                foundation=first.foundation,
+                foundation=current_foundation,
                 idempotency_suffix=":second",
             )
             second_commit = await chapter_service.commit_chapter_and_canon(
@@ -457,16 +514,20 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
                 project_id=first.foundation.project_id,
                 target_chapter_count=4,
                 canon_change=False,
-                foundation=first.foundation,
+                foundation=current_foundation,
                 idempotency_suffix=":source",
                 evaluation=LayerEvaluationResult(
                     decision="escalate_to_arc",
                     summary="Arc authority must inspect earlier derived evidence.",
                     issues=[
                         ChapterEvaluationIssue(
+                            kind="parent_authority_concern",
                             code="arc_authority_required",
                             subject="earlier derived evidence",
                             summary="Arc authority must inspect earlier derived evidence.",
+                            evidence=[
+                                "The reviewed Chapter evidence challenges its current Arc."
+                            ],
                             affected_components=["observations", "canon"],
                         )
                     ],
@@ -506,6 +567,7 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
                         ),
                     ),
                     summary="Chapter one needs evidence-only correction.",
+                    issues=[_derived_evidence_issue()],
                 ),
                 lineage_id=lineage_id,
                 correction_round=0,
@@ -530,16 +592,56 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
             assert workspace["draft_ref_id"] == original["prose_ref_id"]
             assert workspace["revision_origin"] == "arc_evidence_correction"
             assert workspace["automatic_correction_round"] == 1
+            correction_context = await HarnessContextBuilder(engine).build(
+                task_kind="chapter.revise.observe",
+                project_id=first.foundation.project_id,
+                book_id=first.foundation.book_id,
+                arc_id=first.foundation.arc_id,
+                chapter_id=first.chapter_id,
+                semantic_goal="Correct only the derived Chapter evidence.",
+            )
+            correction_items = correction_context.manifest["items"]
+            assert not any(
+                item["group"] == "chapter_guidance"
+                for item in correction_items
+            )
+            review_items = [
+                item
+                for item in correction_items
+                if item["group"] == "arc_parent_review"
+            ]
+            assert len(review_items) == 1
+            assert review_items[0]["role"] == "review_finding"
+            assert review_items[0]["use"] == "repair_authorization"
 
             observations = ChapterObservationResult(
                 summary=(
                     "Mara directly sees the written statement change while "
                     "preserving an analogue comparison."
                 ),
-                continuity_observations=[
-                    "Mara preserves analogue copies before trusting later statements."
+                established_facts=[
+                    {
+                        "statement": (
+                            "Mara preserves analogue copies before trusting later statements."
+                        ),
+                        "evidence_hint": (
+                            "The frozen prose shows Mara preserving an analogue comparison."
+                        ),
+                    }
                 ],
-                canon_proposals=[],
+                canon_proposals=[
+                    SemanticCanonProposal(
+                        category="world_facts",
+                        subject="Mara",
+                        semantic_change=(
+                            "Mara directly witnesses written memory evidence changing."
+                        ),
+                        resolved=False,
+                        evidence_hint=(
+                            "Mara directly watches the blue ink add a confession."
+                        ),
+                    )
+                ],
             )
             observation_task, observation_attempt = await insert_successful_task(
                 engine,
@@ -556,7 +658,7 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
                 arc_baseline_id=first.foundation.arc_baseline_id,
                 chapter_id=first.chapter_id,
                 chapter_baseline_id=first_commit.result.chapter_baseline_id,
-                canon_baseline_id=first.foundation.canon_baseline_id,
+                canon_baseline_id=second_commit.result.canon_after_id,
                 workspace_lock_version=int(workspace["lock_version"]),
                 correction_lineage_id=lineage_id,
                 correction_lineage_origin="review_initiated",
@@ -600,7 +702,7 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
                 arc_baseline_id=first.foundation.arc_baseline_id,
                 chapter_id=first.chapter_id,
                 chapter_baseline_id=first_commit.result.chapter_baseline_id,
-                canon_baseline_id=first.foundation.canon_baseline_id,
+                canon_baseline_id=second_commit.result.canon_after_id,
                 workspace_lock_version=applied.result.workspace_lock_version,
                 correction_lineage_id=lineage_id,
                 correction_lineage_origin="review_initiated",
@@ -611,6 +713,26 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
                     canon_intent_supported_by_frozen_prose=True,
                     descendant_facts_remain_consistent=False,
                     summary="The descendant consistency check failed.",
+                    issues=[
+                        EvaluationIssue(
+                            kind="derived_evidence_mismatch",
+                            code="descendant_fact_mismatch",
+                            subject="corrected Chapter evidence",
+                            summary=(
+                                "The corrected derived evidence conflicts with a "
+                                "formal descendant fact."
+                            ),
+                            evidence=[
+                                "The corrected observation and descendant formal fact disagree."
+                            ],
+                            candidate_claim=(
+                                "The corrected observation states the condition remained open."
+                            ),
+                            contrary_formal_statement=(
+                                "A formal descendant Chapter records the condition as resolved."
+                            ),
+                        )
+                    ],
                 ),
             )
             evidence_strategy = DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
@@ -648,7 +770,7 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
                 arc_baseline_id=first.foundation.arc_baseline_id,
                 chapter_id=first.chapter_id,
                 chapter_baseline_id=first_commit.result.chapter_baseline_id,
-                canon_baseline_id=first.foundation.canon_baseline_id,
+                canon_baseline_id=second_commit.result.canon_after_id,
                 workspace_lock_version=applied.result.workspace_lock_version,
                 correction_lineage_id=lineage_id,
                 correction_lineage_origin="review_initiated",
@@ -682,12 +804,12 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
                     expected_current_chapter_baseline_id=(
                         first_commit.result.chapter_baseline_id
                     ),
-                    expected_canon_baseline_id=first.foundation.canon_baseline_id,
+                    expected_canon_baseline_id=second_commit.result.canon_after_id,
                 ),
                 idempotency_key="evidence:commit",
             )
             assert committed.result.chapter_baseline_version == 2
-            assert not committed.result.canon_changed
+            assert committed.result.canon_changed
 
             async with engine.connect() as connection:
                 revised = (
@@ -721,11 +843,33 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
                     project_id=first.foundation.project_id,
                     ref_id=precheck_ref_id,
                 )
+                world_facts_ref_id = await connection.scalar(
+                    select(canon_baselines.c.world_facts_ref_id).where(
+                        canon_baselines.c.id == committed.result.canon_after_id
+                    )
+                )
+                assert world_facts_ref_id is not None
+                packed_world_facts = await ContentRepository(connection).get_packed(
+                    project_id=first.foundation.project_id,
+                    ref_id=world_facts_ref_id,
+                )
             assert revised["plan_ref_id"] == original["plan_ref_id"]
             assert revised["prose_ref_id"] == original["prose_ref_id"]
             assert second_pointer == second_commit.result.chapter_baseline_id
             assert committed_chapter_count == 2
             assert arc_baseline_count == 1
+            corrected_canon = [
+                CanonEntry.model_validate(item)
+                for item in json.loads(packed_world_facts.unpack_and_verify())
+            ]
+            mara_entry = next(item for item in corrected_canon if item.subject == "Mara")
+            assert mara_entry.source_chapter_baseline_id == (
+                committed.result.chapter_baseline_id
+            )
+            assert mara_entry.source_prose_ref_id == revised["prose_ref_id"]
+            assert mara_entry.evidence.hint == (
+                "Mara directly watches the blue ink add a confession."
+            )
             precheck = json.loads(packed_precheck.unpack_and_verify())
             assert precheck["plan_bytes_unchanged"] is True
             assert precheck["prose_bytes_unchanged"] is True

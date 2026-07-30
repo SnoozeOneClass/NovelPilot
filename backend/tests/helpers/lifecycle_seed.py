@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.agents.contracts import (
@@ -11,7 +12,13 @@ from app.agents.contracts import (
     ArcStateTransition,
 )
 from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
-from app.db.schema import agent_task_attempts, agent_tasks
+from app.db.schema import (
+    agent_task_attempts,
+    agent_tasks,
+    arc_workspaces,
+    book_workspaces,
+    chapter_workspaces,
+)
 from app.domain.arc.commands import ArcCommandService
 from app.domain.arc.contracts import (
     ApplyArcTaskRequest,
@@ -68,6 +75,7 @@ async def insert_successful_task(
     canon_baseline_id: str,
     result: BaseModel,
     workspace_lock_version: int | None = None,
+    workspace_work_cycle_id: str | None = None,
     book_baseline_id: str | None = None,
     arc_id: str | None = None,
     arc_baseline_id: str | None = None,
@@ -80,6 +88,10 @@ async def insert_successful_task(
     source_book_parent_review_id: str | None = None,
     source_arc_closure_review_id: str | None = None,
     source_book_completion_review_id: str | None = None,
+    source_book_candidate_review_id: str | None = None,
+    source_arc_candidate_review_id: str | None = None,
+    source_chapter_candidate_review_id: str | None = None,
+    source_book_progress_handoff_id: str | None = None,
     source_chapter_arc_request_id: str | None = None,
     source_arc_book_request_id: str | None = None,
     source_arc_closure_id: str | None = None,
@@ -93,6 +105,51 @@ async def insert_successful_task(
         else None
     )
     async with engine.begin() as connection:
+        if workspace_lock_version is not None:
+            if chapter_id is not None:
+                workspace_table = chapter_workspaces
+                scope_column = chapter_workspaces.c.chapter_id
+                scope_value = chapter_id
+            elif arc_id is not None:
+                workspace_table = arc_workspaces
+                scope_column = arc_workspaces.c.arc_id
+                scope_value = arc_id
+            else:
+                workspace_table = book_workspaces
+                scope_column = book_workspaces.c.book_id
+                scope_value = book_id
+            workspace_identity = (
+                await connection.execute(
+                    select(
+                        workspace_table.c.work_cycle_id,
+                        workspace_table.c.active_repair_review_id,
+                    ).where(
+                        workspace_table.c.project_id == project_id,
+                        scope_column == scope_value,
+                    )
+                )
+            ).one_or_none()
+            if workspace_identity is not None:
+                if workspace_work_cycle_id is None:
+                    workspace_work_cycle_id = workspace_identity.work_cycle_id
+                if (
+                    "repair" in task_kind
+                    and source_book_candidate_review_id is None
+                    and source_arc_candidate_review_id is None
+                    and source_chapter_candidate_review_id is None
+                ):
+                    if scope_layer == "book":
+                        source_book_candidate_review_id = (
+                            workspace_identity.active_repair_review_id
+                        )
+                    elif scope_layer == "arc":
+                        source_arc_candidate_review_id = (
+                            workspace_identity.active_repair_review_id
+                        )
+                    else:
+                        source_chapter_candidate_review_id = (
+                            workspace_identity.active_repair_review_id
+                        )
         result_ref = await ContentRepository(connection).put(
             project_id=project_id,
             prepared=prepared,
@@ -116,6 +173,7 @@ async def insert_successful_task(
                 arc_id=arc_id,
                 chapter_id=chapter_id,
                 workspace_lock_version=workspace_lock_version,
+                workspace_work_cycle_id=workspace_work_cycle_id,
                 book_baseline_id=book_baseline_id,
                 arc_baseline_id=arc_baseline_id,
                 chapter_baseline_id=chapter_baseline_id,
@@ -128,6 +186,14 @@ async def insert_successful_task(
                 source_arc_closure_review_id=source_arc_closure_review_id,
                 source_book_completion_review_id=(
                     source_book_completion_review_id
+                ),
+                source_book_candidate_review_id=source_book_candidate_review_id,
+                source_arc_candidate_review_id=source_arc_candidate_review_id,
+                source_chapter_candidate_review_id=(
+                    source_chapter_candidate_review_id
+                ),
+                source_book_progress_handoff_id=(
+                    source_book_progress_handoff_id
                 ),
                 source_chapter_arc_request_id=source_chapter_arc_request_id,
                 source_arc_book_request_id=source_arc_book_request_id,

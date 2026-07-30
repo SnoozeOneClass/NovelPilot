@@ -41,6 +41,7 @@ from app.domain.arc.commands import ArcCommandService
 from app.domain.arc.contracts import (
     ApplyArcTaskRequest,
     ArcEvaluation,
+    ArcEvaluationIssue,
     CommitArcAutoRequest,
     RecordArcReviewRequest,
     SubmitArcRequest,
@@ -363,11 +364,15 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                     summary="The Arc contract must change before this Chapter can proceed.",
                     issues=[
                         ChapterEvaluationIssue(
+                            kind="parent_authority_concern",
                             code="arc_contract_concern",
                             subject="current Arc contract",
                             summary=(
                                 "The Arc contract must change before this Chapter can proceed."
                             ),
+                            evidence=[
+                                "The frozen assignment cannot be fulfilled under the Arc constraints."
+                            ],
                             affected_components=["plan"],
                         )
                     ],
@@ -599,6 +604,24 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                 ),
                 idempotency_key="change:review-arc-revision",
             )
+            async with engine.connect() as connection:
+                historical_arc_binding = (
+                    await connection.execute(
+                        select(
+                            arc_baselines.c.book_baseline_id,
+                            arc_baselines.c.canon_baseline_id,
+                            arc_baselines.c.book_progress_handoff_id,
+                            arc_baselines.c.prior_arc_id,
+                            arc_baselines.c.prior_arc_baseline_id,
+                            arc_baselines.c.plan_ref_id,
+                            arc_baselines.c.submission_id,
+                            arc_baselines.c.review_id,
+                        ).where(
+                            arc_baselines.c.id
+                            == ready.foundation.arc_baseline_id
+                        )
+                    )
+                ).one()
             committed = await arc_service.commit_baseline_auto(
                 CommitArcAutoRequest(
                     project_id=ready.foundation.project_id,
@@ -640,6 +663,23 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                     await connection.scalar(select(func.count()).select_from(arc_baselines))
                     == 2
                 )
+                assert (
+                    await connection.execute(
+                        select(
+                            arc_baselines.c.book_baseline_id,
+                            arc_baselines.c.canon_baseline_id,
+                            arc_baselines.c.book_progress_handoff_id,
+                            arc_baselines.c.prior_arc_id,
+                            arc_baselines.c.prior_arc_baseline_id,
+                            arc_baselines.c.plan_ref_id,
+                            arc_baselines.c.submission_id,
+                            arc_baselines.c.review_id,
+                        ).where(
+                            arc_baselines.c.id
+                            == ready.foundation.arc_baseline_id
+                        )
+                    )
+                ).one() == historical_arc_binding
             state = await ProjectStateQuery(engine).get_project(
                 ready.foundation.project_id
             )
@@ -712,9 +752,13 @@ def test_rejected_change_request_keeps_formal_baselines_and_blocks_source_for_us
                     summary="The proposed reveal appears to require an Arc change.",
                     issues=[
                         ChapterEvaluationIssue(
+                            kind="parent_authority_concern",
                             code="arc_reveal_scope",
                             subject="proposed reveal",
                             summary="The proposed reveal appears to require an Arc change.",
+                            evidence=[
+                                "The proposed reveal exceeds the current Arc assignment."
+                            ],
                             affected_components=["plan"],
                         )
                     ],
@@ -781,6 +825,19 @@ def test_arc_to_book_request_resolves_only_when_authorized_book_v2_is_approved(
                 evaluation=ArcEvaluation(
                     decision="escalate_to_book",
                     summary="The Arc requires a Book-level direction change.",
+                    issues=[
+                        ArcEvaluationIssue(
+                            kind="parent_authority_concern",
+                            code="book_direction_concern",
+                            subject="current Book direction",
+                            summary=(
+                                "The Arc evidence warrants review by Book authority."
+                            ),
+                            evidence=[
+                                "The current Arc cannot resolve the concern without changing Book intent."
+                            ],
+                        )
+                    ],
                 ),
             )
             run_id = reviewed_arc.book.run_id

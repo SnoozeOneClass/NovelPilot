@@ -80,6 +80,25 @@ mutable workspace
   -> immutable formal baseline
 ```
 
+每个三层 Workspace 还拥有一个显式 `work_cycle_id`。`lock_version` 只解决一次
+物理写入的 CAS，`work_cycle_id` 则标识一次完整的语义工作周期；候选评审和
+Agent Task 必须冻结同一个周期。`local_repair` 不是“取最新评审后继续”的状态，
+而是一条由 `active_repair_review_id` 指向的单次授权边。Repair Task 同时绑定
+该周期和对应层的 candidate review ID，Route、重启恢复与 Domain Command 都按
+这组精确身份判断，禁止通过时间戳、相同 Blob、相同 baseline 或 current 指针
+猜测授权。应用反馈、父层 rebase 或打开新的 successor workspace 都会创建新
+周期并清除旧 repair 授权。
+
+同一工作周期最多自动进行一次候选语义纠正；重新评审仍要求同类修复时进入明确
+失败/停滞路径，不再自动循环。这与连接层的五次 transport retry 完全不同：
+Provider 重放始终执行同一份冻结 Task Plan，不能产生新的领域纠正授权。
+
+多 Arc 链路同样使用精确来源：Arc 2 及以后只能消费前一正式 Arc closure 产生的
+当前 `BookProgressHandoff`；Book completion 评审和由其打开的 Book successor
+workspace 都保留实际使用的 `source_book_progress_handoff_id`。最终 Arc 的完成
+评审不会因为它自身不再产生“下一 Arc handoff”，就丢失进入该 Arc 时使用的前序
+handoff。
+
 - 未通过审阅的工作稿可以原地更新，不为每次编辑创建 revision。
 - 已通过并提交的正式 baseline 不可覆盖；后续修改派生新 workspace。
 - 章节内部影响由 Chapter 层处理；影响 Story Arc 或全书时只能逐级升级 change request。
@@ -111,6 +130,84 @@ Arc Planner 和 Arc candidate/closure Evaluator 可以看到当前 Arc 的完整
 Arc 收束或父层审查的自动向下纠正，在同一冻结评审 lineage 中最多一轮。第二次出现同类问题时，若拥有该问题的 Agent 给出了用户可以回答的具体问题，则进入显式 creator wait；执行、评估契约或上下文问题进入失败暂停，不能伪装成等待用户。
 
 首版只允许叙事性 Chapter successor 修改当前 lineage 顶端。只要已有后续 Chapter、formal Arc closure 或 Book handoff，就进入 `waiting_for_user/historical_rewrite_unsupported` 并保持所有权威指针不变。正文逐字不变的 evidence-only correction 可以在 Arc 收束前修复 observations/Canon，但必须证明正文证据成立且后续 Chapter 不冲突。
+
+### 4.2 语义权威、事实证据与逐任务上下文
+
+三层共享同一套语义生命周期，但继续使用各自的物理表和 Domain
+Repository。工作稿可以原地修改；Frozen Candidate、Review、Agent
+task/attempt、Domain Command/receipt 和 Formal Outcome 完整留证；正式
+baseline 只能由同层合法 successor 取代，不能被 Evaluator 或下层静默覆盖。
+
+正式 Chapter prose 是“实际写了什么”的叙事来源。Chapter observation
+只输出：
+
+- `summary`：导航摘要，不单独构成事实证据；
+- `established_facts[{statement,evidence_hint}]`：模型提取的普通语义事实；
+- `canon_proposals`：供后续生成使用的当前状态建议。
+
+Agent 不返回存储 ID、hash、offset 或 locator。Chapter 正式提交时，
+Harness 把每条 fact 绑定到具体 Chapter、Chapter baseline、prose ref/hash
+和 fact ordinal，并让正式 `observations_ref_id` 指向该 committed
+document；接受的 Canon entry 同样绑定具体 Chapter baseline 和 prose。
+Observation/Canon 都是可纠正的派生状态，发生争议时回到对应正式 prose，
+不能让错误派生信息反向要求修改正确正文。
+
+每个 Agent task 使用固定 CXT1 Context View。模型可见上下文块只暴露六个
+属性：`role / scope / time / use / access / target`；内部 ID、hash 和完整
+source binding 只写入 `novelpilot-task-context-manifest-v4`。评审或修复任务
+恰好拥有一个逻辑 `target_descriptor`；正式契约、正式结果、正式正文、派生
+证据、Canon 和旧评审均为只读。Book 不重读全部 Chapter，Arc 只消费当前
+Arc 的正式事实，Chapter 只消费当前 assignment、至多下一 assignment、
+必要衔接和当前 Canon；系统不引入 RAG 或全历史检索。
+
+Book 讨论上下文也按用途拆开：`book.discuss` 可以读取当前 discussion state
+和 transcript，`book.synthesize` 只读取已归并的当前 state；Book
+repair/evaluate 不读取 transcript。Book 的 completion contract 与完整 Arc
+topology 只进入 Book revision、Book parent review 和 Book completion 等
+Book 权威任务；Arc 只接收 Book 明确分配给当前 Arc 的 contract，Chapter
+再接收该 Arc 的正式 contract 与当前 outline window，不能把整书
+completion/topology 当成本层可评或可改目标。Arc/Chapter candidate
+Evaluator 同时读取当前 Arc 已提交 facts，避免在缺少正式历史时做冲突判断。
+
+Context policy 不只声明允许组，也声明每个 task kind 的必需组，以及 revision/
+evidence correction 所需的至少一个明确授权来源；缺块在 Provider 调用前以
+`context_assembly_invalid` 失败。正式 Canon 始终保持 `time=current`，不会因
+repair/verify 而误标成候选；只有实际候选块标记为 `pre_repair/post_repair`。
+Raw user feedback 只有在仍是 applied feedback 的当前 content ref 时才标记为
+`creator_guidance`，父层 review 必须保持 `review_finding /
+repair_authorization` 身份。
+
+Evaluator 只允许六类 EP1 blocker：
+`explicit_conflict`、`contract_unfulfilled`、
+`unsupported_strong_conclusion`、`derived_evidence_mismatch`、
+`parent_authority_concern`、`creator_owned_unknown`。普通叙事事实采用开放
+世界判断：前文沉默不等于否定，当前 Chapter 可以首次建立普通事实；只有
+候选陈述与正式来源存在明确相反陈述时才构成冲突。文学质量、风格、节奏和
+soft advisory 偏离不形成 blocker，不触发 Repair 或改变 Route。
+所有能够改变 Route 的字段必须与对应 EP1 issue 原子一致：父层审查必须携带
+`parent_authority_concern`，派生证据纠正必须携带
+`derived_evidence_mismatch`；字段与 issue 不一致时作为评审契约缺陷暂停，
+不能按 Harness 内部优先级猜测模型意图。
+
+Evidence-only correction 只允许在纠正目标仍是当前 Canon entry 的实际来源
+Chapter baseline 时，更新语义相同 entry 的 evidence/provenance。后续 Chapter
+再次提及同一状态不会夺走原来源；纠正也不会把正确正文或后续正式历史改写成
+新的叙事版本。
+
+用户反馈采用 G1 一次性消费：原始反馈不可变留证，在安全边界成为目标层
+Workspace 的当前 guidance；下一次 Frozen Candidate/Review manifest 绑定
+实际 `guidance_ref_id` 和 `source_feedback_id`；正式提交成功时原子清空
+Workspace guidance。已消费的历史反馈不会作为独立 prompt 片段永久重复
+注入；需要长期生效的偏好由同层 baseline 保存为显式 advisory projection。
+普通 guidance 可以只绑定 `source_feedback_id`，不因此成为纠正 lineage。
+只有用户回答正式纠正等待时，`user_initiated` lineage 才必须与该反馈 ID
+原子绑定；`review_initiated` lineage 则禁止混入用户反馈。即使两条反馈文本
+完全相同，它们仍创建不同的 feedback/work-cycle 身份，旧任务不得被新周期复用。
+
+所有 Formal Outcome 都从自身记录解析历史含义，而不是依赖后来变化的
+`current_*` 指针。Book/Arc/Chapter baseline、Arc closure 和 Book
+completion 均保存其实际使用的具体上层 baseline、Canon、终端 Chapter、
+review/approval 和内容 manifest 绑定。
 
 ## 5. SQLite、CAS 与 Transactional Outbox
 

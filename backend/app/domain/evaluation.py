@@ -17,6 +17,13 @@ BookContractJudgment = Literal[
     "revision_warranted",
     "unable_to_judge",
 ]
+_LOCAL_REVIEW_ISSUE_KINDS = frozenset(
+    {
+        "explicit_conflict",
+        "contract_unfulfilled",
+        "unsupported_strong_conclusion",
+    }
+)
 
 
 class CreatorInputNeed(BaseModel):
@@ -96,10 +103,74 @@ class ArcParentContractEvaluation(BaseModel):
     @model_validator(mode="after")
     def _chapter_evidence_shape(self) -> ArcParentContractEvaluation:
         required = self.chapter_evidence_concern == "chapter_evidence_review_required"
+        book_review_required = self.book_review_concern == "book_review_required"
+        revision_warranted = self.arc_contract_judgment == "revision_warranted"
+        creator_required = self.creator_input_need is not None
         if required != (self.chapter_evidence_target is not None):
             raise ValueError(
                 "chapter_evidence_review_required needs one semantic Chapter target."
             )
+        _validate_issue_route(
+            required=book_review_required,
+            kind="parent_authority_concern",
+            issues=self.issues,
+            route_name="book_review_required",
+        )
+        _validate_issue_route(
+            required=required and self.creator_input_need is None,
+            kind="derived_evidence_mismatch",
+            issues=self.issues,
+            route_name="chapter_evidence_review_required",
+        )
+        _validate_creator_input_boundary(
+            unable_to_judge=self.arc_contract_judgment == "unable_to_judge",
+            creator_input_need=self.creator_input_need,
+            issues=self.issues,
+        )
+        if book_review_required and (revision_warranted or required or creator_required):
+            raise ValueError("Arc parent review may select only one authority disposition.")
+        if revision_warranted and (required or creator_required):
+            raise ValueError("Arc revision cannot hide an evidence route or creator wait.")
+        if self.arc_contract_judgment == "unable_to_judge" and (
+            book_review_required or required
+        ):
+            raise ValueError("unable_to_judge cannot also select another authority route.")
+        if required and creator_required:
+            if self.arc_contract_judgment != "remains_applicable":
+                raise ValueError(
+                    "Creator-owned evidence recurrence keeps the Arc contract applicable."
+                )
+            _validate_only_issue_kinds(
+                issues=self.issues,
+                allowed=frozenset({"creator_owned_unknown"}),
+                route_name="creator-owned evidence recurrence",
+            )
+        elif book_review_required:
+            _validate_only_issue_kinds(
+                issues=self.issues,
+                allowed=frozenset({"parent_authority_concern"}),
+                route_name="book_review_required",
+            )
+        elif required:
+            _validate_only_issue_kinds(
+                issues=self.issues,
+                allowed=frozenset({"derived_evidence_mismatch"}),
+                route_name="chapter_evidence_review_required",
+            )
+        elif creator_required:
+            _validate_only_issue_kinds(
+                issues=self.issues,
+                allowed=frozenset({"creator_owned_unknown"}),
+                route_name="creator wait",
+            )
+        elif revision_warranted:
+            _validate_only_issue_kinds(
+                issues=self.issues,
+                allowed=_LOCAL_REVIEW_ISSUE_KINDS,
+                route_name="Arc revision",
+            )
+        elif self.issues:
+            raise ValueError("Keeping the Arc baseline cannot carry ignored blockers.")
         return self
 
 
@@ -111,6 +182,68 @@ class BookParentContractEvaluation(BaseModel):
     summary: str = Field(min_length=1)
     issues: list[EvaluationIssue] = Field(default_factory=list)
     creator_input_need: CreatorInputNeed | None = None
+
+    @model_validator(mode="after")
+    def _creator_input_boundary(self) -> BookParentContractEvaluation:
+        evidence_required = self.arc_evidence_concern == "arc_evidence_review_required"
+        revision_warranted = self.book_contract_judgment == "revision_warranted"
+        creator_required = self.creator_input_need is not None
+        _validate_no_issue_kind(
+            kind="parent_authority_concern",
+            issues=self.issues,
+            message="Book authority has no parent route.",
+        )
+        _validate_issue_route(
+            required=(
+                evidence_required and not creator_required
+            ),
+            kind="derived_evidence_mismatch",
+            issues=self.issues,
+            route_name="arc_evidence_review_required",
+        )
+        _validate_creator_input_boundary(
+            unable_to_judge=self.book_contract_judgment == "unable_to_judge",
+            creator_input_need=self.creator_input_need,
+            issues=self.issues,
+        )
+        if revision_warranted and (evidence_required or creator_required):
+            raise ValueError("Book revision cannot hide an evidence route or creator wait.")
+        if (
+            self.book_contract_judgment == "unable_to_judge"
+            and evidence_required
+        ):
+            raise ValueError("unable_to_judge cannot also select an evidence route.")
+        if evidence_required and creator_required:
+            if self.book_contract_judgment != "remains_applicable":
+                raise ValueError(
+                    "Creator-owned evidence recurrence keeps the Book contract applicable."
+                )
+            _validate_only_issue_kinds(
+                issues=self.issues,
+                allowed=frozenset({"creator_owned_unknown"}),
+                route_name="creator-owned evidence recurrence",
+            )
+        elif evidence_required:
+            _validate_only_issue_kinds(
+                issues=self.issues,
+                allowed=frozenset({"derived_evidence_mismatch"}),
+                route_name="arc_evidence_review_required",
+            )
+        elif creator_required:
+            _validate_only_issue_kinds(
+                issues=self.issues,
+                allowed=frozenset({"creator_owned_unknown"}),
+                route_name="creator wait",
+            )
+        elif revision_warranted:
+            _validate_only_issue_kinds(
+                issues=self.issues,
+                allowed=_LOCAL_REVIEW_ISSUE_KINDS,
+                route_name="Book revision",
+            )
+        elif self.issues:
+            raise ValueError("Keeping the Book baseline cannot carry ignored blockers.")
+        return self
 
 
 class ArcClosureEvaluation(BaseModel):
@@ -141,9 +274,80 @@ class ArcClosureEvaluation(BaseModel):
     @model_validator(mode="after")
     def _chapter_evidence_shape(self) -> ArcClosureEvaluation:
         required = self.chapter_evidence_concern == "chapter_evidence_review_required"
+        book_review_required = self.book_review_concern == "book_review_required"
+        revision_warranted = self.arc_contract_judgment == "revision_warranted"
+        creator_required = self.creator_input_need is not None
         if required != (self.chapter_evidence_target is not None):
             raise ValueError(
                 "chapter_evidence_review_required needs one semantic Chapter target."
+            )
+        _validate_issue_route(
+            required=book_review_required,
+            kind="parent_authority_concern",
+            issues=self.issues,
+            route_name="book_review_required",
+        )
+        _validate_issue_route(
+            required=required and self.creator_input_need is None,
+            kind="derived_evidence_mismatch",
+            issues=self.issues,
+            route_name="chapter_evidence_review_required",
+        )
+        _validate_creator_input_boundary(
+            unable_to_judge=self.arc_contract_judgment == "unable_to_judge",
+            creator_input_need=self.creator_input_need,
+            issues=self.issues,
+        )
+        if book_review_required and (revision_warranted or required or creator_required):
+            raise ValueError("Arc closure may select only one authority disposition.")
+        if revision_warranted and (required or creator_required):
+            raise ValueError("Arc revision cannot hide an evidence route or creator wait.")
+        if self.arc_contract_judgment == "unable_to_judge" and (
+            book_review_required or required
+        ):
+            raise ValueError("unable_to_judge cannot also select another authority route.")
+        if required and creator_required:
+            if self.arc_contract_judgment != "remains_applicable":
+                raise ValueError(
+                    "Creator-owned evidence recurrence keeps the Arc contract applicable."
+                )
+            _validate_only_issue_kinds(
+                issues=self.issues,
+                allowed=frozenset({"creator_owned_unknown"}),
+                route_name="creator-owned evidence recurrence",
+            )
+        elif book_review_required:
+            _validate_only_issue_kinds(
+                issues=self.issues,
+                allowed=frozenset({"parent_authority_concern"}),
+                route_name="book_review_required",
+            )
+        elif required:
+            _validate_only_issue_kinds(
+                issues=self.issues,
+                allowed=frozenset({"derived_evidence_mismatch"}),
+                route_name="chapter_evidence_review_required",
+            )
+        elif creator_required:
+            _validate_only_issue_kinds(
+                issues=self.issues,
+                allowed=frozenset({"creator_owned_unknown"}),
+                route_name="creator wait",
+            )
+        elif revision_warranted:
+            _validate_only_issue_kinds(
+                issues=self.issues,
+                allowed=_LOCAL_REVIEW_ISSUE_KINDS,
+                route_name="Arc revision",
+            )
+        elif all(item.status == "satisfied" for item in self.signal_statuses):
+            if self.issues:
+                raise ValueError("A satisfied Arc closure cannot carry ignored blockers.")
+        else:
+            _validate_only_issue_kinds(
+                issues=self.issues,
+                allowed=_LOCAL_REVIEW_ISSUE_KINDS,
+                route_name="Arc closure correction",
             )
         return self
 
@@ -167,6 +371,54 @@ class BookCompletionEvaluation(BaseModel):
             raise ValueError("Book completion requirement keys must be unique.")
         return value
 
+    @model_validator(mode="after")
+    def _creator_input_boundary(self) -> BookCompletionEvaluation:
+        creator_required = self.creator_input_need is not None
+        _validate_no_issue_kind(
+            kind="parent_authority_concern",
+            issues=self.issues,
+            message="Book completion has no parent authority route.",
+        )
+        _validate_creator_input_boundary(
+            unable_to_judge=self.book_contract_judgment == "unable_to_judge",
+            creator_input_need=self.creator_input_need,
+            issues=self.issues,
+        )
+        _validate_no_issue_kind(
+            kind="derived_evidence_mismatch",
+            issues=self.issues,
+            message="Book completion exposes no lower evidence-correction route.",
+        )
+        if (
+            self.book_contract_judgment == "revision_warranted"
+            and creator_required
+        ):
+            raise ValueError("Book revision cannot hide a creator wait.")
+        if creator_required:
+            _validate_only_issue_kinds(
+                issues=self.issues,
+                allowed=frozenset({"creator_owned_unknown"}),
+                route_name="creator wait",
+            )
+        else:
+            _validate_only_issue_kinds(
+                issues=self.issues,
+                allowed=_LOCAL_REVIEW_ISSUE_KINDS,
+                route_name="Book completion correction",
+            )
+            if (
+                self.book_contract_judgment == "remains_applicable"
+                and all(
+                    item.status == "satisfied"
+                    for item in self.requirement_statuses
+                )
+                and self.issues
+            ):
+                raise ValueError(
+                    "A satisfied Book completion cannot carry ignored blockers."
+                )
+        return self
+
 
 class ChapterEvidenceCorrectionEvaluation(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -176,4 +428,87 @@ class ChapterEvidenceCorrectionEvaluation(BaseModel):
     descendant_facts_remain_consistent: bool
     summary: str = Field(min_length=1)
     issues: list[EvaluationIssue] = Field(default_factory=list)
-    creator_input_need: CreatorInputNeed | None = None
+
+    @model_validator(mode="after")
+    def _evidence_boundary(self) -> ChapterEvidenceCorrectionEvaluation:
+        supported = (
+            self.observations_supported_by_frozen_prose
+            and self.canon_intent_supported_by_frozen_prose
+            and self.descendant_facts_remain_consistent
+        )
+        if supported and self.issues:
+            raise ValueError(
+                "A passing evidence-correction verification cannot carry blockers."
+            )
+        if not supported and not self.issues:
+            raise ValueError(
+                "A failed evidence-correction verification requires an EP1 blocker."
+            )
+        _validate_no_issue_kind(
+            kind="parent_authority_concern",
+            issues=self.issues,
+            message="Chapter evidence verification cannot route a parent challenge.",
+        )
+        _validate_no_issue_kind(
+            kind="creator_owned_unknown",
+            issues=self.issues,
+            message="Chapter evidence verification cannot create a creator wait.",
+        )
+        return self
+
+
+def _validate_creator_input_boundary(
+    *,
+    unable_to_judge: bool,
+    creator_input_need: CreatorInputNeed | None,
+    issues: list[EvaluationIssue],
+) -> None:
+    if unable_to_judge and creator_input_need is None:
+        raise ValueError(
+            "unable_to_judge requires one concrete creator input need."
+        )
+    has_creator_unknown = any(
+        issue.kind == "creator_owned_unknown" for issue in issues
+    )
+    if (creator_input_need is not None) != has_creator_unknown:
+        raise ValueError(
+            "A creator input need and creator_owned_unknown blocker are atomic."
+        )
+
+
+def _validate_issue_route(
+    *,
+    required: bool,
+    kind: str,
+    issues: list[EvaluationIssue],
+    route_name: str,
+) -> None:
+    present = any(issue.kind == kind for issue in issues)
+    if required != present:
+        raise ValueError(
+            f"{route_name} and its {kind} EP1 issue are atomic."
+        )
+
+
+def _validate_no_issue_kind(
+    *,
+    kind: str,
+    issues: list[EvaluationIssue],
+    message: str,
+) -> None:
+    if any(issue.kind == kind for issue in issues):
+        raise ValueError(message)
+
+
+def _validate_only_issue_kinds(
+    *,
+    issues: list[EvaluationIssue],
+    allowed: frozenset[str],
+    route_name: str,
+) -> None:
+    illegal = {issue.kind for issue in issues}.difference(allowed)
+    if illegal:
+        raise ValueError(
+            f"{route_name} cannot carry unrelated EP1 issue kinds: "
+            f"{', '.join(sorted(illegal))}."
+        )

@@ -83,6 +83,7 @@ async def _seed_task(engine: AsyncEngine, *, suffix: str = "a") -> SeededTask:
         context_manifest={"candidate": {"direction": "Contradictory memory."}},
         profile_snapshot=profile,
         workspace_lock_version=1,
+        workspace_work_cycle_id="reconcile-book-work-cycle",
     )
     await AgentTaskStore(engine).create_initial(
         plan=plan,

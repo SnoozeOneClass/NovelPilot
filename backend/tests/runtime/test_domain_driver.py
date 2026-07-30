@@ -193,6 +193,7 @@ def test_book_parent_review_instruction_freezes_only_book_scope(
         context_manifest={"source_arc_book_request_id": "arc-book-request"},
         profile_snapshot=profile,
         workspace_lock_version=instruction.workspace_lock_version,
+        workspace_work_cycle_id="book-parent-work-cycle",
         book_baseline_id=instruction.book_baseline_id,
         arc_baseline_id=instruction.arc_baseline_id,
         chapter_baseline_id=instruction.chapter_baseline_id,
@@ -235,9 +236,9 @@ def test_delivery_validation_failure_diagnostics_do_not_copy_model_input() -> No
 def test_book_local_repair_review_is_consumed_once_before_verification() -> None:
     async def exercise() -> None:
         review = SimpleNamespace(
+            id="book-local-repair-review",
             decision="local_repair",
             submission_id="reviewed-submission",
-            created_at_ms=700,
         )
         pending = SimpleNamespace(
             id="repaired-submission",
@@ -245,7 +246,8 @@ def test_book_local_repair_review_is_consumed_once_before_verification() -> None
         )
         books = SimpleNamespace(
             find_pending_submission=AsyncMock(return_value=None),
-            get_latest_review=AsyncMock(return_value=review),
+            get_review_for_submission=AsyncMock(return_value=None),
+            get_review=AsyncMock(return_value=review),
         )
         execution = SimpleNamespace(
             has_applied_task=AsyncMock(side_effect=(False, True))
@@ -270,14 +272,17 @@ def test_book_local_repair_review_is_consumed_once_before_verification() -> None
         workspace = SimpleNamespace(
             lock_version=9,
             state="active",
-            semantic_repair_count=1,
+            work_cycle_id="book-work-cycle",
+            active_repair_review_id=review.id,
+            semantic_repair_count=0,
+            semantic_repair_limit=1,
             discussion_state_ref_id="discussion-ref",
             candidate_constraints_ref_id="constraints-ref",
-                candidate_titles_ref_id="titles-ref",
-                candidate_rolling_plan_ref_id="rolling-ref",
-                candidate_completion_contract_ref_id="completion-ref",
-                candidate_arc_topology_ref_id="topology-ref",
-            )
+            candidate_titles_ref_id="titles-ref",
+            candidate_rolling_plan_ref_id="rolling-ref",
+            candidate_completion_contract_ref_id="completion-ref",
+            candidate_arc_topology_ref_id="topology-ref",
+        )
         driver = object.__new__(DomainRunDriver)
         arguments = {
             "store": store,
@@ -301,10 +306,12 @@ def test_book_local_repair_review_is_consumed_once_before_verification() -> None
             task_kind="book.repair",
             book_id="book",
             book_baseline_id=None,
-            created_after_ms=700,
+            workspace_work_cycle_id="book-work-cycle",
+            source_book_candidate_review_id=review.id,
         )
 
         books.find_pending_submission.return_value = pending
+        workspace.semantic_repair_count = 1
         third = await driver._decide_book(**arguments)
         assert third is not None
         assert third.task_kind == "verify_repair.book"
@@ -312,12 +319,12 @@ def test_book_local_repair_review_is_consumed_once_before_verification() -> None
     asyncio.run(exercise())
 
 
-def test_arc_local_repair_review_is_consumed_once_before_verification() -> None:
+def test_arc_local_repair_route_survives_restart_then_is_consumed_once() -> None:
     async def exercise() -> None:
         review = SimpleNamespace(
+            id="arc-local-repair-review",
             decision="local_repair",
             submission_id="reviewed-submission",
-            created_at_ms=900,
         )
         pending = SimpleNamespace(
             id="repaired-submission",
@@ -333,19 +340,28 @@ def test_arc_local_repair_review_is_consumed_once_before_verification() -> None:
         workspace = SimpleNamespace(
             state="active",
             lock_version=11,
-            semantic_repair_count=1,
+            work_cycle_id="arc-work-cycle",
+            active_repair_review_id=review.id,
+            semantic_repair_count=0,
+            semantic_repair_limit=1,
             book_baseline_id="book-baseline",
             base_arc_baseline_id=None,
             plan_ref_id="arc-plan-ref",
+            source_feedback_id=None,
+            source_arc_parent_review_id=None,
+            source_arc_closure_review_id=None,
+            source_book_parent_review_id=None,
+            source_book_completion_review_id=None,
         )
         arcs = SimpleNamespace(
             get_unfinished_for_book=AsyncMock(return_value=arc),
             get_workspace=AsyncMock(return_value=workspace),
             find_pending_submission=AsyncMock(return_value=None),
-            get_latest_review=AsyncMock(return_value=review),
+            get_review_for_submission=AsyncMock(return_value=None),
+            get_review=AsyncMock(return_value=review),
         )
         execution = SimpleNamespace(
-            has_applied_task=AsyncMock(side_effect=(False, True))
+            has_applied_task=AsyncMock(side_effect=(False, False, True))
         )
         books = SimpleNamespace(
             get_baseline=AsyncMock(return_value=SimpleNamespace(id="book-baseline"))
@@ -371,7 +387,11 @@ def test_arc_local_repair_review_is_consumed_once_before_verification() -> None:
         assert first is not None
         assert first.task_kind == "arc.repair"
 
-        second = await driver._decide_arc(**arguments)
+        restarted_driver = object.__new__(DomainRunDriver)
+        after_restart = await restarted_driver._decide_arc(**arguments)
+        assert after_restart == first
+
+        second = await restarted_driver._decide_arc(**arguments)
         assert second is not None
         assert second.kind == "submit_arc"
         execution.has_applied_task.assert_awaited_with(
@@ -382,10 +402,12 @@ def test_arc_local_repair_review_is_consumed_once_before_verification() -> None:
             arc_id="arc",
             book_baseline_id="book-baseline",
             arc_baseline_id=None,
-            created_after_ms=900,
+            workspace_work_cycle_id="arc-work-cycle",
+            source_arc_candidate_review_id=review.id,
         )
 
         arcs.find_pending_submission.return_value = pending
+        workspace.semantic_repair_count = 1
         third = await driver._decide_arc(**arguments)
         assert third is not None
         assert third.task_kind == "verify_repair.arc"
@@ -396,10 +418,10 @@ def test_arc_local_repair_review_is_consumed_once_before_verification() -> None:
 def test_chapter_plan_repair_regenerates_invalidated_downstream_content() -> None:
     async def exercise() -> None:
         review = SimpleNamespace(
+            id="chapter-local-repair-review",
             decision="local_repair",
             submission_id="reviewed-submission",
             repair_contract_ref_id="repair-contract-ref",
-            created_at_ms=1_100,
         )
         chapter = SimpleNamespace(
             id="chapter",
@@ -410,7 +432,10 @@ def test_chapter_plan_repair_regenerates_invalidated_downstream_content() -> Non
         workspace = SimpleNamespace(
             state="active",
             lock_version=13,
-            semantic_repair_count=1,
+            work_cycle_id="chapter-work-cycle",
+            active_repair_review_id=review.id,
+            semantic_repair_count=0,
+            semantic_repair_limit=1,
             book_baseline_id="book-baseline",
             arc_baseline_id="arc-baseline",
             base_chapter_baseline_id=None,
@@ -441,7 +466,8 @@ def test_chapter_plan_repair_regenerates_invalidated_downstream_content() -> Non
                 return_value=(chapter, workspace)
             ),
             find_pending_submission=AsyncMock(return_value=None),
-            get_latest_review=AsyncMock(return_value=review),
+            get_review_for_submission=AsyncMock(return_value=None),
+            get_review=AsyncMock(return_value=review),
         )
         store = SimpleNamespace(
             chapters=chapters,
@@ -486,6 +512,107 @@ def test_chapter_plan_repair_regenerates_invalidated_downstream_content() -> Non
         workspace.lock_version += 1
         fourth = await driver._decide_chapter(**arguments)
         assert fourth.kind == "submit_chapter"
+
+    asyncio.run(exercise())
+
+
+def test_chapter_prose_repair_regenerates_observations_instead_of_repairing_them() -> None:
+    async def exercise() -> None:
+        review = SimpleNamespace(
+            id="chapter-prose-repair-review",
+            decision="local_repair",
+            submission_id="reviewed-submission",
+            repair_contract_ref_id="prose-repair-contract-ref",
+        )
+        chapter = SimpleNamespace(
+            id="chapter",
+            book_id="book",
+            arc_id="arc",
+            current_baseline_id=None,
+        )
+        workspace = SimpleNamespace(
+            state="active",
+            lock_version=21,
+            work_cycle_id="chapter-prose-work-cycle",
+            active_repair_review_id=review.id,
+            semantic_repair_count=0,
+            semantic_repair_limit=1,
+            book_baseline_id="book-baseline",
+            arc_baseline_id="arc-baseline",
+            base_chapter_baseline_id=None,
+            plan_ref_id="plan-ref",
+            draft_ref_id="draft-ref",
+            observations_ref_id="observations-ref",
+            candidate_canon_patch_ref_id="canon-patch-ref",
+            correction_lineage_id=None,
+            correction_lineage_origin=None,
+            automatic_correction_round=None,
+            source_arc_parent_review_id=None,
+            source_arc_closure_review_id=None,
+            source_feedback_id=None,
+        )
+        applied_tasks: set[str] = set()
+
+        async def has_applied_task(**kwargs: object) -> bool:
+            return str(kwargs["task_kind"]) in applied_tasks
+
+        chapters = SimpleNamespace(
+            get_non_idle_workspace_for_arc=AsyncMock(
+                return_value=(chapter, workspace)
+            ),
+            find_pending_submission=AsyncMock(return_value=None),
+            get_review_for_submission=AsyncMock(return_value=None),
+            get_review=AsyncMock(return_value=review),
+        )
+        store = SimpleNamespace(
+            chapters=chapters,
+            arcs=SimpleNamespace(),
+            books=SimpleNamespace(),
+            content=SimpleNamespace(
+                get_packed=AsyncMock(
+                    return_value=SimpleNamespace(
+                        unpack_and_verify=lambda: json.dumps(
+                            {"authorized_components": ["prose", "observations"]},
+                            ensure_ascii=False,
+                        ).encode()
+                    )
+                )
+            ),
+            execution=SimpleNamespace(
+                has_applied_task=AsyncMock(side_effect=has_applied_task)
+            ),
+        )
+        driver = object.__new__(DomainRunDriver)
+        arguments = {
+            "store": store,
+            "run": SimpleNamespace(id="run-chapter-prose"),
+            "project_id": "project-chapter-prose",
+            "book_id": "book",
+            "book_baseline_id": "book-baseline",
+            "canon_baseline_id": "canon-baseline",
+            "arc": SimpleNamespace(id="arc"),
+            "arc_baseline_id": "arc-baseline",
+        }
+
+        first = await driver._decide_chapter(**arguments)
+        assert first.task_kind == "chapter.repair.prose"
+        assert first.source_chapter_candidate_review_id == review.id
+
+        applied_tasks.add("chapter.repair.prose")
+        workspace.draft_ref_id = "repaired-draft-ref"
+        workspace.observations_ref_id = None
+        workspace.candidate_canon_patch_ref_id = None
+        workspace.semantic_repair_count = 1
+        workspace.lock_version += 1
+        second = await driver._decide_chapter(**arguments)
+        assert second.task_kind == "chapter.observe"
+        assert second.task_kind != "chapter.repair.observation"
+
+        workspace.observations_ref_id = "regenerated-observations-ref"
+        workspace.candidate_canon_patch_ref_id = "regenerated-canon-patch-ref"
+        workspace.lock_version += 1
+        third = await driver._decide_chapter(**arguments)
+        assert third.kind == "submit_chapter"
 
     asyncio.run(exercise())
 
@@ -841,7 +968,16 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
     if task_kind in {"chapter.observe", "chapter.revise.observe"}:
         return {
             "summary": "调查员通过不受记忆影响的物证确认了证词被篡改。",
-            "continuity_observations": ["调查主线继续推进", "主角开始怀疑自身记忆"],
+            "established_facts": [
+                {
+                    "statement": "调查主线继续推进",
+                    "evidence_hint": "本章行动直接推进调查。",
+                },
+                {
+                    "statement": "主角开始怀疑自身记忆",
+                    "evidence_hint": "本章内心与行动显示这一怀疑。",
+                },
+            ],
             "canon_proposals": [],
         }
     if task_kind == "chapter.repair.observation":
@@ -850,7 +986,12 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
                 {
                     "component": "observations",
                     "summary": "修正后的观察与冻结正文一致。",
-                    "continuity_observations": ["调查主线继续推进"],
+                    "established_facts": [
+                        {
+                            "statement": "调查主线继续推进",
+                            "evidence_hint": "修复后的事实索引与正文一致。",
+                        }
+                    ],
                 }
             ]
         }
@@ -881,14 +1022,12 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
         count_match = re.search(r'"committed_chapter_count":(\d+)', prompt)
         count = int(count_match.group(1)) if count_match else 0
         if count >= 20:
-            assert (
-                '<NOVELPILOT_CONTEXT label="formal_arc_1_closure">'
-                in prompt
+            formal_closure_tag = (
+                '<NOVELPILOT_CONTEXT role="formal_outcome" '
+                'scope="arc" time="cumulative" use="narrative_evidence" '
+                'access="read_only" target="false">'
             )
-            assert (
-                '<NOVELPILOT_CONTEXT label="formal_arc_2_closure">'
-                in prompt
-            )
+            assert prompt.count(formal_closure_tag) == 2
             return {
                 "requirement_statuses": [
                     {

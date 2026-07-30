@@ -93,10 +93,10 @@ def test_create_project_is_atomic_idempotent_and_emits_one_event(tmp_path: Path)
                 ).all()
                 assert len(canon_schemas) == 4
                 assert {tuple(row) for row in canon_schemas} == {
-                    ("canon-characters", 2),
-                    ("canon-foreshadowing", 2),
-                    ("canon-relationships", 2),
-                    ("canon-world-facts", 2),
+                    ("canon-characters", 3),
+                    ("canon-foreshadowing", 3),
+                    ("canon-relationships", 3),
+                    ("canon-world-facts", 3),
                 }
 
             conflicting = request.model_copy(update={"creator_brief": "different bytes"})

@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 from alembic import command
 from sqlalchemy import func, select
-from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.agents.contracts import (
@@ -42,6 +41,7 @@ from app.domain.chapter.commands import ChapterCommandService
 from app.domain.chapter.canon import CanonCategory, CanonEntry
 from app.domain.chapter.contracts import (
     ApplyChapterTaskRequest,
+    CommittedChapterObservation,
     CommitChapterRequest,
     CreateChapterRequest,
     RecordChapterReviewRequest,
@@ -211,7 +211,14 @@ async def _prepare_reviewed_chapter(
         workspace_lock_version=applied_draft.result.workspace_lock_version,
         result=ChapterObservationResult(
             summary="Mara obtains physical evidence that memory edits affect documents.",
-            continuity_observations=["Mara now has a reason to preserve analogue copies."],
+            established_facts=[
+                {
+                    "statement": "Mara now has a reason to preserve analogue copies.",
+                    "evidence_hint": (
+                        "The Chapter shows the physical evidence motivating that choice."
+                    ),
+                }
+            ],
             canon_proposals=proposals,
         ),
     )
@@ -395,10 +402,10 @@ def test_real_precheck_routes_conflicting_canon_assertions_to_repair(
             assert precheck["issues"][0]["code"] == "canon_subject_assertion_conflict"
             assert repair["authorized_components"] == ["canon"]
             assert content_versions == {
-                "chapter.deterministic_precheck": 3,
-                "chapter.review_detail": 3,
-                "chapter.repair_contract": 3,
-                "chapter.observations": 2,
+                "chapter.deterministic_precheck": 4,
+                "chapter.review_detail": 4,
+                "chapter.repair_contract": 4,
+                "chapter.observations": 3,
             }
             assert workspace_state == "active"
             assert run_status == "running"
@@ -430,9 +437,17 @@ def test_plan_repair_replaces_mutable_plan_and_invalidates_downstream(
                     ),
                     issues=[
                         ChapterEvaluationIssue(
+                            kind="unsupported_strong_conclusion",
                             code="chapter_plan_infeasible",
                             subject="mutable Chapter plan",
                             summary="The plan overclaims evidence available under this Arc.",
+                            evidence=[
+                                "The plan reaches a categorical conclusion from limited evidence."
+                            ],
+                            support_gap=(
+                                "The plan does not schedule observable evidence strong "
+                                "enough for its required conclusion."
+                            ),
                             affected_components=["plan"],
                         )
                     ],
@@ -663,11 +678,63 @@ def test_paraphrased_canon_evidence_commits_without_exact_copy(
                     CanonEntry.model_validate(item)
                     for item in json.loads(packed.unpack_and_verify())
                 ]
+                source_refs = (
+                    await connection.execute(
+                        select(
+                            chapter_baselines.c.observations_ref_id,
+                            chapter_baselines.c.prose_ref_id,
+                            chapter_review_submissions.c.observations_ref_id.label(
+                                "candidate_observations_ref_id"
+                            ),
+                        )
+                        .select_from(
+                            chapter_baselines.join(
+                                chapter_review_submissions,
+                                chapter_review_submissions.c.id
+                                == chapter_baselines.c.submission_id,
+                            )
+                        )
+                        .where(
+                            chapter_baselines.c.id
+                            == committed.result.chapter_baseline_id
+                        )
+                    )
+                ).one()
+                committed_observations_packed = await ContentRepository(
+                    connection
+                ).get_packed(
+                    project_id=ready.foundation.project_id,
+                    ref_id=source_refs.observations_ref_id,
+                )
+                committed_observations = (
+                    CommittedChapterObservation.model_validate_json(
+                        committed_observations_packed.unpack_and_verify()
+                    )
+                )
 
-            assert tuple(schema) == ("canon-world-facts", 2)
+            assert tuple(schema) == ("canon-world-facts", 3)
             assert len(entries) == 1
             assert entries[0].evidence.hint == semantic_hint
             assert entries[0].evidence.exact_span is None
+            assert entries[0].source_chapter_baseline_id == (
+                committed.result.chapter_baseline_id
+            )
+            assert entries[0].source_prose_ref_id == source_refs.prose_ref_id
+            assert source_refs.observations_ref_id != (
+                source_refs.candidate_observations_ref_id
+            )
+            assert (
+                committed_observations.source.chapter_baseline_id
+                == committed.result.chapter_baseline_id
+            )
+            assert (
+                committed_observations.source.prose_ref_id
+                == source_refs.prose_ref_id
+            )
+            assert [
+                fact.fact_ordinal
+                for fact in committed_observations.established_facts
+            ] == [1]
         finally:
             await engine.dispose()
 
@@ -819,9 +886,17 @@ def test_local_repair_changes_only_authorized_component_and_consumes_one_budget(
                     summary="One paragraph overstates what Mara can know.",
                     issues=[
                         ChapterEvaluationIssue(
+                            kind="unsupported_strong_conclusion",
                             code="prose_knowledge_overclaim",
                             subject="Mara's knowledge",
                             summary="The prose overstates what Mara can know.",
+                            evidence=[
+                                "The prose states certainty while the scene establishes only suspicion."
+                            ],
+                            support_gap=(
+                                "No observable evidence supports converting uncertainty "
+                                "into knowledge."
+                            ),
                             affected_components=["prose"],
                         )
                     ],
@@ -900,9 +975,19 @@ def test_observation_repair_patch_preserves_unauthorized_canon_component(
                     summary="The summary and continuity observation need clarification.",
                     issues=[
                         ChapterEvaluationIssue(
-                            code="observation_clarity",
+                            kind="derived_evidence_mismatch",
+                            code="observation_prose_mismatch",
                             subject="Chapter observations",
-                            summary="The summary and continuity observation need clarification.",
+                            summary="The observation states more than the frozen prose establishes.",
+                            evidence=[
+                                "The candidate observation and frozen prose make opposite claims."
+                            ],
+                            candidate_claim=(
+                                "The observation says Mara has proved who altered the record."
+                            ),
+                            contrary_formal_statement=(
+                                "The frozen prose states that Mara cannot yet identify the actor."
+                            ),
                             affected_components=["observations"],
                         )
                     ],
@@ -954,8 +1039,16 @@ def test_observation_repair_patch_preserves_unauthorized_canon_component(
                         summary=(
                             "Mara obtains physical evidence that memory edits affect documents."
                         ),
-                        continuity_observations=[
-                            "Mara now has a reason to preserve analogue copies."
+                        established_facts=[
+                            {
+                                "statement": (
+                                    "Mara now has a reason to preserve analogue copies."
+                                ),
+                                "evidence_hint": (
+                                    "The Chapter shows the physical evidence "
+                                    "motivating that choice."
+                                ),
+                            }
                         ],
                     )
                 ]
@@ -995,8 +1088,16 @@ def test_observation_repair_patch_preserves_unauthorized_canon_component(
                     ChapterObservationsRepair(
                         component="observations",
                         summary="Mara directly observes documentary evidence changing.",
-                        continuity_observations=[
-                            "Mara preserves analogue copies before continuing the investigation."
+                        established_facts=[
+                            {
+                                "statement": (
+                                    "Mara preserves analogue copies before continuing "
+                                    "the investigation."
+                                ),
+                                "evidence_hint": (
+                                    "The frozen prose shows Mara preserving the copies."
+                                ),
+                            }
                         ],
                     )
                 ]
@@ -1045,8 +1146,8 @@ def test_observation_repair_patch_preserves_unauthorized_canon_component(
                     json.loads(packed.unpack_and_verify())
                 )
             assert observations.summary == result.changes[0].summary
-            assert observations.continuity_observations == (
-                result.changes[0].continuity_observations
+            assert observations.established_facts == (
+                result.changes[0].established_facts
             )
             assert len(observations.canon_proposals) == 1
             assert observations.canon_proposals[0].subject == "Mara"
@@ -1075,9 +1176,19 @@ def test_canon_repair_patch_preserves_unauthorized_observation_components(
                     summary="Only the Canon proposal needs correction.",
                     issues=[
                         ChapterEvaluationIssue(
+                            kind="derived_evidence_mismatch",
                             code="canon_assertion_inaccurate",
                             subject="mutable documentary evidence",
                             summary="Only the Canon assertion needs correction.",
+                            evidence=[
+                                "The candidate Canon assertion contradicts the frozen prose."
+                            ],
+                            candidate_claim=(
+                                "The Canon proposal says the documentary mutation is resolved."
+                            ),
+                            contrary_formal_statement=(
+                                "The frozen prose leaves the mutation mechanism unresolved."
+                            ),
                             affected_components=["canon"],
                         )
                     ],
@@ -1143,9 +1254,9 @@ def test_canon_repair_patch_preserves_unauthorized_observation_components(
             assert observations.summary == (
                 "Mara obtains physical evidence that memory edits affect documents."
             )
-            assert observations.continuity_observations == [
-                "Mara now has a reason to preserve analogue copies."
-            ]
+            assert [
+                fact.statement for fact in observations.established_facts
+            ] == ["Mara now has a reason to preserve analogue copies."]
             assert observations.canon_proposals == [replacement]
         finally:
             await engine.dispose()
@@ -1172,11 +1283,21 @@ def test_multi_component_repair_union_stalls_when_same_issue_persists(
                     summary="The observations and Canon assertion disagree.",
                     issues=[
                         ChapterEvaluationIssue(
+                            kind="derived_evidence_mismatch",
                             code="documentary_evidence_mismatch",
                             subject="Mara's documentary evidence",
                             summary=(
                                 "The observation summary and Canon assertion must be "
                                 "corrected together."
+                            ),
+                            evidence=[
+                                "The candidate observation and Canon projection disagree."
+                            ],
+                            candidate_claim=(
+                                "The observation says the evidence remains uncertain."
+                            ),
+                            contrary_formal_statement=(
+                                "The candidate Canon projection states a settled conclusion."
                             ),
                             affected_components=["observations", "canon"],
                         )
@@ -1212,8 +1333,15 @@ def test_multi_component_repair_union_stalls_when_same_issue_persists(
                             "Mara sees the written confession change but cannot yet "
                             "identify who caused it."
                         ),
-                        continuity_observations=[
-                            "Mara preserves analogue copies for later comparison."
+                        established_facts=[
+                            {
+                                "statement": (
+                                    "Mara preserves analogue copies for later comparison."
+                                ),
+                                "evidence_hint": (
+                                    "The repaired prose shows Mara preserving the copies."
+                                ),
+                            }
                         ],
                     ),
                     ChapterCanonRepair(
@@ -1277,11 +1405,21 @@ def test_multi_component_repair_union_stalls_when_same_issue_persists(
                 summary="The same documentary-evidence mismatch remains.",
                 issues=[
                     ChapterEvaluationIssue(
+                        kind="derived_evidence_mismatch",
                         code="documentary_evidence_mismatch",
                         subject="Mara's documentary evidence",
                         summary=(
                             "The observation summary and Canon assertion still do "
                             "not establish the same fact."
+                        ),
+                        evidence=[
+                            "The repaired Canon projection still disagrees with frozen prose."
+                        ],
+                        candidate_claim=(
+                            "The repaired Canon projection states a settled cause."
+                        ),
+                        contrary_formal_statement=(
+                            "The frozen prose leaves the cause unsettled."
                         ),
                         affected_components=["canon"],
                     )
@@ -1345,7 +1483,7 @@ def test_multi_component_repair_union_stalls_when_same_issue_persists(
     asyncio.run(exercise())
 
 
-def test_sixth_distinct_semantic_repair_is_not_started_and_run_failure_pauses(
+def test_second_distinct_semantic_repair_is_not_started_and_run_failure_pauses(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "chapter-repair-cap.sqlite3"
@@ -1364,9 +1502,16 @@ def test_sixth_distinct_semantic_repair_is_not_started_and_run_failure_pauses(
                     summary="The observation overstates what Mara knows.",
                     issues=[
                         ChapterEvaluationIssue(
+                            kind="unsupported_strong_conclusion",
                             code="knowledge_overclaim",
                             subject="Mara's knowledge",
                             summary="The observation overstates what Mara knows.",
+                            evidence=[
+                                "The observation states certainty absent from the prose."
+                            ],
+                            support_gap=(
+                                "The frozen prose supports suspicion but not certain knowledge."
+                            ),
                             affected_components=["observations"],
                         )
                     ],
@@ -1398,8 +1543,15 @@ def test_sixth_distinct_semantic_repair_is_not_started_and_run_failure_pauses(
                             summary=(
                                 "Mara records only that the blue ink changed before her."
                             ),
-                            continuity_observations=[
-                                "Mara preserves analogue copies for later comparison."
+                            established_facts=[
+                                {
+                                    "statement": (
+                                        "Mara preserves analogue copies for later comparison."
+                                    ),
+                                    "evidence_hint": (
+                                        "The repaired prose shows the preserved copies."
+                                    ),
+                                }
                             ],
                         )
                     ]
@@ -1415,12 +1567,6 @@ def test_sixth_distinct_semantic_repair_is_not_started_and_run_failure_pauses(
                 ),
                 idempotency_key=f"{ready.chapter_id}:apply-repair-before-cap",
             )
-            async with engine.begin() as connection:
-                await connection.execute(
-                    update(chapter_workspaces)
-                    .where(chapter_workspaces.c.chapter_id == ready.chapter_id)
-                    .values(semantic_repair_count=5)
-                )
             submitted = await service.submit_for_review(
                 SubmitChapterRequest(
                     project_id=ready.foundation.project_id,
@@ -1452,11 +1598,19 @@ def test_sixth_distinct_semantic_repair_is_not_started_and_run_failure_pauses(
                     summary="A distinct continuity issue remains.",
                     issues=[
                         ChapterEvaluationIssue(
+                            kind="contract_unfulfilled",
                             code="continuity_gap",
                             subject="Mara's analogue copies",
                             summary=(
                                 "The revised prose omits the already-required "
                                 "continuity consequence."
+                            ),
+                            evidence=[
+                                "The repaired candidate omits an explicit Chapter continuity obligation."
+                            ],
+                            contract_item=(
+                                "The Chapter must preserve Mara's already-established "
+                                "analogue-copy consequence."
                             ),
                             affected_components=["observations"],
                         )
@@ -1522,12 +1676,16 @@ def test_chapter_escalation_opens_explicit_arc_request_and_blocks_workspace(
                     summary="The approved Arc requires a contradiction this Chapter cannot resolve.",
                     issues=[
                         ChapterEvaluationIssue(
+                            kind="parent_authority_concern",
                             code="arc_contract_concern",
                             subject="required Arc contradiction",
                             summary=(
                                 "The approved Arc requires a contradiction this Chapter "
                                 "cannot resolve."
                             ),
+                            evidence=[
+                                "The frozen Chapter assignment conflicts with committed facts."
+                            ],
                             affected_components=["plan"],
                         )
                     ],

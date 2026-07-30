@@ -17,7 +17,7 @@ from app.store.execution import FrozenTaskContentRefs
 def framework_fingerprint() -> str:
     return prepare_canonical_json(
         {
-            "novelpilot_agent_contract": 1,
+            "novelpilot_agent_contract": 2,
             "pydantic_ai": version("pydantic-ai-slim"),
             "pydantic": version("pydantic"),
             "httpx": version("httpx"),
@@ -64,7 +64,7 @@ class AgentTaskStore:
                 semantic_kind="agent.task_plan",
                 media_type="application/json",
                 schema_id="agent-task-plan",
-                schema_version=1,
+                schema_version=2,
                 created_at_ms=timestamp,
             )
             manifest_ref = await store.content.put(

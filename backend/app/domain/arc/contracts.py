@@ -127,6 +127,20 @@ class ArcRepairPatch(BaseModel):
         return value
 
 
+class ArcEvaluationIssue(EvaluationIssue):
+    """One EP1 blocker judged at Story Arc authority."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    repair_component: ArcRepairComponent | None = Field(
+        default=None,
+        description=(
+            "The bounded Arc component that may be repaired. It is absent for "
+            "Book-authority concerns and creator-owned unknowns."
+        ),
+    )
+
+
 class ArcEvaluation(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -137,7 +151,10 @@ class ArcEvaluation(BaseModel):
         ),
     )
     summary: str = Field(min_length=1, description="Evidence-based Story Arc assessment.")
-    issues: list[EvaluationIssue] = Field(default_factory=list)
+    issues: list[ArcEvaluationIssue] = Field(
+        default_factory=list,
+        description="Blocking EP1 issues only; never a literary-quality scorecard.",
+    )
     repair_scope: list[ArcRepairComponent] = Field(
         default_factory=list,
         description=(
@@ -145,10 +162,77 @@ class ArcEvaluation(BaseModel):
         ),
     )
 
+    @field_validator("repair_scope")
+    @classmethod
+    def _unique_repair_scope(
+        cls,
+        value: list[ArcRepairComponent],
+    ) -> list[ArcRepairComponent]:
+        if len(value) != len(set(value)):
+            raise ValueError("Arc evaluation repair scope must be unique.")
+        return value
+
     @model_validator(mode="after")
     def _decision_boundary(self) -> ArcEvaluation:
         if (self.decision == "local_repair") != bool(self.repair_scope):
             raise ValueError("Exactly local_repair requires a bounded Arc repair scope.")
+        if self.decision == "pass" and self.issues:
+            raise ValueError("A passing Arc evaluation cannot carry blockers.")
+        if self.decision != "pass" and not self.issues:
+            raise ValueError("A non-passing Arc evaluation requires an EP1 blocker.")
+        if self.decision == "local_repair":
+            finding_components = {
+                issue.repair_component
+                for issue in self.issues
+                if issue.repair_component is not None
+            }
+            if len(finding_components) == 0 or any(
+                issue.repair_component is None for issue in self.issues
+            ):
+                raise ValueError(
+                    "Every Arc local-repair issue requires one bounded component."
+                )
+            if finding_components != set(self.repair_scope):
+                raise ValueError(
+                    "Arc repair_scope must equal the issue component union."
+                )
+            if any(
+                issue.kind in {"parent_authority_concern", "creator_owned_unknown"}
+                for issue in self.issues
+            ):
+                raise ValueError(
+                    "Parent-authority and creator-owned blockers cannot be Arc-local repair."
+                )
+        elif any(issue.repair_component is not None for issue in self.issues):
+            raise ValueError(
+                "Arc repair components are legal only for a local-repair decision."
+            )
+        if self.decision == "escalate_to_book":
+            if any(
+                issue.kind != "parent_authority_concern" for issue in self.issues
+            ):
+                raise ValueError(
+                    "escalate_to_book may carry only evidence-bound parent concerns."
+                )
+        elif any(
+            issue.kind == "parent_authority_concern" for issue in self.issues
+        ):
+            raise ValueError(
+                "A parent-authority concern must be escalated to Book."
+            )
+        if self.decision == "needs_user":
+            if any(
+                issue.kind != "creator_owned_unknown" for issue in self.issues
+            ):
+                raise ValueError(
+                    "Arc needs_user may carry only concrete creator-owned unknowns."
+                )
+        elif any(
+            issue.kind == "creator_owned_unknown" for issue in self.issues
+        ):
+            raise ValueError(
+                "Creator-owned unknowns must use the Arc needs_user decision."
+            )
         return self
 
 
@@ -156,7 +240,7 @@ class ArcRepairContract(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     authorized_components: list[ArcRepairComponent] = Field(min_length=1)
-    issues: list[EvaluationIssue] = Field(default_factory=list)
+    issues: list[ArcEvaluationIssue] = Field(default_factory=list)
 
     @field_validator("authorized_components")
     @classmethod
