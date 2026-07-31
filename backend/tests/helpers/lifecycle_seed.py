@@ -1,3 +1,9 @@
+"""Synthetic setup helpers for narrow Domain/DB tests.
+
+These helpers insert completed Agent evidence and therefore must never be imported by
+project-level acceptance scenarios. Real acceptance owns all state through the public API.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -529,6 +535,7 @@ async def seed_approved_book_and_arc(
         canon_baseline_id=project.result.canon_baseline_id,
         workspace_lock_version=applied.result.workspace_lock_version,
         result=ArcEvaluation(
+            guidance_authority_judgment="not_present",
             decision="pass",
             summary="The rolling Arc plan fits the approved Book contract.",
         ),

@@ -56,6 +56,7 @@ from app.domain.evaluation import (
     ContractSignalStatus,
 )
 from app.domain.feedback import FeedbackCommandService, SubmitFeedbackRequest
+from app.runtime.context import HarnessContextBuilder
 from app.store.command_bus import CommandBus
 from tests.domain.test_chapter_lifecycle import (
     ReviewedChapter,
@@ -330,6 +331,7 @@ async def _prepare_second_formal_arc_closure(
         book_baseline_id=foundation.book_baseline_id,
         arc_id=arc_id,
         canon_baseline_id=first.canon_baseline_id,
+        source_book_progress_handoff_id=handoff_id,
         workspace_lock_version=created.result.workspace_lock_version,
         result=ArcPlanProposal(
             title="The Final Evidence",
@@ -391,8 +393,10 @@ async def _prepare_second_formal_arc_closure(
         book_baseline_id=foundation.book_baseline_id,
         arc_id=arc_id,
         canon_baseline_id=first.canon_baseline_id,
+        source_book_progress_handoff_id=handoff_id,
         workspace_lock_version=applied.result.workspace_lock_version,
         result=ArcEvaluation(
+            guidance_authority_judgment="not_present",
             decision="pass",
             summary="The final Arc plan fits the approved Book topology.",
         ),
@@ -862,6 +866,27 @@ def test_final_second_arc_completion_revision_keeps_the_exact_prior_handoff(
             )
             assert current_handoff_id == handoff.result.handoff_id
             assert workspace.work_cycle_id
+            revision_context = await HarnessContextBuilder(engine).build(
+                task_kind="book.revise",
+                project_id=second.chapter.foundation.project_id,
+                book_id=second.chapter.foundation.book_id,
+                arc_id=None,
+                chapter_id=None,
+                semantic_goal="Revise the Book from its exact completion review.",
+                source_book_completion_review_id=review_id,
+                source_book_progress_handoff_id=handoff.result.handoff_id,
+            )
+            completion_review_items = [
+                item
+                for item in revision_context.manifest["items"]
+                if item["group"] == "book_completion_review"
+            ]
+            assert len(completion_review_items) == 1
+            assert (
+                completion_review_items[0]["label"]
+                == "source_book_completion_review"
+            )
+            assert completion_review_items[0]["use"] == "verification"
         finally:
             await engine.dispose()
 

@@ -374,6 +374,7 @@ async def _prepare_reviewed_arc(
         result=(
             evaluation
             or ArcEvaluation(
+                guidance_authority_judgment="not_present",
                 decision="pass",
                 summary="The rolling Arc plan fits the approved Book contract.",
             )
@@ -810,6 +811,7 @@ def test_arc_local_repair_is_bounded_by_components_and_one_correction(
                 project_id="project-repair",
                 operation_mode="full_auto",
                 evaluation=ArcEvaluation(
+                    guidance_authority_judgment="not_present",
                     decision="local_repair",
                     summary="Only the beats need a bounded repair.",
                     issues=[
@@ -966,6 +968,7 @@ def test_arc_local_repair_is_bounded_by_components_and_one_correction(
                 project_id="project-repair-exhausted",
                 operation_mode="full_auto",
                 evaluation=ArcEvaluation(
+                    guidance_authority_judgment="not_present",
                     decision="local_repair",
                             summary="A second repair must not start.",
                     issues=[

@@ -149,6 +149,7 @@ def test_layer_authority_and_creator_wait_decisions_fail_closed() -> None:
     )
     with pytest.raises(ValidationError, match="cannot authorize a Chapter-local repair"):
         LayerEvaluationResult(
+            guidance_authority_judgment="not_present",
             decision="local_repair",
             summary="Attempted lower-layer repair.",
             issues=[chapter_parent],
@@ -163,6 +164,7 @@ def test_layer_authority_and_creator_wait_decisions_fail_closed() -> None:
     )
     with pytest.raises(ValidationError, match="must be escalated to Book"):
         ArcEvaluation(
+            guidance_authority_judgment="not_present",
             decision="needs_user",
             summary="Incorrectly routed parent concern.",
             issues=[arc_parent],
@@ -182,6 +184,28 @@ def test_layer_authority_and_creator_wait_decisions_fail_closed() -> None:
         findings=[creator_unknown],
     )
     assert evaluation.decision == "needs_user"
+
+
+def test_guidance_authority_judgment_cannot_be_hidden_by_a_passing_candidate() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="Chapter guidance requiring parent authority must escalate to Arc",
+    ):
+        LayerEvaluationResult(
+            guidance_authority_judgment="requires_parent_review",
+            decision="pass",
+            summary="The candidate ignored the incompatible guidance.",
+        )
+
+    with pytest.raises(
+        ValidationError,
+        match="Arc guidance requiring parent authority must escalate to Book",
+    ):
+        ArcEvaluation(
+            guidance_authority_judgment="requires_parent_review",
+            decision="pass",
+            summary="The candidate ignored the incompatible guidance.",
+        )
 
 
 def test_one_decision_cannot_hide_mixed_issues_or_extra_repair_authority() -> None:
@@ -227,12 +251,14 @@ def test_one_decision_cannot_hide_mixed_issues_or_extra_repair_authority() -> No
     )
     with pytest.raises(ValidationError, match="only evidence-bound parent concerns"):
         ArcEvaluation(
+            guidance_authority_judgment="not_present",
             decision="escalate_to_book",
             summary="Mixed local and parent issues cannot share one route.",
             issues=[arc_parent, arc_local],
         )
     with pytest.raises(ValidationError, match="must be unique"):
         ArcEvaluation(
+            guidance_authority_judgment="not_present",
             decision="local_repair",
             summary="Duplicate repair scope is invalid.",
             issues=[
@@ -271,6 +297,7 @@ def test_one_decision_cannot_hide_mixed_issues_or_extra_repair_authority() -> No
     )
     with pytest.raises(ValidationError, match="only direct-parent concerns"):
         LayerEvaluationResult(
+            guidance_authority_judgment="not_present",
             decision="escalate_to_arc",
             summary="Mixed local and parent issues cannot share one route.",
             issues=[chapter_parent, chapter_local],
@@ -349,7 +376,10 @@ def test_parent_and_evidence_routes_require_their_exact_ep1_issue_kind() -> None
             summary="A keep decision tries to hide a blocker.",
             issues=[local_issue],
         )
-    with pytest.raises(ValidationError, match="only one authority disposition"):
+    with pytest.raises(
+        ValidationError,
+        match="book_review_required keeps the current Arc contract applicable",
+    ):
         ArcParentContractEvaluation(
             arc_contract_judgment="revision_warranted",
             book_review_concern="book_review_required",

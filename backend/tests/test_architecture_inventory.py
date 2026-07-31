@@ -6,10 +6,10 @@ import sys
 from pathlib import Path
 
 
-def test_clean_slate_acceptance_inventory_is_fully_owned_by_offline_evidence() -> None:
+def test_architecture_inventory_is_explicitly_not_an_acceptance_verdict() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     completed = subprocess.run(
-        [sys.executable, "scripts/acceptance_report.py", "--json"],
+        [sys.executable, "scripts/architecture_inventory.py", "--json"],
         cwd=repo_root,
         check=True,
         capture_output=True,
@@ -18,7 +18,9 @@ def test_clean_slate_acceptance_inventory_is_fully_owned_by_offline_evidence() -
     report = json.loads(completed.stdout)
     by_id = {item["id"]: item for item in report["criteria"]}
 
-    assert report["engineering_acceptance_requires_live_success"] is False
+    assert report["is_acceptance_verdict"] is False
+    assert report["project_acceptance_command"] == "npm.cmd run acceptance"
+    assert report["real_scenario_command"] == "npm.cmd run test:backend-real"
     assert report["summary"] == {
         "covered": 18,
         "partial": 0,
@@ -29,20 +31,20 @@ def test_clean_slate_acceptance_inventory_is_fully_owned_by_offline_evidence() -
     assert by_id["hierarchical_loop_authority"]["status"] == "covered"
     assert by_id["legacy_runtime_removed"]["status"] == "covered"
     assert by_id["live_observation_ready"]["status"] == "covered"
-    assert "post-acceptance observation" in report["scope"]
+    assert "never proves that the backend production path works" in report["scope"]
 
 
-def test_acceptance_markdown_states_live_result_is_not_the_engineering_gate() -> None:
+def test_inventory_markdown_points_to_real_scenario_gate() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     completed = subprocess.run(
-        [sys.executable, "scripts/acceptance_report.py"],
+        [sys.executable, "scripts/architecture_inventory.py"],
         cwd=repo_root,
         check=True,
         capture_output=True,
         text=True,
     )
 
-    assert "# NovelPilot Clean-Slate Acceptance Report" in completed.stdout
+    assert "# NovelPilot Architecture Ownership Inventory" in completed.stdout
     assert "Summary: 18 covered, 0 partial, 0 missing, 18 total." in completed.stdout
-    assert "four-run real-model series" in completed.stdout
+    assert "paid 5.4-mini real-scenario command" in completed.stdout
     assert "legacy_runtime_removed [covered]" in completed.stdout

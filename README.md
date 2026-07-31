@@ -65,26 +65,38 @@ npm.cmd run frontend:dev
 
 ## 质量门禁
 
-```powershell
-npm.cmd run backend:migrate:test
-npm.cmd run backend:schema-check
-npm.cmd run lint
-npm.cmd run typecheck
-npm.cmd run test
-npm.cmd run frontend:build
+```cmd
+npm.cmd run test:fast
+npm.cmd run test:backend-real
 npm.cmd run acceptance
+npm.cmd run architecture:inventory
 npm.cmd run audit:secrets
 ```
 
-离线测试用 Pydantic AI `FunctionModel` 跑通 full-auto 与 participatory 两条 20 章整书链路，验证的是真实 Agent Executor、Domain Command 和 Store 边界，不调用真实 Provider。
+快速测试继续精确覆盖 Schema、SQL 约束、协议错误分类和局部生命周期；其中的
+`FunctionModel`、Mock、手工 seed 只属于单元或 `synthetic_integration` 证据，
+不能证明后端生产路径可运行。
 
-全部离线门禁通过后，才可以显式启动当前冻结的四轮真实模型观测：
+工程验收固定使用 `jemmy-gpt-5.4-mini`，从隔离空数据库启动生产
+`create_app()`/lifespan/Run Engine，通过公开 API 和真实 Provider 运行 S0～S5：
+基础 Book→Arc→Chapter 交接、开放世界证据、正文与派生证据权威、Chapter→Arc→Book
+语义压力，以及关闭/重开后的持久恢复。`acceptance` 会先运行无模型 fast gate，
+再运行这些付费场景；报告落在 `data/backend-real-acceptance/`。
 
-```powershell
+`architecture:inventory` 只是非结论性的静态所有权清单。当前后端阶段不把前端优化
+纳入验收，待四次长跑通过后再集中处理前端。
+
+工程真实场景通过后，才由用户显式启动当前冻结的四轮真实模型观测：
+
+```cmd
 npm.cmd run experiment:live-book
 ```
 
-命令使用应用当前选中的 Profile，顺序固定为 `full_auto → participatory → full_auto → participatory`。终端只播报权威阶段变化、正常 actor 动作和每 60 秒无变化心跳，不输出正文或伪造完成百分比。真实结果只记录 completed/failed/not_run、usage、retry、repair 与问题索引，不作为重构成功门槛，也不会自动重跑或现场修复。命令结束后通过 `data/live-observations/latest-series.json` 定位本次证据，再由后续 Codex 会话分析；Codex 不参与实验运行。
+命令使用应用当前选中的 Profile，顺序固定为
+`full_auto → participatory → full_auto → participatory`。工程验收不会调用这条命令，
+不会替换当前 selected Profile，也不会重置普通项目数据库。终端只播报权威阶段变化、
+正常 actor 动作和每 60 秒无变化心跳；命令结束后通过
+`data/live-observations/latest-series.json` 定位证据，再由后续 Codex 会话分析。
 
 ## 简历项目表述
 
@@ -93,6 +105,8 @@ npm.cmd run experiment:live-book
 - 针对长篇生成中上下文漂移、状态污染和失败后难恢复的问题，设计 Book／Story Arc／Chapter 三层确定性 Harness，将模型推理与领域状态提交隔离，Agent 只产生候选和评审结论，正式内容通过显式 Command、审批和不可变 baseline 落库。
 - 使用 Pydantic AI 重构模型连接与结构化输出底座，按 Provider 协议绑定 opaque model id；实现统一能力校验、30 分钟 activation deadline、最多 6 次真实请求预算及类型化失败证据，避免按具体模型硬编码。
 - 基于 SQLAlchemy 2 Core、Alembic 与异步 SQLite 构建 39 表 LT1 生命周期与分层权威模型、项目内 CAS 内容存储和 Transactional Outbox；实现单写者 Run Engine、幂等命令、崩溃重放、协作式暂停和专用失败重试。
-- 建立 full-auto／participatory 双模式整书离线验收和四轮真实模型非救援观测体系；工程成功由确定性测试门禁判定，概率性模型表现独立记录，便于稳定性分析和后续消融实验。
+- 建立三层测试证据体系：无模型快速契约、固定低成本模型的生产路径语义压力场景、
+  以及四轮约 20 章无技术救援长跑；将跨 Loop 交接、分层权威和崩溃恢复纳入可追踪验收，
+  同时用长跑发现未知累积问题。
 
 真实观测完成后，可把“完成章数、自动 retry/repair 次数、token 与零技术救援轮次”补成量化结果；在观测前不把概率性成功写进简历。

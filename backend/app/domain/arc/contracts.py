@@ -9,6 +9,7 @@ from app.agents.contracts import (
     ArcClosureSignal,
     ArcStateTransition,
     EvaluationIssue,
+    GuidanceAuthorityJudgment,
 )
 
 ArcRepairComponent = Literal[
@@ -144,6 +145,16 @@ class ArcEvaluationIssue(EvaluationIssue):
 class ArcEvaluation(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    guidance_authority_judgment: GuidanceAuthorityJudgment = Field(
+        description=(
+            "Judge active applied user guidance itself, independently of whether the "
+            "candidate followed it. The model-visible active_applied_guidance_present fact "
+            "is authoritative: false requires not_present; true forbids not_present. For "
+            "present guidance, use compatible_with_current_authority only when its requested "
+            "effect can be fully honored under the formal Book baseline, and "
+            "requires_parent_review when honoring it would require Book authority."
+        ),
+    )
     decision: ArcReviewDecision = Field(
         description=(
             "Use local_repair only for a bounded Arc repair; use escalate_to_book when "
@@ -174,6 +185,13 @@ class ArcEvaluation(BaseModel):
 
     @model_validator(mode="after")
     def _decision_boundary(self) -> ArcEvaluation:
+        if (
+            self.guidance_authority_judgment == "requires_parent_review"
+            and self.decision != "escalate_to_book"
+        ):
+            raise ValueError(
+                "Arc guidance requiring parent authority must escalate to Book."
+            )
         if (self.decision == "local_repair") != bool(self.repair_scope):
             raise ValueError("Exactly local_repair requires a bounded Arc repair scope.")
         if self.decision == "pass" and self.issues:

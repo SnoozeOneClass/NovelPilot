@@ -26,7 +26,7 @@ from app.domain.arc.commands import ArcCommandService
 from app.domain.arc.contracts import SubmitArcRequest
 from app.domain.book.contracts import BookEvaluation
 from app.domain.chapter.commands import ChapterCommandService
-from app.domain.chapter.contracts import CommitChapterRequest
+from app.domain.chapter.contracts import CommitChapterRequest, CreateChapterRequest
 from app.domain.commands import CommandPreconditionError
 from app.domain.feedback import (
     ApplyFeedbackRequest,
@@ -223,6 +223,100 @@ def test_feedback_is_routed_then_activates_workspace_without_changing_baseline(
             assert manifest["schema"] == "arc-review-manifest-v6"
             assert manifest["source_feedback_id"] == second_feedback.id
             assert manifest["guidance_ref_id"] == second_feedback.content_ref_id
+            evaluation_context = await HarnessContextBuilder(engine).build(
+                task_kind="evaluate.arc",
+                project_id=foundation.project_id,
+                book_id=foundation.book_id,
+                arc_id=foundation.arc_id,
+                chapter_id=None,
+                semantic_goal="Evaluate the feedback-bound Arc candidate.",
+            )
+            assert "Keep the current conflict restrained" in (
+                evaluation_context.prompt
+            )
+            assert any(
+                item["group"] == "arc_guidance"
+                for item in evaluation_context.manifest["items"]
+            )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+def test_feedback_on_uncommitted_chapter_reaches_normal_plan_context(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "feedback-uncommitted-chapter.sqlite3"
+    command.upgrade(alembic_config(database), "head")
+
+    async def exercise() -> None:
+        engine = create_sqlite_async_engine(database)
+        try:
+            foundation = await seed_approved_book_and_arc(
+                engine,
+                project_id="feedback-uncommitted-chapter",
+                target_chapter_count=2,
+            )
+            chapter = await ChapterCommandService(
+                CommandBus(engine)
+            ).create_chapter(
+                CreateChapterRequest(
+                    project_id=foundation.project_id,
+                    book_id=foundation.book_id,
+                    arc_id=foundation.arc_id,
+                    expected_book_baseline_id=foundation.book_baseline_id,
+                    expected_arc_baseline_id=foundation.arc_baseline_id,
+                    expected_canon_baseline_id=foundation.canon_baseline_id,
+                ),
+                idempotency_key="feedback-uncommitted:create-chapter",
+            )
+            service = FeedbackCommandService(CommandBus(engine))
+            queued = await service.queue(
+                QueueFeedbackRequest(
+                    project_id=foundation.project_id,
+                    content=(
+                        "Preserve the original evidence; if this request would alter "
+                        "the Arc, raise it to Arc authority."
+                    ),
+                    route_layer="chapter",
+                    book_id=foundation.book_id,
+                    arc_id=foundation.arc_id,
+                    chapter_id=chapter.result.chapter_id,
+                ),
+                idempotency_key="feedback-uncommitted:queue",
+            )
+            applied = await service.apply(
+                ApplyFeedbackRequest(
+                    project_id=foundation.project_id,
+                    feedback_id=queued.result.feedback_id,
+                    expected_workspace_lock_version=(
+                        chapter.result.workspace_lock_version
+                    ),
+                ),
+                idempotency_key="feedback-uncommitted:apply",
+            )
+            assert applied.result.workspace_lock_version == (
+                chapter.result.workspace_lock_version + 1
+            )
+
+            context = await HarnessContextBuilder(engine).build(
+                task_kind="chapter.plan",
+                project_id=foundation.project_id,
+                book_id=foundation.book_id,
+                arc_id=foundation.arc_id,
+                chapter_id=chapter.result.chapter_id,
+                semantic_goal="Plan the current feedback-bound Chapter.",
+            )
+            assert "Preserve the original evidence" in context.prompt
+            guidance = [
+                item
+                for item in context.manifest["items"]
+                if item["group"] == "chapter_guidance"
+            ]
+            assert len(guidance) == 1
+            assert guidance[0]["role"] == "creator_guidance"
+            assert guidance[0]["use"] == "advisory"
         finally:
             await engine.dispose()
 

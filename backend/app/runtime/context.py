@@ -269,6 +269,7 @@ _TASK_CONTEXT_POLICY_GROUPS: dict[str, frozenset[str]] = {
             "book_baseline",
             "book_handoff",
             "prior_arc_closure",
+            "arc_guidance",
             "canon",
         }
     ),
@@ -304,6 +305,7 @@ _TASK_CONTEXT_POLICY_GROUPS: dict[str, frozenset[str]] = {
             "book_baseline",
             "arc_outline_projection",
             "arc_working",
+            "arc_guidance",
             "prior_arc_closure",
             "book_handoff",
             "canon",
@@ -326,6 +328,7 @@ _TASK_CONTEXT_POLICY_GROUPS: dict[str, frozenset[str]] = {
         {
             "book_baseline",
             "arc_chapter_window",
+            "chapter_guidance",
             "canon",
             "committed_observations",
         }
@@ -349,6 +352,7 @@ _TASK_CONTEXT_POLICY_GROUPS: dict[str, frozenset[str]] = {
         {
             "arc_chapter_window",
             "chapter_plan",
+            "chapter_guidance",
             "canon",
             "committed_observations",
             "recent_prose",
@@ -418,6 +422,7 @@ _TASK_CONTEXT_POLICY_GROUPS: dict[str, frozenset[str]] = {
             "chapter_prose",
             "chapter_observations",
             "chapter_canon_patch",
+            "chapter_guidance",
             "canon",
             "committed_observations",
         }
@@ -1419,6 +1424,109 @@ class HarnessContextBuilder:
             await add("canon", "canon_world_facts", canon.world_facts_ref_id)
             await add("canon", "canon_foreshadowing", canon.foreshadowing_ref_id)
 
+            # Explicit authority sources belong to the frozen Task Plan, not to
+            # whichever layer-specific workspace happens to be loaded below.
+            # Resolve them before branching on Arc/Chapter scope so Book
+            # revisions cannot silently lose their own parent/completion review.
+            if source_arc_parent_review_id is not None:
+                source_arc_review = await store.arc_parent_reviews.get(
+                    project_id=project_id,
+                    review_id=source_arc_parent_review_id,
+                )
+                if (
+                    source_arc_review is None
+                    or source_arc_review.book_id != book_id
+                    or (
+                        arc_id is not None
+                        and source_arc_review.arc_id != arc_id
+                    )
+                ):
+                    raise ContextFactError(
+                        "arc_parent_review_source_invalid",
+                        "Source Arc parent review does not match the frozen task scope.",
+                    )
+                await add(
+                    "arc_parent_review",
+                    "source_arc_parent_review",
+                    source_arc_review.detail_ref_id,
+                )
+            if source_book_parent_review_id is not None:
+                source_book_review = await store.book_parent_reviews.get(
+                    project_id=project_id,
+                    review_id=source_book_parent_review_id,
+                )
+                if (
+                    source_book_review is None
+                    or source_book_review.book_id != book_id
+                    or (
+                        arc_id is not None
+                        and source_book_review.arc_id != arc_id
+                    )
+                ):
+                    raise ContextFactError(
+                        "book_parent_review_source_invalid",
+                        "Source Book parent review does not match the frozen task scope.",
+                    )
+                await add(
+                    "book_parent_review",
+                    "source_book_parent_review",
+                    source_book_review.detail_ref_id,
+                )
+            if source_arc_closure_review_id is not None:
+                source_closure_review = await store.arc_closure_reviews.get(
+                    project_id=project_id,
+                    review_id=source_arc_closure_review_id,
+                )
+                if (
+                    source_closure_review is None
+                    or source_closure_review.book_id != book_id
+                    or (
+                        arc_id is not None
+                        and source_closure_review.arc_id != arc_id
+                    )
+                ):
+                    raise ContextFactError(
+                        "arc_closure_review_source_invalid",
+                        "Source Arc closure review does not match the frozen task scope.",
+                    )
+                await add(
+                    "arc_closure_review",
+                    "source_arc_closure_review",
+                    source_closure_review.detail_ref_id,
+                )
+            if source_book_completion_review_id is not None:
+                source_completion_review = await store.book_completion_reviews.get(
+                    project_id=project_id,
+                    review_id=source_book_completion_review_id,
+                )
+                if (
+                    source_completion_review is None
+                    or source_completion_review.book_id != book_id
+                ):
+                    raise ContextFactError(
+                        "book_completion_review_source_invalid",
+                        "Source Book completion review does not match the frozen task scope.",
+                    )
+                await add(
+                    "book_completion_review",
+                    "source_book_completion_review",
+                    source_completion_review.detail_ref_id,
+                )
+            if task_kind == "book.revise":
+                if (
+                    source_book_parent_review_id is not None
+                    and book_workspace.source_book_parent_review_id
+                    != source_book_parent_review_id
+                ) or (
+                    source_book_completion_review_id is not None
+                    and book_workspace.source_book_completion_review_id
+                    != source_book_completion_review_id
+                ):
+                    raise ContextFactError(
+                        "book_revision_authorization_source_invalid",
+                        "Book revision is not bound to its exact Workspace review source.",
+                    )
+
             if arc_id is None and source_book_progress_handoff_id is not None:
                 handoff = await store.book_progress_handoffs.get(
                     project_id=project_id,
@@ -1623,106 +1731,6 @@ class HarnessContextBuilder:
                                 "application/vnd.novelpilot.book-progress-handoff+json"
                             ),
                         )
-                if arc_workspace.source_arc_parent_review_id is not None:
-                    source_arc_review = await store.arc_parent_reviews.get(
-                        project_id=project_id,
-                        review_id=arc_workspace.source_arc_parent_review_id,
-                    )
-                    if source_arc_review is not None:
-                        await add(
-                            "arc_parent_review",
-                            "source_arc_parent_review",
-                            source_arc_review.detail_ref_id,
-                        )
-                if arc_workspace.source_arc_closure_review_id is not None:
-                    source_closure_review = await store.arc_closure_reviews.get(
-                        project_id=project_id,
-                        review_id=arc_workspace.source_arc_closure_review_id,
-                    )
-                    if source_closure_review is not None:
-                        await add(
-                            "arc_closure_review",
-                            "source_arc_closure_review",
-                            source_closure_review.detail_ref_id,
-                        )
-                if arc_workspace.source_book_parent_review_id is not None:
-                    source_book_review = await store.book_parent_reviews.get(
-                        project_id=project_id,
-                        review_id=arc_workspace.source_book_parent_review_id,
-                    )
-                    if source_book_review is not None:
-                        await add(
-                            "book_parent_review",
-                            "source_book_parent_review",
-                            source_book_review.detail_ref_id,
-                        )
-                if arc_workspace.source_book_completion_review_id is not None:
-                    source_completion_review = (
-                        await store.book_completion_reviews.get(
-                        project_id=project_id,
-                        review_id=(
-                            arc_workspace.source_book_completion_review_id
-                        ),
-                    )
-                    )
-                    if source_completion_review is not None:
-                        await add(
-                            "book_completion_review",
-                            "source_book_completion_review",
-                            source_completion_review.detail_ref_id,
-                        )
-                if source_arc_parent_review_id is not None:
-                    source_arc_review = await store.arc_parent_reviews.get(
-                        project_id=project_id,
-                        review_id=source_arc_parent_review_id,
-                    )
-                    if source_arc_review is None:
-                        raise LookupError("Source Arc parent review does not exist.")
-                    await add(
-                        "arc_parent_review",
-                        "source_arc_parent_review",
-                        source_arc_review.detail_ref_id,
-                    )
-                if source_book_parent_review_id is not None:
-                    source_book_review = await store.book_parent_reviews.get(
-                        project_id=project_id,
-                        review_id=source_book_parent_review_id,
-                    )
-                    if source_book_review is None:
-                        raise LookupError("Source Book parent review does not exist.")
-                    await add(
-                        "book_parent_review",
-                        "source_book_parent_review",
-                        source_book_review.detail_ref_id,
-                    )
-                if source_arc_closure_review_id is not None:
-                    source_closure_review = await store.arc_closure_reviews.get(
-                        project_id=project_id,
-                        review_id=source_arc_closure_review_id,
-                    )
-                    if source_closure_review is None:
-                        raise LookupError("Source Arc closure review does not exist.")
-                    await add(
-                        "arc_closure_review",
-                        "source_arc_closure_review",
-                        source_closure_review.detail_ref_id,
-                    )
-                if source_book_completion_review_id is not None:
-                    source_completion_review = (
-                        await store.book_completion_reviews.get(
-                        project_id=project_id,
-                        review_id=source_book_completion_review_id,
-                    )
-                    )
-                    if source_completion_review is None:
-                        raise LookupError(
-                            "Source Book completion review does not exist."
-                        )
-                    await add(
-                        "book_completion_review",
-                        "source_book_completion_review",
-                        source_completion_review.detail_ref_id,
-                    )
                 if source_arc_closure_id is not None:
                     current_closure = await store.arc_closures.get(
                         project_id=project_id,
@@ -2363,29 +2371,6 @@ class HarnessContextBuilder:
                         expected_chapter_baseline_id=chapter_baseline.id,
                         expected_prose_ref_id=chapter_baseline.prose_ref_id,
                     )
-                if chapter_workspace.source_arc_parent_review_id is not None:
-                    source_arc_parent_review = await store.arc_parent_reviews.get(
-                        project_id=project_id,
-                        review_id=chapter_workspace.source_arc_parent_review_id,
-                    )
-                    if source_arc_parent_review is not None:
-                        await add(
-                            "arc_parent_review",
-                            "source_arc_parent_review",
-                            source_arc_parent_review.detail_ref_id,
-                        )
-                if chapter_workspace.source_arc_closure_review_id is not None:
-                    source_closure_review = await store.arc_closure_reviews.get(
-                        project_id=project_id,
-                        review_id=chapter_workspace.source_arc_closure_review_id,
-                    )
-                    if source_closure_review is not None:
-                        await add(
-                            "arc_closure_review",
-                            "source_arc_closure_review",
-                            source_closure_review.detail_ref_id,
-                        )
-
             committed = await store.chapters.list_committed_baselines(
                 project_id=project_id,
                 book_id=book_id,
@@ -2802,6 +2787,29 @@ class HarnessContextBuilder:
                         "chapter_workspace_lock_version": chapter_workspace.lock_version,
                     }
                 )
+            if task_kind in {"evaluate.arc", "verify_repair.arc"} and (
+                arc_workspace is not None
+            ):
+                facts["active_applied_guidance_present"] = (
+                    arc_workspace.source_feedback_id is not None
+                )
+            elif task_kind in {
+                "evaluate.chapter",
+                "verify_repair.chapter",
+            } and chapter_workspace is not None:
+                facts["active_applied_guidance_present"] = (
+                    chapter_workspace.source_feedback_id is not None
+                )
+            if task_kind == "evaluate.arc_parent_contract":
+                facts["source_change_request_present"] = (
+                    source_chapter_arc_request_id is not None
+                )
+                facts["source_change_request_layer"] = "chapter_to_arc"
+            elif task_kind == "evaluate.book_parent_contract":
+                facts["source_change_request_present"] = (
+                    source_arc_book_request_id is not None
+                )
+                facts["source_change_request_layer"] = "arc_to_book"
 
         context_policy.validate(items)
         manifest_items: list[JsonValue] = [
@@ -3038,5 +3046,8 @@ def _model_visible_facts(facts: dict[str, JsonValue]) -> dict[str, JsonValue]:
         "chapter_book_ordinal",
         "chapter_arc_ordinal",
         "chapter_lifecycle_status",
+        "active_applied_guidance_present",
+        "source_change_request_present",
+        "source_change_request_layer",
     }
     return {key: value for key, value in facts.items() if key in visible_keys}

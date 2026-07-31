@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 import uuid
@@ -54,6 +53,7 @@ from app.domain.chapter.commands import (
 )
 from app.domain.chapter.contracts import (
     ApplyChapterTaskRequest,
+    ChapterRepairContract,
     CommitChapterRequest,
     CreateChapterRequest,
     RecordChapterReviewRequest,
@@ -1946,6 +1946,20 @@ class DomainRunDriver:
                     source_arc_candidate_review_id=(
                         workspace.active_repair_review_id
                     ),
+                    source_arc_parent_review_id=workspace.source_arc_parent_review_id,
+                    source_arc_closure_review_id=(
+                        workspace.source_arc_closure_review_id
+                    ),
+                    source_book_parent_review_id=(
+                        workspace.source_book_parent_review_id
+                    ),
+                    source_book_completion_review_id=(
+                        workspace.source_book_completion_review_id
+                    ),
+                    source_book_progress_handoff_id=(
+                        workspace.book_progress_handoff_id
+                    ),
+                    source_feedback_id=workspace.source_feedback_id,
                 )
             if submission_review.decision == "pass":
                 gate = await arcs.find_pending_gate(project_id=project_id, arc_id=arc.id)
@@ -1991,6 +2005,20 @@ class DomainRunDriver:
                     arc_baseline_id=workspace.base_arc_baseline_id,
                     workspace_work_cycle_id=workspace.work_cycle_id,
                     source_arc_candidate_review_id=active_repair_review.id,
+                    source_arc_parent_review_id=workspace.source_arc_parent_review_id,
+                    source_arc_closure_review_id=(
+                        workspace.source_arc_closure_review_id
+                    ),
+                    source_book_parent_review_id=(
+                        workspace.source_book_parent_review_id
+                    ),
+                    source_book_completion_review_id=(
+                        workspace.source_book_completion_review_id
+                    ),
+                    source_book_progress_handoff_id=(
+                        workspace.book_progress_handoff_id
+                    ),
+                    source_feedback_id=workspace.source_feedback_id,
                 )
                 if not repaired:
                     if (
@@ -2010,6 +2038,22 @@ class DomainRunDriver:
                         book_baseline_id=workspace.book_baseline_id,
                         arc_baseline_id=workspace.base_arc_baseline_id,
                         source_arc_candidate_review_id=active_repair_review.id,
+                        source_arc_parent_review_id=(
+                            workspace.source_arc_parent_review_id
+                        ),
+                        source_arc_closure_review_id=(
+                            workspace.source_arc_closure_review_id
+                        ),
+                        source_book_parent_review_id=(
+                            workspace.source_book_parent_review_id
+                        ),
+                        source_book_completion_review_id=(
+                            workspace.source_book_completion_review_id
+                        ),
+                        source_book_progress_handoff_id=(
+                            workspace.book_progress_handoff_id
+                        ),
+                        source_feedback_id=workspace.source_feedback_id,
                     )
                 if workspace.plan_ref_id is None:
                     raise HarnessInvariantError(
@@ -2034,6 +2078,9 @@ class DomainRunDriver:
                     source_book_completion_review_id=(
                         workspace.source_book_completion_review_id
                     ),
+                    source_book_progress_handoff_id=(
+                        workspace.book_progress_handoff_id
+                    ),
                 )
                 if not revised:
                     return _TaskInstruction(
@@ -2057,6 +2104,9 @@ class DomainRunDriver:
                         source_book_completion_review_id=(
                             workspace.source_book_completion_review_id
                         ),
+                        source_book_progress_handoff_id=(
+                            workspace.book_progress_handoff_id
+                        ),
                     )
             elif workspace.plan_ref_id is None:
                 return _TaskInstruction(
@@ -2067,6 +2117,9 @@ class DomainRunDriver:
                     workspace_lock_version=workspace.lock_version,
                     book_baseline_id=workspace.book_baseline_id,
                     arc_baseline_id=None,
+                    source_book_progress_handoff_id=(
+                        workspace.book_progress_handoff_id
+                    ),
                 )
             if workspace.plan_ref_id is not None:
                 return _CommandInstruction(
@@ -2516,7 +2569,7 @@ class DomainRunDriver:
         if active_repair_review is not None:
             if active_repair_review.repair_contract_ref_id is None:
                 raise HarnessInvariantError("Chapter local repair has no contract.")
-            repair = json.loads(
+            repair = ChapterRepairContract.model_validate_json(
                 (
                     await content.get_packed(
                         project_id=project_id,
@@ -2524,7 +2577,7 @@ class DomainRunDriver:
                     )
                 ).unpack_and_verify()
             )
-            scope = set(repair.get("authorized_components", []))
+            scope = set(repair.authorized_components)
             plan_repaired = await execution.has_applied_task(
                 project_id=project_id,
                 run_id=run.id,
@@ -2537,6 +2590,9 @@ class DomainRunDriver:
                 chapter_baseline_id=workspace.base_chapter_baseline_id,
                 workspace_work_cycle_id=workspace.work_cycle_id,
                 source_chapter_candidate_review_id=active_repair_review.id,
+                source_feedback_id=workspace.source_feedback_id,
+                source_arc_parent_review_id=workspace.source_arc_parent_review_id,
+                source_arc_closure_review_id=workspace.source_arc_closure_review_id,
             )
             prose_repaired = await execution.has_applied_task(
                 project_id=project_id,
@@ -2550,6 +2606,9 @@ class DomainRunDriver:
                 chapter_baseline_id=workspace.base_chapter_baseline_id,
                 workspace_work_cycle_id=workspace.work_cycle_id,
                 source_chapter_candidate_review_id=active_repair_review.id,
+                source_feedback_id=workspace.source_feedback_id,
+                source_arc_parent_review_id=workspace.source_arc_parent_review_id,
+                source_arc_closure_review_id=workspace.source_arc_closure_review_id,
             )
             observations_repaired = await execution.has_applied_task(
                 project_id=project_id,
@@ -2563,10 +2622,14 @@ class DomainRunDriver:
                 chapter_baseline_id=workspace.base_chapter_baseline_id,
                 workspace_work_cycle_id=workspace.work_cycle_id,
                 source_chapter_candidate_review_id=active_repair_review.id,
+                source_feedback_id=workspace.source_feedback_id,
+                source_arc_parent_review_id=workspace.source_arc_parent_review_id,
+                source_arc_closure_review_id=workspace.source_arc_closure_review_id,
             )
             if (
                 not any((plan_repaired, prose_repaired, observations_repaired))
                 and workspace.semantic_repair_count >= workspace.semantic_repair_limit
+                and repair.repair_stage != "derived_dependency_closure"
             ):
                 raise HarnessInvariantError(
                     "Chapter semantic correction for this frozen review is exhausted.",
@@ -2574,6 +2637,14 @@ class DomainRunDriver:
                 )
             repairs_plan = "plan" in scope
             repairs_prose = "prose" in scope and not repairs_plan
+            if repair.repair_stage == "derived_dependency_closure" and (
+                repairs_plan
+                or repairs_prose
+                or not scope <= {"observations", "canon"}
+            ):
+                raise HarnessInvariantError(
+                    "Chapter derived dependency closure has an illegal repair scope."
+                )
             if repairs_plan and not plan_repaired:
                 return self._chapter_task("chapter.repair.plan", chapter, workspace)
             if repairs_prose and not prose_repaired:

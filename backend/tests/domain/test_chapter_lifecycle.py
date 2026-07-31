@@ -261,6 +261,7 @@ async def _prepare_reviewed_chapter(
         result=(
             evaluation
             or LayerEvaluationResult(
+                guidance_authority_judgment="not_present",
                 decision="pass",
                 summary=(
                     "The Chapter is coherent and the evidence span supports the Canon proposal."
@@ -401,10 +402,12 @@ def test_real_precheck_routes_conflicting_canon_assertions_to_repair(
             assert precheck["checks"]["canon_patch_applicable"] is False
             assert precheck["issues"][0]["code"] == "canon_subject_assertion_conflict"
             assert repair["authorized_components"] == ["canon"]
+            assert repair["repair_stage"] == "primary_semantic"
+            assert repair["schema"] == "chapter-repair-contract-v5"
             assert content_versions == {
                 "chapter.deterministic_precheck": 4,
-                "chapter.review_detail": 4,
-                "chapter.repair_contract": 4,
+                "chapter.review_detail": 5,
+                "chapter.repair_contract": 5,
                 "chapter.observations": 3,
             }
             assert workspace_state == "active"
@@ -430,6 +433,7 @@ def test_plan_repair_replaces_mutable_plan_and_invalidates_downstream(
                 target_chapter_count=2,
                 canon_change=False,
                 evaluation=LayerEvaluationResult(
+                    guidance_authority_judgment="not_present",
                     decision="local_repair",
                     summary=(
                         "The mutable Chapter plan overclaims evidence but can be "
@@ -882,6 +886,7 @@ def test_local_repair_changes_only_authorized_component_and_consumes_one_budget(
                 target_chapter_count=2,
                 canon_change=False,
                 evaluation=LayerEvaluationResult(
+                    guidance_authority_judgment="not_present",
                     decision="local_repair",
                     summary="One paragraph overstates what Mara can know.",
                     issues=[
@@ -918,6 +923,7 @@ def test_local_repair_changes_only_authorized_component_and_consumes_one_budget(
                 chapter_id=ready.chapter_id,
                 canon_baseline_id=ready.foundation.canon_baseline_id,
                 workspace_lock_version=ready.workspace_lock_version,
+                source_chapter_candidate_review_id=ready.review_id,
                 output_mode="text_streaming",
                 result=ChapterDraftResult(
                     prose="Mara compared the statements and documented only what she directly observed."
@@ -971,6 +977,7 @@ def test_observation_repair_patch_preserves_unauthorized_canon_component(
                 target_chapter_count=2,
                 canon_change=True,
                 evaluation=LayerEvaluationResult(
+                    guidance_authority_judgment="not_present",
                     decision="local_repair",
                     summary="The summary and continuity observation need clarification.",
                     issues=[
@@ -1172,6 +1179,7 @@ def test_canon_repair_patch_preserves_unauthorized_observation_components(
                 target_chapter_count=2,
                 canon_change=True,
                 evaluation=LayerEvaluationResult(
+                    guidance_authority_judgment="not_present",
                     decision="local_repair",
                     summary="Only the Canon proposal needs correction.",
                     issues=[
@@ -1279,6 +1287,7 @@ def test_multi_component_repair_union_stalls_when_same_issue_persists(
                 target_chapter_count=2,
                 canon_change=True,
                 evaluation=LayerEvaluationResult(
+                    guidance_authority_judgment="not_present",
                     decision="local_repair",
                     summary="The observations and Canon assertion disagree.",
                     issues=[
@@ -1401,6 +1410,7 @@ def test_multi_component_repair_union_stalls_when_same_issue_persists(
                 idempotency_key=f"{ready.chapter_id}:resubmit-after-multi-repair",
             )
             verification = LayerEvaluationResult(
+                guidance_authority_judgment="not_present",
                 decision="local_repair",
                 summary="The same documentary-evidence mismatch remains.",
                 issues=[
@@ -1483,6 +1493,402 @@ def test_multi_component_repair_union_stalls_when_same_issue_persists(
     asyncio.run(exercise())
 
 
+def test_prose_repair_allows_one_bounded_derived_dependency_closure(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "chapter-derived-dependency-closure.sqlite3"
+    command.upgrade(alembic_config(database), "head")
+
+    async def exercise() -> None:
+        engine = create_sqlite_async_engine(database)
+        try:
+            ready = await _prepare_reviewed_chapter(
+                engine,
+                project_id="project-derived-dependency-closure",
+                target_chapter_count=2,
+                canon_change=True,
+                evaluation=LayerEvaluationResult(
+                    guidance_authority_judgment="not_present",
+                    decision="local_repair",
+                    summary="The candidate places the archive device in the wrong room.",
+                    issues=[
+                        ChapterEvaluationIssue(
+                            kind="explicit_conflict",
+                            code="archive_device_location",
+                            subject="archive scanner location",
+                            summary=(
+                                "Both prose and Canon place the device outside the "
+                                "locked data room required by the frozen assignment."
+                            ),
+                            evidence=[
+                                "The candidate says the device is in the maintenance room."
+                            ],
+                            candidate_claim=(
+                                "The archive scanner stands in the maintenance room."
+                            ),
+                            contrary_formal_statement=(
+                                "The frozen assignment requires the device inside "
+                                "the locked data room."
+                            ),
+                            affected_components=["prose", "canon"],
+                        )
+                    ],
+                ),
+            )
+            service = ChapterCommandService(CommandBus(engine))
+            repaired_prose = (
+                "Mara unlocked the data room and crossed to its innermost operation "
+                "table. The archive scanner stood there, still sealed inside the "
+                "room, while she preserved the original record."
+            )
+            prose_task, prose_attempt = await insert_successful_task(
+                engine,
+                project_id=ready.foundation.project_id,
+                run_id=ready.foundation.run_id,
+                task_id=f"{ready.chapter_id}:repair-prose-for-derived-closure",
+                attempt_id=(
+                    f"{ready.chapter_id}:repair-prose-for-derived-closure:attempt"
+                ),
+                role="chapter_writer",
+                task_kind="chapter.repair.prose",
+                scope_layer="chapter",
+                book_id=ready.foundation.book_id,
+                book_baseline_id=ready.foundation.book_baseline_id,
+                arc_id=ready.foundation.arc_id,
+                arc_baseline_id=ready.foundation.arc_baseline_id,
+                chapter_id=ready.chapter_id,
+                canon_baseline_id=ready.foundation.canon_baseline_id,
+                workspace_lock_version=ready.workspace_lock_version,
+                output_mode="text_streaming",
+                result=ChapterDraftResult(prose=repaired_prose),
+            )
+            prose_applied = await service.apply_repair_result(
+                ApplyChapterTaskRequest(
+                    project_id=ready.foundation.project_id,
+                    chapter_id=ready.chapter_id,
+                    task_id=prose_task,
+                    attempt_id=prose_attempt,
+                    expected_workspace_lock_version=ready.workspace_lock_version,
+                ),
+                idempotency_key=f"{ready.chapter_id}:apply-prose-derived-closure",
+            )
+
+            regenerated = ChapterObservationResult(
+                summary=(
+                    "Mara inspects the archive scanner while preserving the original."
+                ),
+                established_facts=[
+                    {
+                        "statement": "Mara preserves the original archive record.",
+                        "evidence_hint": (
+                            "The repaired prose shows her preserving the original."
+                        ),
+                    }
+                ],
+                canon_proposals=[
+                    SemanticCanonProposal(
+                        category="world_facts",
+                        subject="Archive scanner location",
+                        semantic_change=(
+                            "The archive scanner is in the adjacent maintenance room."
+                        ),
+                        resolved=False,
+                        evidence_hint=(
+                            "The regenerated observation incorrectly places it outside."
+                        ),
+                    )
+                ],
+            )
+            observe_task, observe_attempt = await insert_successful_task(
+                engine,
+                project_id=ready.foundation.project_id,
+                run_id=ready.foundation.run_id,
+                task_id=f"{ready.chapter_id}:observe-after-prose-repair",
+                attempt_id=f"{ready.chapter_id}:observe-after-prose-repair:attempt",
+                role="chapter_writer",
+                task_kind="chapter.observe",
+                scope_layer="chapter",
+                book_id=ready.foundation.book_id,
+                book_baseline_id=ready.foundation.book_baseline_id,
+                arc_id=ready.foundation.arc_id,
+                arc_baseline_id=ready.foundation.arc_baseline_id,
+                chapter_id=ready.chapter_id,
+                canon_baseline_id=ready.foundation.canon_baseline_id,
+                workspace_lock_version=(
+                    prose_applied.result.workspace_lock_version
+                ),
+                source_chapter_candidate_review_id=ready.review_id,
+                result=regenerated,
+            )
+            observation_applied = await service.apply_observation_result(
+                ApplyChapterTaskRequest(
+                    project_id=ready.foundation.project_id,
+                    chapter_id=ready.chapter_id,
+                    task_id=observe_task,
+                    attempt_id=observe_attempt,
+                    expected_workspace_lock_version=(
+                        prose_applied.result.workspace_lock_version
+                    ),
+                ),
+                idempotency_key=f"{ready.chapter_id}:apply-regenerated-observation",
+            )
+            submitted = await service.submit_for_review(
+                SubmitChapterRequest(
+                    project_id=ready.foundation.project_id,
+                    chapter_id=ready.chapter_id,
+                    expected_workspace_lock_version=(
+                        observation_applied.result.workspace_lock_version
+                    ),
+                ),
+                idempotency_key=f"{ready.chapter_id}:submit-derived-mismatch",
+            )
+            verify_task, verify_attempt = await insert_successful_task(
+                engine,
+                project_id=ready.foundation.project_id,
+                run_id=ready.foundation.run_id,
+                task_id=f"{ready.chapter_id}:verify-derived-mismatch",
+                attempt_id=f"{ready.chapter_id}:verify-derived-mismatch:attempt",
+                role="evaluator",
+                task_kind="verify_repair.chapter",
+                scope_layer="chapter",
+                book_id=ready.foundation.book_id,
+                book_baseline_id=ready.foundation.book_baseline_id,
+                arc_id=ready.foundation.arc_id,
+                arc_baseline_id=ready.foundation.arc_baseline_id,
+                chapter_id=ready.chapter_id,
+                canon_baseline_id=ready.foundation.canon_baseline_id,
+                workspace_lock_version=(
+                    observation_applied.result.workspace_lock_version
+                ),
+                source_chapter_candidate_review_id=ready.review_id,
+                result=LayerEvaluationResult(
+                    guidance_authority_judgment="not_present",
+                    decision="local_repair",
+                    summary=(
+                        "The repaired prose is correct; only regenerated Canon is wrong."
+                    ),
+                    issues=[
+                        ChapterEvaluationIssue(
+                            kind="explicit_conflict",
+                            code="archive_device_location",
+                            subject="archive scanner location",
+                            summary=(
+                                "The regenerated Canon contradicts the repaired prose."
+                            ),
+                            evidence=[
+                                "Canon says maintenance room while prose says data room."
+                            ],
+                            candidate_claim=(
+                                "The archive scanner is in the maintenance room."
+                            ),
+                            contrary_formal_statement=(
+                                "The repaired prose places it inside the locked data room."
+                            ),
+                            affected_components=["canon"],
+                            recurrence="persists_after_authorized_repair",
+                        )
+                    ],
+                ),
+            )
+            strategy = DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                "verify_repair.chapter"
+            )
+            closure_review = await service.record_review(
+                RecordChapterReviewRequest(
+                    project_id=ready.foundation.project_id,
+                    chapter_id=ready.chapter_id,
+                    submission_id=submitted.result.submission_id,
+                    evaluator_task_id=verify_task,
+                    evaluator_attempt_id=verify_attempt,
+                    rubric_id=strategy.rubric_id,
+                    rubric_version=strategy.rubric_version,
+                ),
+                idempotency_key=f"{ready.chapter_id}:open-derived-closure",
+            )
+            async with engine.connect() as connection:
+                closure_workspace = (
+                    await connection.execute(
+                        select(
+                            chapter_workspaces.c.lock_version,
+                            chapter_workspaces.c.semantic_repair_count,
+                            chapter_workspaces.c.active_repair_review_id,
+                        ).where(
+                            chapter_workspaces.c.chapter_id == ready.chapter_id
+                        )
+                    )
+                ).one()
+                closure_ref_id = await connection.scalar(
+                    select(chapter_reviews.c.repair_contract_ref_id).where(
+                        chapter_reviews.c.id == closure_review.result.review_id
+                    )
+                )
+                run_before_closure = (
+                    await connection.execute(
+                        select(
+                            generation_runs.c.status,
+                            generation_runs.c.failure_code,
+                        ).where(
+                            generation_runs.c.id == ready.foundation.run_id
+                        )
+                    )
+                ).one()
+                assert closure_ref_id is not None
+                closure_contract = json.loads(
+                    (
+                        await ContentRepository(connection).get_packed(
+                            project_id=ready.foundation.project_id,
+                            ref_id=closure_ref_id,
+                        )
+                    ).unpack_and_verify()
+                )
+            assert tuple(run_before_closure) == ("running", None)
+            assert closure_workspace.semantic_repair_count == 1
+            assert closure_contract["repair_stage"] == (
+                "derived_dependency_closure"
+            )
+            assert closure_contract["authorized_components"] == ["canon"]
+
+            evidence_task, evidence_attempt = await insert_successful_task(
+                engine,
+                project_id=ready.foundation.project_id,
+                run_id=ready.foundation.run_id,
+                task_id=f"{ready.chapter_id}:close-derived-dependency",
+                attempt_id=f"{ready.chapter_id}:close-derived-dependency:attempt",
+                role="chapter_writer",
+                task_kind="chapter.repair.observation",
+                scope_layer="chapter",
+                book_id=ready.foundation.book_id,
+                book_baseline_id=ready.foundation.book_baseline_id,
+                arc_id=ready.foundation.arc_id,
+                arc_baseline_id=ready.foundation.arc_baseline_id,
+                chapter_id=ready.chapter_id,
+                canon_baseline_id=ready.foundation.canon_baseline_id,
+                workspace_lock_version=closure_workspace.lock_version,
+                source_chapter_candidate_review_id=(
+                    closure_review.result.review_id
+                ),
+                result=ChapterObservationRepairPatch(
+                    changes=[
+                        ChapterCanonRepair(
+                            component="canon",
+                            canon_proposals=[
+                                SemanticCanonProposal(
+                                    category="world_facts",
+                                    subject="Archive scanner location",
+                                    semantic_change=(
+                                        "The archive scanner is inside the locked "
+                                        "data room on its innermost operation table."
+                                    ),
+                                    resolved=False,
+                                    evidence_hint=(
+                                        "The repaired prose places it inside the room."
+                                    ),
+                                )
+                            ],
+                        )
+                    ]
+                ),
+            )
+            evidence_applied = await service.apply_repair_result(
+                ApplyChapterTaskRequest(
+                    project_id=ready.foundation.project_id,
+                    chapter_id=ready.chapter_id,
+                    task_id=evidence_task,
+                    attempt_id=evidence_attempt,
+                    expected_workspace_lock_version=closure_workspace.lock_version,
+                ),
+                idempotency_key=f"{ready.chapter_id}:apply-derived-closure",
+            )
+            async with engine.connect() as connection:
+                count_after_closure = await connection.scalar(
+                    select(chapter_workspaces.c.semantic_repair_count).where(
+                        chapter_workspaces.c.chapter_id == ready.chapter_id
+                    )
+                )
+            assert count_after_closure == 1
+
+            final_submission = await service.submit_for_review(
+                SubmitChapterRequest(
+                    project_id=ready.foundation.project_id,
+                    chapter_id=ready.chapter_id,
+                    expected_workspace_lock_version=(
+                        evidence_applied.result.workspace_lock_version
+                    ),
+                ),
+                idempotency_key=f"{ready.chapter_id}:submit-closed-dependency",
+            )
+            final_task, final_attempt = await insert_successful_task(
+                engine,
+                project_id=ready.foundation.project_id,
+                run_id=ready.foundation.run_id,
+                task_id=f"{ready.chapter_id}:verify-closed-dependency",
+                attempt_id=f"{ready.chapter_id}:verify-closed-dependency:attempt",
+                role="evaluator",
+                task_kind="verify_repair.chapter",
+                scope_layer="chapter",
+                book_id=ready.foundation.book_id,
+                book_baseline_id=ready.foundation.book_baseline_id,
+                arc_id=ready.foundation.arc_id,
+                arc_baseline_id=ready.foundation.arc_baseline_id,
+                chapter_id=ready.chapter_id,
+                canon_baseline_id=ready.foundation.canon_baseline_id,
+                workspace_lock_version=(
+                    evidence_applied.result.workspace_lock_version
+                ),
+                source_chapter_candidate_review_id=(
+                    closure_review.result.review_id
+                ),
+                result=LayerEvaluationResult(
+                    guidance_authority_judgment="not_present",
+                    decision="pass",
+                    summary=(
+                        "Repaired prose and its derived evidence now agree."
+                    ),
+                ),
+            )
+            final_review = await service.record_review(
+                RecordChapterReviewRequest(
+                    project_id=ready.foundation.project_id,
+                    chapter_id=ready.chapter_id,
+                    submission_id=final_submission.result.submission_id,
+                    evaluator_task_id=final_task,
+                    evaluator_attempt_id=final_attempt,
+                    rubric_id=strategy.rubric_id,
+                    rubric_version=strategy.rubric_version,
+                ),
+                idempotency_key=f"{ready.chapter_id}:pass-derived-closure",
+            )
+            committed = await service.commit_chapter_and_canon(
+                CommitChapterRequest(
+                    project_id=ready.foundation.project_id,
+                    chapter_id=ready.chapter_id,
+                    submission_id=final_submission.result.submission_id,
+                    review_id=final_review.result.review_id,
+                    expected_canon_baseline_id=(
+                        ready.foundation.canon_baseline_id
+                    ),
+                ),
+                idempotency_key=f"{ready.chapter_id}:commit-derived-closure",
+            )
+            async with engine.connect() as connection:
+                baseline_prose_ref = await connection.scalar(
+                    select(chapter_baselines.c.prose_ref_id).where(
+                        chapter_baselines.c.id
+                        == committed.result.chapter_baseline_id
+                    )
+                )
+                workspace_prose_ref = await connection.scalar(
+                    select(chapter_workspaces.c.draft_ref_id).where(
+                        chapter_workspaces.c.chapter_id == ready.chapter_id
+                    )
+                )
+            assert baseline_prose_ref == workspace_prose_ref
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
 def test_second_distinct_semantic_repair_is_not_started_and_run_failure_pauses(
     tmp_path: Path,
 ) -> None:
@@ -1498,6 +1904,7 @@ def test_second_distinct_semantic_repair_is_not_started_and_run_failure_pauses(
                 target_chapter_count=2,
                 canon_change=False,
                 evaluation=LayerEvaluationResult(
+                    guidance_authority_judgment="not_present",
                     decision="local_repair",
                     summary="The observation overstates what Mara knows.",
                     issues=[
@@ -1594,6 +2001,7 @@ def test_second_distinct_semantic_repair_is_not_started_and_run_failure_pauses(
                 canon_baseline_id=ready.foundation.canon_baseline_id,
                 workspace_lock_version=applied.result.workspace_lock_version,
                 result=LayerEvaluationResult(
+                    guidance_authority_judgment="not_present",
                     decision="local_repair",
                     summary="A distinct continuity issue remains.",
                     issues=[
@@ -1672,6 +2080,7 @@ def test_chapter_escalation_opens_explicit_arc_request_and_blocks_workspace(
                 target_chapter_count=2,
                 canon_change=False,
                 evaluation=LayerEvaluationResult(
+                    guidance_authority_judgment="not_present",
                     decision="escalate_to_arc",
                     summary="The approved Arc requires a contradiction this Chapter cannot resolve.",
                     issues=[

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import json
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
-from typing import cast
+from typing import AbstractSet, cast
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
@@ -16,6 +15,7 @@ from app.agents.contracts import (
     ChapterObservationRepairPatch,
     ChapterObservationResult,
     ChapterPlanProposal,
+    ChapterRepairComponent,
     LayerEvaluationResult,
 )
 from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
@@ -35,6 +35,7 @@ from app.domain.chapter.contracts import (
     ApplyChapterTaskRequest,
     ApplyChapterTaskResult,
     ChapterComponent,
+    ChapterRepairContract,
     ChapterReviewDecision,
     CommitChapterRequest,
     CommitChapterResult,
@@ -100,7 +101,7 @@ def _merge_chapter_observation_repair(
     *,
     current: ChapterObservationResult,
     patch: ChapterObservationRepairPatch,
-    allowed_scope: set[str],
+    allowed_scope: AbstractSet[str],
 ) -> ChapterObservationResult:
     requested = {change.component for change in patch.changes}
     unauthorized = requested.difference(allowed_scope)
@@ -124,10 +125,19 @@ def _merge_chapter_observation_repair(
     return observations
 
 
-_CHAPTER_REPAIR_COMPONENT_ORDER = ("plan", "prose", "observations", "canon")
+_CHAPTER_REPAIR_COMPONENT_ORDER: tuple[ChapterRepairComponent, ...] = (
+    "plan",
+    "prose",
+    "observations",
+    "canon",
+)
+_CHAPTER_NARRATIVE_REPAIR_COMPONENTS = frozenset({"plan", "prose"})
+_CHAPTER_DERIVED_REPAIR_COMPONENTS = frozenset({"observations", "canon"})
 
 
-def _chapter_repair_scope(evaluation: LayerEvaluationResult) -> list[str]:
+def _chapter_repair_scope(
+    evaluation: LayerEvaluationResult,
+) -> list[ChapterRepairComponent]:
     affected = {
         component
         for issue in evaluation.issues
@@ -151,6 +161,22 @@ def _chapter_issue_fingerprint(issue: ChapterEvaluationIssue) -> str:
             "subject": normalize(issue.subject),
         }
     ).sha256
+
+
+def _is_derived_dependency_closure(
+    *,
+    previous_contract: ChapterRepairContract | None,
+    repair_scope: AbstractSet[str],
+) -> bool:
+    if previous_contract is None:
+        return False
+    previous_scope = set(previous_contract.authorized_components)
+    return (
+        previous_contract.repair_stage == "primary_semantic"
+        and bool(previous_scope & _CHAPTER_NARRATIVE_REPAIR_COMPONENTS)
+        and bool(repair_scope)
+        and repair_scope <= _CHAPTER_DERIVED_REPAIR_COMPONENTS
+    )
 
 
 class ChapterCommandService:
@@ -712,7 +738,7 @@ class ChapterCommandService:
                 or review_snapshot.repair_contract_ref_id is None
             ):
                 raise CommandPreconditionError("Chapter has no active local repair contract.")
-            repair_contract = json.loads(
+            repair_contract = ChapterRepairContract.model_validate_json(
                 (
                     await session.content.get_packed(
                         project_id=request.project_id,
@@ -720,13 +746,15 @@ class ChapterCommandService:
                     )
                 ).unpack_and_verify()
             )
-        scope = repair_contract.get("authorized_components")
-        if not isinstance(scope, list) or any(not isinstance(item, str) for item in scope):
-            raise CommandPreconditionError("Chapter repair contract has an invalid scope.")
-        allowed_scope = set(scope)
+        allowed_scope = set(repair_contract.authorized_components)
+        repair_stage = repair_contract.repair_stage
         prepared: Sequence[PreparedContent]
         descriptors: Sequence[tuple[str, str, str | None, int | None]]
         if task.task_kind == "chapter.repair.plan":
+            if repair_stage != "primary_semantic":
+                raise CommandPreconditionError(
+                    "A derived dependency closure cannot replace the Chapter plan."
+                )
             if allowed_scope != {"plan"}:
                 raise CommandPreconditionError(
                     "A Chapter plan repair must be the only authorized component."
@@ -757,6 +785,10 @@ class ChapterCommandService:
                 )
 
         elif task.task_kind == "chapter.repair.prose":
+            if repair_stage != "primary_semantic":
+                raise CommandPreconditionError(
+                    "A derived dependency closure cannot replace Chapter prose."
+                )
             if "prose" not in allowed_scope:
                 raise CommandPreconditionError("Repair contract does not authorize prose changes.")
             draft = ChapterDraftResult.model_validate_json(raw)
@@ -785,6 +817,13 @@ class ChapterCommandService:
             if not allowed_scope.intersection({"observations", "canon"}):
                 raise CommandPreconditionError(
                     "Repair contract does not authorize observation or Canon changes."
+                )
+            if (
+                repair_stage == "derived_dependency_closure"
+                and not allowed_scope <= _CHAPTER_DERIVED_REPAIR_COMPONENTS
+            ):
+                raise CommandPreconditionError(
+                    "A derived dependency closure may change only observations or Canon."
                 )
             if workspace_snapshot.draft_ref_id is None:
                 raise CommandPreconditionError("Observation repair has no frozen prose.")
@@ -847,7 +886,18 @@ class ChapterCommandService:
                 refs: Sequence[str],
                 timestamp: int,
             ) -> ChapterWorkspaceRecord:
-                _require_repair_budget(workspace)
+                if repair_stage == "primary_semantic":
+                    _require_repair_budget(workspace)
+                    semantic_repair_count = workspace.semantic_repair_count + 1
+                else:
+                    if (
+                        workspace.semantic_repair_count
+                        != workspace.semantic_repair_limit
+                    ):
+                        raise CommandPreconditionError(
+                            "Derived evidence closure requires one consumed narrative repair."
+                        )
+                    semantic_repair_count = workspace.semantic_repair_count
                 if workspace.draft_ref_id != workspace_snapshot.draft_ref_id:
                     raise CommandPreconditionError("Chapter prose changed before repair delivery.")
                 return replace(
@@ -856,7 +906,7 @@ class ChapterCommandService:
                     lock_version=workspace.lock_version + 1,
                     observations_ref_id=refs[0],
                     candidate_canon_patch_ref_id=refs[1],
-                    semantic_repair_count=workspace.semantic_repair_count + 1,
+                    semantic_repair_count=semantic_repair_count,
                     updated_at_ms=timestamp,
                 )
 
@@ -1345,7 +1395,7 @@ class ChapterCommandService:
         repair_ref_id = self._id_factory()
         change_request_id = self._id_factory()
         failure_ref_id = self._id_factory()
-        previous_repair_contract: dict[str, object] | None = None
+        previous_repair_contract: ChapterRepairContract | None = None
         async with self._command_bus.read_unit_of_work() as session:
             task = await session.execution.get_successful_task(
                 project_id=request.project_id,
@@ -1386,7 +1436,7 @@ class ChapterCommandService:
                     raise CommandPreconditionError(
                         "Chapter repair verification lost its source repair contract."
                     )
-                previous_repair_contract = json.loads(
+                previous_repair_contract = ChapterRepairContract.model_validate_json(
                     (
                         await session.content.get_packed(
                             project_id=request.project_id,
@@ -1407,19 +1457,15 @@ class ChapterCommandService:
                 "An initial Chapter evaluation cannot report repair recurrence."
             )
         repair_scope = _chapter_repair_scope(evaluation)
+        repair_scope_set = set(repair_scope)
         issue_fingerprints = [
             _chapter_issue_fingerprint(issue) for issue in evaluation.issues
         ]
         previous_issue_fingerprints: set[str] = set()
         if previous_repair_contract is not None:
-            raw_fingerprints = previous_repair_contract.get("issue_fingerprints")
-            if not isinstance(raw_fingerprints, list) or any(
-                not isinstance(value, str) for value in raw_fingerprints
-            ):
-                raise CommandPreconditionError(
-                    "Chapter repair verification source has invalid issue fingerprints."
-                )
-            previous_issue_fingerprints = set(raw_fingerprints)
+            previous_issue_fingerprints = set(
+                previous_repair_contract.issue_fingerprints
+            )
         stalled_issue_fingerprints = sorted(
             {
                 fingerprint
@@ -1434,21 +1480,37 @@ class ChapterCommandService:
                 )
             }
         )
+        derived_dependency_closure = (
+            task.task_kind == "verify_repair.chapter"
+            and decision == "local_repair"
+            and workspace_snapshot is not None
+            and workspace_snapshot.semantic_repair_count
+            == workspace_snapshot.semantic_repair_limit
+            and _is_derived_dependency_closure(
+                previous_contract=previous_repair_contract,
+                repair_scope=repair_scope_set,
+            )
+        )
         semantic_repair_stalled = (
             task.task_kind == "verify_repair.chapter"
             and decision == "local_repair"
             and bool(stalled_issue_fingerprints)
+            and not derived_dependency_closure
         )
         prepared_precheck = prepare_canonical_json(deterministic_precheck)
         prepared_detail = prepare_canonical_json(evaluation)
         repair_contract = (
-            {
-                "schema": "chapter-repair-contract-v4",
-                "authorized_components": repair_scope,
-                "issues": [issue.model_dump(mode="json") for issue in evaluation.issues],
-                "issue_fingerprints": issue_fingerprints,
-                "stalled_issue_fingerprints": stalled_issue_fingerprints,
-            }
+            ChapterRepairContract(
+                repair_stage=(
+                    "derived_dependency_closure"
+                    if derived_dependency_closure
+                    else "primary_semantic"
+                ),
+                authorized_components=repair_scope,
+                issues=evaluation.issues,
+                issue_fingerprints=issue_fingerprints,
+                stalled_issue_fingerprints=stalled_issue_fingerprints,
+            )
             if decision == "local_repair"
             else None
         )
@@ -1536,6 +1598,11 @@ class ChapterCommandService:
                 or workspace.work_cycle_id != submission.work_cycle_id
                 or task.source_chapter_candidate_review_id
                 != workspace.active_repair_review_id
+                or task.source_feedback_id != workspace.source_feedback_id
+                or task.source_arc_parent_review_id
+                != workspace.source_arc_parent_review_id
+                or task.source_arc_closure_review_id
+                != workspace.source_arc_closure_review_id
                 or task.book_baseline_id != submission.book_baseline_id
                 or task.arc_baseline_id != submission.arc_baseline_id
                 or task.canon_baseline_id != submission.canon_before_id
@@ -1544,6 +1611,12 @@ class ChapterCommandService:
                 or current_previous_review != previous_review
             ):
                 raise CommandPreconditionError("Chapter evaluation facts are stale or mismatched.")
+            if (
+                evaluation.guidance_authority_judgment == "not_present"
+            ) == (workspace.source_feedback_id is not None):
+                raise CommandPreconditionError(
+                    "Chapter evaluation did not classify its exact active guidance."
+                )
             precheck_ref = await session.content.put(
                 project_id=request.project_id,
                 prepared=prepared_precheck,
@@ -1560,7 +1633,7 @@ class ChapterCommandService:
                 semantic_kind="chapter.review_detail",
                 media_type="application/json",
                 schema_id="chapter-evaluation-result",
-                schema_version=4,
+                schema_version=5,
                 ref_id=detail_ref_id,
                 created_at_ms=timestamp,
             )
@@ -1572,7 +1645,7 @@ class ChapterCommandService:
                     semantic_kind="chapter.repair_contract",
                     media_type="application/json",
                     schema_id="chapter-repair-contract",
-                    schema_version=4,
+                    schema_version=5,
                     ref_id=repair_ref_id,
                     created_at_ms=timestamp,
                 )
@@ -1654,8 +1727,11 @@ class ChapterCommandService:
                     decision == "local_repair"
                     and (
                         semantic_repair_stalled
-                        or workspace.semantic_repair_count
-                        >= workspace.semantic_repair_limit
+                        or (
+                            workspace.semantic_repair_count
+                            >= workspace.semantic_repair_limit
+                            and not derived_dependency_closure
+                        )
                     )
                 ):
                     failure_ref = await session.content.put(
@@ -2522,6 +2598,13 @@ def _task_matches_workspace(
         and task.arc_baseline_id == workspace.arc_baseline_id
         and task.chapter_baseline_id == workspace.base_chapter_baseline_id
         and task.canon_baseline_id == workspace.canon_baseline_id
+        and task.source_chapter_candidate_review_id
+        == workspace.active_repair_review_id
+        and task.source_arc_parent_review_id
+        == workspace.source_arc_parent_review_id
+        and task.source_arc_closure_review_id
+        == workspace.source_arc_closure_review_id
+        and task.source_feedback_id == workspace.source_feedback_id
         and workspace.state == "active"
     )
 
@@ -2566,6 +2649,9 @@ def _apply_chapter_precheck(
         return evaluation
 
     return LayerEvaluationResult(
+        guidance_authority_judgment=(
+            evaluation.guidance_authority_judgment
+        ),
         decision="local_repair",
         summary=(
             "Deterministic Chapter/Canon precheck requires a bounded repair. "

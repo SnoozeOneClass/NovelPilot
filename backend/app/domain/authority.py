@@ -2652,6 +2652,67 @@ class LoopAuthorityCommandService:
         return change, arc, baseline, workspace
 
     @staticmethod
+    async def _arc_book_source_is_current(
+        session: StoreSession,
+        *,
+        change: StoredArcBookChangeRequestRecord,
+        source_arc: ArcRecord,
+    ) -> bool:
+        source_count = sum(
+            (
+                change.source_candidate_review_id is not None,
+                change.source_arc_parent_review_id is not None,
+                change.source_arc_closure_review_id is not None,
+            )
+        )
+        if source_count != 1:
+            return False
+        if change.source_candidate_review_id is not None:
+            if change.source_candidate_submission_id is None:
+                return False
+            submission = await session.arcs.get_submission(
+                project_id=change.project_id,
+                submission_id=change.source_candidate_submission_id,
+            )
+            candidate_review = await session.arcs.get_review(
+                project_id=change.project_id,
+                review_id=change.source_candidate_review_id,
+            )
+            return (
+                submission is not None
+                and candidate_review is not None
+                and submission.arc_id == source_arc.id
+                and candidate_review.arc_id == source_arc.id
+                and candidate_review.submission_id == submission.id
+                and candidate_review.decision == "escalate_to_book"
+                and submission.base_arc_baseline_id
+                == source_arc.current_baseline_id
+            )
+        if change.source_arc_parent_review_id is not None:
+            parent_review = await session.arc_parent_reviews.get(
+                project_id=change.project_id,
+                review_id=change.source_arc_parent_review_id,
+            )
+            return (
+                parent_review is not None
+                and parent_review.arc_id == source_arc.id
+                and parent_review.disposition == "book_review_required"
+                and parent_review.target_arc_baseline_id
+                == source_arc.current_baseline_id
+            )
+        assert change.source_arc_closure_review_id is not None
+        closure_review = await session.arc_closure_reviews.get(
+            project_id=change.project_id,
+            review_id=change.source_arc_closure_review_id,
+        )
+        return (
+            closure_review is not None
+            and closure_review.arc_id == source_arc.id
+            and closure_review.disposition == "book_review_required"
+            and closure_review.arc_baseline_id == source_arc.current_baseline_id
+        )
+
+    @staticmethod
     async def _book_parent_snapshot(
         session: StoreSession,
         *,
@@ -2694,6 +2755,15 @@ class LoopAuthorityCommandService:
                 arc_id=change.arc_id,
             )
         )
+        source_is_current = (
+            False
+            if change is None or source_arc is None
+            else await LoopAuthorityCommandService._arc_book_source_is_current(
+                session,
+                change=change,
+                source_arc=source_arc,
+            )
+        )
         if (
             change is None
             or change.book_id != request.book_id
@@ -2710,7 +2780,8 @@ class LoopAuthorityCommandService:
             or task.book_baseline_id != baseline.id
             or source_arc is None
             or source_arc.book_id != request.book_id
-            or task.arc_baseline_id != source_arc.current_baseline_id
+            or task.arc_baseline_id is not None
+            or not source_is_current
             or task.workspace_lock_version != workspace.lock_version
             or task.source_arc_book_request_id != request.request_id
             or project is None

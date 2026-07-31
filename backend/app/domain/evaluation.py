@@ -89,8 +89,27 @@ class ChapterEvidenceTarget(BaseModel):
 class ArcParentContractEvaluation(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    arc_contract_judgment: ArcContractJudgment
-    book_review_concern: Literal["not_required", "book_review_required"]
+    arc_contract_judgment: ArcContractJudgment = Field(
+        description=(
+            "Directly adjudicate the exact inbound Chapter-to-Arc concern. "
+            "remains_applicable means the requested effect can be handled below Book "
+            "authority under the unchanged Arc; it must not mean only that the current "
+            "Chapter candidate ignored the concern. When book_review_concern is "
+            "book_review_required, use remains_applicable because the current Arc stays "
+            "authoritative until Book decides. unable_to_judge is reserved for a concrete "
+            "creator-owned input need."
+        ),
+    )
+    book_review_concern: Literal[
+        "not_required",
+        "book_review_required",
+    ] = Field(
+        description=(
+            "Judge whether honoring the exact inbound requested effect requires Book "
+            "authority. A candidate that preserves the current Book by ignoring the request "
+            "does not make Book review unnecessary."
+        ),
+    )
     chapter_evidence_concern: Literal[
         "not_required",
         "chapter_evidence_review_required",
@@ -106,6 +125,14 @@ class ArcParentContractEvaluation(BaseModel):
         book_review_required = self.book_review_concern == "book_review_required"
         revision_warranted = self.arc_contract_judgment == "revision_warranted"
         creator_required = self.creator_input_need is not None
+        if (
+            book_review_required
+            and self.arc_contract_judgment != "remains_applicable"
+        ):
+            raise ValueError(
+                "book_review_required keeps the current Arc contract applicable "
+                "until Book authority decides."
+            )
         if required != (self.chapter_evidence_target is not None):
             raise ValueError(
                 "chapter_evidence_review_required needs one semantic Chapter target."
@@ -177,8 +204,23 @@ class ArcParentContractEvaluation(BaseModel):
 class BookParentContractEvaluation(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    book_contract_judgment: BookContractJudgment
-    arc_evidence_concern: Literal["not_required", "arc_evidence_review_required"]
+    book_contract_judgment: BookContractJudgment = Field(
+        description=(
+            "Directly adjudicate the exact inbound Arc-to-Book concern at top authority. "
+            "remains_applicable means the requested effect is rejected or can be handled "
+            "below Book authority without changing the Book baseline; it must not mean only "
+            "that current Arc content ignored the concern."
+        ),
+    )
+    arc_evidence_concern: Literal[
+        "not_required",
+        "arc_evidence_review_required",
+    ] = Field(
+        description=(
+            "Judge whether the inbound concern is actually a derived Arc-evidence problem "
+            "that must be corrected below Book rather than a Book contract decision."
+        ),
+    )
     summary: str = Field(min_length=1)
     issues: list[EvaluationIssue] = Field(default_factory=list)
     creator_input_need: CreatorInputNeed | None = None

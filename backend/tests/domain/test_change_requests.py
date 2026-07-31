@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import cast
+
 import pytest
 from alembic import command
 from sqlalchemy import func, select
@@ -360,6 +362,7 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                 foundation=first.foundation,
                 idempotency_suffix=":second",
                 evaluation=LayerEvaluationResult(
+                    guidance_authority_judgment="not_present",
                     decision="escalate_to_arc",
                     summary="The Arc contract must change before this Chapter can proceed.",
                     issues=[
@@ -431,6 +434,10 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                 "source_chapter_candidate_canon_intent",
             } <= labels
             assert all("current" not in label for label in labels)
+            facts = cast(dict[str, object], frozen_context.manifest["facts"])
+            assert facts["source_change_request_present"] is True
+            assert facts["source_change_request_layer"] == "chapter_to_arc"
+            assert "active_applied_guidance_present" not in facts
             bus = CommandBus(engine)
             with pytest.raises(
                 CommandPreconditionError,
@@ -446,7 +453,7 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                     ),
                     idempotency_key="change:activate-without-authority",
                 )
-            await _record_arc_revision_authorization(
+            arc_parent_review_id = await _record_arc_revision_authorization(
                 engine,
                 project_id=ready.foundation.project_id,
                 run_id=ready.foundation.run_id,
@@ -525,6 +532,7 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                 arc_baseline_id=ready.foundation.arc_baseline_id,
                 canon_baseline_id=ready.foundation.canon_baseline_id,
                 workspace_lock_version=activated.result.workspace_lock_version,
+                source_arc_parent_review_id=arc_parent_review_id,
                 result=plan,
             )
             arc_service = ArcCommandService(bus)
@@ -546,6 +554,7 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                 arc_id=ready.foundation.arc_id,
                 chapter_id=None,
                 semantic_goal="Evaluate the coherent Arc successor candidate.",
+                source_arc_parent_review_id=arc_parent_review_id,
             )
             assert '"title":"Chapter 1"' in candidate_context.prompt
             assert '"title":"The surviving trace"' in candidate_context.prompt
@@ -581,7 +590,9 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                 arc_baseline_id=ready.foundation.arc_baseline_id,
                 canon_baseline_id=ready.foundation.canon_baseline_id,
                 workspace_lock_version=applied.result.workspace_lock_version,
+                source_arc_parent_review_id=arc_parent_review_id,
                 result=ArcEvaluation(
+                    guidance_authority_judgment="not_present",
                     decision="pass",
                     summary="The revised Arc resolves the explicit Chapter escalation.",
                 ),
@@ -701,6 +712,7 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                 arc_id=ready.foundation.arc_id,
                 chapter_id=None,
                 semantic_goal="Revise the coherent current Story Arc.",
+                source_arc_parent_review_id=arc_parent_review_id,
             )
             assert '"title":"Chapter 1"' in arc_context.prompt
             assert '"title":"The surviving trace"' in arc_context.prompt
@@ -748,6 +760,7 @@ def test_rejected_change_request_keeps_formal_baselines_and_blocks_source_for_us
                 target_chapter_count=2,
                 canon_change=False,
                 evaluation=LayerEvaluationResult(
+                    guidance_authority_judgment="not_present",
                     decision="escalate_to_arc",
                     summary="The proposed reveal appears to require an Arc change.",
                     issues=[
@@ -823,6 +836,7 @@ def test_arc_to_book_request_resolves_only_when_authorized_book_v2_is_approved(
                 project_id=project_id,
                 operation_mode="full_auto",
                 evaluation=ArcEvaluation(
+                    guidance_authority_judgment="not_present",
                     decision="escalate_to_book",
                     summary="The Arc requires a Book-level direction change.",
                     issues=[
@@ -874,7 +888,7 @@ def test_arc_to_book_request_resolves_only_when_authorized_book_v2_is_approved(
                     ),
                     idempotency_key="arc-to-book:activate-without-authority",
                 )
-            await _record_book_revision_authorization(
+            book_parent_review_id = await _record_book_revision_authorization(
                 engine,
                 project_id=project_id,
                 run_id=run_id,
@@ -898,6 +912,23 @@ def test_arc_to_book_request_resolves_only_when_authorized_book_v2_is_approved(
             )
             assert activated.result.target_layer == "book"
             assert activated.result.workspace_lock_version is not None
+            revision_context = await HarnessContextBuilder(engine).build(
+                task_kind="book.revise",
+                project_id=project_id,
+                book_id=book_id,
+                arc_id=None,
+                chapter_id=None,
+                semantic_goal="Revise the Book from its exact parent-authority review.",
+                source_book_parent_review_id=book_parent_review_id,
+            )
+            parent_review_items = [
+                item
+                for item in revision_context.manifest["items"]
+                if item["group"] == "book_parent_review"
+            ]
+            assert len(parent_review_items) == 1
+            assert parent_review_items[0]["label"] == "source_book_parent_review"
+            assert parent_review_items[0]["use"] == "repair_authorization"
             new_baseline_id = await _commit_book_v2(
                 engine,
                 project_id=project_id,

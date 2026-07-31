@@ -28,6 +28,11 @@ packages = []
 [tool.pytest.ini_options]
 pythonpath = ["backend"]
 testpaths = ["backend/tests"]
+markers = [
+  "acceptance_contract: fast local contracts for the real-scenario runner; not a backend acceptance verdict",
+  "synthetic_integration: deterministic integration evidence that does not use a real Provider",
+  "real_model: paid tests that call the configured real model Provider",
+]
 
 [tool.ruff]
 line-length = 100

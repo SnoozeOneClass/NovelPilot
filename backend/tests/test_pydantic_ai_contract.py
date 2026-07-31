@@ -17,6 +17,7 @@ class ArcPlanContract(BaseModel):
 
 
 models.ALLOW_MODEL_REQUESTS = False
+pytestmark = pytest.mark.synthetic_integration
 
 
 def test_native_output_is_framework_validated_and_reports_usage() -> None:

@@ -17,7 +17,12 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from sqlalchemy import func, select
 
 from app.agents.binding import ProfileCredential, ResolvedModelBinding
-from app.agents.contracts import CapabilityName, ProfileCapabilities, ProfileSnapshot
+from app.agents.contracts import (
+    CapabilityName,
+    ChapterEvaluationIssue,
+    ProfileCapabilities,
+    ProfileSnapshot,
+)
 from app.agents.executor import AgentExecutor
 from app.agents.registry import DEFAULT_TASK_REGISTRY
 from app.agents.transport import ActivationRequestBudget, RequestCountingModel
@@ -53,6 +58,7 @@ from app.domain.book.contracts import (
     RecordBookUserInputRequest,
 )
 from app.domain.commands import CommandPreconditionError
+from app.domain.chapter.contracts import ChapterRepairContract
 from app.domain.projects import CreateProjectRequest, ProjectCommandService
 from app.profiles import ProfileCatalog, profile_configuration_fingerprint
 from app.runtime.control import (
@@ -73,6 +79,34 @@ from app.runtime.reconcile import ReconcileService
 from app.store.command_bus import CommandBus
 from app.store.content import ContentRepository
 from tests.helpers.lifecycle_seed import insert_successful_task
+
+
+pytestmark = pytest.mark.synthetic_integration
+
+
+def _chapter_repair_contract_bytes(
+    components: list[Literal["plan", "prose", "observations", "canon"]],
+    *,
+    stage: Literal[
+        "primary_semantic",
+        "derived_dependency_closure",
+    ] = "primary_semantic",
+) -> bytes:
+    issue = ChapterEvaluationIssue(
+        kind="contract_unfulfilled",
+        code="synthetic_driver_repair",
+        subject="synthetic Chapter repair",
+        summary="The synthetic Driver fixture requires the declared repair scope.",
+        evidence=["The fixture exercises deterministic Route sequencing only."],
+        contract_item="Apply the exact declared synthetic repair scope.",
+        affected_components=components,
+    )
+    return ChapterRepairContract(
+        repair_stage=stage,
+        authorized_components=components,
+        issues=[issue],
+        issue_fingerprints=["synthetic-driver-repair"],
+    ).model_dump_json().encode()
 
 
 class DeterministicNovelResolver:
@@ -352,6 +386,7 @@ def test_arc_local_repair_route_survives_restart_then_is_consumed_once() -> None
             source_arc_closure_review_id=None,
             source_book_parent_review_id=None,
             source_book_completion_review_id=None,
+            book_progress_handoff_id=None,
         )
         arcs = SimpleNamespace(
             get_unfinished_for_book=AsyncMock(return_value=arc),
@@ -404,6 +439,12 @@ def test_arc_local_repair_route_survives_restart_then_is_consumed_once() -> None
             arc_baseline_id=None,
             workspace_work_cycle_id="arc-work-cycle",
             source_arc_candidate_review_id=review.id,
+            source_arc_parent_review_id=None,
+            source_arc_closure_review_id=None,
+            source_book_parent_review_id=None,
+            source_book_completion_review_id=None,
+            source_book_progress_handoff_id=None,
+            source_feedback_id=None,
         )
 
         arcs.find_pending_submission.return_value = pending
@@ -456,10 +497,7 @@ def test_chapter_plan_repair_regenerates_invalidated_downstream_content() -> Non
             return str(kwargs["task_kind"]) in applied_tasks
 
         packed_repair = SimpleNamespace(
-            unpack_and_verify=lambda: json.dumps(
-                {"authorized_components": ["plan"]},
-                ensure_ascii=False,
-            ).encode()
+            unpack_and_verify=lambda: _chapter_repair_contract_bytes(["plan"])
         )
         chapters = SimpleNamespace(
             get_non_idle_workspace_for_arc=AsyncMock(
@@ -571,10 +609,9 @@ def test_chapter_prose_repair_regenerates_observations_instead_of_repairing_them
             content=SimpleNamespace(
                 get_packed=AsyncMock(
                     return_value=SimpleNamespace(
-                        unpack_and_verify=lambda: json.dumps(
-                            {"authorized_components": ["prose", "observations"]},
-                            ensure_ascii=False,
-                        ).encode()
+                        unpack_and_verify=lambda: _chapter_repair_contract_bytes(
+                            ["prose", "observations"]
+                        )
                     )
                 )
             ),
@@ -613,6 +650,28 @@ def test_chapter_prose_repair_regenerates_observations_instead_of_repairing_them
         workspace.lock_version += 1
         third = await driver._decide_chapter(**arguments)
         assert third.kind == "submit_chapter"
+
+        derived_review = SimpleNamespace(
+            id="chapter-derived-closure-review",
+            decision="local_repair",
+            submission_id="repaired-submission",
+            repair_contract_ref_id="derived-closure-contract-ref",
+        )
+        workspace.active_repair_review_id = derived_review.id
+        chapters.get_review.return_value = derived_review
+        store.content.get_packed.return_value = SimpleNamespace(
+            unpack_and_verify=lambda: _chapter_repair_contract_bytes(
+                ["canon"],
+                stage="derived_dependency_closure",
+            )
+        )
+        fourth = await driver._decide_chapter(**arguments)
+        assert fourth.task_kind == "chapter.repair.observation"
+
+        applied_tasks.add("chapter.repair.observation")
+        workspace.lock_version += 1
+        fifth = await driver._decide_chapter(**arguments)
+        assert fifth.kind == "submit_chapter"
 
     asyncio.run(exercise())
 
@@ -942,6 +1001,7 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
         }
     if task_kind in {"evaluate.arc", "verify_repair.arc"}:
         return {
+            "guidance_authority_judgment": "not_present",
             "decision": "pass",
             "summary": "故事弧符合全书合同与当前 Canon。",
             "issues": [],
@@ -997,6 +1057,7 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
         }
     if task_kind in {"evaluate.chapter", "verify_repair.chapter"}:
         return {
+            "guidance_authority_judgment": "not_present",
             "decision": "pass",
             "summary": "章节计划、正文、观察与上游合同一致。",
             "issues": [],
@@ -1688,7 +1749,7 @@ def test_context_assembly_failure_binds_real_harness_action_and_requires_action_
 
 
 @pytest.mark.parametrize("operation_mode", ["full_auto", "participatory"])
-def test_driver_completes_twenty_chapter_book_with_only_product_gates(
+def test_synthetic_driver_completes_twenty_chapter_book_with_only_product_gates(
     tmp_path: Path,
     operation_mode: str,
 ) -> None:

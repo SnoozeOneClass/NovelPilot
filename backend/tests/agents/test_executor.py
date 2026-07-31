@@ -48,6 +48,9 @@ from app.store.command_bus import CommandBus
 from app.store.execution import AttemptSummaryRecord, ExecutionRepository
 
 
+pytestmark = pytest.mark.synthetic_integration
+
+
 class RecordingLivePublisher:
     def __init__(self) -> None:
         self.events: list[AgentLiveEvent] = []

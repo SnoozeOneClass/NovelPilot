@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.agents.contracts import ChapterObservationResult
+from app.agents.contracts import (
+    ChapterEvaluationIssue,
+    ChapterObservationResult,
+    ChapterRepairComponent,
+)
 
 ChapterComponent = Literal[
     "plan",
@@ -19,6 +23,83 @@ ChapterReviewDecision = Literal[
     "local_repair",
     "escalate_to_arc",
 ]
+ChapterRepairStage = Literal[
+    "primary_semantic",
+    "derived_dependency_closure",
+]
+
+
+class ChapterRepairContract(BaseModel):
+    """Harness-owned repair authority shared by Domain delivery and Route."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        serialize_by_alias=True,
+    )
+
+    contract_schema: Literal["chapter-repair-contract-v5"] = Field(
+        default="chapter-repair-contract-v5",
+        alias="schema",
+    )
+    repair_stage: ChapterRepairStage
+    authorized_components: list[ChapterRepairComponent] = Field(min_length=1)
+    issues: list[ChapterEvaluationIssue] = Field(min_length=1)
+    issue_fingerprints: list[str] = Field(min_length=1)
+    stalled_issue_fingerprints: list[str] = Field(default_factory=list)
+
+    @field_validator("authorized_components")
+    @classmethod
+    def _unique_components(
+        cls,
+        value: list[ChapterRepairComponent],
+    ) -> list[ChapterRepairComponent]:
+        if len(value) != len(set(value)):
+            raise ValueError("Chapter repair components must be unique.")
+        return value
+
+    @field_validator("issue_fingerprints", "stalled_issue_fingerprints")
+    @classmethod
+    def _valid_fingerprints(cls, value: list[str]) -> list[str]:
+        if any(not fingerprint.strip() for fingerprint in value):
+            raise ValueError("Chapter repair fingerprints must be non-blank.")
+        return value
+
+    @field_validator("stalled_issue_fingerprints")
+    @classmethod
+    def _unique_stalled_fingerprints(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("Stalled Chapter repair fingerprints must be unique.")
+        return value
+
+    @model_validator(mode="after")
+    def _stage_scope(self) -> ChapterRepairContract:
+        scope = set(self.authorized_components)
+        issue_scope = {
+            component
+            for issue in self.issues
+            for component in issue.affected_components
+        }
+        if scope != issue_scope:
+            raise ValueError(
+                "Chapter repair authorization must equal the typed issue component union."
+            )
+        if "plan" in scope and scope != {"plan"}:
+            raise ValueError(
+                "A Chapter plan repair must be the only authorized component."
+            )
+        if self.repair_stage == "derived_dependency_closure" and not scope <= {
+            "observations",
+            "canon",
+        }:
+            raise ValueError(
+                "A derived dependency closure may change only observations or Canon."
+            )
+        if len(self.issue_fingerprints) != len(self.issues):
+            raise ValueError(
+                "Each Chapter repair issue requires one frozen semantic fingerprint."
+            )
+        return self
 
 
 class CreateChapterRequest(BaseModel):

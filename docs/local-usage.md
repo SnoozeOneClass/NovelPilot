@@ -92,6 +92,7 @@ scripts\python.cmd scripts/migrate_profile_config.py
 ```text
 data/novelpilot.sqlite3       # 唯一权威应用库
 data/backups/                 # 一致快照及 manifest
+data/backend-real-acceptance/ # 5.4-mini 工程真实场景报告与隔离数据库
 data/live-observations/       # 四轮真实观测报告
 config/*.local.json           # Profile 与本地密钥
 output/                       # Markdown 导出及保留的旧输出
@@ -121,32 +122,37 @@ npm.cmd run backend:restore -- data\backups\novelpilot-2026-07-23.sqlite3
 
 备份可以来自当前迁移树中的旧 schema revision，因此应在不兼容迁移前先执行备份命令。Restore 验证 manifest、文件 hash、integrity、FK、备份自身 revision 与 Blob hash，在 staging 库升级到当前 head 后再原子替换整库。它不支持把一个项目合并进另一个正在运行的数据库。
 
-## 7. 离线质量门禁
+## 7. 后端质量与真实场景门禁
 
-```powershell
-npm.cmd run backend:migrate:test
-npm.cmd run backend:schema-check
-npm.cmd run backend:lint
-npm.cmd run backend:typecheck
-npm.cmd run backend:test
-npm.cmd run frontend:lint
-npm.cmd run frontend:typecheck
-npm.cmd run frontend:test
-npm.cmd run frontend:build
+```cmd
+npm.cmd run test:fast
+npm.cmd run test:backend-real
 npm.cmd run acceptance
+npm.cmd run architecture:inventory
 npm.cmd run audit:secrets
 ```
 
 其中：
 
-- migration gate 执行 fresh upgrade、schema check、空库 downgrade/upgrade；
-- backend tests 覆盖数据库负约束、三层生命周期、Pydantic AI、Run Engine、恢复、API 和双模式 20 章整书；
-- acceptance 把产品能力映射到实现和离线测试，并检查旧运行路径已消失；
-- secret audit 扫描 `data/` 和 `output/` 下数据库、备份、导出与报告，发现 API key 时只报告脱敏路径、Profile id 和值类型。
+- `test:fast` 执行 fresh migration、schema check、backend lint/type check 和无模型
+  单元/契约测试。它能快速发现局部错误，但不能单独宣称后端可运行；
+- `test:backend-real` 固定显式绑定 `jemmy-gpt-5.4-mini`，先通过生产 Adapter
+  探测 structured output、正文流和 usage，再在隔离空数据库中运行 S1～S5；
+- 工程场景通过 `create_app()`、FastAPI lifespan、唯一 Run Engine、公开 API、
+  Pydantic AI、真实 Provider、Domain Command 与 SQLite Store，不提交内部结果或
+  手工写领域状态；
+- `acceptance` 先运行 fast gate，再运行付费真实场景；失败报告和场景数据库保留在
+  `data/backend-real-acceptance/`；
+- `architecture:inventory` 只检查实现与局部测试所有权，明确不是验收结论；
+- `test:backend-real` 与 `acceptance` 不会改变当前 selected Profile，也不会启动
+  `experiment:live-book`；
+- 当前后端阶段不把前端 lint/test/build 纳入验收。后端通过四次长跑后再单独优化前端；
+- secret audit 扫描 `data/` 和 `output/`，发现 API key 时只报告脱敏路径、
+  Profile id 和值类型。
 
 ## 8. 四次真实模型观测
 
-只有上一节全部通过后才执行。先启动后端，再用一个独立命令运行：
+只有工程真实场景通过后才由用户手动执行。先启动后端，再用一个独立命令运行：
 
 ```powershell
 npm.cmd run experiment:live-book

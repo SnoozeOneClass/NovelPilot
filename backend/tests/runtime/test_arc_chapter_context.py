@@ -108,6 +108,12 @@ def test_chapter_context_projects_current_and_next_without_full_arc_outline(
                 "physical evidence at assignment 3"
                 in arc_context.prompt
             )
+            arc_facts = cast(
+                dict[str, object],
+                arc_context.manifest["facts"],
+            )
+            assert arc_facts["active_applied_guidance_present"] is False
+            assert '"active_applied_guidance_present":false' in arc_context.prompt
 
             state = await ProjectStateQuery(engine).get_project(
                 foundation.project_id

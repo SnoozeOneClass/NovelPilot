@@ -9,9 +9,10 @@ from typing import Literal, cast
 
 Status = Literal["covered", "partial", "missing"]
 REPORT_SCOPE = (
-    "Static traceability inventory for the clean-slate SQLite/Pydantic-AI architecture. "
-    "A covered item has implementation and executable offline test ownership; the four-run "
-    "real-model series is deliberately a post-acceptance observation, not a success gate."
+    "Non-verdict static architecture inventory for the clean-slate SQLite/Pydantic-AI "
+    "implementation. 'Covered' means only that named source and local contract ownership "
+    "exist. It never proves that the backend production path works; that verdict requires "
+    "the paid 5.4-mini real-scenario command."
 )
 
 
@@ -268,7 +269,10 @@ CRITERIA: tuple[AcceptanceCriterion, ...] = (
             EvidenceProbe("README.md", ("Pydantic AI", "SQLite", "简历")),
             EvidenceProbe("docs/architecture.md", ("Domain Harness", "Transactional Outbox", "LT1")),
             EvidenceProbe("docs/local-usage.md", ("backend:migrate", "experiment:live-book")),
-            EvidenceProbe("docs/acceptance-traceability.md", ("工程验收", "真实观测")),
+            EvidenceProbe(
+                "docs/acceptance-traceability.md",
+                ("三层证据", "工程真实场景验收", "用户四次长跑"),
+            ),
         ),
     ),
 )
@@ -331,7 +335,9 @@ def build_report(repo_root: Path) -> dict[str, object]:
     }
     return {
         "scope": REPORT_SCOPE,
-        "engineering_acceptance_requires_live_success": False,
+        "is_acceptance_verdict": False,
+        "project_acceptance_command": "npm.cmd run acceptance",
+        "real_scenario_command": "npm.cmd run test:backend-real",
         "summary": summary,
         "criteria": items,
     }
@@ -341,7 +347,7 @@ def render_markdown(report: dict[str, object]) -> str:
     summary = report["summary"]
     assert isinstance(summary, dict)
     lines = [
-        "# NovelPilot Clean-Slate Acceptance Report",
+        "# NovelPilot Architecture Ownership Inventory",
         "",
         str(report["scope"]),
         "",
@@ -368,7 +374,9 @@ def render_markdown(report: dict[str, object]) -> str:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Generate the clean-slate acceptance inventory.")
+    parser = argparse.ArgumentParser(
+        description="Generate a non-verdict clean-slate architecture ownership inventory."
+    )
     parser.add_argument("--json", action="store_true")
     return parser
 

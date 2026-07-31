@@ -388,6 +388,7 @@ def test_chapter_revision_creates_v2_without_increasing_committed_chapter_count(
                 chapter_baseline_id=first.result.chapter_baseline_id,
                 canon_baseline_id=first.result.canon_after_id,
                 workspace_lock_version=activated.result.workspace_lock_version,
+                source_feedback_id=feedback.result.feedback_id,
                 result=ChapterPlanProposal(
                     title="The Witness Who Remembered Twice",
                     purpose="Tighten the reveal of the first physical trace.",
@@ -422,6 +423,7 @@ def test_chapter_revision_creates_v2_without_increasing_committed_chapter_count(
                 chapter_baseline_id=first.result.chapter_baseline_id,
                 canon_baseline_id=first.result.canon_after_id,
                 workspace_lock_version=plan_applied.result.workspace_lock_version,
+                source_feedback_id=feedback.result.feedback_id,
                 output_mode="text_streaming",
                 result=ChapterDraftResult(
                     prose=(
@@ -457,6 +459,7 @@ def test_chapter_revision_creates_v2_without_increasing_committed_chapter_count(
                 chapter_baseline_id=first.result.chapter_baseline_id,
                 canon_baseline_id=first.result.canon_after_id,
                 workspace_lock_version=draft_applied.result.workspace_lock_version,
+                source_feedback_id=feedback.result.feedback_id,
                 result=ChapterObservationResult(
                     summary="The tighter reveal preserves the established outcome.",
                     established_facts=[
@@ -505,7 +508,11 @@ def test_chapter_revision_creates_v2_without_increasing_committed_chapter_count(
                 chapter_baseline_id=first.result.chapter_baseline_id,
                 canon_baseline_id=first.result.canon_after_id,
                 workspace_lock_version=observed.result.workspace_lock_version,
+                source_feedback_id=feedback.result.feedback_id,
                 result=LayerEvaluationResult(
+                    guidance_authority_judgment=(
+                        "compatible_with_current_authority"
+                    ),
                     decision="pass",
                     summary="The Chapter-only revision is coherent and Canon-neutral.",
                 ),

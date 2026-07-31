@@ -799,6 +799,11 @@ class ChapterObservationResult(BaseModel):
 
 
 ChapterRepairComponent = Literal["plan", "prose", "observations", "canon"]
+GuidanceAuthorityJudgment = Literal[
+    "not_present",
+    "compatible_with_current_authority",
+    "requires_parent_review",
+]
 
 
 class ChapterObservationsRepair(BaseModel):
@@ -1003,6 +1008,16 @@ class ChapterEvaluationIssue(EvaluationIssue):
 class LayerEvaluationResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    guidance_authority_judgment: GuidanceAuthorityJudgment = Field(
+        description=(
+            "Judge active applied user guidance itself, independently of whether the "
+            "candidate followed it. The model-visible active_applied_guidance_present fact "
+            "is authoritative: false requires not_present; true forbids not_present. For "
+            "present guidance, use compatible_with_current_authority only when the requested "
+            "effect can be fully honored without changing the formal Arc or Book authority, "
+            "and requires_parent_review when honoring it would require parent authority."
+        ),
+    )
     decision: Literal["pass", "local_repair", "escalate_to_arc"] = Field(
         description=(
             "Use local_repair only for a bounded chapter repair; use "
@@ -1021,6 +1036,13 @@ class LayerEvaluationResult(BaseModel):
 
     @model_validator(mode="after")
     def _decision_payload(self) -> LayerEvaluationResult:
+        if (
+            self.guidance_authority_judgment == "requires_parent_review"
+            and self.decision != "escalate_to_arc"
+        ):
+            raise ValueError(
+                "Chapter guidance requiring parent authority must escalate to Arc."
+            )
         if self.decision == "pass" and self.issues:
             raise ValueError("A passing Chapter evaluation cannot carry blocking issues.")
         if self.decision != "pass" and not self.issues:

@@ -299,9 +299,15 @@ def test_cross_field_semantic_rules_are_present_in_model_visible_contracts() -> 
     assert "required conclusion must be no stronger than the observable evidence" in (
         arc_evaluation.task_instructions
     )
-    assert arc_evaluation.output_schema_version == 4
-    assert arc_evaluation.evaluation_strategy_version == 5
-    assert arc_evaluation.rubric_id == "arc-candidate-rubric-v5"
+    assert "active applied Arc guidance" in arc_evaluation.task_instructions
+    assert "guidance request itself" in arc_evaluation.task_instructions
+    assert "active_applied_guidance_present" in arc_evaluation.task_instructions
+    assert "guidance_authority_judgment" in arc_evaluation.output_schema["required"]
+    assert arc_evaluation.output_schema_version == 6
+    assert arc_evaluation.evaluation_strategy_version == 8
+    assert arc_evaluation.rubric_id == "arc-candidate-rubric-v7"
+    assert arc_evaluation.context_policy_id == "arc-evaluator-context-v5"
+    assert arc_evaluation.context_policy_version == 4
 
     chapter_properties = chapter_evaluation.output_schema["properties"]
     assert "escalation_target" not in chapter_properties
@@ -315,6 +321,12 @@ def test_cross_field_semantic_rules_are_present_in_model_visible_contracts() -> 
     )
     assert "new assignment-fulfillment issue" in chapter_evaluation.task_instructions
     assert "escalate_to_arc carries only" in chapter_evaluation.task_instructions
+    assert "active applied Chapter guidance" in chapter_evaluation.task_instructions
+    assert "guidance request itself" in chapter_evaluation.task_instructions
+    assert (
+        "guidance_authority_judgment"
+        in chapter_evaluation.output_schema["required"]
+    )
 
 
 def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
@@ -431,10 +443,11 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
         chapter_evaluation.task_instructions
     )
     assert "Harness derives" in chapter_evaluation.task_instructions
-    assert chapter_evaluation.output_schema_version == 5
-    assert chapter_evaluation.evaluation_strategy_version == 6
-    assert chapter_evaluation.rubric_id == "chapter-candidate-rubric-v7"
-    assert chapter_evaluation.context_policy_id == "chapter-evaluator-context-v4"
+    assert chapter_evaluation.output_schema_version == 7
+    assert chapter_evaluation.evaluation_strategy_version == 9
+    assert chapter_evaluation.rubric_id == "chapter-candidate-rubric-v9"
+    assert chapter_evaluation.context_policy_id == "chapter-evaluator-context-v5"
+    assert chapter_evaluation.context_policy_version == 4
 
     chapter_repair_evaluation = DEFAULT_TASK_REGISTRY.get(
         role="evaluator",
@@ -444,19 +457,23 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
     chapter_repair_strategy = DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
         "verify_repair.chapter"
     )
-    assert chapter_repair_evaluation.output_schema_version == 5
-    assert chapter_repair_evaluation.evaluation_strategy_version == 6
-    assert chapter_repair_evaluation.rubric_id == "chapter-repair-rubric-v7"
+    assert chapter_repair_evaluation.output_schema_version == 7
+    assert chapter_repair_evaluation.evaluation_strategy_version == 10
+    assert chapter_repair_evaluation.rubric_id == "chapter-repair-rubric-v10"
     assert (
         chapter_repair_evaluation.context_policy_id
-        == "chapter-repair-verification-context-v4"
+        == "chapter-repair-verification-context-v5"
     )
+    assert chapter_repair_evaluation.context_policy_version == 4
     assert set(chapter_repair_strategy.legal_semantic_signals) == {
         "pass",
         "local_repair",
         "escalate_to_arc",
     }
     assert "new assignment-fulfillment issue" in (
+        chapter_repair_evaluation.task_instructions
+    )
+    assert "derived-evidence dependency closure" in (
         chapter_repair_evaluation.task_instructions
     )
 
@@ -477,15 +494,28 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
         contract_version=1,
     )
     assert "instead of merely weakening" in chapter_prose_repair.task_instructions
+    chapter_observation_repair = DEFAULT_TASK_REGISTRY.get(
+        role="chapter_writer",
+        task_kind="chapter.repair.observation",
+        contract_version=1,
+    )
+    assert (
+        chapter_observation_repair.context_policy_id
+        == "chapter-observation-repair-context-v3"
+    )
+    assert chapter_observation_repair.context_policy_version == 3
+    assert "derived dependency closure" in (
+        chapter_observation_repair.task_instructions
+    )
 
     arc_repair_evaluation = DEFAULT_TASK_REGISTRY.get(
         role="evaluator",
         task_kind="verify_repair.arc",
         contract_version=1,
     )
-    assert arc_repair_evaluation.output_schema_version == 4
-    assert arc_repair_evaluation.evaluation_strategy_version == 5
-    assert arc_repair_evaluation.rubric_id == "arc-repair-rubric-v6"
+    assert arc_repair_evaluation.output_schema_version == 6
+    assert arc_repair_evaluation.evaluation_strategy_version == 8
+    assert arc_repair_evaluation.rubric_id == "arc-repair-rubric-v8"
 
 
 def test_local_repair_patch_contracts_reject_empty_and_duplicate_changes() -> None:
@@ -671,17 +701,17 @@ def test_parent_and_evidence_review_rubrics_expose_harness_route_shape() -> None
             "book_review_required and a parent_authority_concern issue are atomic",
             "chapter_evidence_review_required and a derived_evidence_mismatch issue "
             "are atomic",
-            3,
-            3,
-            "arc-parent-contract-rubric-v4",
+            5,
+            5,
+            "arc-parent-contract-rubric-v6",
         ),
         "evaluate.book_parent_contract": (
             "Book is the top authority",
             "arc_evidence_review_required and a derived_evidence_mismatch issue "
             "are atomic",
-            3,
-            3,
-            "book-parent-contract-rubric-v3",
+            4,
+            4,
+            "book-parent-contract-rubric-v4",
         ),
         "evaluate.arc_closure": (
             "book_review_required and a parent_authority_concern issue are atomic",
@@ -731,6 +761,20 @@ def test_parent_and_evidence_review_rubrics_expose_harness_route_shape() -> None
         contract_version=1,
     )
     assert "creator_input_need" not in evidence_definition.output_schema["properties"]
+
+    arc_parent = DEFAULT_TASK_REGISTRY.get(
+        role="evaluator",
+        task_kind="evaluate.arc_parent_contract",
+        contract_version=1,
+    )
+    assert "source change request is the evaluation target" in (
+        arc_parent.task_instructions
+    )
+    assert "exact inbound Chapter-to-Arc concern" in (
+        arc_parent.output_schema["properties"]["arc_contract_judgment"][
+            "description"
+        ]
+    )
 
 
 def test_arc_contract_exposes_complete_semantic_chapter_outline() -> None:

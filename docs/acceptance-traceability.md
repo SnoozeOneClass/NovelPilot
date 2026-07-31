@@ -1,90 +1,136 @@
-# 重构验收追踪
+# 后端验收与证据追踪
 
-## 验收口径
+NovelPilot 不再把 Mock、手工插入的生命周期状态、`FunctionModel` 整书跑通，
+或源码字符串扫描解释为“后端已经可运行”。这些检查仍可用于快速定位局部错误，
+但项目级结论必须来自生产组件的真实路径。
 
-阶段 0～10 的离线门禁通过即构成重构工程验收。真实模型具有概率性和不可控 token 成本，因此四次真实模型运行属于工程完成后的表现观测，不是成功条件。
+## 三层证据
 
-| 能力 | 权威实现 | 主要离线证据 |
-| --- | --- | --- |
-| 单 SQLite、39 表、Alembic drift | `app.db` | `backend/tests/db`、`test_database_engine.py` |
-| 项目内 CAS 与删除隔离 | `app.store.content`、复合 FK | `test_content.py`、`test_constraints.py` |
-| Book workspace/review/approval/baseline | `app.domain.book` | `test_book_discussion.py`、`test_book_lifecycle.py` |
-| Book 有序 Arc 拓扑与非最终弧确定性交接 | `domain.book/authority`、`runtime.driver` | `test_completion.py`、整书 driver 参数化测试 |
-| 当前 Arc 契约、双模式审批与 formal closure | `app.domain.arc`、`domain.authority` | `test_arc_lifecycle.py`、`test_completion.py`、整书 driver 参数化测试 |
-| Chapter/Canon 原子提交 | `app.domain.chapter` | `test_chapter_lifecycle.py`、`test_revisions.py` |
-| Chapter 正文、committed established facts 与 Canon 精确来源绑定 | `domain.chapter.contracts/commands/canon` | `test_chapter_lifecycle.py`、`test_chapter_canon.py` |
-| CXT1 六字段逐任务 Context View 与 fail-closed target/权限 | `runtime.context`、`agents.registry` | `test_context_policy.py`、`test_arc_chapter_context.py`、`test_domain_driver.py` |
-| EP1 六类 blocker、开放世界事实判断与直接父层路由 | `agents.contracts/registry`、三层 evaluation contracts | `test_ep1_contract.py`、三层 lifecycle/change/completion tests |
-| Book transcript/state 分流与 completion/topology 不越级注入 | `runtime.context` | `test_context_policy.py`、`test_domain_driver.py` |
-| parent/evidence route 与 EP1 issue 原子一致 | `domain.evaluation`、`agents.registry` | `test_ep1_contract.py`、`test_registry.py`、`test_authority_feedback.py` |
-| G1 用户 guidance 一次性消费与候选来源留证 | `domain.feedback`、`runtime.context`、三层 commands | `test_feedback.py`、`test_authority_feedback.py` |
-| Formal Outcome 不依赖可变 current 指针解释历史 | 三层 baseline、`arc_closures`、`book_completions` | `test_revisions.py`、`test_change_requests.py`、`test_completion.py` |
-| Book > Arc > Chapter 直属上层审查 | `domain.change_requests/authority` | `test_change_requests.py`、`test_authority_feedback.py` |
-| AR1 与单轮向下纠正 lineage | `domain.authority`、`runtime.driver` | `test_authority_feedback.py`、`test_completion.py` |
-| Q1 顶端叙事修订与 evidence-only correction | `domain.chapter/feedback/authority` | `test_feedback.py`、`test_authority_feedback.py` |
-| Pydantic AI typed/text 输出与双流式线协议 | `app.agents.binding/transport` | `test_pydantic_ai_contract.py`、`test_binding.py`、`test_transport.py` |
-| Profile capability evidence 与无密钥快照 | `app.agents.probe`、`app.profiles` | `test_probe.py`、`test_profiles.py`、secret audit |
-| 5 次 transport retry、6 请求总预算、T1 | `agents.transport/contracts/executor`、DB check | `test_transport.py`、`test_executor.py`、schema tests |
-| 唯一 Run Engine、Pause/Retry/C1 | `app.runtime` | `backend/tests/runtime` |
-| 任务证据与 live delta 分离 | `agents.executor`、`runtime.live` | executor/live/routing tests |
-| FIFO 延迟反馈、creator wait 与正式修订 | `domain.feedback/change_requests`、`api.workspace` | feedback/change/authority/API tests |
-| Arc closure、Book handoff/completion、snapshot、Markdown | `domain.authority/snapshots/export` | completion/export/snapshot tests |
-| 显式 API、幂等、SSE 不驱动流程 | `api.workspace`、新 React App | API tests、frontend tests/build |
-| 一致备份恢复 | `db.maintenance` | `test_maintenance.py` |
-| SQLite/备份/导出/报告密钥审计 | `security.audit` | `test_secret_audit.py` |
-| 旧运行路径彻底退出 | 目录删除与单一 `app.main` | `acceptance_report.py` negative probes |
+| 层级 | 目的 | 模型 | 能得出的结论 |
+| --- | --- | --- | --- |
+| 快速单元/契约证据 | 纯函数、Schema、SQL 约束、CAS、迁移、协议错误分类 | 通常不调用 | 某个局部契约成立 |
+| 工程真实场景验收 | 生产接线、跨 Loop 交接、分层权威、恢复、真实 Provider | 固定 `jemmy-gpt-5.4-mini` | 本次目标工程场景通过 |
+| 用户四次长跑 | 约 20 章长流程成功率和未知累积问题 | 当前用户实验 Profile | 最终后端稳定性里程碑 |
 
-完整静态 inventory 由以下命令生成；任何 `partial` 或 `missing` 都返回非零状态：
+四次长跑不是工程真实场景的替代品，工程场景也不冒充长篇稳定性证明。两者会经过
+一部分相同生产代码，这是必要的交叉证据：前者定向复现已知失败类别，后者发现未知
+长流程问题。
 
-```powershell
+## 标准命令
+
+```cmd
+npm.cmd run test:fast
+npm.cmd run test:backend-real
 npm.cmd run acceptance
-```
-
-本轮语义权威验收还要求：
-
-- Book、Arc、Chapter 的 Agent Task、ReviewSubmission 和 Workspace 使用同一
-  `work_cycle_id`；repair 还绑定当前 `active_repair_review_id` 对应的精确
-  candidate review，Route 不使用时间戳或“最新评审”猜测授权；
-- 同一工作周期最多一次候选语义纠正；Provider 的五次 transport retry 只会
-  重放同一份冻结 Task Plan，不能重置语义纠正额度；
-- 两条文本完全相同的反馈仍产生不同的 feedback/work-cycle 身份，旧任务不可
-  跨周期复用；普通 guidance、用户纠正回答和评审触发纠正分别满足独立 lineage
-  约束；
-- Chapter plan/prose 修复会按依赖关系重新生成下游内容；只有
-  observations/Canon-only 修复使用 observation repair 路径；
-- 多 Arc Book completion revision 保留进入最终 Arc 时实际使用的精确
-  progress handoff，不从 final Arc 是否产生下一 handoff 反推来源；
-- `ChapterObservationResult` 不再包含混合语义的
-  `continuity_observations`，模型只输出 summary、established facts 和
-  Canon proposals；
-- 每个 committed fact 和 Canon entry 可回溯到具体 Chapter baseline 与
-  prose ref，Agent 输出不包含内部存储身份；
-- 每个 Evaluator 只有一个 CXT1 逻辑 target，历史 discussion、旧 review 和
-  已消费 feedback 不会成为隐式修复目标；
-- 前文沉默、当前章首次建立普通事实、明确相反证据、显式契约未履行、无证据
-  强结论、派生证据错误和纯文学偏好均有确定性测试；
-- Book、Arc、Chapter successor 使 current 指针后移后，旧正式记录自身的
-  baseline/content/review/approval 绑定保持不变。
-
-## 双模式整书离线验收
-
-`backend/tests/runtime/test_domain_driver.py` 使用 Pydantic AI `FunctionModel`，但经过正式 Task Registry、Agent Executor、execution evidence、Route、Domain Commands 和 SQLite Store，而不是绕过业务层直接塞 fixture。
-
-- full-auto：20 个正式 Chapter、1 次 Book 批准、0 次 Arc 批准；
-- participatory：20 个正式 Chapter、1 次 Book 批准、2 次 Arc 批准；
-- 两者都严格运行 Book 规划的两个 Arc；Arc 1 closure 确定性交接到 Arc 2，Arc 2 作为最终弧触发正式 Book completion；
-- closure 由契约与已提交事实判定，检查点只由已批准 Arc 大纲长度派生；
-- 无 Arc 滚动复盘、无 Chapter-to-Book 直达变更、无按次数完成；
-- 浏览器、SSE 和真实 Provider 均不是推进条件。
-
-## 真实观测
-
-离线工程验收后执行固定 series：
-
-```powershell
+npm.cmd run architecture:inventory
 npm.cmd run experiment:live-book
 ```
 
-命令默认使用应用当前选中的 Profile；当前冻结观测使用 OpenAI Responses Profile `jemmy-gpt-5.6-terra`（模型 `gpt-5.6-terra`，base URL `https://api.jemmy.icu/v1`）。每个 slot 只允许正常产品交互，不允许技术救援。报告保存：代码/Prompt/Profile/framework/Harness 指纹、项目 ID、模式、最终权威状态、章节/Arc/closure/handoff/gate、全部 task attempt metadata、usage、retry/repair、类型化错误、completion identity 和导出 hash。
+- `test:fast`：迁移、Schema、lint、type check 和无模型局部测试；不产生后端验收结论。
+- `test:backend-real`：先做 S0 Profile 探测，再运行 S1～S5。
+- `acceptance`：依次执行 `test:fast` 与 `test:backend-real`。
+- `architecture:inventory`：非结论性的源码所有权清单，不能代替运行。
+- `experiment:live-book`：仍由用户手动启动，保持四次长跑、当前 selected Profile
+  和无技术救援边界；任何其他测试命令都不会调用它。
 
-可能结果是 0～4 个 completed；failed 和 not_run 同样是有效观测记录。终端按权威状态变化播报，并在 60 秒无变化时输出心跳，不生成虚假完成百分比。`latest-series.json` 和批次内 `series.json` 标识实验是否仍在运行、意外中断或已完成采集，`active_observation` 只保存最新的非权威观察。series 结束后不自动分析、不修改代码、不补跑；Codex 只在结束后读取 aggregate、slot 报告与数据库证据进行集中分析。
+前端当前不属于后端验收门槛。后端通过四次真实长跑后，再单独优化前端。
+
+## 什么是工程真实场景
+
+一个场景必须同时满足：
+
+1. 从隔离的空 SQLite 数据库执行生产 Alembic migration；
+2. 通过 `create_app()` 和真实 FastAPI lifespan 创建唯一 Run Engine；
+3. 只通过公开 HTTP API 创建项目、启动、回答 Book、审批、反馈、暂停或恢复；
+4. 显式绑定 `jemmy-gpt-5.4-mini` 到 Book、Arc、Chapter、Evaluator，不修改
+   `selected_profile_id`；
+5. 使用生产 Pydantic AI binding、OpenAI Responses Adapter 和真实 Provider；
+6. task、attempt、Context、result、delivery、review、baseline、event 全由生产代码产生；
+7. 场景不得提交 Agent result、内部 task/baseline ID，或直接写数据库；
+8. 数据库仅用于只读核验权威身份、来源绑定、版本、状态和终止条件；
+9. 断言语义不变量和合法终态集合，不逐字匹配模型措辞；
+10. 失败时保留脱敏报告与隔离数据库，不修改 Prompt、Profile、模型输出或状态后续跑。
+
+`TestClient` 只替代 socket 传输，不替代应用组件。它仍会启动/关闭 lifespan，
+Run Engine 在真实异步循环运行，Provider 请求仍是外部 HTTP。
+
+## S0～S5 场景矩阵
+
+| 场景 | 真实输入/检查点 | 主要不变量 |
+| --- | --- | --- |
+| S0 Provider contract | 对 5.4-mini 执行生产 capability probe | structured output、text stream、usage 和 fingerprint 一致 |
+| S1 基础纵切 | Book discussion → Book 审批 → Arc 规划/审批 → Chapter plan/draft/observe/evaluate/commit | producer、持久化和 consumer 都成功；任务绑定具体 baseline |
+| S2 开放世界证据 | 前文沉默，当前章首次建立普通事实 | 沉默不是 `explicit_conflict`；不为证明“过去没发生”而改写历史 |
+| S3 派生证据权威 | 正文明确建立事实，Observation/Canon 从正文派生 | prose 是叙事来源；若发生 evidence-only repair，必须保持同一 prose ref |
+| S4 分层语义压力 | Chapter 反馈与 Book 正式承诺发生张力 | 同一反馈依次进入 Chapter、Arc、Book 审查；Book 可保留当前基线并授权 Arc 纠正，或让 successor 停在人工批准；下层不能直接替换上层 |
+| S5 持久恢复 | 第一章正式提交后安全暂停、关闭 lifespan、同库重开并继续 | current pointer、work cycle、delivery 和事件不靠内存流重建；任务不重复投递 |
+
+任务数和最长时间只是费用/失控保护，不是小说完成条件。每层仍由自身语义终止契约
+决定完成。
+
+## 共享验收不变量
+
+- Book、Arc、Chapter baseline 版本从 1 连续递增，successor 的 parent 指向前一版；
+- 旧 baseline 行永远保留，current 指针移动不等于覆盖历史；
+- 每个正式 Chapter 绑定实际使用的 Book、Arc、Canon-before/after 和 prose 来源；
+- 所有真实 Agent task 使用 `jemmy-gpt-5.4-mini` 的同一配置 fingerprint；
+- 同一 correction lineage 的自动轮次只能是 0 或 1；
+- 成功 task 必须被 Domain 消费或明确标记 stale；只有刻意的安全暂停可以暂留
+  一个待投递完成动作；
+- 用户反馈通过公开 API 排队并在原子动作结束后的安全边界生效；
+- 已应用的 Arc/Chapter 指导必须同时进入当前生产任务与本层 Evaluator Context；
+  `chapter.observe` 例外，它只从实际正文派生，不能把“用户想要什么”记成“正文已经写了什么”；
+- Evaluator 只判断；只有 Harness Domain Command 能提交正式状态；
+- Provider 错误与 Harness/Domain 错误必须分开分类；
+- 报告不保存 API key、完整 creator brief/feedback、Prompt、Context、正文、
+  content blob 或原始诊断附件。
+
+## 失败语义
+
+| 类型 | 验收处理 |
+| --- | --- |
+| auth、quota、network、timeout、Provider capability | 失败并标记 `external_provider`；不归咎于 Harness，也不能标记通过 |
+| 模型产生合法结构，但 delivery/Route/Domain 违反权威契约 | `harness_or_domain`，属于项目缺陷 |
+| 模型耗尽生产重试仍不能满足声明的 typed output | 真实 Profile 适配失败 |
+| 语义压力到达明确 creator decision / Book successor approval | 合法人工终态，不自动批准 |
+| 系统不能合法处理 | 必须进入带 failure code 的 `failure_paused`，不能 pending 空转 |
+
+场景 actor 没有失败 Retry 能力。失败后的数据库只用于定位第一个断裂的不变量。
+
+## 现有测试的重新分类
+
+| 既有形式 | 保留价值 | 当前分类 |
+| --- | --- | --- |
+| Schema/FK/unique/CAS/migration 测试 | 精确、快速验证数据库负约束 | 单元/契约证据 |
+| `MockTransport` 错误分类 | 确定性覆盖超时、重试和协议边界 | 单元/契约证据 |
+| `object.__new__(DomainRunDriver)`、`AsyncMock` 私有路由测试 | 可定位单个分支，但绕过生产装配 | `synthetic_integration`，不得宣称验收 |
+| `insert_successful_task()` / `seed_approved_book_and_arc()` | 低成本构造 Domain/DB 前置状态 | 仅限局部测试，真实场景禁止导入 |
+| `FunctionModel` 二十章测试 | 压测确定性 Route 与 Domain 组合 | `synthetic_integration`，不是模型/后端可用性 |
+| `run_engine_enabled=False` API 测试 | 请求验证、幂等和错误 envelope | 局部 API 契约 |
+| 静态源码 probe | 检查实现所有权和旧路径消失 | `architecture:inventory`，非 verdict |
+| S0～S5 | 生产装配、真实模型、跨层交接与权威 | 工程真实场景验收 |
+| 四次约 20 章实验 | 未知长流程稳定性 | 用户最终里程碑 |
+
+## 证据位置
+
+工程场景每次写入：
+
+```text
+data/backend-real-acceptance/
+  latest-run.json
+  <run-id>/
+    frozen-run.json
+    progress.json
+    aggregate.json
+    base-vertical-v1.json
+    open-world-evidence-v1.json
+    derived-evidence-v1.json
+    hierarchical-pressure-v1.json
+    <case>/novelpilot.sqlite3
+```
+
+报告是数据库权威证据的脱敏索引，不成为第二套小说事实。失败数据库被保留，便于在
+不重跑模型的情况下确认第一个 producer→persistence→consumer 断点。
+
+四次长跑仍写入 `data/live-observations/`，使用普通项目数据库和当前 selected
+Profile；它不会被 `acceptance` 隐式启动或重置。

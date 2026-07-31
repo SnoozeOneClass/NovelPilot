@@ -78,6 +78,19 @@ def _task_matches_workspace(
         and task.book_baseline_id == workspace.book_baseline_id
         and task.arc_baseline_id == workspace.base_arc_baseline_id
         and task.canon_baseline_id == workspace.canon_baseline_id
+        and task.source_arc_candidate_review_id
+        == workspace.active_repair_review_id
+        and task.source_arc_parent_review_id
+        == workspace.source_arc_parent_review_id
+        and task.source_arc_closure_review_id
+        == workspace.source_arc_closure_review_id
+        and task.source_book_parent_review_id
+        == workspace.source_book_parent_review_id
+        and task.source_book_completion_review_id
+        == workspace.source_book_completion_review_id
+        and task.source_book_progress_handoff_id
+        == workspace.book_progress_handoff_id
+        and task.source_feedback_id == workspace.source_feedback_id
         and workspace.state == "active"
     )
 
@@ -1146,11 +1159,28 @@ class ArcCommandService:
                 or workspace.work_cycle_id != submission.work_cycle_id
                 or task.source_arc_candidate_review_id
                 != workspace.active_repair_review_id
+                or task.source_feedback_id != workspace.source_feedback_id
+                or task.source_arc_parent_review_id
+                != workspace.source_arc_parent_review_id
+                or task.source_arc_closure_review_id
+                != workspace.source_arc_closure_review_id
+                or task.source_book_parent_review_id
+                != workspace.source_book_parent_review_id
+                or task.source_book_completion_review_id
+                != workspace.source_book_completion_review_id
+                or task.source_book_progress_handoff_id
+                != workspace.book_progress_handoff_id
                 or task.book_baseline_id != submission.book_baseline_id
                 or task.arc_baseline_id != submission.base_arc_baseline_id
                 or task.canon_baseline_id != submission.canon_baseline_id
             ):
                 raise CommandPreconditionError("Arc evaluation facts are stale or mismatched.")
+            if (
+                evaluation.guidance_authority_judgment == "not_present"
+            ) == (workspace.source_feedback_id is not None):
+                raise CommandPreconditionError(
+                    "Arc evaluation did not classify its exact active guidance."
+                )
             if evaluation.decision == "pass":
                 current_book_chapter_count = (
                     await session.chapters.count_committed_for_book(

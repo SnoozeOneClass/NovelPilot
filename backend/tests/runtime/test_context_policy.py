@@ -89,6 +89,17 @@ def test_every_context_policy_is_task_specific_and_cxt1_complete() -> None:
     assert "committed_observations" in (
         CONTEXT_POLICY_REGISTRY["verify_repair.chapter"].allowed_groups
     )
+    for task_kind, guidance_group in (
+        ("arc.plan", "arc_guidance"),
+        ("evaluate.arc", "arc_guidance"),
+        ("chapter.plan", "chapter_guidance"),
+        ("chapter.draft", "chapter_guidance"),
+        ("evaluate.chapter", "chapter_guidance"),
+    ):
+        assert guidance_group in CONTEXT_POLICY_REGISTRY[task_kind].allowed_groups
+    assert "chapter_guidance" not in (
+        CONTEXT_POLICY_REGISTRY["chapter.observe"].allowed_groups
+    )
     assert "arc_chapter_window" not in (
         CONTEXT_POLICY_REGISTRY["chapter.observe"].allowed_groups
     )

@@ -22,8 +22,10 @@ from app.db.engine import create_sqlite_async_engine
 from app.db.maintenance import alembic_config
 from app.db.schema import (
     arc_baselines,
+    arc_book_change_requests,
     arc_parent_reviews,
     arc_workspaces,
+    book_workspaces,
     canon_baselines,
     chapter_baselines,
     chapter_arc_change_requests,
@@ -37,6 +39,7 @@ from app.domain.authority import (
     AuthorityTaskFailure,
     LoopAuthorityCommandService,
     RecordArcParentReviewRequest,
+    RecordBookParentReviewRequest,
 )
 from app.domain.chapter.commands import (
     ChapterCommandService,
@@ -55,6 +58,7 @@ from app.domain.change_requests import (
 )
 from app.domain.evaluation import (
     ArcParentContractEvaluation,
+    BookParentContractEvaluation,
     ChapterEvidenceTarget,
     ChapterEvidenceCorrectionEvaluation,
     CreatorInputNeed,
@@ -93,6 +97,7 @@ async def _prepare_arc_parent_fixture(
         target_chapter_count=2,
         canon_change=False,
         evaluation=LayerEvaluationResult(
+            guidance_authority_judgment="not_present",
             decision="escalate_to_arc",
             summary="The Chapter preserves evidence that requires Arc authority.",
             issues=[
@@ -175,6 +180,107 @@ async def _record_arc_parent(
         idempotency_key=f"{suffix}:record",
     )
     return recorded.result.review_id
+
+
+def test_book_parent_review_uses_relational_source_arc_baseline(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "book-parent-relational-source.sqlite3"
+    command.upgrade(alembic_config(database), "head")
+
+    async def exercise() -> None:
+        engine = create_sqlite_async_engine(database)
+        try:
+            fixture = await _prepare_arc_parent_fixture(
+                engine,
+                project_id="book-parent-relational-source",
+            )
+            foundation = fixture.chapter.foundation
+            await _record_arc_parent(
+                engine,
+                fixture=fixture,
+                suffix="book-parent-source-arc",
+                evaluation=ArcParentContractEvaluation(
+                    arc_contract_judgment="remains_applicable",
+                    book_review_concern="book_review_required",
+                    chapter_evidence_concern="not_required",
+                    summary=(
+                        "The requested change affects the approved Book promise."
+                    ),
+                    issues=[
+                        EvaluationIssue(
+                            kind="parent_authority_concern",
+                            code="book_promise_change_requested",
+                            subject="approved evidence-preservation promise",
+                            summary=(
+                                "Only Book authority may decide whether to replace "
+                                "the evidence-preservation promise."
+                            ),
+                            evidence=[
+                                "The Chapter request asks Arc to reverse a Book promise."
+                            ],
+                        )
+                    ],
+                ),
+                lineage_id="book-parent-source-lineage",
+                correction_round=0,
+            )
+            async with engine.connect() as connection:
+                request_id = await connection.scalar(
+                    select(arc_book_change_requests.c.id).where(
+                        arc_book_change_requests.c.arc_id
+                        == foundation.arc_id
+                    )
+                )
+                book_lock = await connection.scalar(
+                    select(book_workspaces.c.lock_version).where(
+                        book_workspaces.c.book_id == foundation.book_id
+                    )
+                )
+            assert request_id is not None and book_lock is not None
+
+            task_id, attempt_id = await insert_successful_task(
+                engine,
+                project_id=foundation.project_id,
+                run_id=foundation.run_id,
+                task_id="book-parent-source-book:task",
+                attempt_id="book-parent-source-book:attempt",
+                role="evaluator",
+                task_kind="evaluate.book_parent_contract",
+                scope_layer="book",
+                book_id=foundation.book_id,
+                book_baseline_id=foundation.book_baseline_id,
+                arc_baseline_id=None,
+                canon_baseline_id=foundation.canon_baseline_id,
+                workspace_lock_version=book_lock,
+                correction_lineage_id="book-parent-source-lineage",
+                correction_lineage_origin="review_initiated",
+                automatic_correction_round=0,
+                source_arc_book_request_id=request_id,
+                result=BookParentContractEvaluation(
+                    book_contract_judgment="remains_applicable",
+                    arc_evidence_concern="not_required",
+                    summary="The current Book promise remains applicable.",
+                ),
+            )
+            recorded = await LoopAuthorityCommandService(
+                CommandBus(engine)
+            ).record_book_parent_review(
+                RecordBookParentReviewRequest(
+                    project_id=foundation.project_id,
+                    book_id=foundation.book_id,
+                    request_id=request_id,
+                    task_id=task_id,
+                    attempt_id=attempt_id,
+                ),
+                idempotency_key="book-parent-source:record",
+            )
+            assert recorded.result.disposition == "keep_book"
+            assert recorded.result.downstream_action == "arc_correction_opened"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
 
 
 def _creator_need() -> CreatorInputNeed:
@@ -517,6 +623,7 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
                 foundation=current_foundation,
                 idempotency_suffix=":source",
                 evaluation=LayerEvaluationResult(
+                    guidance_authority_judgment="not_present",
                     decision="escalate_to_arc",
                     summary="Arc authority must inspect earlier derived evidence.",
                     issues=[
@@ -599,6 +706,7 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
                 arc_id=first.foundation.arc_id,
                 chapter_id=first.chapter_id,
                 semantic_goal="Correct only the derived Chapter evidence.",
+                source_arc_parent_review_id=parent_review_id,
             )
             correction_items = correction_context.manifest["items"]
             assert not any(
