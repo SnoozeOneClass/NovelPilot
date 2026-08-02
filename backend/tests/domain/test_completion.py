@@ -46,6 +46,17 @@ from app.domain.authority import (
     RecordArcClosureReviewRequest,
     RecordBookCompletionReviewRequest,
 )
+from app.domain.book.commands import BookCommandService
+from app.domain.book.contracts import (
+    ApplyBookCandidateTaskRequest,
+    BookArcContract,
+    BookArcTopologySuffix,
+    BookCompletionRequirement,
+    BookCreativeConstraints,
+    BookRollingPlan,
+    BookSuccessorCandidateProposal,
+    CompletionContract,
+)
 from app.domain.chapter.commands import ChapterCommandService
 from app.domain.chapter.contracts import CommitChapterRequest
 from app.domain.commands import CommandPreconditionError
@@ -887,6 +898,171 @@ def test_final_second_arc_completion_revision_keeps_the_exact_prior_handoff(
                 == "source_book_completion_review"
             )
             assert completion_review_items[0]["use"] == "verification"
+
+            successor = BookSuccessorCandidateProposal(
+                direction=(
+                    "The verified history remains valid while one future Arc resolves "
+                    "the still-open central memory conflict."
+                ),
+                constraints=BookCreativeConstraints(
+                    genre_reader_promise="A fair-play memory mystery.",
+                    premise_story_engine=(
+                        "Physical evidence exposes each remaining memory edit."
+                    ),
+                    stable_world_invariants=[
+                        "Physical evidence cannot be retroactively edited."
+                    ],
+                    stable_character_invariants=[
+                        "The investigator follows verifiable evidence."
+                    ],
+                    core_selling_points=["Evidence-bound reversals"],
+                    prohibited_outcomes=["Do not erase committed Arc history."],
+                ),
+                selected_title="Echo Testimony",
+                rolling_plan=BookRollingPlan(
+                    long_term_character_directions=[
+                        "The investigator accepts the final cost of verified truth."
+                    ],
+                    whole_book_pacing_strategy=(
+                        "Add only the future Arc needed by the unresolved requirement."
+                    ),
+                    ending_tendency="Resolve the central conflict without rewriting history.",
+                    arc_planning_guidelines=[
+                        "The successor Arc must establish the unresolved completion evidence."
+                    ],
+                    whole_book_scale_guidance="The prior Chapter estimate remains advisory.",
+                ),
+                completion_contract=CompletionContract(
+                    completion_requirements=[
+                        BookCompletionRequirement(
+                            requirement_key="memory_conflict_resolved",
+                            description="Resolve the central memory conflict.",
+                            evidence_expectation=(
+                                "A future committed Chapter proves the final resolution."
+                            ),
+                        )
+                    ]
+                ),
+                arc_topology_suffix=BookArcTopologySuffix(
+                    arcs=[
+                        BookArcContract(
+                            whole_book_role="Resolve the still-open completion requirement.",
+                            core_goal=(
+                                "Establish the final physical proof of the memory conflict."
+                            ),
+                            handoff_from_previous=(
+                                "Continue from both immutable formal Arc closures."
+                            ),
+                            exit_conditions=[
+                                "Committed evidence resolves the central memory conflict."
+                            ],
+                            completion_requirement_keys=[
+                                "memory_conflict_resolved"
+                            ],
+                            is_final=True,
+                        )
+                    ]
+                ),
+            )
+            invalid_successor = successor.model_copy(
+                update={
+                    "arc_topology_suffix": BookArcTopologySuffix(
+                        arcs=[
+                            successor.arc_topology_suffix.arcs[0].model_copy(
+                                update={"completion_requirement_keys": []}
+                            )
+                        ]
+                    )
+                }
+            )
+            invalid_task, invalid_attempt = await insert_successful_task(
+                engine,
+                project_id=second.chapter.foundation.project_id,
+                run_id=second.chapter.foundation.run_id,
+                task_id="completion-second-arc:invalid-book-revise",
+                attempt_id="completion-second-arc:invalid-book-revise:attempt",
+                role="book_strategist",
+                task_kind="book.revise",
+                scope_layer="book",
+                book_id=second.chapter.foundation.book_id,
+                book_baseline_id=second.chapter.foundation.book_baseline_id,
+                canon_baseline_id=second.canon_baseline_id,
+                workspace_lock_version=opened.result.workspace_lock_version,
+                source_book_completion_review_id=review_id,
+                source_book_progress_handoff_id=handoff.result.handoff_id,
+                result=invalid_successor,
+            )
+            book_service = BookCommandService(CommandBus(engine))
+            with pytest.raises(
+                CommandPreconditionError,
+                match="must be owned by a mutable future Arc",
+            ):
+                await book_service.apply_candidate_result(
+                    ApplyBookCandidateTaskRequest(
+                        project_id=second.chapter.foundation.project_id,
+                        book_id=second.chapter.foundation.book_id,
+                        task_id=invalid_task,
+                        attempt_id=invalid_attempt,
+                        expected_workspace_lock_version=(
+                            opened.result.workspace_lock_version
+                        ),
+                    ),
+                    idempotency_key="completion-second-arc:reject-unowned-successor",
+                )
+
+            revise_task, revise_attempt = await insert_successful_task(
+                engine,
+                project_id=second.chapter.foundation.project_id,
+                run_id=second.chapter.foundation.run_id,
+                task_id="completion-second-arc:book-revise",
+                attempt_id="completion-second-arc:book-revise:attempt",
+                role="book_strategist",
+                task_kind="book.revise",
+                scope_layer="book",
+                book_id=second.chapter.foundation.book_id,
+                book_baseline_id=second.chapter.foundation.book_baseline_id,
+                canon_baseline_id=second.canon_baseline_id,
+                workspace_lock_version=opened.result.workspace_lock_version,
+                source_book_completion_review_id=review_id,
+                source_book_progress_handoff_id=handoff.result.handoff_id,
+                result=successor,
+            )
+            applied = await book_service.apply_candidate_result(
+                ApplyBookCandidateTaskRequest(
+                    project_id=second.chapter.foundation.project_id,
+                    book_id=second.chapter.foundation.book_id,
+                    task_id=revise_task,
+                    attempt_id=revise_attempt,
+                    expected_workspace_lock_version=opened.result.workspace_lock_version,
+                ),
+                idempotency_key="completion-second-arc:apply-successor",
+            )
+            evaluation_context = await HarnessContextBuilder(engine).build(
+                task_kind="evaluate.book",
+                project_id=second.chapter.foundation.project_id,
+                book_id=second.chapter.foundation.book_id,
+                arc_id=None,
+                chapter_id=None,
+                semantic_goal="Evaluate the completion-driven Book successor.",
+                source_book_completion_review_id=review_id,
+                source_book_progress_handoff_id=handoff.result.handoff_id,
+            )
+            state_marker = "Model-visible semantic state and counters:\n"
+            visible_state = next(
+                line
+                for line in evaluation_context.prompt.split(
+                    state_marker, maxsplit=1
+                )[1].splitlines()
+                if line.strip()
+            )
+            assert '"candidate_kind":"successor"' in visible_state
+            assert '"historical_prefix_arc_count":2' in visible_state
+            assert '"candidate_arc_contract_count":3' in visible_state
+            assert '"candidate_final_arc_ordinal":3' in visible_state
+            assert '"book_arc_contract_count"' not in visible_state
+            assert applied.result.workspace_lock_version == (
+                opened.result.workspace_lock_version + 1
+            )
         finally:
             await engine.dispose()
 

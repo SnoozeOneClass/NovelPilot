@@ -125,7 +125,7 @@ def test_book_revision_requires_review_and_user_approval_then_stales_active_arc_
                 completion_contract=CompletionContract(
                     completion_requirements=[
                         BookCompletionRequirement(
-                            requirement_key="central_memory_conflict_resolved",
+                            requirement_key="memory_conflict_resolved",
                             description="Resolve the central memory conflict.",
                             evidence_expectation="Committed Chapters prove the resolution.",
                         )
@@ -138,6 +138,7 @@ def test_book_revision_requires_review_and_user_approval_then_stales_active_arc_
                             core_goal="Confront the operator with verified evidence.",
                             handoff_from_previous="Continue the current active Arc.",
                             exit_conditions=["The central edit is resolved."],
+                            completion_requirement_keys=["memory_conflict_resolved"],
                             is_final=True,
                         )
                     ]
@@ -193,6 +194,13 @@ def test_book_revision_requires_review_and_user_approval_then_stales_active_arc_
                 result=BookEvaluation(
                     decision="pass",
                     summary="The future-only revision preserves committed history.",
+                    requirement_coverage=[
+                        {
+                            "requirement_key": "memory_conflict_resolved",
+                            "judgment": "aligned",
+                            "rationale": "The revised final Arc resolves the requirement.",
+                        }
+                    ],
                 ),
             )
             reviewed = await book_service.record_review(

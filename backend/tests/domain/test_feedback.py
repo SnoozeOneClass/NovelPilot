@@ -396,6 +396,13 @@ def test_identical_feedback_bytes_bind_the_exact_new_work_cycle(
                 result=BookEvaluation(
                     decision="pass",
                     summary="Fixture payload for exact applied-task identity.",
+                    requirement_coverage=[
+                        {
+                            "requirement_key": "memory_conflict_resolved",
+                            "judgment": "aligned",
+                            "rationale": "Fixture coverage remains aligned.",
+                        }
+                    ],
                 ),
             )
             async with UnitOfWork(engine, begin_mode="IMMEDIATE") as store:

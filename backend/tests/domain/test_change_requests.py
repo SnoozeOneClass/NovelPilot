@@ -118,7 +118,7 @@ async def _commit_book_v2(
         completion_contract=CompletionContract(
             completion_requirements=[
                 BookCompletionRequirement(
-                    requirement_key="central_memory_conflict_resolved",
+                    requirement_key="memory_conflict_resolved",
                     description="Resolve the central memory conflict.",
                     evidence_expectation="Committed Chapters prove the resolution.",
                 )
@@ -133,6 +133,7 @@ async def _commit_book_v2(
                     exit_conditions=[
                         "The escalated reveal is supported and resolved."
                     ],
+                    completion_requirement_keys=["memory_conflict_resolved"],
                     is_final=True,
                 )
             ]
@@ -188,6 +189,13 @@ async def _commit_book_v2(
         result=BookEvaluation(
             decision="pass",
             summary="The Book revision resolves the explicit lower-layer request.",
+            requirement_coverage=[
+                {
+                    "requirement_key": "memory_conflict_resolved",
+                    "judgment": "aligned",
+                    "rationale": "The revised final Arc resolves the requirement.",
+                }
+            ],
         ),
     )
     reviewed = await service.record_review(

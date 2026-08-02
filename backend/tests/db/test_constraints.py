@@ -310,6 +310,13 @@ def test_delivery_failure_states_require_result_and_error_consistency(
                 result=BookEvaluation(
                     decision="pass",
                     summary="The candidate passes for this constraint fixture.",
+                    requirement_coverage=[
+                        {
+                            "requirement_key": "fixture_complete",
+                            "judgment": "aligned",
+                            "rationale": "The fixture requirement is covered.",
+                        }
+                    ],
                 ),
             )
 

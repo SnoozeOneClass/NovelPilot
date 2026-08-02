@@ -13,6 +13,7 @@ from app.agents.contracts import BookDiscussionResult
 from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
 from app.db.uow import StoreSession
 from app.domain.book.contracts import (
+    BOOK_REPAIRABLE_COMPONENTS,
     ApplyBookCandidateRequest,
     ApplyBookCandidateResult,
     ApplyBookCandidateTaskRequest,
@@ -39,6 +40,7 @@ from app.domain.book.contracts import (
     SubmitBookRequest,
     SubmitBookResult,
 )
+from app.domain.evaluation import BookCompletionEvaluation
 from app.domain.book.discussion import bind_agent_result, bind_user_input
 from app.domain.commands import (
     Actor,
@@ -94,6 +96,10 @@ def _merge_book_repair(
     topology_effective_after_arc_ordinal: int,
 ) -> BookCandidatePack:
     authorized = set(contract.authorized_components)
+    if authorized != set(BOOK_REPAIRABLE_COMPONENTS):
+        raise CommandPreconditionError(
+            "Book repair contract does not match the Harness-declared same-layer envelope."
+        )
     requested = {change.component for change in patch.changes}
     unauthorized = requested.difference(authorized)
     if unauthorized:
@@ -115,6 +121,161 @@ def _merge_book_repair(
     if candidate == current:
         raise CommandPreconditionError("Book repair result made no authorized change.")
     return candidate
+
+
+def _validate_book_completion_ownership(
+    *,
+    completion_contract: CompletionContract,
+    arc_topology: BookArcTopology,
+    previous_contract: CompletionContract | None,
+    effective_after_arc_ordinal: int,
+    source_completion_evaluation: BookCompletionEvaluation | None,
+) -> None:
+    """Validate structural Book requirement ownership without judging semantics."""
+
+    arcs = arc_topology.arcs
+    if not 0 <= effective_after_arc_ordinal <= len(arcs):
+        raise CommandPreconditionError(
+            "Book completion responsibility boundary is outside the candidate topology."
+        )
+    current_keys = {
+        item.requirement_key
+        for item in completion_contract.completion_requirements
+    }
+    suffix = arcs[effective_after_arc_ordinal:]
+    suffix_keys = {
+        key for arc in suffix for key in arc.completion_requirement_keys
+    }
+    mutable_unknown = suffix_keys.difference(current_keys)
+    if mutable_unknown:
+        raise CommandPreconditionError(
+            "Mutable Book Arc contracts reference unknown completion requirements: "
+            + ", ".join(sorted(mutable_unknown))
+        )
+    if effective_after_arc_ordinal == 0:
+        all_unknown = {
+            key for arc in arcs for key in arc.completion_requirement_keys
+        }.difference(current_keys)
+        if all_unknown:
+            raise CommandPreconditionError(
+                "Initial Book Arc contracts reference unknown completion requirements: "
+                + ", ".join(sorted(all_unknown))
+            )
+    assigned_current_keys = {
+        key
+        for arc in arcs
+        for key in arc.completion_requirement_keys
+        if key in current_keys
+    }
+    missing = current_keys.difference(assigned_current_keys)
+    if missing:
+        raise CommandPreconditionError(
+            "Book completion requirements lack an owning Story Arc: "
+            + ", ".join(sorted(missing))
+        )
+    previous_keys = (
+        set()
+        if previous_contract is None
+        else {
+            item.requirement_key
+            for item in previous_contract.completion_requirements
+        }
+    )
+    new_keys_without_future_owner = current_keys.difference(previous_keys).difference(
+        suffix_keys
+    )
+    if new_keys_without_future_owner:
+        raise CommandPreconditionError(
+            "New Book completion requirements must be owned by a mutable future Arc: "
+            + ", ".join(sorted(new_keys_without_future_owner))
+        )
+    if source_completion_evaluation is not None:
+        unresolved_current_keys = {
+            item.requirement_key
+            for item in source_completion_evaluation.requirement_statuses
+            if item.status in {"unresolved", "contradicted"}
+            and item.requirement_key in current_keys
+        }
+        unresolved_without_future_owner = unresolved_current_keys.difference(
+            suffix_keys
+        )
+        if unresolved_without_future_owner:
+            raise CommandPreconditionError(
+                "Unresolved Book completion requirements must be owned by a mutable "
+                "future Arc: "
+                + ", ".join(sorted(unresolved_without_future_owner))
+            )
+
+
+def _validate_book_evaluation_requirement_coverage(
+    *,
+    evaluation: BookEvaluation,
+    completion_contract: CompletionContract,
+) -> None:
+    expected = {
+        item.requirement_key
+        for item in completion_contract.completion_requirements
+    }
+    actual = {
+        item.requirement_key for item in evaluation.requirement_coverage
+    }
+    if actual != expected:
+        raise CommandPreconditionError(
+            "Book evaluation requirement coverage must exactly match the current "
+            "completion contract."
+        )
+
+
+async def _load_book_completion_contract(
+    session: StoreSession,
+    *,
+    project_id: str,
+    book_id: str,
+    baseline_id: str | None,
+) -> CompletionContract | None:
+    if baseline_id is None:
+        return None
+    baseline = await session.books.get_baseline(
+        project_id=project_id,
+        book_id=book_id,
+        baseline_id=baseline_id,
+    )
+    if baseline is None:
+        raise CommandPreconditionError("Book completion baseline does not exist.")
+    return CompletionContract.model_validate_json(
+        (
+            await session.content.get_packed(
+                project_id=project_id,
+                ref_id=baseline.completion_contract_ref_id,
+            )
+        ).unpack_and_verify()
+    )
+
+
+async def _load_source_completion_evaluation(
+    session: StoreSession,
+    *,
+    project_id: str,
+    review_id: str | None,
+) -> BookCompletionEvaluation | None:
+    if review_id is None:
+        return None
+    review = await session.book_completion_reviews.get(
+        project_id=project_id,
+        review_id=review_id,
+    )
+    if review is None:
+        raise CommandPreconditionError(
+            "Book candidate lost its source completion review."
+        )
+    return BookCompletionEvaluation.model_validate_json(
+        (
+            await session.content.get_packed(
+                project_id=project_id,
+                ref_id=review.detail_ref_id,
+            )
+        ).unpack_and_verify()
+    )
 
 
 def _compose_book_arc_topology(
@@ -912,6 +1073,30 @@ class BookCommandService:
                 raise CommandPreconditionError(
                     "Book candidate does not preserve the approved discussion title."
                 )
+            topology_effective_after = await _topology_effective_after_arc_ordinal(
+                session,
+                project_id=request.project_id,
+                book_id=request.book_id,
+                base_book_baseline_id=workspace.base_book_baseline_id,
+            )
+            previous_completion_contract = await _load_book_completion_contract(
+                session,
+                project_id=request.project_id,
+                book_id=request.book_id,
+                baseline_id=workspace.base_book_baseline_id,
+            )
+            source_completion_evaluation = await _load_source_completion_evaluation(
+                session,
+                project_id=request.project_id,
+                review_id=workspace.source_book_completion_review_id,
+            )
+            _validate_book_completion_ownership(
+                completion_contract=candidate.completion_contract,
+                arc_topology=candidate.arc_topology,
+                previous_contract=previous_completion_contract,
+                effective_after_arc_ordinal=topology_effective_after,
+                source_completion_evaluation=source_completion_evaluation,
+            )
             prepared = prepared_repair or (
                 prepare_exact_text(candidate.direction),
                 prepare_canonical_json(candidate.constraints),
@@ -976,7 +1161,7 @@ class BookCommandService:
                     "book.arc_topology",
                     "application/json",
                     "book-arc-topology",
-                    1,
+                    2,
                 ),
             )
             refs = [
@@ -1103,6 +1288,30 @@ class BookCommandService:
                 or workspace.state in {"blocked_by_user", "blocked_by_upstream", "stale"}
             ):
                 raise CommandPreconditionError("Book workspace is stale or blocked.")
+            topology_effective_after = await _topology_effective_after_arc_ordinal(
+                session,
+                project_id=request.project_id,
+                book_id=request.book_id,
+                base_book_baseline_id=workspace.base_book_baseline_id,
+            )
+            _validate_book_completion_ownership(
+                completion_contract=request.candidate.completion_contract,
+                arc_topology=request.candidate.arc_topology,
+                previous_contract=await _load_book_completion_contract(
+                    session,
+                    project_id=request.project_id,
+                    book_id=request.book_id,
+                    baseline_id=workspace.base_book_baseline_id,
+                ),
+                effective_after_arc_ordinal=topology_effective_after,
+                source_completion_evaluation=(
+                    await _load_source_completion_evaluation(
+                        session,
+                        project_id=request.project_id,
+                        review_id=workspace.source_book_completion_review_id,
+                    )
+                ),
+            )
 
             pending = await session.books.find_pending_submission(
                 project_id=request.project_id,
@@ -1132,7 +1341,7 @@ class BookCommandService:
                     "book.arc_topology",
                     "application/json",
                     "book-arc-topology",
-                    1,
+                    2,
                 ),
             )
             refs = [
@@ -1382,10 +1591,16 @@ class BookCommandService:
         if evaluation.decision == "pass" and request.deterministic_precheck.get("passed") is not True:
             raise CommandPreconditionError("Book deterministic prechecks did not pass.")
         prepared_precheck = prepare_canonical_json(request.deterministic_precheck)
+        repair_contract = (
+            BookRepairContract(
+                authorized_components=list(BOOK_REPAIRABLE_COMPONENTS),
+                issues=evaluation.findings,
+            )
+            if evaluation.decision == "local_repair"
+            else None
+        )
         prepared_repair = (
-            None
-            if evaluation.repair_contract is None
-            else prepare_canonical_json(evaluation.repair_contract)
+            None if repair_contract is None else prepare_canonical_json(repair_contract)
         )
         failure_ref_id = self._id_factory()
         prepared_failure = prepare_canonical_json(
@@ -1456,6 +1671,18 @@ class BookCommandService:
                 or workspace.lock_version != submission.workspace_lock_version
             ):
                 raise CommandPreconditionError("Evaluator result or Book submission is stale.")
+            completion_contract = CompletionContract.model_validate_json(
+                (
+                    await session.content.get_packed(
+                        project_id=request.project_id,
+                        ref_id=submission.completion_contract_ref_id,
+                    )
+                ).unpack_and_verify()
+            )
+            _validate_book_evaluation_requirement_coverage(
+                evaluation=evaluation,
+                completion_contract=completion_contract,
+            )
             precheck_ref = await session.content.put(
                 project_id=request.project_id,
                 prepared=prepared_precheck,
@@ -1475,7 +1702,7 @@ class BookCommandService:
                         semantic_kind="book.repair_contract",
                         media_type="application/json",
                         schema_id="book-repair-contract",
-                        schema_version=1,
+                        schema_version=2,
                         ref_id=repair_ref_id,
                         created_at_ms=timestamp,
                     )
@@ -1644,7 +1871,9 @@ class BookCommandService:
             or title_source not in {"recommended", "custom"}
         ):
             raise CommandPreconditionError("Reviewed title payload contains an invalid title.")
-        CompletionContract.model_validate_json(packed_contract.unpack_and_verify())
+        completion_contract = CompletionContract.model_validate_json(
+            packed_contract.unpack_and_verify()
+        )
         topology = BookArcTopology.model_validate_json(
             packed_topology.unpack_and_verify()
         )
@@ -1740,6 +1969,24 @@ class BookCommandService:
                 raise CommandPreconditionError(
                     "Book successor topology changed the frozen historical prefix."
                 )
+            _validate_book_completion_ownership(
+                completion_contract=completion_contract,
+                arc_topology=topology,
+                previous_contract=await _load_book_completion_contract(
+                    session,
+                    project_id=request.project_id,
+                    book_id=request.book_id,
+                    baseline_id=request.expected_current_baseline_id,
+                ),
+                effective_after_arc_ordinal=topology_effective_after,
+                source_completion_evaluation=(
+                    await _load_source_completion_evaluation(
+                        session,
+                        project_id=request.project_id,
+                        review_id=workspace.source_book_completion_review_id,
+                    )
+                ),
+            )
             await session.books.insert_approval(
                 BookApprovalRecord(
                     id=approval_id,

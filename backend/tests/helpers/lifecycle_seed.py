@@ -370,6 +370,11 @@ async def seed_approved_book_and_arc(
                                     else "A stable handoff to the next Arc exists."
                                 ),
                             ],
+                            completion_requirement_keys=(
+                                ["memory_conflict_resolved"]
+                                if ordinal == arc_contract_count
+                                else []
+                            ),
                             is_final=ordinal == arc_contract_count,
                         )
                         for ordinal in range(1, arc_contract_count + 1)
@@ -402,6 +407,13 @@ async def seed_approved_book_and_arc(
         result=BookEvaluation(
             decision="pass",
             summary="The direction and completion contract are coherent.",
+            requirement_coverage=[
+                {
+                    "requirement_key": "memory_conflict_resolved",
+                    "judgment": "aligned",
+                    "rationale": "The final planned Arc resolves this requirement.",
+                }
+            ],
         ),
     )
     reviewed = await book_service.record_review(

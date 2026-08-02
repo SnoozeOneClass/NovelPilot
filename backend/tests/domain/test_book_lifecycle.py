@@ -45,7 +45,6 @@ from app.domain.book.contracts import (
     BookDiscussionState,
     BookEvaluation,
     BookEvaluationIssue,
-    BookRepairContract,
     BookRepairPatch,
     BookRollingPlan,
     CompletionContract,
@@ -110,10 +109,21 @@ def _book_topology() -> BookArcTopology:
                 core_goal="Identify the edit source with physical evidence.",
                 handoff_from_previous="Begin from the approved premise.",
                 exit_conditions=["The source and central conflict are resolved."],
+                completion_requirement_keys=["memory_conflict_resolved"],
                 is_final=True,
             )
         ]
     )
+
+
+def _aligned_requirement_coverage() -> list[dict[str, str]]:
+    return [
+        {
+            "requirement_key": "memory_conflict_resolved",
+            "judgment": "aligned",
+            "rationale": "The responsible final Arc resolves the central conflict.",
+        }
+    ]
 
 
 def test_book_arc_topology_is_semantic_count_free_and_final_last() -> None:
@@ -181,19 +191,42 @@ def test_book_requires_review_and_user_approval_before_formal_baseline(
                 ),
                 idempotency_key="create-project",
             )
+            book_candidate = BookCandidatePack(
+                direction="围绕一份会改变叙述者记忆的证词展开。",
+                constraints=_book_constraints(),
+                selected_title="《证词回声》",
+                rolling_plan=_book_rolling_plan(),
+                completion_contract=_completion_contract(),
+                arc_topology=_book_topology(),
+            )
+            unowned_topology = BookArcTopology(
+                arcs=[
+                    book_candidate.arc_topology.arcs[0].model_copy(
+                        update={"completion_requirement_keys": []}
+                    )
+                ]
+            )
+            with pytest.raises(
+                CommandPreconditionError,
+                match="lack an owning Story Arc",
+            ):
+                await book_service.apply_candidate(
+                    ApplyBookCandidateRequest(
+                        project_id="project-a",
+                        book_id=project.result.book_id,
+                        expected_workspace_lock_version=1,
+                        candidate=book_candidate.model_copy(
+                            update={"arc_topology": unowned_topology}
+                        ),
+                    ),
+                    idempotency_key="reject-unowned-completion-requirement",
+                )
             candidate = await book_service.apply_candidate(
                 ApplyBookCandidateRequest(
                     project_id="project-a",
                     book_id=project.result.book_id,
                     expected_workspace_lock_version=1,
-                    candidate=BookCandidatePack(
-                        direction="围绕一份会改变叙述者记忆的证词展开。",
-                        constraints=_book_constraints(),
-                        selected_title="《证词回声》",
-                        rolling_plan=_book_rolling_plan(),
-                        completion_contract=_completion_contract(),
-                        arc_topology=_book_topology(),
-                    ),
+                    candidate=book_candidate,
                 ),
                 idempotency_key="apply-candidate",
             )
@@ -216,6 +249,48 @@ def test_book_requires_review_and_user_approval_before_formal_baseline(
                 ).one()
                 assert tuple(book_before_review) == ("developing", None)
 
+            wrong_task_id, wrong_attempt_id = await insert_successful_task(
+                engine,
+                project_id="project-a",
+                run_id=project.result.generation_run_id,
+                task_id="evaluate-book-wrong-coverage",
+                attempt_id="evaluate-book-wrong-coverage-attempt",
+                role="evaluator",
+                task_kind="evaluate.book",
+                scope_layer="book",
+                book_id=project.result.book_id,
+                canon_baseline_id=project.result.canon_baseline_id,
+                workspace_lock_version=candidate.result.workspace_lock_version,
+                result=BookEvaluation(
+                    decision="pass",
+                    summary="This result omitted the actual completion key.",
+                    requirement_coverage=[
+                        {
+                            "requirement_key": "wrong_requirement",
+                            "judgment": "aligned",
+                            "rationale": "This is intentionally the wrong key.",
+                        }
+                    ],
+                ),
+            )
+            with pytest.raises(
+                CommandPreconditionError,
+                match="exactly match the current completion contract",
+            ):
+                await book_service.record_review(
+                    RecordBookReviewRequest(
+                        project_id="project-a",
+                        book_id=project.result.book_id,
+                        submission_id=submitted.result.submission_id,
+                        evaluator_task_id=wrong_task_id,
+                        evaluator_attempt_id=wrong_attempt_id,
+                        rubric_id=BOOK_EVALUATION_STRATEGY.rubric_id,
+                        rubric_version=BOOK_EVALUATION_STRATEGY.rubric_version,
+                        deterministic_precheck={"passed": True},
+                    ),
+                    idempotency_key="reject-wrong-requirement-coverage",
+                )
+
             task_id, attempt_id = await _insert_successful_book_evaluator_task(
                 engine,
                 project_id="project-a",
@@ -227,6 +302,7 @@ def test_book_requires_review_and_user_approval_before_formal_baseline(
                     decision="pass",
                     summary="方向、约束与完成合同一致，可以提交用户批准。",
                     findings=[],
+                    requirement_coverage=_aligned_requirement_coverage(),
                 ),
             )
             reviewed = await book_service.record_review(
@@ -549,6 +625,7 @@ def test_task_driven_book_loop_reaches_baseline_only_after_explicit_approval(
                 result=BookEvaluation(
                     decision="pass",
                     summary="The candidate is coherent and satisfies its contract.",
+                    requirement_coverage=_aligned_requirement_coverage(),
                 ),
             )
             reviewed = await service.record_review(
@@ -797,13 +874,10 @@ def test_book_local_repair_is_scope_bounded_and_second_review_failure_pauses_run
                         contract_item=(
                             "The Book direction must provide a usable causal story engine."
                         ),
-                        repair_component="direction",
+                        observed_components=["direction"],
                     )
                 ],
-                repair_contract=BookRepairContract(
-                    authorized_components=["direction"],
-                    issue_summary="Clarify why the witness can detect the memory edit.",
-                ),
+                requirement_coverage=_aligned_requirement_coverage(),
             )
             await insert_successful_task(
                 engine,
@@ -834,49 +908,33 @@ def test_book_local_repair_is_scope_bounded_and_second_review_failure_pauses_run
             )
             assert reviewed.result.decision == "local_repair"
 
-            unauthorized = BookRepairPatch(
-                changes=[
-                    BookConstraintsRepair(
-                        component="constraints",
-                        value=_book_constraints(perspective="first-person"),
-                    )
-                ]
-            )
-            await insert_successful_task(
-                engine,
-                project_id="project-repair",
-                run_id=project.result.generation_run_id,
-                task_id="unauthorized-book-repair",
-                attempt_id="unauthorized-book-repair-attempt",
-                role="book_strategist",
-                task_kind="book.repair",
-                scope_layer="book",
-                book_id=project.result.book_id,
-                canon_baseline_id=project.result.canon_baseline_id,
-                workspace_lock_version=4,
-                result=unauthorized,
-            )
-            with pytest.raises(CommandPreconditionError, match="unauthorized"):
-                await service.apply_candidate_result(
-                    ApplyBookCandidateTaskRequest(
-                        project_id="project-repair",
-                        book_id=project.result.book_id,
-                        task_id="unauthorized-book-repair",
-                        attempt_id="unauthorized-book-repair-attempt",
-                        expected_workspace_lock_version=4,
-                    ),
-                    idempotency_key="reject-unauthorized-book-repair",
-                )
-
             repaired_candidate = BookRepairPatch(
                 changes=[
                     BookDirectionRepair(
                         component="direction",
                         value=(
                         "A witness detects a memory edit through an impossible timestamp, "
-                        "then investigates who altered her testimony."
+                            "then investigates who altered her testimony."
                         ),
-                    )
+                    ),
+                    BookConstraintsRepair(
+                        component="constraints",
+                        value=BookCreativeConstraints(
+                            genre_reader_promise=original.constraints.genre_reader_promise,
+                            premise_story_engine=(
+                                "An impossible physical timestamp exposes rewritten memory "
+                                "and drives the investigation."
+                            ),
+                            stable_world_invariants=(
+                                original.constraints.stable_world_invariants
+                            ),
+                            stable_character_invariants=(
+                                original.constraints.stable_character_invariants
+                            ),
+                            core_selling_points=original.constraints.core_selling_points,
+                            prohibited_outcomes=original.constraints.prohibited_outcomes,
+                        ),
+                    ),
                 ]
             )
             await insert_successful_task(
@@ -939,8 +997,10 @@ def test_book_local_repair_is_scope_bounded_and_second_review_failure_pauses_run
                         ref_id=ref_id,
                     )
                     preserved.append(json.loads(packed.unpack_and_verify()))
-            assert preserved == [
-                original.constraints.model_dump(mode="json"),
+            assert preserved[0] == repaired_candidate.changes[1].value.model_dump(
+                mode="json"
+            )
+            assert preserved[1:] == [
                 original.rolling_plan.model_dump(mode="json"),
                 original.completion_contract.model_dump(mode="json"),
             ]

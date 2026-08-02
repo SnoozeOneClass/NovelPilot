@@ -47,9 +47,11 @@ from app.agents.transport import (
     ActivationRequestBudgetExhausted,
     ModelRequestBudgetExhausted,
     ProviderAttempt,
+    ProviderEmptyOutput,
     ProviderOutputTruncated,
     ProviderStreamIncomplete,
     raise_for_incomplete_stream,
+    response_has_usable_final_output,
 )
 from app.db.uow import UnitOfWork
 from app.store.agent_tasks import AgentTaskStore, framework_fingerprint
@@ -510,8 +512,12 @@ class AgentExecutor:
                     )
             except BaseException as exc:
                 captured_messages.extend(run_messages)
-                retryable = retryable_provider_failure(
+                normalized_exc = _normalize_provider_empty_output(
                     exc,
+                    messages=run_messages,
+                )
+                retryable = retryable_provider_failure(
+                    normalized_exc,
                     attempt=budget.latest_attempt,
                 )
                 consumed_request = budget.provider_request_count > provider_count_before
@@ -521,6 +527,8 @@ class AgentExecutor:
                             retry=False,
                             reason=retryable.reason,
                         )
+                    if normalized_exc is not exc:
+                        raise normalized_exc from exc
                     raise
                 delay = _retry_delay_seconds(
                     budget=budget,
@@ -888,6 +896,7 @@ def _assert_registry_matches_plan(plan: AgentTaskPlan, definition: Any) -> None:
         definition.model_request_limit,
         definition.rubric_id,
         definition.rubric_version,
+        definition.repairable_components,
     )
     actual = (
         plan.scope_layer,
@@ -900,6 +909,7 @@ def _assert_registry_matches_plan(plan: AgentTaskPlan, definition: Any) -> None:
         plan.model_request_limit,
         plan.rubric_id,
         plan.rubric_version,
+        plan.repairable_components,
     )
     if actual != expected or plan.output_schema_fingerprint != prepare_canonical_json(
         definition.output_schema
@@ -1028,6 +1038,12 @@ def retryable_provider_failure(
 ) -> RetryableFailure | None:
     """Return a replay decision only for explicit transient Provider failures."""
 
+    if isinstance(exc, ProviderEmptyOutput):
+        return RetryableFailure(
+            reason="provider_empty_output",
+            http_status=_http_status(exc),
+            retry_after_seconds=_retry_after_seconds(exc),
+        )
     if isinstance(exc, ProviderStreamIncomplete):
         return RetryableFailure(
             reason="provider_stream_incomplete",
@@ -1063,6 +1079,8 @@ def classify_execution_error(exc: BaseException, *, secret: str = "") -> Classif
         category, code = "timeout", "activation_deadline_exceeded"
     elif isinstance(exc, ProviderOutputTruncated):
         category, code = "output_truncation", "provider_output_truncated"
+    elif isinstance(exc, ProviderEmptyOutput):
+        category, code = "transport", "provider_empty_output_retries_exhausted"
     elif isinstance(exc, ProviderStreamIncomplete):
         category, code = "transport", "provider_stream_retries_exhausted"
     elif isinstance(exc, ActivationRequestBudgetExhausted):
@@ -1139,6 +1157,44 @@ def _raise_stream_boundary_error(
         raise ProviderStreamIncomplete(
             "Provider stream ended without content or a protocol completion payload."
         ) from cause
+
+
+def _normalize_provider_empty_output(
+    exc: BaseException,
+    *,
+    messages: list[ModelMessage],
+) -> BaseException:
+    """Recognize complete thinking-only output even when run_stream entry failed."""
+
+    if isinstance(
+        exc,
+        (
+            KeyboardInterrupt,
+            SystemExit,
+            asyncio.CancelledError,
+            ProviderOutputTruncated,
+            ProviderStreamIncomplete,
+        ),
+    ):
+        return exc
+    response = next(
+        (
+            message
+            for message in reversed(messages)
+            if isinstance(message, ModelResponse)
+        ),
+        None,
+    )
+    if (
+        response is None
+        or response.state != "complete"
+        or response.finish_reason == "length"
+        or response_has_usable_final_output(response)
+    ):
+        return exc
+    return ProviderEmptyOutput(
+        "Provider returned a complete response containing only thinking or blank output."
+    )
 
 
 def _retry_delay_seconds(

@@ -202,6 +202,13 @@ class AgentTaskPlan(BaseModel):
     rubric_id: str | None = None
     rubric_version: int | None = Field(default=None, ge=1)
     rubric_text: str | None = None
+    repairable_components: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Harness-declared same-layer candidate envelope for Book/Arc semantic "
+            "repair. It is frozen control metadata, never model-authored authority."
+        ),
+    )
     harness_policy_id: str = "novelpilot-domain-harness"
     harness_policy_version: int = Field(default=1, ge=1)
     toolset: tuple[str, ...] = ()
@@ -306,6 +313,10 @@ class AgentTaskPlan(BaseModel):
                 raise ValueError("rubric_text requires a frozen rubric identity.")
         elif self.rubric_text is None or not self.rubric_text.strip():
             raise ValueError("Evaluator rubrics must freeze substantive rubric text.")
+        if len(self.repairable_components) != len(set(self.repairable_components)) or any(
+            not component.strip() for component in self.repairable_components
+        ):
+            raise ValueError("Frozen repairable component names must be unique and non-blank.")
         review_sources = (
             self.source_arc_parent_review_id,
             self.source_book_parent_review_id,
@@ -933,37 +944,53 @@ class EvaluationIssue(BaseModel):
 
     @model_validator(mode="after")
     def _ep1_shape(self) -> EvaluationIssue:
-        conflict_shape = (
+        statement_pair = (
             self.candidate_claim is not None
             and bool(self.candidate_claim.strip())
             and self.contrary_formal_statement is not None
             and bool(self.contrary_formal_statement.strip())
         )
-        if self.kind in {"explicit_conflict", "derived_evidence_mismatch"}:
-            if not conflict_shape:
-                raise ValueError(
-                    f"{self.kind} requires affirmative candidate and formal statements."
-                )
-        elif self.candidate_claim is not None or self.contrary_formal_statement is not None:
-            raise ValueError(
-                "Candidate/formal statement pairs are reserved for conflict or "
-                "derived-evidence mismatch issues."
-            )
-        if (self.kind == "contract_unfulfilled") != (
-            self.contract_item is not None and bool(self.contract_item.strip())
+        has_any_statement = (
+            self.candidate_claim is not None
+            or self.contrary_formal_statement is not None
+        )
+        if (
+            self.kind in {"explicit_conflict", "derived_evidence_mismatch"}
+            and not statement_pair
         ):
             raise ValueError(
-                "Exactly contract_unfulfilled requires one explicit contract item."
+                f"{self.kind} requires affirmative candidate and formal statements."
             )
-        if (self.kind == "unsupported_strong_conclusion") != (
-            self.support_gap is not None and bool(self.support_gap.strip())
-        ):
+        if has_any_statement and not statement_pair:
             raise ValueError(
-                "Exactly unsupported_strong_conclusion requires one support gap."
+                "Candidate/formal diagnostic statements must be supplied together and "
+                "must both be non-blank."
             )
-        if (self.kind == "creator_owned_unknown") != (
-            self.creator_question is not None and bool(self.creator_question.strip())
-        ):
+
+        has_contract_item = self.contract_item is not None and bool(
+            self.contract_item.strip()
+        )
+        if self.contract_item is not None and not has_contract_item:
+            raise ValueError("A supplied contract item must be non-blank.")
+        if self.kind == "contract_unfulfilled" and not has_contract_item:
+            raise ValueError(
+                "contract_unfulfilled requires one explicit contract item."
+            )
+
+        has_support_gap = self.support_gap is not None and bool(self.support_gap.strip())
+        if self.support_gap is not None and not has_support_gap:
+            raise ValueError("A supplied support gap must be non-blank.")
+        if self.kind == "unsupported_strong_conclusion" and not has_support_gap:
+            raise ValueError(
+                "unsupported_strong_conclusion requires one support gap."
+            )
+
+        has_creator_question = self.creator_question is not None and bool(
+            self.creator_question.strip()
+        )
+        if self.creator_question is not None and not has_creator_question:
+            raise ValueError("A supplied creator question must be non-blank.")
+        if (self.kind == "creator_owned_unknown") != has_creator_question:
             raise ValueError(
                 "Exactly creator_owned_unknown requires one concrete creator question."
             )

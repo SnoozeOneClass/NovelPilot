@@ -12,6 +12,7 @@ from app.agents.contracts import ArcPlanProposal
 from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
 from app.db.uow import StoreSession
 from app.domain.arc.contracts import (
+    ARC_REPAIRABLE_COMPONENTS,
     ApplyArcTaskRequest,
     ApplyArcTaskResult,
     ApproveArcRequest,
@@ -102,6 +103,10 @@ def _merge_arc_repair(
     contract: ArcRepairContract,
 ) -> ArcPlanProposal:
     authorized = set(contract.authorized_components)
+    if authorized != set(ARC_REPAIRABLE_COMPONENTS):
+        raise CommandPreconditionError(
+            "Arc repair contract does not match the Harness-declared same-layer envelope."
+        )
     requested = {change.component for change in patch.changes}
     unauthorized = requested.difference(authorized)
     if unauthorized:
@@ -1069,7 +1074,7 @@ class ArcCommandService:
         prepared_precheck = prepare_canonical_json(request.deterministic_precheck)
         repair_contract = (
             ArcRepairContract(
-                authorized_components=evaluation.repair_scope,
+                authorized_components=list(ARC_REPAIRABLE_COMPONENTS),
                 issues=evaluation.issues,
             )
             if evaluation.decision == "local_repair"
@@ -1243,7 +1248,7 @@ class ArcCommandService:
                         semantic_kind="arc.repair_contract",
                         media_type="application/json",
                         schema_id="arc-repair-contract",
-                        schema_version=2,
+                        schema_version=3,
                         ref_id=repair_ref_id,
                         created_at_ms=timestamp,
                     )

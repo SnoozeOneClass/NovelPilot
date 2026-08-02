@@ -93,6 +93,14 @@ Agent Task 必须冻结同一个周期。`local_repair` 不是“取最新评审
 失败/停滞路径，不再自动循环。这与连接层的五次 transport retry 完全不同：
 Provider 重放始终执行同一份冻结 Task Plan，不能产生新的领域纠正授权。
 
+Book/Arc 的这一次纠正按“完整同层语义问题”授权，而不是按 Evaluator 首次点名的
+字段授权。`observed_components` 只记录诊断位置；Harness 为 Repair 冻结完整同层
+候选包络，Agent 扫描每个原始 issue 在包络中的全部出现位置并只返回实际变化。
+Book 包络不含正式标题且 topology 只允许未来 suffix，Arc 包络只含当前 Arc
+candidate；Verifier 读取 before/after、原始 issue ledger 和 Harness 生成的实际
+变化清单。Chapter 继续使用现有 dependency-aware 精确组件授权，不为形式对称而
+扩大权限。纠正仍只有一轮，正式 baseline 和历史 prefix 始终不可写。
+
 多 Arc 链路同样使用精确来源：Arc 2 及以后只能消费前一正式 Arc closure 产生的
 当前 `BookProgressHandoff`；Book completion 评审和由其打开的 Book successor
 workspace 都保留实际使用的 `source_book_progress_handoff_id`。最终 Arc 的完成
@@ -105,6 +113,7 @@ handoff。
 - Agent 只提出、修订或评审；Harness 通过 Domain Command 写权威状态。
 - 上游 baseline 更新后，未提交的下游 workspace 会失效并显式重绑；已提交历史不会被自动 rebase/replay。
 - 每个正式 Book baseline 冻结一个有序语义 Arc 拓扑，并且恰好标记一个最终 Arc。Book 只规定各 Arc 在全书中的职责、核心目标、前序交接和退出条件，不分配章节标题、章节事件、场景或每弧章数。
+- 每个 Book Arc contract 通过 `completion_requirement_keys` 显式承担当前 Book completion contract 中的要求。Harness 校验 key 身份、完整覆盖和 successor future suffix 的责任归属；现有 Book Evaluator 在同一次评审中逐项判断 `aligned / strength_mismatch / infeasible`，不新增第二个评审调用。这里的 `aligned` 是语义蕴含：负责 Arc 的目标与退出条件达成后，要求中不可省略的命名主体、行为、排除项、因果边、结果强度和证据预期必须必然成立；仅仅“方向相关”“澄清角色”或“排除统一布局”不能替代精确责任，缺失或只被暗示时必须判为 `strength_mismatch`，但不要求逐字匹配。Arc 只获得分配给自己的要求并负责把它们落实为 closure signals 与逐章大纲，因此 Book 仍不越级规划 Chapter。
 - 用户给出的章节数只作为软规模建议传给规划 Agent，不参与 Route、Arc 收束、Book 完成或拓扑修订门禁。
 - 每个正式 Arc baseline 冻结一个明确生效点和恰好覆盖其未来区间的 `chapter_outline`；初始 Arc 必须至少包含一章，合法 successor 可以在生效点已经等于新检查点时包含零个未来项。
 - Harness 创建 Chapter 时确定性分配唯一大纲项，并把来源 Arc baseline 固定到 Chapter 身份上。Chapter 自身的 revision 不能改写这项 provenance。
@@ -154,7 +163,7 @@ Observation/Canon 都是可纠正的派生状态，发生争议时回到对应�
 
 每个 Agent task 使用固定 CXT1 Context View。模型可见上下文块只暴露六个
 属性：`role / scope / time / use / access / target`；内部 ID、hash 和完整
-source binding 只写入 `novelpilot-task-context-manifest-v4`。评审或修复任务
+source binding 只写入 `novelpilot-task-context-manifest-v5`。评审或修复任务
 恰好拥有一个逻辑 `target_descriptor`；正式契约、正式结果、正式正文、派生
 证据、Canon 和旧评审均为只读。Book 不重读全部 Chapter，Arc 只消费当前
 Arc 的正式事实，Chapter 只消费当前 assignment、至多下一 assignment、
@@ -168,6 +177,12 @@ Book 权威任务；Arc 只接收 Book 明确分配给当前 Arc 的 contract，
 再接收该 Arc 的正式 contract 与当前 outline window，不能把整书
 completion/topology 当成本层可评或可改目标。Arc/Chapter candidate
 Evaluator 同时读取当前 Arc 已提交 facts，避免在缺少正式历史时做冲突判断。
+
+Book successor Context 明确区分 predecessor、Harness 冻结的历史 Arc 前缀和
+当前 candidate：模型看到 `candidate_kind`、历史前缀数量以及从当前候选派生的
+拓扑数量/最终 Arc ordinal，不再把 predecessor 的总数或最终 ordinal 暴露成
+候选必须保持不变的硬约束。历史前缀相等与 future suffix 权限仍由 Domain
+composition/CAS 确定性保护，不交给 Evaluator 重新裁决。
 
 Context policy 不只声明允许组，也声明每个 task kind 的必需组，以及 revision/
 evidence correction 所需的至少一个明确授权来源；缺块在 Provider 调用前以
@@ -184,6 +199,11 @@ Evaluator 只允许六类 EP1 blocker：
 世界判断：前文沉默不等于否定，当前 Chapter 可以首次建立普通事实；只有
 候选陈述与正式来源存在明确相反陈述时才构成冲突。文学质量、风格、节奏和
 soft advisory 偏离不形成 blocker，不触发 Repair 或改变 Route。
+EP1 `kind` 决定分类及其最低必需证据，其他普通字段只保留诊断信息，不构成第二套
+Route 协议。例如 `contract_unfulfilled` 可以同时携带具体 `support_gap`，冲突之外的
+issue 也可以保留完整的候选/正式陈述对；Harness 不因相关诊断冗余而拒绝结果，也不
+从这些可选字段猜 Route。只有 `creator_question` 继续专属于
+`creator_owned_unknown`，因为它会授权真正的用户等待。
 所有能够改变 Route 的字段必须与对应 EP1 issue 原子一致：父层审查必须携带
 `parent_authority_concern`，派生证据纠正必须携带
 `derived_evidence_mismatch`；字段与 issue 不一致时作为评审契约缺陷暂停，
@@ -258,6 +278,14 @@ FastAPI lifespan 创建并关闭唯一 `AsyncEngine`、Run Engine 和内存 live
 - T1：connect/pool 10 秒、write 60 秒、read 10 分钟、activation 30 分钟。
 
 连接、首事件超时、流空闲超时/中断、408/409/425/429/5xx 等按合同分类并指数退避；鉴权、额度、配置、能力、明确 invalid request、取消和输出截断快速失败。完整响应的 `length`/`max_tokens` 终止不会自动增大上限重跑。失败 task 持久化类型化错误与已脱敏诊断，Run 进入 `failure_paused` 等待显式 Retry，不会重新回到 pending。
+
+HTTP 200/`complete` 也不等于任务已经产生结果。若捕获的真实
+`ModelResponse` 只有 thinking 或空白、没有可消费的正文、工具、refusal、文件/
+图片或原生结构化输出材料，Executor 将其规范化为 `provider_empty_output`。
+检查位于 Pydantic AI `run_stream` 外层，因此 context manager 入场前抛错也能被
+识别；系统使用同一 Frozen Task Plan 和同一六请求预算有限重放。连续六次为空时
+以 `provider_empty_output_retries_exhausted` 明确失败暂停，不进入语义 Repair 或
+pending 循环。
 
 NovelPilot 不按任务或领域层设置产品级输出 token 预算。Responses 在未配置时省略 `max_output_tokens`；Messages 因协议强制要求而使用冻结 Profile 中显式、经探测的大 `max_tokens`，不使用隐式 4096。
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -246,6 +247,14 @@ class BookArcContract(BaseModel):
             "Do not prescribe Chapter counts or a Chapter-by-Chapter outline."
         ),
     )
+    completion_requirement_keys: list[str] = Field(
+        description=(
+            "Book completion requirement keys whose semantic outcome this Story Arc "
+            "is responsible for advancing or establishing. This assigns Book-level "
+            "responsibility only; it does not prescribe Chapter counts, titles, events, "
+            "or scenes."
+        ),
+    )
     is_final: bool = Field(
         description="True only for the last planned Story Arc in the Book topology."
     )
@@ -266,6 +275,23 @@ class BookArcContract(BaseModel):
     def _non_blank_exit_conditions(cls, value: list[str]) -> list[str]:
         if any(not item.strip() for item in value):
             raise ValueError("Book Arc exit conditions must be non-blank.")
+        return value
+
+    @field_validator("completion_requirement_keys")
+    @classmethod
+    def _valid_completion_requirement_keys(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError(
+                "Book Arc completion requirement responsibility keys must be unique."
+            )
+        if any(
+            not item
+            or not re.fullmatch(r"[a-z0-9][a-z0-9_.-]*", item)
+            for item in value
+        ):
+            raise ValueError(
+                "Book Arc completion requirement responsibility keys are invalid."
+            )
         return value
 
 
@@ -370,6 +396,14 @@ BookRepairComponent = Literal[
     "arc_topology",
 ]
 
+BOOK_REPAIRABLE_COMPONENTS: tuple[BookRepairComponent, ...] = (
+    "direction",
+    "constraints",
+    "rolling_plan",
+    "completion_contract",
+    "arc_topology",
+)
+
 
 class BookDirectionRepair(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -448,16 +482,44 @@ class BookRepairPatch(BaseModel):
         return value
 
 
+class BookEvaluationIssue(EvaluationIssue):
+    """One EP1 blocker judged at Book authority."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    observed_components: list[BookRepairComponent] = Field(
+        default_factory=list,
+        description=(
+            "Diagnostic Book candidate locations where this semantic issue was "
+            "explicitly observed. This is not the repair authorization boundary; the "
+            "Harness declares that same-layer envelope independently."
+        ),
+    )
+
+    @field_validator("observed_components")
+    @classmethod
+    def _unique_observed_components(
+        cls,
+        value: list[BookRepairComponent],
+    ) -> list[BookRepairComponent]:
+        if len(value) != len(set(value)):
+            raise ValueError("Book issue observed components must be unique.")
+        return value
+
+
 class BookRepairContract(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     authorized_components: list[BookRepairComponent] = Field(
         min_length=1,
-        description="Bounded Book components allowed to change during local repair.",
+        description=(
+            "Harness-declared same-layer Book candidate envelope allowed to change "
+            "during this one bounded local repair."
+        ),
     )
-    issue_summary: str = Field(
+    issues: list[BookEvaluationIssue] = Field(
         min_length=1,
-        description="Why these Book components require local repair.",
+        description="Complete frozen semantic issue ledger authorizing this repair.",
     )
 
     @field_validator("authorized_components")
@@ -471,18 +533,58 @@ class BookRepairContract(BaseModel):
         return value
 
 
-class BookEvaluationIssue(EvaluationIssue):
-    """One EP1 blocker judged at Book authority."""
+BookRequirementCoverageJudgmentKind = Literal[
+    "aligned",
+    "strength_mismatch",
+    "infeasible",
+]
 
+
+class BookRequirementCoverageJudgment(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    repair_component: BookRepairComponent | None = Field(
-        default=None,
+    requirement_key: str = Field(
+        min_length=1,
+        pattern=r"^[a-z0-9][a-z0-9_.-]*$",
+        description="One exact key from the current Book completion contract.",
+    )
+    judgment: BookRequirementCoverageJudgmentKind = Field(
         description=(
-            "The bounded Book component that may be repaired. It is required for "
-            "local repair findings and absent for creator-owned unknowns."
+            "Whether closing the responsible Arc contracts under their exact goals and "
+            "exit conditions necessarily establishes every indispensable named subject, "
+            "action, exclusion, causal link, outcome strength, and evidence expectation "
+            "in this Book completion requirement. Thematic compatibility or a broader "
+            "category is a strength_mismatch, not aligned."
         ),
     )
+    rationale: str = Field(
+        min_length=1,
+        description=(
+            "For aligned, map every indispensable semantic atom to a responsible Arc goal "
+            "or exit condition. For a non-aligned judgment, name the exact missing or "
+            "infeasible atom; do not rely on matching or differing wording alone."
+        ),
+    )
+    blocking_issue_code: str | None = Field(
+        default=None,
+        description=(
+            "Required for strength_mismatch or infeasible and absent for aligned. It "
+            "links this coverage judgment to one typed EP1 finding in the same result."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _issue_link_boundary(self) -> BookRequirementCoverageJudgment:
+        linked = (
+            self.blocking_issue_code is not None
+            and bool(self.blocking_issue_code.strip())
+        )
+        if (self.judgment == "aligned") == linked:
+            raise ValueError(
+                "Only a non-aligned Book requirement coverage judgment requires a "
+                "blocking issue code."
+            )
+        return self
 
 
 class BookEvaluation(BaseModel):
@@ -490,7 +592,8 @@ class BookEvaluation(BaseModel):
 
     decision: Literal["pass", "local_repair", "needs_user"] = Field(
         description=(
-            "Use local_repair only when a bounded repair_contract can resolve the findings."
+            "Use local_repair only when one bounded same-layer repair can resolve the "
+            "findings; the Harness owns the repairable component envelope."
         ),
     )
     summary: str = Field(min_length=1, description="Evidence-based Book rubric assessment.")
@@ -498,39 +601,55 @@ class BookEvaluation(BaseModel):
         default_factory=list,
         description="Blocking EP1 findings only; never a literary-quality scorecard.",
     )
-    repair_contract: BookRepairContract | None = Field(
-        default=None,
+    requirement_coverage: list[BookRequirementCoverageJudgment] = Field(
+        min_length=1,
         description=(
-            "Required when decision is local_repair and forbidden for pass or needs_user."
+            "Exactly one semantic coverage judgment for every current Book completion "
+            "requirement. The Harness validates the exact key set."
         ),
     )
 
+    @field_validator("requirement_coverage")
+    @classmethod
+    def _unique_requirement_coverage(
+        cls,
+        value: list[BookRequirementCoverageJudgment],
+    ) -> list[BookRequirementCoverageJudgment]:
+        keys = [item.requirement_key for item in value]
+        if len(keys) != len(set(keys)):
+            raise ValueError("Book requirement coverage keys must be unique.")
+        return value
+
     @model_validator(mode="after")
     def _repair_shape(self) -> BookEvaluation:
-        if (self.decision == "local_repair") != (self.repair_contract is not None):
-            raise ValueError("Only local_repair carries a repair_contract")
         if self.decision == "pass" and self.findings:
             raise ValueError("A passing Book evaluation cannot carry blockers.")
         if self.decision != "pass" and not self.findings:
             raise ValueError("A non-passing Book evaluation requires an EP1 blocker.")
+        finding_codes = [finding.code for finding in self.findings]
+        if len(finding_codes) != len(set(finding_codes)):
+            raise ValueError("Book evaluation finding codes must be unique.")
+        linked_codes = {
+            item.blocking_issue_code
+            for item in self.requirement_coverage
+            if item.blocking_issue_code is not None
+        }
+        if not linked_codes.issubset(set(finding_codes)):
+            raise ValueError(
+                "Every non-aligned Book requirement must link to one typed EP1 finding."
+            )
+        if self.decision == "pass" and any(
+            item.judgment != "aligned" for item in self.requirement_coverage
+        ):
+            raise ValueError(
+                "A passing Book evaluation requires every completion requirement to "
+                "be semantically aligned with its responsible Arc contracts."
+            )
         if self.decision == "local_repair":
-            assert self.repair_contract is not None
-            finding_components = {
-                finding.repair_component
-                for finding in self.findings
-                if finding.repair_component is not None
-            }
-            if len(finding_components) == 0 or any(
-                finding.repair_component is None for finding in self.findings
-            ):
+            if any(not finding.observed_components for finding in self.findings):
                 raise ValueError(
-                    "Every Book local-repair finding requires one bounded component."
-                )
-            if finding_components != set(
-                self.repair_contract.authorized_components
-            ):
-                raise ValueError(
-                    "Book repair authorization must equal the finding component union."
+                    "Every Book local-repair finding requires at least one observed "
+                    "candidate component."
                 )
             if any(
                 finding.kind
@@ -540,9 +659,9 @@ class BookEvaluation(BaseModel):
                 raise ValueError(
                     "Creator-owned and parent-authority blockers cannot be Book-local repair."
                 )
-        elif any(finding.repair_component is not None for finding in self.findings):
+        elif any(finding.observed_components for finding in self.findings):
             raise ValueError(
-                "Book repair components are legal only for a local-repair decision."
+                "Book observed repair locations are legal only for local repair."
             )
         if self.decision == "needs_user":
             if any(

@@ -37,10 +37,10 @@ from app.domain.arc.contracts import (
     ApplyArcTaskRequest,
     ApproveArcRequest,
     ArcChapterOutlineRepair,
+    ArcClosureSignalsRepair,
     ArcEvaluation,
     ArcEvaluationIssue,
     ArcRepairPatch,
-    ArcTitleRepair,
     CommitArcAutoRequest,
     CreateStoryArcRequest,
     RecordArcReviewRequest,
@@ -214,6 +214,9 @@ async def _seed_approved_book(
                                 "The edit source is identified.",
                                 "The central conflict is resolved.",
                             ],
+                            completion_requirement_keys=[
+                                "memory_conflict_resolved"
+                            ],
                             is_final=True,
                         )
                     ]
@@ -245,6 +248,13 @@ async def _seed_approved_book(
         result=BookEvaluation(
             decision="pass",
             summary="The direction and completion contract are coherent.",
+            requirement_coverage=[
+                {
+                    "requirement_key": "memory_conflict_resolved",
+                    "judgment": "aligned",
+                    "rationale": "The final Arc owns and resolves the requirement.",
+                }
+            ],
         ),
     )
     reviewed = await book_service.record_review(
@@ -826,10 +836,9 @@ def test_arc_local_repair_is_bounded_by_components_and_one_correction(
                             contract_item=(
                                 "The Arc outline must schedule setup before causal payoff."
                             ),
-                            repair_component="chapter_outline",
+                            observed_components=["chapter_outline"],
                         )
                     ],
-                    repair_scope=["chapter_outline"],
                 ),
             )
             assert setup.review.next_action == "repair"
@@ -846,20 +855,28 @@ def test_arc_local_repair_is_bounded_by_components_and_one_correction(
                 )
                 for index, entry in enumerate(setup.plan.chapter_outline)
             ]
-            unauthorized = ArcRepairPatch(
-                changes=[
-                    ArcTitleRepair(component="title", value="Unauthorized title"),
-                    ArcChapterOutlineRepair(
-                        component="chapter_outline",
-                        value=repaired_outline,
+            repaired_closure_signals = [
+                ArcClosureSignal(
+                    signal_key="first_edit_source_identified",
+                    description=(
+                        "The source is identified only after the causal setup is established."
                     ),
-                ]
-            )
+                    evidence_expectation=(
+                        "Committed Chapter observations establish the setup before naming "
+                        "the source."
+                    ),
+                    required=True,
+                )
+            ]
             authorized = ArcRepairPatch(
                 changes=[
                     ArcChapterOutlineRepair(
                         component="chapter_outline",
                         value=repaired_outline,
+                    ),
+                    ArcClosureSignalsRepair(
+                        component="closure_signals",
+                        value=repaired_closure_signals,
                     ),
                 ]
             )
@@ -872,11 +889,7 @@ def test_arc_local_repair_is_bounded_by_components_and_one_correction(
                 ]
             )
             task_pairs: list[tuple[str, str]] = []
-            for suffix, result in (
-                ("unauthorized", unauthorized),
-                ("no-op", no_op),
-                ("authorized", authorized),
-            ):
+            for suffix, result in (("no-op", no_op), ("authorized", authorized)):
                 task_pairs.append(
                     await insert_successful_task(
                         engine,
@@ -896,7 +909,7 @@ def test_arc_local_repair_is_bounded_by_components_and_one_correction(
                     )
                 )
             service = ArcCommandService(CommandBus(engine))
-            with pytest.raises(CommandPreconditionError, match="unauthorized components"):
+            with pytest.raises(CommandPreconditionError, match="no authorized change"):
                 await service.apply_task_result(
                     ApplyArcTaskRequest(
                         project_id=setup.book.project_id,
@@ -906,18 +919,6 @@ def test_arc_local_repair_is_bounded_by_components_and_one_correction(
                         attempt_id=task_pairs[0][1],
                         expected_workspace_lock_version=setup.workspace_lock_version,
                     ),
-                    idempotency_key="repair:unauthorized",
-                )
-            with pytest.raises(CommandPreconditionError, match="no authorized change"):
-                await service.apply_task_result(
-                    ApplyArcTaskRequest(
-                        project_id=setup.book.project_id,
-                        book_id=setup.book.book_id,
-                        arc_id=setup.arc_id,
-                        task_id=task_pairs[1][0],
-                        attempt_id=task_pairs[1][1],
-                        expected_workspace_lock_version=setup.workspace_lock_version,
-                    ),
                     idempotency_key="repair:no-op",
                 )
             repaired = await service.apply_task_result(
@@ -925,8 +926,8 @@ def test_arc_local_repair_is_bounded_by_components_and_one_correction(
                     project_id=setup.book.project_id,
                     book_id=setup.book.book_id,
                     arc_id=setup.arc_id,
-                    task_id=task_pairs[2][0],
-                    attempt_id=task_pairs[2][1],
+                    task_id=task_pairs[1][0],
+                    attempt_id=task_pairs[1][1],
                     expected_workspace_lock_version=setup.workspace_lock_version,
                 ),
                 idempotency_key="repair:authorized",
@@ -941,7 +942,7 @@ def test_arc_local_repair_is_bounded_by_components_and_one_correction(
                         ).where(arc_workspaces.c.arc_id == setup.arc_id)
                     )
                 ).one()
-                unauthorized_state = await connection.scalar(
+                no_op_state = await connection.scalar(
                     select(agent_tasks.c.delivery_state).where(
                         agent_tasks.c.id == task_pairs[0][0]
                     )
@@ -955,13 +956,13 @@ def test_arc_local_repair_is_bounded_by_components_and_one_correction(
                     json.loads(packed.unpack_and_verify())
                 )
                 assert workspace.semantic_repair_count == 1
-                assert unauthorized_state == "pending"
+                assert no_op_state == "pending"
                 assert merged_plan.chapter_outline[0].core_event == "Repaired beat"
                 assert merged_plan.title == setup.plan.title
                 assert len(merged_plan.chapter_outline) == len(
                     setup.plan.chapter_outline
                 )
-                assert merged_plan.closure_signals == setup.plan.closure_signals
+                assert merged_plan.closure_signals == repaired_closure_signals
 
             exhausted = await _prepare_reviewed_arc(
                 engine,
@@ -983,10 +984,9 @@ def test_arc_local_repair_is_bounded_by_components_and_one_correction(
                             contract_item=(
                                 "The Arc outline must cover every explicit Arc obligation."
                             ),
-                            repair_component="chapter_outline",
+                            observed_components=["chapter_outline"],
                         )
                     ],
-                    repair_scope=["chapter_outline"],
                 ),
                     repair_count_before_review=1,
             )

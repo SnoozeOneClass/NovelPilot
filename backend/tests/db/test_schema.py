@@ -203,6 +203,13 @@ def test_delivery_failure_revision_preserves_existing_success_evidence(
                 BookEvaluation(
                     decision="pass",
                     summary="The frozen candidate is internally coherent.",
+                    requirement_coverage=[
+                        {
+                            "requirement_key": "fixture_complete",
+                            "judgment": "aligned",
+                            "rationale": "The fixture requirement is covered.",
+                        }
+                    ],
                 )
             )
             async with engine.begin() as connection:

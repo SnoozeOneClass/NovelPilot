@@ -19,7 +19,7 @@ from app.domain.arc.outline import (
     render_chapter_outline_window,
     resolve_outline_entry,
 )
-from app.domain.book.contracts import BookArcTopology
+from app.domain.book.contracts import BookArcTopology, CompletionContract
 from app.domain.chapter.contracts import CommittedChapterObservation
 from app.domain.project_state import ArcOutlineEntryView, project_arc_outline
 from app.store.arcs import ArcBaselineRecord
@@ -260,6 +260,7 @@ _TASK_CONTEXT_POLICY_GROUPS: dict[str, frozenset[str]] = {
     "verify_repair.book": frozenset(
         {
             "book_working",
+            "book_pre_repair_candidate",
             "book_candidate_review",
             "canon",
         }
@@ -317,6 +318,7 @@ _TASK_CONTEXT_POLICY_GROUPS: dict[str, frozenset[str]] = {
             "book_baseline",
             "arc_outline_projection",
             "arc_working",
+            "arc_pre_repair_candidate",
             "arc_candidate_review",
             "prior_arc_closure",
             "book_handoff",
@@ -522,7 +524,12 @@ _TASK_REQUIRED_CONTEXT_GROUPS: dict[str, frozenset[str]] = {
     ),
     "evaluate.book": frozenset({"book_working", "canon"}),
     "verify_repair.book": frozenset(
-        {"book_working", "book_candidate_review", "canon"}
+        {
+            "book_working",
+            "book_pre_repair_candidate",
+            "book_candidate_review",
+            "canon",
+        }
     ),
     "arc.plan": frozenset({"book_baseline", "canon"}),
     "arc.revise": frozenset(
@@ -545,6 +552,7 @@ _TASK_REQUIRED_CONTEXT_GROUPS: dict[str, frozenset[str]] = {
             "book_baseline",
             "arc_outline_projection",
             "arc_working",
+            "arc_pre_repair_candidate",
             "arc_candidate_review",
             "canon",
         }
@@ -748,6 +756,12 @@ _GROUP_SEMANTICS: dict[
         "pre_repair",
         "repair_authorization",
     ),
+    "book_pre_repair_candidate": (
+        "working_candidate",
+        "book",
+        "pre_repair",
+        "verification",
+    ),
     "book_parent_review": (
         "review_finding",
         "book",
@@ -787,6 +801,12 @@ _GROUP_SEMANTICS: dict[
         "arc",
         "pre_repair",
         "repair_authorization",
+    ),
+    "arc_pre_repair_candidate": (
+        "working_candidate",
+        "arc",
+        "pre_repair",
+        "verification",
     ),
     "arc_parent_review": (
         "review_finding",
@@ -878,6 +898,14 @@ _GROUP_SEMANTICS: dict[
 }
 
 _REPAIR_TASKS = frozenset({"book.repair", "arc.repair"})
+_BOOK_CANDIDATE_CONTEXT_TASKS = frozenset(
+    {
+        "book.revise",
+        "book.repair",
+        "evaluate.book",
+        "verify_repair.book",
+    }
+)
 _MUTABLE_CANDIDATE_GROUPS = frozenset(
     {
         "book_working",
@@ -1268,6 +1296,13 @@ class HarnessContextBuilder:
                     )
                 )
 
+            async def content_sha256(ref_id: str) -> str:
+                packed = await store.content.get_packed(
+                    project_id=project_id,
+                    ref_id=ref_id,
+                )
+                return packed.reference.blob_sha256
+
             book_workspace = await store.books.get_workspace(
                 project_id=project_id,
                 book_id=book_id,
@@ -1302,6 +1337,14 @@ class HarnessContextBuilder:
                     "approved_book_completion_contract",
                     book_baseline.completion_contract_ref_id,
                 )
+                book_completion_contract = CompletionContract.model_validate_json(
+                    (
+                        await store.content.get_packed(
+                            project_id=project_id,
+                            ref_id=book_baseline.completion_contract_ref_id,
+                        )
+                    ).unpack_and_verify()
+                )
                 packed_topology = await store.content.get_packed(
                     project_id=project_id,
                     ref_id=book_baseline.arc_topology_ref_id,
@@ -1328,6 +1371,7 @@ class HarnessContextBuilder:
             else:
                 book_baseline = None
                 book_arc_topology = None
+                book_completion_contract = None
                 await add(
                     "book_working",
                     "book_direction_working_draft",
@@ -1373,6 +1417,22 @@ class HarnessContextBuilder:
                 "book_candidate_arc_topology",
                 book_workspace.candidate_arc_topology_ref_id,
             )
+            book_candidate_topology = None
+            if book_workspace.candidate_arc_topology_ref_id is not None:
+                try:
+                    book_candidate_topology = BookArcTopology.model_validate_json(
+                        (
+                            await store.content.get_packed(
+                                project_id=project_id,
+                                ref_id=book_workspace.candidate_arc_topology_ref_id,
+                            )
+                        ).unpack_and_verify()
+                    )
+                except ValueError as exc:
+                    raise ContextFactError(
+                        "book_candidate_arc_topology_valid",
+                        "Current Book candidate Arc topology is invalid.",
+                    ) from exc
             book_guidance_ref = await exact_feedback_ref(
                 feedback_id=book_workspace.source_feedback_id,
                 guidance_ref_id=book_workspace.guidance_ref_id,
@@ -1412,6 +1472,68 @@ class HarnessContextBuilder:
                     "active_book_repair_contract",
                     active_book_review.repair_contract_ref_id,
                 )
+            book_repair_changed_components: list[str] | None = None
+            if task_kind == "verify_repair.book" and active_book_review is not None:
+                pre_repair_book_submission = await store.books.get_submission(
+                    project_id=project_id,
+                    submission_id=active_book_review.submission_id,
+                )
+                if pre_repair_book_submission is None:
+                    raise ContextFactError(
+                        "book_pre_repair_submission_present",
+                        "Book repair verification lost its frozen pre-repair candidate.",
+                    )
+                pre_repair_refs = (
+                    ("direction", pre_repair_book_submission.direction_ref_id),
+                    ("constraints", pre_repair_book_submission.constraints_ref_id),
+                    ("selected_title", pre_repair_book_submission.titles_ref_id),
+                    ("rolling_plan", pre_repair_book_submission.rolling_plan_ref_id),
+                    (
+                        "completion_contract",
+                        pre_repair_book_submission.completion_contract_ref_id,
+                    ),
+                    ("arc_topology", pre_repair_book_submission.arc_topology_ref_id),
+                )
+                current_refs = {
+                    "direction": book_workspace.direction_draft_ref_id,
+                    "constraints": book_workspace.candidate_constraints_ref_id,
+                    "selected_title": book_workspace.candidate_titles_ref_id,
+                    "rolling_plan": book_workspace.candidate_rolling_plan_ref_id,
+                    "completion_contract": (
+                        book_workspace.candidate_completion_contract_ref_id
+                    ),
+                    "arc_topology": book_workspace.candidate_arc_topology_ref_id,
+                }
+                for component, ref_id in pre_repair_refs:
+                    await add(
+                        "book_pre_repair_candidate",
+                        f"pre_repair_book_{component}",
+                        ref_id,
+                    )
+                if any(ref_id is None for ref_id in current_refs.values()):
+                    raise ContextFactError(
+                        "book_repaired_candidate_complete",
+                        "Book repair verification has no complete repaired candidate.",
+                    )
+                if await content_sha256(pre_repair_book_submission.titles_ref_id) != (
+                    await content_sha256(cast(str, current_refs["selected_title"]))
+                ):
+                    raise ContextFactError(
+                        "book_repair_preserves_selected_title",
+                        "Book repair changed the protected formal title candidate.",
+                    )
+                book_repair_changed_components = [
+                    component
+                    for component, old_ref_id in pre_repair_refs
+                    if component != "selected_title"
+                    and await content_sha256(old_ref_id)
+                    != await content_sha256(cast(str, current_refs[component]))
+                ]
+                if not book_repair_changed_components:
+                    raise ContextFactError(
+                        "book_repair_changed_component_present",
+                        "Book repair verification found no changed candidate component.",
+                    )
 
             canon = await store.canon.get_baseline(
                 project_id=project_id,
@@ -1571,6 +1693,7 @@ class HarnessContextBuilder:
             arc = None
             arc_workspace = None
             arc_baseline = None
+            arc_repair_changed_components: list[str] | None = None
             authority_subject_arc_id: str | None = None
             authority_subject_arc_baseline_id: str | None = None
             if arc_id is not None:
@@ -1590,6 +1713,7 @@ class HarnessContextBuilder:
                     if (
                         book_baseline is None
                         or book_arc_topology is None
+                        or book_completion_contract is None
                         or arc_workspace.book_baseline_id != book_baseline.id
                         or arc.ordinal < 1
                         or arc.ordinal > len(book_arc_topology.arcs)
@@ -1598,6 +1722,22 @@ class HarnessContextBuilder:
                             "book_arc_contract_binding_invalid",
                             "Story Arc is not bound to one current Book Arc contract.",
                         )
+                    assigned_contract = book_arc_topology.arcs[arc.ordinal - 1]
+                    completion_by_key = {
+                        requirement.requirement_key: requirement
+                        for requirement in (
+                            book_completion_contract.completion_requirements
+                        )
+                    }
+                    missing_assigned_keys = set(
+                        assigned_contract.completion_requirement_keys
+                    ).difference(completion_by_key)
+                    if missing_assigned_keys:
+                        raise ContextFactError(
+                            "assigned_completion_requirements_current",
+                            "Assigned Book Arc contract references unknown current completion "
+                            "requirements.",
+                        )
                     add_synthetic(
                         "book_baseline",
                         "assigned_book_arc_contract",
@@ -1605,9 +1745,13 @@ class HarnessContextBuilder:
                             JsonValue,
                             {
                                 "arc_ordinal": arc.ordinal,
-                                "contract": book_arc_topology.arcs[
-                                    arc.ordinal - 1
-                                ].model_dump(mode="json"),
+                                "contract": assigned_contract.model_dump(mode="json"),
+                                "assigned_completion_requirements": [
+                                    completion_by_key[key].model_dump(mode="json")
+                                    for key in (
+                                        assigned_contract.completion_requirement_keys
+                                    )
+                                ],
                             },
                         ),
                         semantic_kind=(
@@ -1677,6 +1821,51 @@ class HarnessContextBuilder:
                         "active_story_arc_repair_contract",
                         active_arc_review.repair_contract_ref_id,
                     )
+                if task_kind == "verify_repair.arc" and active_arc_review is not None:
+                    pre_repair_arc_submission = await store.arcs.get_submission(
+                        project_id=project_id,
+                        submission_id=active_arc_review.submission_id,
+                    )
+                    if (
+                        pre_repair_arc_submission is None
+                        or arc_workspace.plan_ref_id is None
+                    ):
+                        raise ContextFactError(
+                            "arc_pre_repair_submission_present",
+                            "Arc repair verification lost its frozen before/after candidate.",
+                        )
+                    await add(
+                        "arc_pre_repair_candidate",
+                        "pre_repair_story_arc_candidate",
+                        pre_repair_arc_submission.plan_ref_id,
+                    )
+                    pre_repair_plan = ArcPlanProposal.model_validate_json(
+                        (
+                            await store.content.get_packed(
+                                project_id=project_id,
+                                ref_id=pre_repair_arc_submission.plan_ref_id,
+                            )
+                        ).unpack_and_verify()
+                    )
+                    repaired_plan = ArcPlanProposal.model_validate_json(
+                        (
+                            await store.content.get_packed(
+                                project_id=project_id,
+                                ref_id=arc_workspace.plan_ref_id,
+                            )
+                        ).unpack_and_verify()
+                    )
+                    arc_repair_changed_components = [
+                        component
+                        for component in type(pre_repair_plan).model_fields
+                        if getattr(pre_repair_plan, component)
+                        != getattr(repaired_plan, component)
+                    ]
+                    if not arc_repair_changed_components:
+                        raise ContextFactError(
+                            "arc_repair_changed_component_present",
+                            "Arc repair verification found no changed candidate component.",
+                        )
                 if arc_workspace.prior_arc_id and arc_workspace.prior_arc_baseline_id:
                     prior_baseline = await store.arcs.get_baseline(
                         project_id=project_id,
@@ -2425,10 +2614,11 @@ class HarnessContextBuilder:
                     f"recent_committed_chapter_{baseline.chapter_id}_prose",
                     baseline.prose_ref_id,
                 )
-            for book_arc in await store.arcs.list_for_book(
+            book_arcs = await store.arcs.list_for_book(
                 project_id=project_id,
                 book_id=book_id,
-            ):
+            )
+            for book_arc in book_arcs:
                 if book_arc.current_closure_id is None:
                     continue
                 book_formal_closure = await store.arc_closures.get(
@@ -2676,21 +2866,63 @@ class HarnessContextBuilder:
                     "Book completion context requires the planned final Arc closure."
                 )
 
+            book_candidate_kind: Literal["initial", "successor"] = (
+                "initial"
+                if book_workspace.base_book_baseline_id is None
+                else "successor"
+            )
+            unfinished_book_arcs = [
+                item for item in book_arcs if item.lifecycle_status != "completed"
+            ]
+            if len(unfinished_book_arcs) > 1:
+                raise ContextFactError(
+                    "book_historical_prefix_unique",
+                    "Book authority contains multiple unfinished Story Arcs.",
+                )
+            historical_prefix_arc_count = (
+                unfinished_book_arcs[0].ordinal - 1
+                if unfinished_book_arcs
+                else (book_arcs[-1].ordinal if book_arcs else 0)
+            )
+
             if context_policy.requires_target:
+                target_payload: dict[str, JsonValue] = {
+                    "semantic_target": _semantic_target_name(
+                        task_kind,
+                        candidate_kind=book_candidate_kind,
+                    ),
+                    "scope": _task_scope(task_kind),
+                    "repair_authorized": (
+                        task_kind in _REPAIR_TASKS
+                        or task_kind.startswith("chapter.repair.")
+                    ),
+                }
+                if resolved_definition.repairable_components:
+                    target_payload["repairable_components"] = cast(
+                        list[JsonValue],
+                        list(resolved_definition.repairable_components),
+                    )
+                    target_payload["protected_authority"] = cast(
+                        list[JsonValue],
+                        list(_protected_repair_authority(task_kind)),
+                    )
+                changed_components = (
+                    book_repair_changed_components
+                    if task_kind == "verify_repair.book"
+                    else (
+                        arc_repair_changed_components
+                        if task_kind == "verify_repair.arc"
+                        else None
+                    )
+                )
+                if changed_components is not None:
+                    target_payload["changed_components"] = cast(
+                        list[JsonValue], changed_components
+                    )
                 add_synthetic(
                     "context_target",
                     "semantic_task_target",
-                    cast(
-                        JsonValue,
-                        {
-                            "semantic_target": _semantic_target_name(task_kind),
-                            "scope": _task_scope(task_kind),
-                            "repair_authorized": (
-                                task_kind in _REPAIR_TASKS
-                                or task_kind.startswith("chapter.repair.")
-                            ),
-                        },
-                    ),
+                    cast(JsonValue, target_payload),
                     semantic_kind=(
                         "application/vnd.novelpilot.context-target+json"
                     ),
@@ -2707,6 +2939,16 @@ class HarnessContextBuilder:
                 "committed_chapter_count": len(committed),
                 "book_cumulative_committed_chapter_count": len(committed),
             }
+            if task_kind in _BOOK_CANDIDATE_CONTEXT_TASKS:
+                facts["candidate_kind"] = book_candidate_kind
+                facts["historical_prefix_arc_count"] = historical_prefix_arc_count
+                if book_candidate_topology is not None:
+                    facts["candidate_arc_contract_count"] = len(
+                        book_candidate_topology.arcs
+                    )
+                    facts["candidate_final_arc_ordinal"] = len(
+                        book_candidate_topology.arcs
+                    )
             if book_baseline is not None:
                 facts["approved_title"] = book_baseline.approved_title
                 facts["book_arc_contract_count"] = (
@@ -2857,7 +3099,7 @@ class HarnessContextBuilder:
             for item in items
         ]
         manifest: dict[str, JsonValue] = {
-            "schema_id": "novelpilot-task-context-manifest-v4",
+            "schema_id": "novelpilot-task-context-manifest-v5",
             "task_kind": task_kind,
             "facts": facts,
             "items": manifest_items,
@@ -2903,7 +3145,7 @@ class HarnessContextBuilder:
                 if value is not None
             },
         )
-        model_facts = _model_visible_facts(facts)
+        model_facts = _model_visible_facts(facts, task_kind=task_kind)
         if evaluation_strategy is not None:
             manifest["evaluation_strategy"] = {
                 "id": evaluation_strategy.strategy_id,
@@ -2999,11 +3241,24 @@ def _role_for_task(task_kind: str) -> AgentRole:
     return "evaluator"
 
 
-def _semantic_target_name(task_kind: str) -> str:
+def _semantic_target_name(
+    task_kind: str,
+    *,
+    candidate_kind: Literal["initial", "successor"],
+) -> str:
+    if task_kind in {"evaluate.book", "book.repair", "verify_repair.book"}:
+        if task_kind == "verify_repair.book":
+            return (
+                "repaired_initial_book_candidate"
+                if candidate_kind == "initial"
+                else "repaired_book_successor_candidate"
+            )
+        return (
+            "initial_book_candidate"
+            if candidate_kind == "initial"
+            else "book_successor_candidate"
+        )
     named = {
-        "evaluate.book": "current_book_candidate",
-        "verify_repair.book": "repaired_book_candidate",
-        "book.repair": "current_book_candidate",
         "evaluate.arc": "current_arc_candidate",
         "verify_repair.arc": "repaired_arc_candidate",
         "arc.repair": "current_arc_candidate",
@@ -3027,7 +3282,32 @@ def _semantic_target_name(task_kind: str) -> str:
         ) from exc
 
 
-def _model_visible_facts(facts: dict[str, JsonValue]) -> dict[str, JsonValue]:
+def _protected_repair_authority(task_kind: str) -> tuple[str, ...]:
+    scope = _task_scope(task_kind)
+    if scope == "book":
+        return (
+            "selected_title",
+            "formal_book_baselines",
+            "historical_arc_prefix",
+            "chapter_prose_and_canon",
+            "route_and_storage_identity",
+        )
+    if scope == "arc":
+        return (
+            "formal_book_contract",
+            "formal_arc_baselines",
+            "chapter_prose_and_canon",
+            "historical_chapter_assignments",
+            "route_and_storage_identity",
+        )
+    return ()
+
+
+def _model_visible_facts(
+    facts: dict[str, JsonValue],
+    *,
+    task_kind: str,
+) -> dict[str, JsonValue]:
     visible_keys = {
         "operation_mode",
         "book_lifecycle_status",
@@ -3037,6 +3317,10 @@ def _model_visible_facts(facts: dict[str, JsonValue]) -> dict[str, JsonValue]:
         "book_arc_contract_count",
         "book_final_arc_ordinal",
         "topology_effective_after_arc_ordinal",
+        "candidate_kind",
+        "historical_prefix_arc_count",
+        "candidate_arc_contract_count",
+        "candidate_final_arc_ordinal",
         "arc_ordinal",
         "arc_is_final",
         "arc_lifecycle_status",
@@ -3050,4 +3334,12 @@ def _model_visible_facts(facts: dict[str, JsonValue]) -> dict[str, JsonValue]:
         "source_change_request_present",
         "source_change_request_layer",
     }
+    if task_kind in _BOOK_CANDIDATE_CONTEXT_TASKS:
+        visible_keys.difference_update(
+            {
+                "book_arc_contract_count",
+                "book_final_arc_ordinal",
+                "topology_effective_after_arc_ordinal",
+            }
+        )
     return {key: value for key, value in facts.items() if key in visible_keys}

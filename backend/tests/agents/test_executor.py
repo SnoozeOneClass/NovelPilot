@@ -3,7 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
+from typing import Iterator
 
 import httpx
 import pytest
@@ -14,7 +18,11 @@ from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from sqlalchemy import select
 
-from app.agents.binding import ProfileCredential, ResolvedModelBinding
+from app.agents.binding import (
+    ModelBindingResolver,
+    ProfileCredential,
+    ResolvedModelBinding,
+)
 from app.agents.contracts import ProfileCapabilities, ProfileSnapshot
 from app.agents.executor import (
     AgentExecutionResult,
@@ -27,6 +35,7 @@ from app.agents.registry import DEFAULT_TASK_REGISTRY
 from app.agents.roles import build_agent
 from app.agents.transport import (
     ActivationRequestBudget,
+    ProviderEmptyOutput,
     ProviderOutputTruncated,
     ProviderStreamIncomplete,
     RequestCountingModel,
@@ -59,6 +68,157 @@ class RecordingLivePublisher:
         self.events.append(event)
 
 
+def _responses_completed_payload(
+    *,
+    response_id: str,
+    output: list[dict[str, object]],
+) -> dict[str, object]:
+    return {
+        "id": response_id,
+        "created_at": 1.0,
+        "model": "loopback-responses-model",
+        "object": "response",
+        "output": output,
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
+        "status": "completed",
+    }
+
+
+def _sse_body(events: list[dict[str, object]]) -> bytes:
+    chunks = [
+        "data: " + json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n\n"
+        for event in events
+    ]
+    chunks.append("data: [DONE]\n\n")
+    return "".join(chunks).encode("utf-8")
+
+
+@contextmanager
+def _thinking_then_result_responses_server() -> Iterator[
+    tuple[str, list[dict[str, object]]]
+]:
+    requests: list[dict[str, object]] = []
+    valid_result = json.dumps(
+        {
+            "decision": "pass",
+            "summary": "The responsible Arc reaches the Book requirement.",
+            "findings": [],
+            "requirement_coverage": [
+                {
+                    "requirement_key": "ending_resolved",
+                    "judgment": "aligned",
+                    "rationale": "The final Arc establishes the required ending.",
+                }
+            ],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self) -> None:  # noqa: N802 - stdlib handler API.
+            content_length = int(self.headers.get("Content-Length", "0"))
+            requests.append(
+                json.loads(self.rfile.read(content_length).decode("utf-8"))
+            )
+            sequence = len(requests)
+            if sequence == 1:
+                reasoning_item: dict[str, object] = {
+                    "id": "rs_loopback_1",
+                    "summary": [
+                        {"text": "Reasoning completed without a final answer.", "type": "summary_text"}
+                    ],
+                    "type": "reasoning",
+                    "status": "completed",
+                }
+                events = [
+                    {
+                        "type": "response.reasoning_summary_text.delta",
+                        "delta": "Reasoning completed without a final answer.",
+                        "item_id": "rs_loopback_1",
+                        "output_index": 0,
+                        "sequence_number": 0,
+                        "summary_index": 0,
+                    },
+                    {
+                        "type": "response.completed",
+                        "response": _responses_completed_payload(
+                            response_id="resp_loopback_1",
+                            output=[reasoning_item],
+                        ),
+                        "sequence_number": 1,
+                    },
+                ]
+            else:
+                output_item: dict[str, object] = {
+                    "id": "msg_loopback_2",
+                    "content": [
+                        {
+                            "annotations": [],
+                            "text": valid_result,
+                            "type": "output_text",
+                        }
+                    ],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+                events = [
+                    {
+                        "type": "response.output_text.delta",
+                        "content_index": 0,
+                        "delta": valid_result,
+                        "item_id": "msg_loopback_2",
+                        "logprobs": [],
+                        "output_index": 0,
+                        "sequence_number": 0,
+                    },
+                    {
+                        "type": "response.output_text.done",
+                        "content_index": 0,
+                        "item_id": "msg_loopback_2",
+                        "logprobs": [],
+                        "output_index": 0,
+                        "sequence_number": 1,
+                        "text": valid_result,
+                    },
+                    {
+                        "type": "response.completed",
+                        "response": _responses_completed_payload(
+                            response_id="resp_loopback_2",
+                            output=[output_item],
+                        ),
+                        "sequence_number": 2,
+                    },
+                ]
+            body = _sse_body(events)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        yield f"http://{host}:{port}/v1", requests
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 class FunctionBindingResolver:
     def resolve(
         self,
@@ -79,7 +239,9 @@ class FunctionBindingResolver:
             assert info.model_request_parameters.output_mode == "native"
             yield (
                 '{"decision":"pass","summary":"The Book contract is coherent.",'
-                '"findings":[],"repair_contract":null}'
+                '"findings":[],"requirement_coverage":[{'
+                '"requirement_key":"ending_resolved","judgment":"aligned",'
+                '"rationale":"The responsible Arc reaches the requirement."}]}'
             )
 
         model = RequestCountingModel(
@@ -310,7 +472,7 @@ def test_executor_persists_complete_task_evidence_without_token_deltas(tmp_path:
             )
             assert result.status == "succeeded"
             assert result.input_tokens == 50
-            assert result.output_tokens == 13
+            assert result.output_tokens == 25
 
             async with engine.connect() as connection:
                 task_row = (
@@ -337,7 +499,7 @@ def test_executor_persists_complete_task_evidence_without_token_deltas(tmp_path:
                         .where(agent_tasks.c.id == plan.task_id)
                     )
                 ).one()
-                assert tuple(task_plan_schema) == ("agent-task-plan", 2)
+                assert tuple(task_plan_schema) == ("agent-task-plan", 3)
                 attempt_row = (
                     await connection.execute(
                         select(
@@ -380,7 +542,7 @@ def test_executor_persists_complete_task_evidence_without_token_deltas(tmp_path:
         "succeeded",
         rows[4],
         50,
-        13,
+        25,
         0,
     )
     assert rows[4] is not None
@@ -389,7 +551,7 @@ def test_executor_persists_complete_task_evidence_without_token_deltas(tmp_path:
     assert len(summaries) == 1
     assert summaries[0].task_kind == "evaluate.book"
     assert summaries[0].attempt_status == "succeeded"
-    assert summaries[0].total_tokens == 63
+    assert summaries[0].total_tokens == 75
     assert len(summaries[0].profile_fingerprint) == 64
     assert summaries[0].model_id == "opaque-test-model"
     assert summaries[0].harness_policy_id == "novelpilot-domain-harness"
@@ -932,7 +1094,95 @@ def test_empty_http_success_replays_same_prose_task_then_succeeds(
     ]
     assert budget.provider_request_count == 2
     assert budget.transport_retry_count == 1
-    assert budget.attempts[0].retry_reason == "provider_stream_incomplete"
+    assert budget.attempts[0].retry_reason == "provider_empty_output"
+    assert budget.attempts[1].retry_decision == "completed"
+
+
+def test_real_responses_stack_replays_thinking_only_http_success(
+    tmp_path: Path,
+) -> None:
+    """Exercise HTTP SSE -> OpenAI SDK -> Pydantic AI -> Executor replay."""
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    async def exercise(
+        base_url: str,
+    ) -> tuple[object, list[AgentLiveEvent], ActivationRequestBudget]:
+        engine = create_sqlite_async_engine(tmp_path / "responses-loopback.sqlite3")
+        profile = ProfileSnapshot.create(
+            profile_id="responses-loopback",
+            display_name="Responses loopback",
+            api_family="openai_responses",
+            base_url=base_url,
+            model_id="loopback-responses-model",
+            capabilities=ProfileCapabilities(
+                text_streaming=True,
+                native_json_schema=True,
+            ),
+        )
+        definition = DEFAULT_TASK_REGISTRY.get(
+            role="evaluator",
+            task_kind="evaluate.book",
+            contract_version=1,
+        )
+        plan = DEFAULT_TASK_REGISTRY.freeze_plan(
+            task_id="responses-loopback-task",
+            project_id="responses-loopback-project",
+            run_id="responses-loopback-run",
+            task_key="evaluate.book:responses-loopback",
+            action_key="evaluate.book",
+            role="evaluator",
+            task_kind="evaluate.book",
+            contract_version=1,
+            book_id="responses-loopback-book",
+            canon_baseline_id="responses-loopback-canon",
+            semantic_goal="Evaluate one frozen Book candidate.",
+            prompt="Evaluate the supplied frozen Book candidate.",
+            context_manifest={"candidate_kind": "initial"},
+            profile_snapshot=profile,
+            workspace_lock_version=1,
+            workspace_work_cycle_id="responses-loopback-cycle",
+        )
+        binding = ModelBindingResolver().resolve(
+            profile=profile,
+            expected_profile_fingerprint=profile.fingerprint,
+            required_capabilities=definition.required_capabilities,
+            model_request_limit=definition.model_request_limit,
+            credential=ProfileCredential.from_plaintext("loopback-secret"),
+        )
+        live = RecordingLivePublisher()
+        try:
+            output, _usage = await AgentExecutor(
+                engine,
+                registry=DEFAULT_TASK_REGISTRY,
+                live_publisher=live,
+                sleep=no_sleep,
+            )._run_agent(
+                plan=plan,
+                attempt_id="responses-loopback-attempt",
+                definition=definition,
+                agent=build_agent(model=binding.model, definition=definition),
+                budget=binding.budget,
+                captured_messages=[],
+            )
+            return output, live.events, binding.budget
+        finally:
+            await binding.aclose()
+            await engine.dispose()
+
+    with _thinking_then_result_responses_server() as (base_url, requests):
+        output, events, budget = asyncio.run(exercise(base_url))
+
+    assert getattr(output, "decision") == "pass"
+    assert len(requests) == 2
+    assert requests[0] == requests[1]
+    assert [event.kind for event in events] == ["attempt_restarting"]
+    assert events[0].reason == "provider_empty_output"
+    assert budget.provider_request_count == 2
+    assert budget.transport_retry_count == 1
+    assert budget.model_request_count == 1
+    assert budget.attempts[0].retry_reason == "provider_empty_output"
     assert budget.attempts[1].retry_decision == "completed"
 
 
@@ -1011,7 +1261,7 @@ def test_six_empty_http_successes_exhaust_stream_replay_budget(
     result = asyncio.run(exercise())
 
     assert result.status == "failed"
-    assert result.error_code == "provider_stream_retries_exhausted"
+    assert result.error_code == "provider_empty_output_retries_exhausted"
     assert result.provider_request_count == 6
     assert result.transport_retry_count == 5
     assert result.model_request_count == 1
@@ -1088,5 +1338,5 @@ def test_length_finish_reason_is_rejected_before_any_result_commit() -> None:
 def test_complete_response_without_usable_output_is_incomplete() -> None:
     response = ModelResponse(parts=[], finish_reason="stop", state="complete")
 
-    with pytest.raises(ProviderStreamIncomplete, match="no usable output"):
+    with pytest.raises(ProviderEmptyOutput, match="no usable final output"):
         raise_for_incomplete_stream(response)

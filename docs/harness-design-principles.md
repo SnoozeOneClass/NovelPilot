@@ -112,6 +112,13 @@ Loop 的主体是 harness：harness 决定每一轮怎么开始、给 LLM 什么
 
 Arc 收束失败同样只是一项 Arc 层审查输入。即使 Arc 层确认需要修订，也必须由 ArcPlanner 提出候选、经过 Arc 评估和模式对应的批准，再由 Harness 提交新基线。Book baseline 的任何替换都必须经过 Book 层审阅，并在两种运行模式下都获得人工批准。
 
+同层候选的一轮有界修复针对的是完整语义问题，不是 Evaluator 首次点名字段的
+机械集合。Book/Arc 的 `observed_components` 只作诊断；Harness 按层冻结完整候选
+修复包络，Repair Agent 可修正同一问题在包络内的全部出现位置，但不能触碰正式
+baseline、Book 标题、历史 Arc 前缀或跨层内容。Chapter 仍按 plan/prose/
+observation/Canon 的依赖关系使用精确组件授权。这个差异来自对象职责，而不是三层
+生命周期原则不一致；所有层仍只有一轮纠正和一次关联复评。
+
 ### 4.3 已提交历史的有效性推定
 
 一份内容经过所属层级评审、由 Harness 正式提交，并被后续内容持续依赖后，应当推定其在当前正式 lineage 中有效。新的模型评估、复盘或不同意见只能形成质疑、证据或变更建议，不能仅凭一次新的语义判断把旧 baseline 宣告为错误、失效或应被自动覆盖。
@@ -138,6 +145,12 @@ Arc 收束失败同样只是一项 Arc 层审查输入。即使 Arc 层确认需
 同一冻结评审 lineage 最多自动向下纠正一轮，并在纠正后执行一次关联复评。复评仍要求同类向下纠正时，Harness 必须停止自动循环；Retry、重启、换 task ID 或换一种问题表述都不能重置这项领域预算。只有真实用户输入才能建立新的 `user_initiated` lineage，旧 lineage 仍保持不可变；新 lineage 同样受单轮纠正和一次关联复评限制，不能自行继续派生 lineage。
 
 `waiting_for_user` 只表示用户确实拥有解决问题所需的事实或决策权。Provider、执行、投递、评估 Prompt/rubric/schema 或上下文装配问题属于系统责任；自动恢复预算耗尽后必须进入带真实 Agent 任务或真实 Harness 动作以及诊断证据的 `failure_paused`，不能为满足状态约束伪造 Agent 任务，也不能把工程缺陷包装成向用户提问。
+
+Provider 返回成功状态但没有可消费最终输出属于执行异常，不是创作失败。Harness
+应从实际响应 part 判断，而不是依赖框架异常文案；只有 thinking/空白而没有正文、
+工具、refusal、文件或结构化结果时，重放完全相同的 Frozen Task Plan，并与其他
+transport retry 共用既定六请求预算。预算耗尽后明确失败暂停，不能借此开启新的
+语义修复或保持 pending。
 
 ## 5. 分层闭环 Agent Harness
 
@@ -193,6 +206,15 @@ Arc 收束失败同样只是一项 Arc 层审查输入。即使 Arc 层确认需
 
 执行：LLM 可以参与总结当前全书状态、解释长期偏差、提出 Book 候选和 Arc 拓扑候选。Book 只规划每个 Arc 的全书职责、核心目标、前序交接、退出条件与最终弧标记，不越级分配章节标题、章节事件、场景或每弧章数。
 
+Book 还必须把每个正式 completion requirement 通过稳定 key 分配给至少一个
+当前可执行 Arc。Harness 验证引用与覆盖完整性，Book Evaluator 在既有一次评审中
+判断 Arc 目标/退出条件是否语义蕴含该 requirement：Arc 关闭后，要求中不可省略的
+命名主体、行为、排除项、因果边、结果强度和证据预期必须必然成立。主题相容、
+“澄清角色”或“排除统一布局”之类宽泛承诺，不能替代要求中明确的人物—行为—因果
+责任；缺失或仅被暗示时属于 `strength_mismatch`，但不要求逐字复述。这属于全书
+最低终止契约，而不是额外文学质量评审。completion-driven successor 的未解决要求
+必须由未来 suffix 承担，不能只指向已完成的历史 prefix。
+
 观测：全书 Loop 观测主线方向、类型承诺、主角长期弧线、核心卖点、终局方向和整体节奏。
 
 验证：验证重点是整本书是否仍朝人类确认的目标推进，是否偏离读者承诺，是否接近完结，或是否需要重规划。
@@ -206,6 +228,11 @@ Arc 收束失败同样只是一项 Arc 层审查输入。即使 Arc 层确认需
 目标来源：当前故事弧的上层目标来自正式 Book baseline 中与当前 ordinal 唯一对应的 Arc contract。Arc Planner 根据该 contract、当前故事状态和上一弧 handoff 展开具体阶段契约；不能重新发明自己的全书职责。
 
 上下文构造：harness 应为故事弧级判断提供当前精确 Book Arc contract、相关全书约束、上一弧 handoff、当前 Arc 的完整逐章大纲、弧内已提交章节、关键角色阶段状态、伏笔阶段状态和节奏历史。逐章大纲只覆盖当前 Arc 从生效点到收束所需的未来区间，不预写整本书，也不把其他未来 Arc 的完整拓扑暴露给 Chapter。
+
+当前 Arc 只接收其 Book Arc contract 明确承担的 completion requirement 内容，
+不接收整本 completion contract。Arc 负责把这些上层要求落实到 closure signals
+和逐章大纲；Book 不因此获得章节规划权，Chapter 也不能重新解释 requirement 的
+全书归属。
 
 执行：Arc Planner 在 Arc 获批前同时提出阶段契约和完整逐章大纲；每个大纲项至少说明标题、核心事件、章末钩子和场景序列。LLM 也可以解释阶段偏差、判断多章累积效果，并在 Arc 层已获得修订权限时提出后继计划。大纲是宏观职责锚点，不是要求 Chapter 逐字复述的隐藏协议。
 

@@ -115,6 +115,61 @@ def test_closed_contract_and_strong_conclusion_require_their_named_evidence() ->
     assert conclusion_issue.support_gap is not None
 
 
+def test_ep1_kind_requires_minimum_evidence_without_rejecting_relevant_diagnostics() -> None:
+    issue = EvaluationIssue(
+        kind="contract_unfulfilled",
+        code="completion_requirement_not_entailed",
+        subject="current_incident_separation",
+        summary="The owning Arc is broader than the exact completion requirement.",
+        evidence=[
+            "The requirement names exact actors, actions, and a causal relationship."
+        ],
+        contract_item=(
+            "Tang Qiao places the page; Gu Xiangchao obstructs verification and causes "
+            "the delay and fall."
+        ),
+        support_gap=(
+            "The owning Arc only promises to clarify roles and does not require either "
+            "specific action or the causal edge."
+        ),
+    )
+    assert issue.kind == "contract_unfulfilled"
+    assert issue.support_gap is not None
+
+    conflict_with_contract_context = EvaluationIssue(
+        kind="explicit_conflict",
+        code="formal_contract_conflict",
+        subject="responsibility attribution",
+        summary="The candidate reverses the formal attribution.",
+        evidence=["The candidate and formal contract name opposite actors."],
+        candidate_claim="Tang Qiao obstructed verification.",
+        contrary_formal_statement="The formal contract assigns obstruction to Gu Xiangchao.",
+        contract_item="Preserve the formal responsibility attribution.",
+    )
+    assert conflict_with_contract_context.contract_item is not None
+
+    with pytest.raises(ValidationError, match="supplied together"):
+        EvaluationIssue(
+            kind="parent_authority_concern",
+            code="incomplete_diagnostic_pair",
+            subject="Book responsibility",
+            summary="Only one side of a diagnostic comparison was supplied.",
+            evidence=["The lower layer raised a concern."],
+            candidate_claim="The Arc cannot close under its assignment.",
+        )
+
+    with pytest.raises(ValidationError, match="Exactly creator_owned_unknown"):
+        EvaluationIssue(
+            kind="contract_unfulfilled",
+            code="creator_route_smuggling",
+            subject="Arc exit",
+            summary="A diagnostic field must not manufacture a creator wait.",
+            evidence=["The Arc exit remains unmet."],
+            contract_item="Close the assigned Arc transition.",
+            creator_question="Should the creator rewrite the Arc?",
+        )
+
+
 def test_derived_evidence_mismatch_names_both_projection_and_formal_prose() -> None:
     with pytest.raises(ValidationError, match="affirmative candidate and formal"):
         EvaluationIssue(
@@ -182,6 +237,13 @@ def test_layer_authority_and_creator_wait_decisions_fail_closed() -> None:
         decision="needs_user",
         summary="One creator-owned decision is required.",
         findings=[creator_unknown],
+        requirement_coverage=[
+            {
+                "requirement_key": "ending_resolved",
+                "judgment": "aligned",
+                "rationale": "The current Arc ownership remains feasible.",
+            }
+        ],
     )
     assert evaluation.decision == "needs_user"
 
@@ -208,7 +270,7 @@ def test_guidance_authority_judgment_cannot_be_hidden_by_a_passing_candidate() -
         )
 
 
-def test_one_decision_cannot_hide_mixed_issues_or_extra_repair_authority() -> None:
+def test_one_decision_cannot_hide_mixed_issues_and_observations_are_diagnostic() -> None:
     book_issue = BookEvaluationIssue(
         kind="contract_unfulfilled",
         code="direction_missing",
@@ -216,22 +278,36 @@ def test_one_decision_cannot_hide_mixed_issues_or_extra_repair_authority() -> No
         summary="The candidate omits its assigned direction.",
         evidence=["The frozen candidate does not contain the assigned direction."],
         contract_item="Preserve the evidence-led mystery direction.",
-        repair_component="direction",
+        observed_components=["direction"],
     )
-    with pytest.raises(ValidationError, match="must equal"):
-        BookEvaluation(
-            decision="local_repair",
-            summary="The repair contract is broader than the issue ledger.",
-            findings=[book_issue],
-            repair_contract=BookRepairContract(
-                authorized_components=["direction", "constraints"],
-                issue_summary="Repair the missing direction.",
-            ),
-        )
+    evaluation = BookEvaluation(
+        decision="local_repair",
+        summary="The issue was observed in direction, without granting authority.",
+        findings=[book_issue],
+        requirement_coverage=[
+            {
+                "requirement_key": "ending_resolved",
+                "judgment": "aligned",
+                "rationale": "The completion ownership remains aligned.",
+            }
+        ],
+    )
+    assert evaluation.findings[0].observed_components == ["direction"]
+    repair_contract = BookRepairContract(
+        authorized_components=[
+            "direction",
+            "constraints",
+            "rolling_plan",
+            "completion_contract",
+            "arc_topology",
+        ],
+        issues=[book_issue],
+    )
+    assert repair_contract.authorized_components[-1] == "arc_topology"
     with pytest.raises(ValidationError, match="must be unique"):
         BookRepairContract(
             authorized_components=["direction", "direction"],
-            issue_summary="Duplicate authority is not a semantic union.",
+            issues=[book_issue],
         )
 
     arc_parent = ArcEvaluationIssue(
@@ -257,22 +333,14 @@ def test_one_decision_cannot_hide_mixed_issues_or_extra_repair_authority() -> No
             issues=[arc_parent, arc_local],
         )
     with pytest.raises(ValidationError, match="must be unique"):
-        ArcEvaluation(
-            guidance_authority_judgment="not_present",
-            decision="local_repair",
-            summary="Duplicate repair scope is invalid.",
-            issues=[
-                ArcEvaluationIssue(
-                    kind="contract_unfulfilled",
-                    code="arc_exit_missing",
-                    subject="Arc exit",
-                    summary="The candidate omits the assigned exit.",
-                    evidence=["The frozen candidate does not complete the transition."],
-                    contract_item="Complete the assigned Arc transition.",
-                    repair_component="desired_state_transition",
-                )
-            ],
-            repair_scope=[
+        ArcEvaluationIssue(
+            kind="contract_unfulfilled",
+            code="arc_exit_missing",
+            subject="Arc exit",
+            summary="The candidate omits the assigned exit.",
+            evidence=["The frozen candidate does not complete the transition."],
+            contract_item="Complete the assigned Arc transition.",
+            observed_components=[
                 "desired_state_transition",
                 "desired_state_transition",
             ],

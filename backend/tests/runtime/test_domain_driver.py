@@ -892,6 +892,7 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
                     "core_goal": "形成第一条可复核证据链。",
                     "handoff_from_previous": "承接已批准的悬疑开局。",
                     "exit_conditions": ["物证已经证明记忆篡改机制。"],
+                    "completion_requirement_keys": ["truth_exposed"],
                     "is_final": False,
                 },
                 {
@@ -902,6 +903,7 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
                         "操作者已经被揭露。",
                         "主角承担了约定的代价。",
                     ],
+                    "completion_requirement_keys": ["cost_paid"],
                     "is_final": True,
                 },
             ]
@@ -926,7 +928,18 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
             "decision": "pass",
             "summary": "全书方向、约束与完成合同一致。",
             "findings": [],
-            "repair_contract": None,
+            "requirement_coverage": [
+                {
+                    "requirement_key": "truth_exposed",
+                    "judgment": "aligned",
+                    "rationale": "The first Arc establishes the required truth evidence.",
+                },
+                {
+                    "requirement_key": "cost_paid",
+                    "judgment": "aligned",
+                    "rationale": "The final Arc establishes the protagonist's cost.",
+                },
+            ],
         }
     if task_kind in {"arc.plan", "arc.revise"}:
         arc_match = re.search(r'"arc_ordinal":(\d+)', prompt)
@@ -1005,7 +1018,6 @@ def _task_output(task_kind: str, prompt: str) -> dict[str, object] | str:
             "decision": "pass",
             "summary": "故事弧符合全书合同与当前 Canon。",
             "issues": [],
-            "repair_scope": [],
         }
     if task_kind in {"chapter.plan", "chapter.revise.plan", "chapter.repair.plan"}:
         chapter_match = re.search(r'"chapter_book_ordinal":(\d+)', prompt)
@@ -1413,6 +1425,9 @@ def test_rejected_domain_delivery_failure_pauses_once_and_requires_explicit_retr
                                 core_goal="Complete the deterministic assertion.",
                                 handoff_from_previous="Begin from the fixture premise.",
                                 exit_conditions=["The fixture ending is committed."],
+                                completion_requirement_keys=[
+                                    "delivery_failure_fixture"
+                                ],
                                 is_final=True,
                             )
                         ]

@@ -64,7 +64,7 @@ class AgentTaskStore:
                 semantic_kind="agent.task_plan",
                 media_type="application/json",
                 schema_id="agent-task-plan",
-                schema_version=2,
+                schema_version=3,
                 created_at_ms=timestamp,
             )
             manifest_ref = await store.content.put(

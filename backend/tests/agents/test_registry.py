@@ -197,7 +197,9 @@ def test_role_agent_has_no_function_tools_and_no_shared_history() -> None:
         return ModelResponse(
             parts=[
                 TextPart(
-                    '{"decision":"pass","summary":"All checks pass.","findings":[],"repair_contract":null}'
+                    '{"decision":"pass","summary":"All checks pass.","findings":[],'
+                    '"requirement_coverage":[{"requirement_key":"ending_resolved",'
+                    '"judgment":"aligned","rationale":"The responsible Arc reaches it."}]}'
                 )
             ]
         )
@@ -278,23 +280,45 @@ def test_cross_field_semantic_rules_are_present_in_model_visible_contracts() -> 
     assert set(completion) == {"completion_requirements"}
     assert "arc_topology" in book_candidate.output_schema["properties"]
     assert "advisory" in book_candidate.task_instructions
+    assert "semantically entail every indispensable named subject" in (
+        book_candidate.task_instructions
+    )
+    assert "clarify roles" in book_candidate.task_instructions
+    assert book_candidate.output_schema_version == 4
 
     book_properties = book_evaluation.output_schema["properties"]
-    assert "Required when decision is local_repair" in (
-        book_properties["repair_contract"]["description"]
+    assert "Exactly one semantic coverage judgment" in (
+        book_properties["requirement_coverage"]["description"]
     )
-    assert "local_repair" in book_evaluation.task_instructions
-    assert "authorized components equal that exact union" in (
+    assert "local-repair" in book_evaluation.task_instructions
+    assert "observed_components are diagnostic" in book_evaluation.task_instructions
+    assert "complete same-layer Book candidate envelope" in (
         book_evaluation.task_instructions
     )
     assert "Book is the top creative authority" in book_evaluation.task_instructions
+    assert "Coverage means the requirement necessarily follows" in (
+        book_evaluation.task_instructions
+    )
+    assert "Candidate direction or constraints cannot substitute" in (
+        book_evaluation.task_instructions
+    )
+    assert "Thematic compatibility or a broader category" in str(
+        book_evaluation.output_schema["$defs"][
+            "BookRequirementCoverageJudgment"
+        ]["properties"]["judgment"]["description"]
+    )
+    assert book_evaluation.output_schema_version == 4
+    assert book_evaluation.evaluation_strategy_version == 5
+    assert book_evaluation.rubric_id == "book-candidate-rubric-v6"
 
     arc_properties = arc_evaluation.output_schema["properties"]
-    assert "only when decision is local_repair" in (
-        arc_properties["repair_scope"]["description"]
+    assert "repair_scope" not in arc_properties
+    assert "observed_components are diagnostic only" in (
+        arc_evaluation.task_instructions
     )
-    assert "repair_scope contains at least one" in arc_evaluation.task_instructions
-    assert "repair_scope equals that exact union" in arc_evaluation.task_instructions
+    assert "complete current same-layer Arc candidate envelope" in (
+        arc_evaluation.task_instructions
+    )
     assert "escalate_to_book carries only" in arc_evaluation.task_instructions
     assert "required conclusion must be no stronger than the observable evidence" in (
         arc_evaluation.task_instructions
@@ -303,11 +327,11 @@ def test_cross_field_semantic_rules_are_present_in_model_visible_contracts() -> 
     assert "guidance request itself" in arc_evaluation.task_instructions
     assert "active_applied_guidance_present" in arc_evaluation.task_instructions
     assert "guidance_authority_judgment" in arc_evaluation.output_schema["required"]
-    assert arc_evaluation.output_schema_version == 6
-    assert arc_evaluation.evaluation_strategy_version == 8
-    assert arc_evaluation.rubric_id == "arc-candidate-rubric-v7"
-    assert arc_evaluation.context_policy_id == "arc-evaluator-context-v5"
-    assert arc_evaluation.context_policy_version == 4
+    assert arc_evaluation.output_schema_version == 7
+    assert arc_evaluation.evaluation_strategy_version == 9
+    assert arc_evaluation.rubric_id == "arc-candidate-rubric-v8"
+    assert arc_evaluation.context_policy_id == "arc-evaluator-context-v6"
+    assert arc_evaluation.context_policy_version == 5
 
     chapter_properties = chapter_evaluation.output_schema["properties"]
     assert "escalation_target" not in chapter_properties
@@ -369,14 +393,17 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
         },
         "chapter": {"observations", "canon"},
     }
-    expected_versions = {"book": 3, "arc": 5, "chapter": 4}
+    expected_versions = {"book": 5, "arc": 6, "chapter": 4}
     for layer, definition in definitions.items():
         assert definition.output_schema_version == expected_versions[layer]
         assert set(definition.output_schema["properties"]) == {"changes"}
         changes = definition.output_schema["properties"]["changes"]
         assert changes["items"]["discriminator"]["propertyName"] == "component"
         assert set(changes["items"]["discriminator"]["mapping"]) == expected_components[layer]
-        assert "subset" in definition.task_instructions
+        if layer == "chapter":
+            assert "subset" in definition.task_instructions
+        else:
+            assert "every occurrence" in definition.task_instructions
         assert "Harness preserves" in definition.task_instructions
 
     for layer in ("book", "arc"):
@@ -389,6 +416,8 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
 
     book_schema_text = str(definitions["book"].output_schema)
     assert "selected_title" not in book_schema_text
+    assert "semantically entail every" in definitions["book"].task_instructions
+    assert "clarify roles" in definitions["book"].task_instructions
 
     chapter_observation = DEFAULT_TASK_REGISTRY.get(
         role="chapter_writer",
@@ -513,9 +542,18 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
         task_kind="verify_repair.arc",
         contract_version=1,
     )
-    assert arc_repair_evaluation.output_schema_version == 6
-    assert arc_repair_evaluation.evaluation_strategy_version == 8
-    assert arc_repair_evaluation.rubric_id == "arc-repair-rubric-v8"
+    assert arc_repair_evaluation.output_schema_version == 7
+    assert arc_repair_evaluation.evaluation_strategy_version == 9
+    assert arc_repair_evaluation.rubric_id == "arc-repair-rubric-v9"
+
+    book_repair_evaluation = DEFAULT_TASK_REGISTRY.get(
+        role="evaluator",
+        task_kind="verify_repair.book",
+        contract_version=1,
+    )
+    assert book_repair_evaluation.output_schema_version == 5
+    assert book_repair_evaluation.evaluation_strategy_version == 6
+    assert book_repair_evaluation.rubric_id == "book-repair-rubric-v7"
 
 
 def test_local_repair_patch_contracts_reject_empty_and_duplicate_changes() -> None:

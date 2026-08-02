@@ -35,6 +35,10 @@ class ProviderStreamIncomplete(RuntimeError):
     """A streamed wire response ended without a protocol-complete terminal state."""
 
 
+class ProviderEmptyOutput(ProviderStreamIncomplete):
+    """A complete Provider response contained no task-consumable final output."""
+
+
 def _wall_clock_ms() -> int:
     return time.time_ns() // 1_000_000
 
@@ -351,7 +355,15 @@ def raise_for_incomplete_stream(response: ModelResponse) -> None:
         raise ProviderStreamIncomplete(
             f"Provider stream ended in state={response.state!r} without a complete result."
         )
-    usable_output = False
+    if not response_has_usable_final_output(response):
+        raise ProviderEmptyOutput(
+            "Provider returned HTTP success but no usable final output for the frozen task."
+        )
+
+
+def response_has_usable_final_output(response: ModelResponse) -> bool:
+    """Return whether Pydantic AI received any actionable non-thinking final part."""
+
     for part in response.parts:
         part_kind = getattr(part, "part_kind", None)
         if part_kind == "thinking":
@@ -359,14 +371,9 @@ def raise_for_incomplete_stream(response: ModelResponse) -> None:
         if part_kind == "text":
             content = getattr(part, "content", None)
             if isinstance(content, str) and content.strip():
-                usable_output = True
-                break
+                return True
             continue
         # Structured output/tool calls and other non-thinking protocol parts are
         # usable inputs to Pydantic AI even when no plain text accompanies them.
-        usable_output = True
-        break
-    if not usable_output:
-        raise ProviderStreamIncomplete(
-            "Provider returned HTTP success but no usable output for the frozen task."
-        )
+        return True
+    return False

@@ -23,6 +23,17 @@ ArcRepairComponent = Literal[
     "closure_signals",
     "chapter_outline",
 ]
+ARC_REPAIRABLE_COMPONENTS: tuple[ArcRepairComponent, ...] = (
+    "title",
+    "desired_state_transition",
+    "conflict_trajectory",
+    "pacing_trajectory",
+    "character_obligations",
+    "foreshadowing_obligations",
+    "prohibitions",
+    "closure_signals",
+    "chapter_outline",
+)
 ArcReviewDecision = Literal["pass", "local_repair", "escalate_to_book", "needs_user"]
 
 
@@ -108,7 +119,7 @@ class ArcRepairPatch(BaseModel):
 
     changes: list[ArcRepairChange] = Field(
         min_length=1,
-        max_length=5,
+        max_length=9,
         description=(
             "Only Story Arc components authorized by the repair contract in frozen context. "
             "Every returned replacement must differ from its current value. "
@@ -133,13 +144,24 @@ class ArcEvaluationIssue(EvaluationIssue):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    repair_component: ArcRepairComponent | None = Field(
-        default=None,
+    observed_components: list[ArcRepairComponent] = Field(
+        default_factory=list,
         description=(
-            "The bounded Arc component that may be repaired. It is absent for "
-            "Book-authority concerns and creator-owned unknowns."
+            "Diagnostic Arc candidate locations where this semantic issue was "
+            "explicitly observed. This is not the repair authorization boundary; the "
+            "Harness declares that same-layer envelope independently."
         ),
     )
+
+    @field_validator("observed_components")
+    @classmethod
+    def _unique_observed_components(
+        cls,
+        value: list[ArcRepairComponent],
+    ) -> list[ArcRepairComponent]:
+        if len(value) != len(set(value)):
+            raise ValueError("Arc issue observed components must be unique.")
+        return value
 
 
 class ArcEvaluation(BaseModel):
@@ -166,23 +188,6 @@ class ArcEvaluation(BaseModel):
         default_factory=list,
         description="Blocking EP1 issues only; never a literary-quality scorecard.",
     )
-    repair_scope: list[ArcRepairComponent] = Field(
-        default_factory=list,
-        description=(
-            "Required and non-empty only when decision is local_repair; otherwise empty."
-        ),
-    )
-
-    @field_validator("repair_scope")
-    @classmethod
-    def _unique_repair_scope(
-        cls,
-        value: list[ArcRepairComponent],
-    ) -> list[ArcRepairComponent]:
-        if len(value) != len(set(value)):
-            raise ValueError("Arc evaluation repair scope must be unique.")
-        return value
-
     @model_validator(mode="after")
     def _decision_boundary(self) -> ArcEvaluation:
         if (
@@ -192,27 +197,18 @@ class ArcEvaluation(BaseModel):
             raise ValueError(
                 "Arc guidance requiring parent authority must escalate to Book."
             )
-        if (self.decision == "local_repair") != bool(self.repair_scope):
-            raise ValueError("Exactly local_repair requires a bounded Arc repair scope.")
         if self.decision == "pass" and self.issues:
             raise ValueError("A passing Arc evaluation cannot carry blockers.")
         if self.decision != "pass" and not self.issues:
             raise ValueError("A non-passing Arc evaluation requires an EP1 blocker.")
+        issue_codes = [issue.code for issue in self.issues]
+        if len(issue_codes) != len(set(issue_codes)):
+            raise ValueError("Arc evaluation issue codes must be unique.")
         if self.decision == "local_repair":
-            finding_components = {
-                issue.repair_component
-                for issue in self.issues
-                if issue.repair_component is not None
-            }
-            if len(finding_components) == 0 or any(
-                issue.repair_component is None for issue in self.issues
-            ):
+            if any(not issue.observed_components for issue in self.issues):
                 raise ValueError(
-                    "Every Arc local-repair issue requires one bounded component."
-                )
-            if finding_components != set(self.repair_scope):
-                raise ValueError(
-                    "Arc repair_scope must equal the issue component union."
+                    "Every Arc local-repair issue requires at least one observed "
+                    "candidate component."
                 )
             if any(
                 issue.kind in {"parent_authority_concern", "creator_owned_unknown"}
@@ -221,9 +217,9 @@ class ArcEvaluation(BaseModel):
                 raise ValueError(
                     "Parent-authority and creator-owned blockers cannot be Arc-local repair."
                 )
-        elif any(issue.repair_component is not None for issue in self.issues):
+        elif any(issue.observed_components for issue in self.issues):
             raise ValueError(
-                "Arc repair components are legal only for a local-repair decision."
+                "Arc observed repair locations are legal only for local repair."
             )
         if self.decision == "escalate_to_book":
             if any(
@@ -257,8 +253,17 @@ class ArcEvaluation(BaseModel):
 class ArcRepairContract(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    authorized_components: list[ArcRepairComponent] = Field(min_length=1)
-    issues: list[ArcEvaluationIssue] = Field(default_factory=list)
+    authorized_components: list[ArcRepairComponent] = Field(
+        min_length=1,
+        description=(
+            "Harness-declared same-layer Arc candidate envelope allowed to change "
+            "during this one bounded local repair."
+        ),
+    )
+    issues: list[ArcEvaluationIssue] = Field(
+        min_length=1,
+        description="Complete frozen semantic issue ledger authorizing this repair.",
+    )
 
     @field_validator("authorized_components")
     @classmethod

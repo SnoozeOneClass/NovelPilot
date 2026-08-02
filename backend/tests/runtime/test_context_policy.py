@@ -7,15 +7,23 @@ from typing import cast
 
 import pytest
 from alembic import command
+from sqlalchemy import select
 
 from app.db.engine import create_sqlite_async_engine
 from app.db.maintenance import alembic_config
+from app.db.schema import book_workspaces
+from app.domain.feedback import (
+    ApplyFeedbackRequest,
+    FeedbackCommandService,
+    QueueFeedbackRequest,
+)
 from app.runtime.context import (
     CONTEXT_POLICY_REGISTRY,
     ContextFactError,
     HarnessContextBuilder,
     _ContextItem,
 )
+from app.store.command_bus import CommandBus
 from tests.helpers.lifecycle_seed import seed_approved_book_and_arc
 
 
@@ -260,6 +268,74 @@ def test_evaluator_context_has_one_semantic_target_and_hides_internal_ids(
             assert foundation.book_baseline_id not in context.prompt
             assert foundation.arc_baseline_id not in context.prompt
             assert foundation.canon_baseline_id not in context.prompt
+            assert '"assigned_completion_requirements"' in context.prompt
+            assert '"requirement_key":"memory_conflict_resolved"' in context.prompt
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+def test_book_successor_context_labels_history_without_reusing_old_topology_counters(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "cxt1-book-successor.sqlite3"
+    command.upgrade(alembic_config(database), "head")
+
+    async def exercise() -> None:
+        engine = create_sqlite_async_engine(database)
+        try:
+            foundation = await seed_approved_book_and_arc(
+                engine,
+                project_id="project-cxt1-successor",
+                target_chapter_count=2,
+                arc_contract_count=4,
+            )
+            feedback_service = FeedbackCommandService(CommandBus(engine))
+            feedback = await feedback_service.queue(
+                QueueFeedbackRequest(
+                    project_id=foundation.project_id,
+                    content="Clarify only the mutable future Book direction.",
+                    route_layer="book",
+                    book_id=foundation.book_id,
+                ),
+                idempotency_key="cxt1-successor:queue",
+            )
+            async with engine.connect() as connection:
+                workspace_lock = await connection.scalar(
+                    select(book_workspaces.c.lock_version).where(
+                        book_workspaces.c.book_id == foundation.book_id
+                    )
+                )
+            assert workspace_lock is not None
+            await feedback_service.apply(
+                ApplyFeedbackRequest(
+                    project_id=foundation.project_id,
+                    feedback_id=feedback.result.feedback_id,
+                    expected_workspace_lock_version=workspace_lock,
+                ),
+                idempotency_key="cxt1-successor:apply",
+            )
+
+            context = await HarnessContextBuilder(engine).build(
+                task_kind="book.revise",
+                project_id=foundation.project_id,
+                book_id=foundation.book_id,
+                arc_id=None,
+                chapter_id=None,
+                semantic_goal="Revise only the mutable future Book contract.",
+            )
+            state_marker = "Model-visible semantic state and counters:\n"
+            visible_state = next(
+                line
+                for line in context.prompt.split(state_marker, maxsplit=1)[1].splitlines()
+                if line.strip()
+            )
+            assert '"candidate_kind":"successor"' in visible_state
+            assert '"historical_prefix_arc_count":0' in visible_state
+            assert '"book_arc_contract_count"' not in visible_state
+            assert '"book_final_arc_ordinal"' not in visible_state
+            assert '"topology_effective_after_arc_ordinal"' not in visible_state
         finally:
             await engine.dispose()
 

@@ -23,8 +23,13 @@ from app.agents.contracts import (
     ScopeLayer,
     finalize_chapter_prose,
 )
-from app.domain.arc.contracts import ArcEvaluation, ArcRepairPatch
+from app.domain.arc.contracts import (
+    ARC_REPAIRABLE_COMPONENTS,
+    ArcEvaluation,
+    ArcRepairPatch,
+)
 from app.domain.book.contracts import (
+    BOOK_REPAIRABLE_COMPONENTS,
     BookCandidatePack,
     BookEvaluation,
     BookRepairPatch,
@@ -59,13 +64,34 @@ BOOK_CANDIDATE_CONTRACT = (
     "ordered Arc topology contains semantic whole-book roles, goals, handoffs, exit "
     "conditions, and exactly one final last Arc. It must not allocate Chapter counts, "
     "Chapter titles, events, scenes, IDs, or ordinals. Treat whole-book scale guidance "
-    "as advisory only. Do not invent storage IDs, approval state, routes, or commands."
+    "as advisory only. Every Arc must explicitly list the Book completion requirement keys "
+    "it is responsible for, every current required key must have at least one owning Arc, "
+    "and each responsible Arc's goal and exit conditions must semantically entail every "
+    "indispensable named subject, action, exclusion, causal link, outcome strength, and "
+    "evidence expectation in that requirement without copying its wording. Broad goals such "
+    "as clarify roles, separate responsibilities, resolve the incident, or exclude a unified "
+    "plot do not by themselves guarantee a specific actor, act, or causal relationship. "
+    "Do not invent storage IDs, approval "
+    "state, routes, or commands."
 )
 BOOK_EVALUATION_CONTRACT = (
-    "Use decision='local_repair' exactly when a non-null bounded repair_contract is needed; "
-    "for pass or needs_user, repair_contract must be null. A pass has no findings and every "
-    "non-pass has at least one typed EP1 finding. Every local-repair finding names one repair "
-    "component, and the repair contract's authorized components equal that exact union. "
+    "A pass has no findings and every non-pass has at least one typed EP1 finding. Every "
+    "local-repair finding lists the candidate components where you explicitly observed the "
+    "same semantic issue; these observed_components are diagnostic and do not define the "
+    "Harness repair boundary. The Harness independently authorizes the complete same-layer "
+    "Book candidate envelope except selected_title. Return exactly one requirement_coverage "
+    "judgment for every current completion requirement. Use aligned only when the responsible "
+    "Arc goals and exit conditions semantically entail every indispensable named subject, "
+    "action, exclusion, causal link, outcome strength, and evidence expectation in the "
+    "requirement. Coverage means the requirement necessarily follows when the owning Arc "
+    "contracts close; thematic compatibility or a broad promise to clarify roles, separate "
+    "responsibility, resolve an incident, or exclude a unified plot is not enough. Candidate "
+    "direction or constraints cannot substitute for missing owner-Arc exit obligations. In "
+    "each aligned rationale, map every indispensable semantic atom to a responsible Arc goal "
+    "or exit condition. Use strength_mismatch when any atom remains merely possible or "
+    "implicit; infeasible when the topology cannot realize it. Either non-aligned judgment "
+    "must link to one finding code in the same result. A pass requires every "
+    "coverage judgment to be aligned. "
     "needs_user carries only creator_owned_unknown findings, each with one concrete answerable "
     "creator question. Book is the top creative authority, so never emit a "
     "parent_authority_concern. Report no literary preference, style, pacing, or advisory "
@@ -78,10 +104,11 @@ ARC_EVALUATION_CONTRACT = (
     "candidate ignored it: use compatible_with_current_authority only when its requested effect "
     "can be fully honored under the current Book, and requires_parent_review when honoring it "
     "would change the Book. requires_parent_review must use escalate_to_book. "
-    "Use decision='local_repair' exactly when repair_scope contains at least one bounded Arc "
-    "component; otherwise repair_scope must be empty. A pass has no issues and every non-pass "
-    "has at least one typed EP1 issue. Every local-repair issue names one repair component, and "
-    "repair_scope equals that exact union. escalate_to_book carries only "
+    "A pass has no issues and every non-pass has at least one typed EP1 issue. Every "
+    "local-repair issue lists the Arc candidate components where you explicitly observed the "
+    "same semantic issue. observed_components are diagnostic only: the Harness independently "
+    "authorizes the complete current same-layer Arc candidate envelope for one repair. "
+    "escalate_to_book carries only "
     "parent_authority_concern issues supported by concrete evidence; do not declare the Book "
     "baseline wrong. needs_user carries only creator_owned_unknown issues, each with one "
     "concrete answerable question. When active applied Arc guidance is present, judge its "
@@ -154,12 +181,23 @@ BOOK_CANDIDATE_RUBRIC = (
     "guidance, ordered semantic Arc topology, and every keyed completion requirement are "
     "substantive, mutually coherent, feasible, and usable by later Arc planning. Verify "
     "adjacent Arc handoff coherence, observable exit conditions, and exactly one final last "
-    "Arc. Empty placeholders and Book-authored Chapter allocation fail. Do not request "
+    "Arc. For every completion requirement, return one typed coverage judgment and compare "
+    "its description and evidence expectation with the goals and exit conditions of every Arc "
+    "that claims its key. Treat this as semantic entailment, not word matching: decompose the "
+    "requirement into its indispensable named subjects, actions, exclusions, causal links, "
+    "outcome strength, and evidence expectation. Completing the owning Arc contracts under "
+    "their exact goals and exit conditions must necessarily establish every atom. A broader "
+    "category or compatible direction leaves a strength mismatch when it does not require the "
+    "specific actor, act, or causal edge. Structural key presence alone is not semantic "
+    "coverage. Empty "
+    "placeholders and Book-authored Chapter allocation fail. Do not request "
     "Chapter counts, Chapter titles, scenes, or a Chapter-by-Chapter outline. "
     + EP1_BLOCKER_PROTOCOL
 )
 ARC_CANDIDATE_RUBRIC = (
     "Check that the desired state transition serves the exact assigned Book Arc contract; "
+    "for every Book completion requirement assigned to this Arc, ensure the closure signals "
+    "and Chapter outline can establish evidence at the requirement's stated semantic strength; "
     "conflict and pacing trajectories are stage-level and feasible; character, "
     "foreshadowing, and prohibition obligations are explicit; and every closure signal is "
     "observable. "
@@ -311,6 +349,7 @@ class EvaluationStrategyDefinition:
     legal_semantic_signals: tuple[str, ...]
     output_model: type[BaseModel]
     output_schema_version: int
+    repairable_components: tuple[str, ...] = ()
 
 
 class EvaluationStrategyRegistry:
@@ -379,6 +418,7 @@ class TaskDefinition:
     rubric_id: str | None = None
     rubric_version: int | None = None
     rubric_text: str | None = None
+    repairable_components: tuple[str, ...] = ()
     text_finalizer: TextFinalizer | None = None
 
     @property
@@ -432,6 +472,7 @@ class TaskRegistry:
                     strategy.rubric_version,
                     strategy.rubric_text,
                     strategy.output_model,
+                    strategy.repairable_components,
                 )
                 actual = (
                     definition.evaluation_strategy_id,
@@ -442,6 +483,7 @@ class TaskRegistry:
                     definition.rubric_version,
                     definition.rubric_text,
                     definition.output_model,
+                    definition.repairable_components,
                 )
                 if actual != expected:
                     raise ValueError(
@@ -449,6 +491,10 @@ class TaskRegistry:
                     )
             elif definition.evaluation_strategy_id is not None:
                 raise ValueError(f"Producer task cannot bind evaluator strategy: {key!r}")
+            if len(definition.repairable_components) != len(
+                set(definition.repairable_components)
+            ) or any(not component.strip() for component in definition.repairable_components):
+                raise ValueError(f"Invalid repairable component envelope for {key!r}")
             if definition.output_mode == "text_streaming" and definition.text_finalizer is None:
                 raise ValueError(f"Text task {key!r} requires an explicit pure finalizer.")
             if definition.output_mode == "native_json_schema" and definition.text_finalizer is not None:
@@ -566,6 +612,7 @@ class TaskRegistry:
             rubric_id=definition.rubric_id,
             rubric_version=definition.rubric_version,
             rubric_text=definition.rubric_text,
+            repairable_components=definition.repairable_components,
             output_mode=definition.output_mode,
             required_capabilities=definition.required_capabilities,
             model_request_limit=definition.model_request_limit,
@@ -588,6 +635,7 @@ def _native(
     evaluation_strategy_version: int | None = None,
     output_schema_version: int = 1,
     context_policy_version: int = 2,
+    repairable_components: tuple[str, ...] = (),
 ) -> TaskDefinition:
     return TaskDefinition(
         role=role,
@@ -606,6 +654,7 @@ def _native(
         rubric_id=rubric_id,
         rubric_version=1 if rubric_id else None,
         rubric_text=rubric_text,
+        repairable_components=repairable_components,
     )
 
 
@@ -653,6 +702,7 @@ def _evaluation(
         evaluation_strategy_version=strategy.strategy_version,
         output_schema_version=strategy.output_schema_version,
         context_policy_version=strategy.context_policy_version,
+        repairable_components=strategy.repairable_components,
     )
 
 
@@ -672,6 +722,7 @@ def _strategy(
     strategy_version: int = 1,
     output_schema_version: int = 1,
     context_policy_version: int = 2,
+    repairable_components: tuple[str, ...] = (),
 ) -> EvaluationStrategyDefinition:
     return EvaluationStrategyDefinition(
         strategy_id=f"{task_kind}-strategy",
@@ -690,6 +741,7 @@ def _strategy(
         legal_semantic_signals=legal_semantic_signals,
         output_model=output_model,
         output_schema_version=output_schema_version,
+        repairable_components=repairable_components,
     )
 
 
@@ -699,7 +751,7 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
             task_kind="evaluate.book",
             scope_layer="book",
             objective="Evaluate one frozen Book candidate without rewriting it.",
-            context_policy_id="book-evaluator-context-v2",
+            context_policy_id="book-evaluator-context-v3",
             context_includes=(
                 "candidate_book_pack",
                 "creator_confirmed_decisions",
@@ -710,24 +762,27 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "harness_route_commands",
                 "storage_identifiers",
             ),
-            rubric_id="book-candidate-rubric-v4",
+            rubric_id="book-candidate-rubric-v6",
             rubric_text=BOOK_CANDIDATE_RUBRIC,
             deterministic_prechecks=(
                 "candidate_components_present",
                 "book_workspace_version_current",
                 "completion_requirement_keys_unique",
                 "book_arc_topology_valid",
+                "completion_requirement_arc_ownership_valid",
             ),
             legal_semantic_signals=("pass", "local_repair", "needs_user"),
             output_model=BookEvaluation,
-            strategy_version=3,
-            output_schema_version=2,
+            strategy_version=5,
+            output_schema_version=4,
+            context_policy_version=3,
+            repairable_components=BOOK_REPAIRABLE_COMPONENTS,
         ),
         _strategy(
             task_kind="evaluate.arc",
             scope_layer="arc",
             objective="Evaluate one frozen Story Arc candidate and its complete Chapter outline.",
-            context_policy_id="arc-evaluator-context-v5",
+            context_policy_id="arc-evaluator-context-v6",
             context_includes=(
                 "assigned_book_arc_contract",
                 "candidate_arc_contract",
@@ -743,13 +798,14 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "harness_route_commands",
                 "unrelated_execution_evidence",
             ),
-            rubric_id="arc-candidate-rubric-v7",
+            rubric_id="arc-candidate-rubric-v8",
             rubric_text=ARC_CANDIDATE_RUBRIC,
             deterministic_prechecks=(
                 "arc_workspace_version_current",
                 "arc_outline_coverage_exact",
                 "closure_signal_keys_unique",
                 "assigned_book_arc_contract_current",
+                "assigned_completion_requirements_current",
             ),
             legal_semantic_signals=(
                 "pass",
@@ -758,9 +814,10 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "needs_user",
             ),
             output_model=ArcEvaluation,
-            strategy_version=8,
-            output_schema_version=6,
-            context_policy_version=4,
+            strategy_version=9,
+            output_schema_version=7,
+            context_policy_version=5,
+            repairable_components=ARC_REPAIRABLE_COMPONENTS,
         ),
         _strategy(
             task_kind="evaluate.chapter",
@@ -990,9 +1047,9 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                     "chapter-repair-verification-context-v5"
                     if layer == "chapter"
                     else (
-                        "arc-repair-verification-context-v3"
+                        "arc-repair-verification-context-v4"
                         if layer == "arc"
-                        else f"{layer}-repair-verification-context-v2"
+                        else f"{layer}-repair-verification-context-v3"
                     )
                 ),
                 context_includes=(
@@ -1011,9 +1068,9 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                     "chapter-repair-rubric-v10"
                     if layer == "chapter"
                     else (
-                        "arc-repair-rubric-v8"
+                        "arc-repair-rubric-v9"
                         if layer == "arc"
-                        else "book-repair-rubric-v5"
+                        else "book-repair-rubric-v7"
                     )
                 ),
                 rubric_text=(
@@ -1025,7 +1082,14 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                         else CHAPTER_CANDIDATE_RUBRIC
                     )
                 )
-                + " Verify the complete original issue ledger and reject unauthorized changes.",
+                + (
+                    " Verify only the complete original issue ledger against the frozen "
+                    "before candidate, repaired candidate, and Harness-generated changed-"
+                    "component manifest. Pass only when every original issue is gone, every "
+                    "change is relevant to those issues, and the repair introduced no new EP1 "
+                    "blocker. Do not reopen unrelated literary quality or authorize another "
+                    "repair round."
+                ),
                 deterministic_prechecks=(
                     "repair_scope_matches_authorization",
                     "complete_issue_ledger_present",
@@ -1042,13 +1106,22 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                     else ArcEvaluation if layer == "arc" else LayerEvaluationResult
                 ),
                 strategy_version=(
-                    10 if layer == "chapter" else 8 if layer == "arc" else 4
+                    10 if layer == "chapter" else 9 if layer == "arc" else 6
                 ),
                 output_schema_version=(
-                    7 if layer == "chapter" else 6 if layer == "arc" else 3
+                    7 if layer == "chapter" else 7 if layer == "arc" else 5
                 ),
                 context_policy_version=(
-                    4 if layer == "chapter" else 3 if layer == "arc" else 2
+                    4 if layer == "chapter" else 4 if layer == "arc" else 3
+                ),
+                repairable_components=(
+                    ()
+                    if layer == "chapter"
+                    else (
+                        ARC_REPAIRABLE_COMPONENTS
+                        if layer == "arc"
+                        else BOOK_REPAIRABLE_COMPONENTS
+                    )
                 ),
             )
             for layer in ("book", "arc", "chapter")
@@ -1077,39 +1150,49 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
                 "Synthesize the frozen creator brief and discussion into one coherent Book "
                 f"candidate. {BOOK_CANDIDATE_CONTRACT}"
             ),
-            output_schema_version=2,
+            output_schema_version=4,
         ),
         _native(
             "book_strategist",
             "book.revise",
             "book",
             BookSuccessorCandidateProposal,
-            context_policy_id="book-revision-context-v2",
+            context_policy_id="book-revision-context-v3",
             instructions=(
                 "Revise only the Book-level intent authorized by the frozen change request. "
                 "Return only the mutable future Arc suffix in arc_topology_suffix; never "
                 "repeat the Harness-frozen historical prefix, ordinals, IDs, or baseline "
                 f"metadata. {BOOK_CANDIDATE_CONTRACT}"
             ),
-            output_schema_version=2,
+            output_schema_version=4,
+            context_policy_version=3,
         ),
         _native(
             "book_strategist",
             "book.repair",
             "book",
             BookRepairPatch,
-            context_policy_id="book-repair-context-v2",
+            context_policy_id="book-repair-context-v3",
             instructions=(
-                "Return only a semantic patch whose change components are a subset of the "
-                "evaluator-authorized Book repair contract in frozen context. Do not return "
+                "Read the complete original issue ledger and scan every component in the "
+                "Harness-declared repairable Book candidate envelope for every occurrence of "
+                "those same semantic issues. Return only the replacements actually needed to "
+                "remove the complete issue, even when the first evaluation observed it in only "
+                "one component. Do not make unrelated improvements. Do not return "
                 "selected_title or repeat any omitted Book component; the Harness preserves "
                 "omitted content. Every returned replacement must actually differ from the "
                 "current component; an arc_topology repair returns only the authorized mutable "
                 "future suffix and never repeats the frozen historical prefix. An unchanged "
-                "replacement is rejected as a no-op. Do not "
+                "replacement is rejected as a no-op. When repairing completion ownership, "
+                "make the responsible Arc goals and exit conditions semantically entail every "
+                "creator-required named subject, act, exclusion, causal link, and evidence "
+                "strength; do not hide a missing specific obligation behind a broader phrase "
+                "such as clarify roles or resolve the incident. Do not "
                 "invent storage IDs, approval state, routes, or commands."
             ),
-            output_schema_version=3,
+            output_schema_version=5,
+            context_policy_version=3,
+            repairable_components=BOOK_REPAIRABLE_COMPONENTS,
         ),
         *[
             _native(
@@ -1118,13 +1201,13 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
                 "arc",
                 ArcPlanProposal,
                 context_policy_id=(
-                    "arc-plan-context-v5"
+                    "arc-plan-context-v6"
                     if task_kind == "arc.plan"
-                    else "arc-revise-context-v4"
+                    else "arc-revise-context-v5"
                 ),
                 instructions=instructions,
                 output_schema_version=4,
-                context_policy_version=3 if task_kind == "arc.plan" else 2,
+                context_policy_version=4 if task_kind == "arc.plan" else 3,
             )
             for task_kind, instructions in (
                 (
@@ -1139,7 +1222,9 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
                     "needed to realize this Arc. Each entry contains only title, core_event, "
                     "hook, and scenes. The Harness derives the closure checkpoint from the "
                     "approved outline length and owns ordinals and identities. Expand the "
-                    "assigned Book contract semantically; do not copy its wording or redefine "
+                    "assigned Book contract and its assigned completion requirements "
+                    "semantically; make closure signals and outline evidence reach each "
+                    "requirement's stated strength. Do not copy its wording or redefine "
                     "its whole-book role. When an entry requires confirmation, exclusion, "
                     "culpability, or causal closure, schedule observable evidence strong enough "
                     "for that conclusion without violating the Arc prohibitions or Canon; do not "
@@ -1165,10 +1250,13 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
             "arc.repair",
             "arc",
             ArcRepairPatch,
-            context_policy_id="arc-repair-context-v3",
+            context_policy_id="arc-repair-context-v4",
             instructions=(
-                "Return only a semantic patch whose change components are a subset of the "
-                "evaluator-authorized Arc repair scope in frozen context. Do not repeat omitted "
+                "Read the complete original issue ledger and scan every component in the "
+                "Harness-declared repairable Arc candidate envelope for every occurrence of "
+                "those same semantic issues. Return only replacements actually needed to "
+                "remove the complete issue, even when the first evaluation observed it in only "
+                "one component. Do not make unrelated improvements or repeat omitted "
                 "Arc components; the Harness preserves them exactly. Every returned replacement "
                 "must actually differ from the current component; an unchanged replacement is "
                 "rejected as a no-op. Replacing chapter_outline replaces the complete mutable "
@@ -1178,7 +1266,9 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
                 "can obtain without violating the other Arc components. Do not invent storage "
                 "IDs, approval state, routes, or commands."
             ),
-            output_schema_version=5,
+            output_schema_version=6,
+            context_policy_version=3,
+            repairable_components=ARC_REPAIRABLE_COMPONENTS,
         ),
         _native(
             "chapter_writer",
