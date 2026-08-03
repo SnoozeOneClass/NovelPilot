@@ -110,6 +110,8 @@ Loop 的主体是 harness：harness 决定每一轮怎么开始、给 LLM 什么
 
 升级必须逐级进行。Chapter 只能提交 Chapter-to-Arc 审查请求，不能自行判定 Arc 契约错误，也不能直接升级到 Book；Arc 审查后如果认为需要改变全书承诺，只能提交 Arc-to-Book 审查请求，由 Book 层判断。变更请求只打开目标层的审查状态，不直接打开修订工作区，更不直接替换正式 baseline。
 
+跨层复审还必须区分“问题来源”和“本轮评审对象”。Arc-to-Book 请求及其原始证据是不可变的问题来源，用来解释为什么需要 Book 判断；每个 Book 评审任务另行冻结当时实际被审查的 Arc 正式 baseline。若第一轮允许 Arc 纠正，第二轮仍沿用原请求，但评审对象必须改为经过同一纠正 lineage、Arc 评审和正式提交后产生的 successor。Harness 必须用关系链证明二者的联系，不能因为某个 Arc 恰好是 current 就默认它合法，也不能为了更新评审对象而改写原始请求。
+
 Arc 收束失败同样只是一项 Arc 层审查输入。即使 Arc 层确认需要修订，也必须由 ArcPlanner 提出候选、经过 Arc 评估和模式对应的批准，再由 Harness 提交新基线。Book baseline 的任何替换都必须经过 Book 层审阅，并在两种运行模式下都获得人工批准。
 
 同层候选的一轮有界修复针对的是完整语义问题，不是 Evaluator 首次点名字段的

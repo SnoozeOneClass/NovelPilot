@@ -163,7 +163,7 @@ Observation/Canon 都是可纠正的派生状态，发生争议时回到对应�
 
 每个 Agent task 使用固定 CXT1 Context View。模型可见上下文块只暴露六个
 属性：`role / scope / time / use / access / target`；内部 ID、hash 和完整
-source binding 只写入 `novelpilot-task-context-manifest-v5`。评审或修复任务
+source binding 只写入 `novelpilot-task-context-manifest-v6`。评审或修复任务
 恰好拥有一个逻辑 `target_descriptor`；正式契约、正式结果、正式正文、派生
 证据、Canon 和旧评审均为只读。Book 不重读全部 Chapter，Arc 只消费当前
 Arc 的正式事实，Chapter 只消费当前 assignment、至多下一 assignment、
@@ -184,6 +184,12 @@ Book successor Context 明确区分 predecessor、Harness 冻结的历史 Arc �
 候选必须保持不变的硬约束。历史前缀相等与 future suffix 权限仍由 Domain
 composition/CAS 确定性保护，不交给 Evaluator 重新裁决。
 
+初始 Book 候选自身的 completion contract 与 Arc ownership 在原生结构化输出
+边界闭合校验：Arc 只能逐字复用同一候选已经声明的 requirement key，每个
+requirement 至少由一个 Arc 承担。字段描述和任务指令向模型公开该规则，Pydantic
+输出校验可使用同一冻结任务已有的一次 output-repair 请求纠正；Domain 在正式
+apply 时仍保留相同门禁，不能通过放松权威校验换取成功率。
+
 Context policy 不只声明允许组，也声明每个 task kind 的必需组，以及 revision/
 evidence correction 所需的至少一个明确授权来源；缺块在 Provider 调用前以
 `context_assembly_invalid` 失败。正式 Canon 始终保持 `time=current`，不会因
@@ -191,6 +197,14 @@ repair/verify 而误标成候选；只有实际候选块标记为 `pre_repair/po
 Raw user feedback 只有在仍是 applied feedback 的当前 content ref 时才标记为
 `creator_guidance`，父层 review 必须保持 `review_finding /
 repair_authorization` 身份。
+
+Book parent review 使用双身份绑定：`source_arc_book_request_id` 永远指向最初
+触发 Book 判断的不可变问题与证据，`subject_arc_baseline_id` 指向本次任务实际
+评审的 Arc 正式版本；Book task 自身的 `arc_baseline_id` 仍为空。第一轮要求
+origin、subject 与当前 Arc head 一致；若第一轮授权 Arc 纠正，第二轮可继续引用
+原请求，但 subject 必须是由该前序评审、同一纠正 lineage、通过的 Arc review
+和正式授权共同产生的 successor。Context 组装、任务冻结和 Domain delivery
+共享同一个关系解析器，任一环节无法证明完整链路都会在模型调用或提交前失败。
 
 Evaluator 只允许六类 EP1 blocker：
 `explicit_conflict`、`contract_unfulfilled`、

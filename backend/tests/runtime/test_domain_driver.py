@@ -188,6 +188,7 @@ def test_book_parent_review_instruction_freezes_only_book_scope(
         correction_lineage_origin=lineage_origin,
         automatic_correction_round=automatic_round,
         source_arc_book_request_id="arc-book-request",
+        subject_arc_baseline_id="arc-subject-baseline",
         source_book_parent_review_id=source_parent_review_id,
         source_feedback_id=source_feedback_id,
     )
@@ -196,6 +197,7 @@ def test_book_parent_review_instruction_freezes_only_book_scope(
     assert instruction.arc_baseline_id is None
     assert instruction.chapter_id is None
     assert instruction.chapter_baseline_id is None
+    assert instruction.subject_arc_baseline_id == "arc-subject-baseline"
     assert instruction.source_arc_book_request_id == "arc-book-request"
     assert instruction.source_book_parent_review_id == source_parent_review_id
     assert instruction.source_feedback_id == source_feedback_id
@@ -231,6 +233,7 @@ def test_book_parent_review_instruction_freezes_only_book_scope(
         book_baseline_id=instruction.book_baseline_id,
         arc_baseline_id=instruction.arc_baseline_id,
         chapter_baseline_id=instruction.chapter_baseline_id,
+        subject_arc_baseline_id=instruction.subject_arc_baseline_id,
         correction_lineage_id=instruction.correction_lineage_id,
         correction_lineage_origin=instruction.correction_lineage_origin,
         automatic_correction_round=instruction.automatic_correction_round,
@@ -243,6 +246,7 @@ def test_book_parent_review_instruction_freezes_only_book_scope(
     assert plan.book_baseline_id == "book-baseline"
     assert plan.arc_baseline_id is None
     assert plan.chapter_baseline_id is None
+    assert plan.subject_arc_baseline_id == "arc-subject-baseline"
 
 
 def test_delivery_validation_failure_diagnostics_do_not_copy_model_input() -> None:

@@ -11,6 +11,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.agents.contracts import (
+    ArcPlanProposal,
     ChapterEvaluationIssue,
     ChapterObservationResult,
     EvaluationIssue,
@@ -21,11 +22,13 @@ from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
 from app.db.engine import create_sqlite_async_engine
 from app.db.maintenance import alembic_config
 from app.db.schema import (
+    agent_tasks,
     arc_baselines,
     arc_book_change_requests,
     arc_parent_reviews,
     arc_workspaces,
     book_workspaces,
+    book_parent_reviews,
     canon_baselines,
     chapter_baselines,
     chapter_arc_change_requests,
@@ -40,6 +43,14 @@ from app.domain.authority import (
     LoopAuthorityCommandService,
     RecordArcParentReviewRequest,
     RecordBookParentReviewRequest,
+)
+from app.domain.arc.commands import ArcCommandService
+from app.domain.arc.contracts import (
+    ApplyArcTaskRequest,
+    ArcEvaluation,
+    CommitArcAutoRequest,
+    RecordArcReviewRequest,
+    SubmitArcRequest,
 )
 from app.domain.chapter.commands import (
     ChapterCommandService,
@@ -69,7 +80,8 @@ from app.domain.feedback import (
     QueueFeedbackRequest,
 )
 from app.domain.project_state import ProjectStateQuery
-from app.runtime.context import HarnessContextBuilder
+from app.runtime.context import ContextFactError, HarnessContextBuilder
+from app.runtime.driver import DomainRunDriver
 from app.store.command_bus import CommandBus
 from app.store.content import ContentRepository
 from tests.domain.test_chapter_lifecycle import (
@@ -251,6 +263,7 @@ def test_book_parent_review_uses_relational_source_arc_baseline(
                 book_id=foundation.book_id,
                 book_baseline_id=foundation.book_baseline_id,
                 arc_baseline_id=None,
+                subject_arc_baseline_id=foundation.arc_baseline_id,
                 canon_baseline_id=foundation.canon_baseline_id,
                 workspace_lock_version=book_lock,
                 correction_lineage_id="book-parent-source-lineage",
@@ -277,6 +290,378 @@ def test_book_parent_review_uses_relational_source_arc_baseline(
             )
             assert recorded.result.disposition == "keep_book"
             assert recorded.result.downstream_action == "arc_correction_opened"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+def test_arc_successor_is_the_exact_subject_of_runtime_book_parent_round_one(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "book-parent-successor-subject.sqlite3"
+    command.upgrade(alembic_config(database), "head")
+
+    async def exercise() -> None:
+        engine = create_sqlite_async_engine(database)
+        try:
+            fixture = await _prepare_arc_parent_fixture(
+                engine,
+                project_id="book-parent-successor-subject",
+            )
+            foundation = fixture.chapter.foundation
+            lineage_id = "book-parent-successor-lineage"
+            await _record_arc_parent(
+                engine,
+                fixture=fixture,
+                suffix="book-parent-successor-source",
+                evaluation=ArcParentContractEvaluation(
+                    arc_contract_judgment="remains_applicable",
+                    book_review_concern="book_review_required",
+                    chapter_evidence_concern="not_required",
+                    summary="The Chapter concern requires immediate Book authority.",
+                    issues=[
+                        EvaluationIssue(
+                            kind="parent_authority_concern",
+                            code="book_contract_review_required",
+                            subject="approved Book promise",
+                            summary="Only Book may judge whether its promise still applies.",
+                            evidence=["The Arc evidence reaches a Book-level promise."],
+                        )
+                    ],
+                ),
+                lineage_id=lineage_id,
+                correction_round=0,
+            )
+            async with engine.connect() as connection:
+                request_id = await connection.scalar(
+                    select(arc_book_change_requests.c.id).where(
+                        arc_book_change_requests.c.arc_id == foundation.arc_id
+                    )
+                )
+                book_lock = await connection.scalar(
+                    select(book_workspaces.c.lock_version).where(
+                        book_workspaces.c.book_id == foundation.book_id
+                    )
+                )
+            assert request_id is not None and book_lock is not None
+
+            round_zero_task, round_zero_attempt = await insert_successful_task(
+                engine,
+                project_id=foundation.project_id,
+                run_id=foundation.run_id,
+                task_id="book-parent-round-zero:task",
+                attempt_id="book-parent-round-zero:attempt",
+                role="evaluator",
+                task_kind="evaluate.book_parent_contract",
+                scope_layer="book",
+                book_id=foundation.book_id,
+                book_baseline_id=foundation.book_baseline_id,
+                arc_baseline_id=None,
+                subject_arc_baseline_id=foundation.arc_baseline_id,
+                canon_baseline_id=foundation.canon_baseline_id,
+                workspace_lock_version=book_lock,
+                correction_lineage_id=lineage_id,
+                correction_lineage_origin="review_initiated",
+                automatic_correction_round=0,
+                source_arc_book_request_id=request_id,
+                result=BookParentContractEvaluation(
+                    book_contract_judgment="remains_applicable",
+                    arc_evidence_concern="not_required",
+                    summary="Book remains applicable; Arc must reconcile its evidence.",
+                ),
+            )
+            round_zero = await LoopAuthorityCommandService(
+                CommandBus(engine)
+            ).record_book_parent_review(
+                RecordBookParentReviewRequest(
+                    project_id=foundation.project_id,
+                    book_id=foundation.book_id,
+                    request_id=request_id,
+                    task_id=round_zero_task,
+                    attempt_id=round_zero_attempt,
+                ),
+                idempotency_key="book-parent-round-zero:record",
+            )
+            assert round_zero.result.downstream_action == "arc_correction_opened"
+
+            async with engine.connect() as connection:
+                source_plan_ref_id = await connection.scalar(
+                    select(arc_baselines.c.plan_ref_id).where(
+                        arc_baselines.c.id == foundation.arc_baseline_id
+                    )
+                )
+                correction_lock = await connection.scalar(
+                    select(arc_workspaces.c.lock_version).where(
+                        arc_workspaces.c.arc_id == foundation.arc_id
+                    )
+                )
+                assert source_plan_ref_id is not None
+                packed_plan = await ContentRepository(connection).get_packed(
+                    project_id=foundation.project_id,
+                    ref_id=source_plan_ref_id,
+                )
+            assert correction_lock is not None
+            successor_plan = ArcPlanProposal.model_validate_json(
+                packed_plan.unpack_and_verify()
+            )
+            planner_task, planner_attempt = await insert_successful_task(
+                engine,
+                project_id=foundation.project_id,
+                run_id=foundation.run_id,
+                task_id="book-guided-arc-successor:task",
+                attempt_id="book-guided-arc-successor:attempt",
+                role="arc_planner",
+                task_kind="arc.revise",
+                scope_layer="arc",
+                book_id=foundation.book_id,
+                book_baseline_id=foundation.book_baseline_id,
+                arc_id=foundation.arc_id,
+                arc_baseline_id=foundation.arc_baseline_id,
+                canon_baseline_id=foundation.canon_baseline_id,
+                workspace_lock_version=correction_lock,
+                source_book_parent_review_id=round_zero.result.review_id,
+                result=successor_plan,
+            )
+            arc_service = ArcCommandService(CommandBus(engine))
+            applied = await arc_service.apply_task_result(
+                ApplyArcTaskRequest(
+                    project_id=foundation.project_id,
+                    book_id=foundation.book_id,
+                    arc_id=foundation.arc_id,
+                    task_id=planner_task,
+                    attempt_id=planner_attempt,
+                    expected_workspace_lock_version=correction_lock,
+                ),
+                idempotency_key="book-guided-arc-successor:apply",
+            )
+            submitted = await arc_service.submit_for_review(
+                SubmitArcRequest(
+                    project_id=foundation.project_id,
+                    book_id=foundation.book_id,
+                    arc_id=foundation.arc_id,
+                    expected_workspace_lock_version=(
+                        applied.result.workspace_lock_version
+                    ),
+                ),
+                idempotency_key="book-guided-arc-successor:submit",
+            )
+            evaluator_task, evaluator_attempt = await insert_successful_task(
+                engine,
+                project_id=foundation.project_id,
+                run_id=foundation.run_id,
+                task_id="book-guided-arc-successor:evaluate",
+                attempt_id="book-guided-arc-successor:evaluate-attempt",
+                role="evaluator",
+                task_kind="evaluate.arc",
+                scope_layer="arc",
+                book_id=foundation.book_id,
+                book_baseline_id=foundation.book_baseline_id,
+                arc_id=foundation.arc_id,
+                arc_baseline_id=foundation.arc_baseline_id,
+                canon_baseline_id=foundation.canon_baseline_id,
+                workspace_lock_version=applied.result.workspace_lock_version,
+                source_book_parent_review_id=round_zero.result.review_id,
+                result=ArcEvaluation(
+                    guidance_authority_judgment="not_present",
+                    decision="pass",
+                    summary="The formal Arc successor follows the Book judgment.",
+                ),
+            )
+            strategy = DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
+                "evaluate.arc"
+            )
+            reviewed = await arc_service.record_review(
+                RecordArcReviewRequest(
+                    project_id=foundation.project_id,
+                    book_id=foundation.book_id,
+                    arc_id=foundation.arc_id,
+                    submission_id=submitted.result.submission_id,
+                    evaluator_task_id=evaluator_task,
+                    evaluator_attempt_id=evaluator_attempt,
+                    rubric_id=strategy.rubric_id,
+                    rubric_version=strategy.rubric_version,
+                    deterministic_precheck={"passed": True},
+                ),
+                idempotency_key="book-guided-arc-successor:review",
+            )
+            committed = await arc_service.commit_baseline_auto(
+                CommitArcAutoRequest(
+                    project_id=foundation.project_id,
+                    book_id=foundation.book_id,
+                    arc_id=foundation.arc_id,
+                    submission_id=submitted.result.submission_id,
+                    review_id=reviewed.result.review_id,
+                    expected_current_baseline_id=foundation.arc_baseline_id,
+                ),
+                idempotency_key="book-guided-arc-successor:commit",
+            )
+
+            async with UnitOfWork(engine) as store:
+                run = await store.runs.get(
+                    project_id=foundation.project_id,
+                    run_id=foundation.run_id,
+                )
+            assert run is not None
+            driver = object.__new__(DomainRunDriver)
+            driver._engine = engine
+            instruction = await driver._decide_next(run)
+            assert instruction is not None
+            assert instruction.task_kind == "evaluate.book_parent_contract"
+            assert instruction.arc_baseline_id is None
+            assert instruction.subject_arc_baseline_id == committed.result.baseline_id
+            assert instruction.source_arc_book_request_id == request_id
+            assert (
+                instruction.source_book_parent_review_id
+                == round_zero.result.review_id
+            )
+            assert instruction.automatic_correction_round == 1
+
+            async with engine.connect() as connection:
+                book_cycle = (
+                    await connection.execute(
+                        select(
+                            book_workspaces.c.lock_version,
+                            book_workspaces.c.work_cycle_id,
+                        ).where(book_workspaces.c.book_id == foundation.book_id)
+                    )
+                ).one()
+            with pytest.raises(
+                ContextFactError,
+                match="not the current formal Arc head",
+            ):
+                await HarnessContextBuilder(engine).build(
+                    task_kind=instruction.task_kind,
+                    project_id=foundation.project_id,
+                    book_id=instruction.book_id,
+                    arc_id=None,
+                    chapter_id=None,
+                    semantic_goal="Reject a stale origin masquerading as the subject.",
+                    source_book_parent_review_id=(
+                        instruction.source_book_parent_review_id
+                    ),
+                    source_arc_book_request_id=(
+                        instruction.source_arc_book_request_id
+                    ),
+                    canon_baseline_id=foundation.canon_baseline_id,
+                    book_baseline_id=foundation.book_baseline_id,
+                    subject_arc_baseline_id=foundation.arc_baseline_id,
+                    workspace_lock_version=book_cycle.lock_version,
+                    workspace_work_cycle_id=book_cycle.work_cycle_id,
+                    correction_lineage_id=instruction.correction_lineage_id,
+                    correction_lineage_origin=(
+                        instruction.correction_lineage_origin
+                    ),
+                    automatic_correction_round=(
+                        instruction.automatic_correction_round
+                    ),
+                )
+            context = await HarnessContextBuilder(engine).build(
+                task_kind=instruction.task_kind,
+                project_id=foundation.project_id,
+                book_id=instruction.book_id,
+                arc_id=None,
+                chapter_id=None,
+                semantic_goal="Review the exact formal Arc successor at Book authority.",
+                source_book_parent_review_id=(
+                    instruction.source_book_parent_review_id
+                ),
+                source_arc_book_request_id=instruction.source_arc_book_request_id,
+                canon_baseline_id=foundation.canon_baseline_id,
+                book_baseline_id=foundation.book_baseline_id,
+                subject_arc_baseline_id=instruction.subject_arc_baseline_id,
+                workspace_lock_version=book_cycle.lock_version,
+                workspace_work_cycle_id=book_cycle.work_cycle_id,
+                correction_lineage_id=instruction.correction_lineage_id,
+                correction_lineage_origin=instruction.correction_lineage_origin,
+                automatic_correction_round=(
+                    instruction.automatic_correction_round
+                ),
+            )
+            assert context.manifest["facts"]["authority_subject_arc_baseline_id"] == (
+                committed.result.baseline_id
+            )
+
+            round_one_task, round_one_attempt = await insert_successful_task(
+                engine,
+                project_id=foundation.project_id,
+                run_id=foundation.run_id,
+                task_id="book-parent-round-one:task",
+                attempt_id="book-parent-round-one:attempt",
+                role="evaluator",
+                task_kind="evaluate.book_parent_contract",
+                scope_layer="book",
+                book_id=foundation.book_id,
+                book_baseline_id=foundation.book_baseline_id,
+                arc_baseline_id=None,
+                subject_arc_baseline_id=committed.result.baseline_id,
+                canon_baseline_id=foundation.canon_baseline_id,
+                workspace_lock_version=book_cycle.lock_version,
+                workspace_work_cycle_id=book_cycle.work_cycle_id,
+                correction_lineage_id=lineage_id,
+                correction_lineage_origin="review_initiated",
+                automatic_correction_round=1,
+                source_book_parent_review_id=round_zero.result.review_id,
+                source_arc_book_request_id=request_id,
+                result=BookParentContractEvaluation(
+                    book_contract_judgment="remains_applicable",
+                    arc_evidence_concern="not_required",
+                    summary="The Arc successor now satisfies the unchanged Book.",
+                ),
+            )
+            round_one = await LoopAuthorityCommandService(
+                CommandBus(engine)
+            ).record_book_parent_review(
+                RecordBookParentReviewRequest(
+                    project_id=foundation.project_id,
+                    book_id=foundation.book_id,
+                    request_id=request_id,
+                    task_id=round_one_task,
+                    attempt_id=round_one_attempt,
+                ),
+                idempotency_key="book-parent-round-one:record",
+            )
+            assert round_one.result.downstream_action == "request_resolved"
+            async with engine.connect() as connection:
+                reviews = list(
+                    (
+                        await connection.execute(
+                            select(
+                                book_parent_reviews.c.automatic_correction_round,
+                                book_parent_reviews.c.subject_arc_baseline_id,
+                            )
+                            .where(
+                                book_parent_reviews.c.request_id == request_id
+                            )
+                            .order_by(
+                                book_parent_reviews.c.automatic_correction_round
+                            )
+                        )
+                    ).all()
+                )
+                round_one_task_binding = (
+                    await connection.execute(
+                        select(
+                            agent_tasks.c.arc_baseline_id,
+                            agent_tasks.c.subject_arc_baseline_id,
+                        ).where(agent_tasks.c.id == round_one_task)
+                    )
+                ).one()
+                request_status = await connection.scalar(
+                    select(arc_book_change_requests.c.status).where(
+                        arc_book_change_requests.c.id == request_id
+                    )
+                )
+            assert reviews == [
+                (0, foundation.arc_baseline_id),
+                (1, committed.result.baseline_id),
+            ]
+            assert round_one_task_binding.arc_baseline_id is None
+            assert (
+                round_one_task_binding.subject_arc_baseline_id
+                == committed.result.baseline_id
+            )
+            assert request_status == "resolved"
         finally:
             await engine.dispose()
 

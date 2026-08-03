@@ -20,6 +20,11 @@ from app.domain.arc.outline import (
     resolve_outline_entry,
 )
 from app.domain.book.contracts import BookArcTopology, CompletionContract
+from app.domain.book_parent_cases import (
+    BookParentCaseBinding,
+    BookParentCaseError,
+    resolve_book_parent_review_case,
+)
 from app.domain.chapter.contracts import CommittedChapterObservation
 from app.domain.project_state import ArcOutlineEntryView, project_arc_outline
 from app.store.arcs import ArcBaselineRecord
@@ -1040,6 +1045,17 @@ class HarnessContextBuilder:
         source_arc_book_request_id: str | None = None,
         source_arc_closure_id: str | None = None,
         canon_baseline_id: str | None = None,
+        book_baseline_id: str | None = None,
+        subject_arc_baseline_id: str | None = None,
+        workspace_lock_version: int | None = None,
+        workspace_work_cycle_id: str | None = None,
+        correction_lineage_id: str | None = None,
+        correction_lineage_origin: Literal[
+            "review_initiated", "user_initiated"
+        ]
+        | None = None,
+        automatic_correction_round: Literal[0, 1] | None = None,
+        source_feedback_id: str | None = None,
     ) -> FrozenTaskContext:
         resolved_definition = definition or DEFAULT_TASK_REGISTRY.get(
             role=_role_for_task(task_kind),
@@ -2751,47 +2767,51 @@ class HarnessContextBuilder:
                         predecessor.detail_ref_id,
                     )
             if task_kind == "evaluate.book_parent_contract":
-                if source_arc_book_request_id is None:
+                if (
+                    source_arc_book_request_id is None
+                    or book_baseline_id is None
+                    or workspace_lock_version is None
+                    or workspace_work_cycle_id is None
+                    or correction_lineage_id is None
+                    or correction_lineage_origin is None
+                    or automatic_correction_round is None
+                ):
                     raise ValueError(
-                        "Book parent-contract context requires an exact Arc-to-Book request."
+                        "Book parent-contract context requires one exact frozen case."
                     )
-                book_request = await store.changes.get_arc_book(
-                    project_id=project_id,
-                    request_id=source_arc_book_request_id,
-                )
-                if book_request is None or book_request.book_id != book_id:
-                    raise LookupError(
-                        "Source Arc-to-Book request does not match the task."
+                try:
+                    book_parent_case = await resolve_book_parent_review_case(
+                        store,
+                        binding=BookParentCaseBinding(
+                            project_id=project_id,
+                            book_id=book_id,
+                            request_id=source_arc_book_request_id,
+                            target_book_baseline_id=book_baseline_id,
+                            subject_arc_baseline_id=subject_arc_baseline_id,
+                            canon_baseline_id=selected_canon_baseline_id,
+                            workspace_lock_version=workspace_lock_version,
+                            workspace_work_cycle_id=workspace_work_cycle_id,
+                            correction_lineage_id=correction_lineage_id,
+                            correction_lineage_origin=correction_lineage_origin,
+                            automatic_correction_round=automatic_correction_round,
+                            predecessor_review_id=source_book_parent_review_id,
+                            source_feedback_id=source_feedback_id,
+                        ),
                     )
+                except BookParentCaseError as error:
+                    raise ContextFactError(error.invariant, str(error)) from error
+                book_request = book_parent_case.change
                 await add(
                     "arc_book_request",
                     "arc_to_book_request_evidence",
                     book_request.evidence_ref_id,
                 )
-                subject_arc = await store.arcs.get(
-                    project_id=project_id,
-                    arc_id=book_request.arc_id,
-                )
-                subject_workspace = await store.arcs.get_workspace(
-                    project_id=project_id,
-                    arc_id=book_request.arc_id,
-                )
-                if subject_arc is None or subject_workspace is None:
-                    raise LookupError(
-                        "Source Arc-to-Book request lost its Story Arc."
-                    )
+                subject_arc = book_parent_case.source_arc
+                subject_workspace = book_parent_case.source_arc_workspace
                 authority_subject_arc_id = subject_arc.id
-                authority_subject_arc_baseline_id = subject_arc.current_baseline_id
-                if subject_arc.current_baseline_id is not None:
-                    subject_baseline = await store.arcs.get_baseline(
-                        project_id=project_id,
-                        arc_id=subject_arc.id,
-                        baseline_id=subject_arc.current_baseline_id,
-                    )
-                    if subject_baseline is None:
-                        raise LookupError(
-                            "Source Arc-to-Book request lost its current Arc baseline."
-                        )
+                authority_subject_arc_baseline_id = subject_arc_baseline_id
+                subject_baseline = book_parent_case.subject_arc_baseline
+                if subject_baseline is not None:
                     await add(
                         "arc_book_request",
                         "source_arc_current_plan",
@@ -2844,15 +2864,8 @@ class HarnessContextBuilder:
                         "source_arc_closure_review",
                         source_arc_closure.detail_ref_id,
                 )
-                if source_book_parent_review_id is not None:
-                    book_predecessor = await store.book_parent_reviews.get(
-                        project_id=project_id,
-                        review_id=source_book_parent_review_id,
-                    )
-                    if book_predecessor is None:
-                        raise LookupError(
-                            "Book parent successor lost its predecessor review."
-                        )
+                book_predecessor = book_parent_case.predecessor_review
+                if book_predecessor is not None:
                     await add(
                         "book_parent_review",
                         "predecessor_book_parent_review",
@@ -3099,7 +3112,7 @@ class HarnessContextBuilder:
             for item in items
         ]
         manifest: dict[str, JsonValue] = {
-            "schema_id": "novelpilot-task-context-manifest-v5",
+            "schema_id": "novelpilot-task-context-manifest-v6",
             "task_kind": task_kind,
             "facts": facts,
             "items": manifest_items,
@@ -3135,6 +3148,7 @@ class HarnessContextBuilder:
             "book_progress_handoff_id": source_book_progress_handoff_id,
             "chapter_arc_request_id": source_chapter_arc_request_id,
             "arc_book_request_id": source_arc_book_request_id,
+            "subject_arc_baseline_id": subject_arc_baseline_id,
             "arc_closure_id": source_arc_closure_id,
         }
         manifest["authority_sources"] = cast(

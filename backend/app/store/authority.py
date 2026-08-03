@@ -67,6 +67,7 @@ class BookParentReviewRecord:
     arc_id: str
     request_id: str
     target_book_baseline_id: str
+    subject_arc_baseline_id: str | None
     source_task_id: str
     source_attempt_id: str
     strategy_id: str

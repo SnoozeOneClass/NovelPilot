@@ -2381,6 +2381,7 @@ book_parent_reviews = Table(
     Column("arc_id", String, nullable=False),
     Column("request_id", String, nullable=False),
     Column("target_book_baseline_id", String, nullable=False),
+    Column("subject_arc_baseline_id", String),
     Column("source_task_id", String, nullable=False),
     Column("source_attempt_id", String, nullable=False),
     Column("strategy_id", String, nullable=False),
@@ -2449,6 +2450,15 @@ book_parent_reviews = Table(
     ForeignKeyConstraint(
         ["project_id", "book_id", "target_book_baseline_id"],
         ["book_baselines.project_id", "book_baselines.book_id", "book_baselines.id"],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "book_id", "arc_id", "subject_arc_baseline_id"],
+        [
+            "arc_baselines.project_id",
+            "arc_baselines.book_id",
+            "arc_baselines.arc_id",
+            "arc_baselines.id",
+        ],
     ),
     ForeignKeyConstraint(
         ["project_id", "source_task_id", "source_attempt_id"],
@@ -3053,6 +3063,7 @@ agent_tasks = Table(
     Column("book_baseline_id", String),
     Column("arc_baseline_id", String),
     Column("chapter_baseline_id", String),
+    Column("subject_arc_baseline_id", String),
     Column("canon_baseline_id", String, nullable=False),
     Column("correction_lineage_id", String),
     Column("correction_lineage_origin", String),
@@ -3142,6 +3153,11 @@ agent_tasks = Table(
         "AND chapter_baseline_id IS NULL) "
         "OR (scope_layer = 'chapter' AND book_baseline_id IS NOT NULL "
         "AND arc_baseline_id IS NOT NULL))",
+    ),
+    _ck(
+        "book_parent_subject_scope",
+        "(task_kind = 'evaluate.book_parent_contract' "
+        "OR subject_arc_baseline_id IS NULL)",
     ),
     _ck(
         "correction_lineage_shape",
@@ -3275,6 +3291,10 @@ agent_tasks = Table(
             "arc_baselines.arc_id",
             "arc_baselines.id",
         ],
+    ),
+    ForeignKeyConstraint(
+        ["project_id", "subject_arc_baseline_id"],
+        ["arc_baselines.project_id", "arc_baselines.id"],
     ),
     ForeignKeyConstraint(
         ["project_id", "book_id", "arc_id", "chapter_id", "chapter_baseline_id"],

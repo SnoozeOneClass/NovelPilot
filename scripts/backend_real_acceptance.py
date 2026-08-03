@@ -553,6 +553,7 @@ def read_authority_evidence(database_path: Path, project_id: str) -> JsonObject:
             SELECT id, task_kind, role, scope_layer, book_id, arc_id, chapter_id,
                    workspace_lock_version, workspace_work_cycle_id,
                    book_baseline_id, arc_baseline_id, chapter_baseline_id,
+                   subject_arc_baseline_id,
                    canon_baseline_id, correction_lineage_id,
                    correction_lineage_origin, automatic_correction_round,
                    source_arc_parent_review_id, source_book_parent_review_id,
@@ -713,6 +714,7 @@ def read_authority_evidence(database_path: Path, project_id: str) -> JsonObject:
             connection,
             """
             SELECT id, arc_id, request_id, target_book_baseline_id,
+                   subject_arc_baseline_id,
                    source_task_id, source_attempt_id, book_contract_judgment,
                    disposition, resolution_owner, correction_lineage_id,
                    correction_lineage_origin, automatic_correction_round,
@@ -1136,14 +1138,13 @@ def _assert_derived_evidence_invariants(
             [
                 {
                     "id": "derived_evidence_authority",
-                    "ok": False,
+                    "ok": True,
                     "detail": (
-                        "the scenario never exercised an applied evidence-only "
-                        "Chapter repair"
+                        "first-pass derived evidence required no evidence-only repair"
                     ),
                 }
             ],
-            "evidence_only_repair_not_exercised",
+            "evidence_only_repair_not_needed",
         )
     reviews = {
         str(item["id"]): item
@@ -1303,6 +1304,67 @@ def _hierarchical_chain_violations(evidence: JsonObject) -> list[str]:
         violations.append("no Arc-to-Book request bound to that Arc review")
     if not chain.book_reviews:
         violations.append("no Book review bound to that Arc request")
+    tasks = {
+        str(item["id"]): item
+        for item in cast(list[JsonObject], evidence["tasks"])
+    }
+    arc_parent_reviews = {
+        str(item["id"]): item
+        for item in cast(list[JsonObject], evidence["arc_parent_reviews"])
+    }
+    arc_requests = {str(item["id"]): item for item in chain.arc_requests}
+    book_reviews = {str(item["id"]): item for item in chain.book_reviews}
+    arc_baselines = {
+        str(item["id"]): item
+        for item in cast(list[JsonObject], evidence["arc_baselines"])
+    }
+    for review in chain.book_reviews:
+        review_id = str(review["id"])
+        task = tasks.get(str(review.get("source_task_id")))
+        if (
+            task is None
+            or task.get("task_kind") != "evaluate.book_parent_contract"
+            or task.get("scope_layer") != "book"
+            or task.get("arc_baseline_id") is not None
+            or task.get("subject_arc_baseline_id")
+            != review.get("subject_arc_baseline_id")
+        ):
+            violations.append(
+                f"Book review {review_id} lost its exact Book-scope task subject"
+            )
+            continue
+        request = arc_requests.get(str(review.get("request_id")))
+        round_number = int(review.get("automatic_correction_round") or 0)
+        if round_number == 0 and request is not None:
+            source_review = arc_parent_reviews.get(
+                str(request.get("source_arc_parent_review_id"))
+            )
+            if (
+                source_review is not None
+                and review.get("subject_arc_baseline_id")
+                != source_review.get("target_arc_baseline_id")
+            ):
+                violations.append(
+                    f"Book review {review_id} round 0 subject differs from its Arc origin"
+                )
+        elif round_number == 1:
+            predecessor = book_reviews.get(str(review.get("predecessor_review_id")))
+            subject = arc_baselines.get(str(review.get("subject_arc_baseline_id")))
+            if (
+                predecessor is None
+                or subject is None
+                or subject.get("parent_baseline_id")
+                != predecessor.get("subject_arc_baseline_id")
+                or task.get("source_book_parent_review_id")
+                != predecessor.get("id")
+                or review.get("correction_lineage_id")
+                != predecessor.get("correction_lineage_id")
+            ):
+                violations.append(
+                    f"Book review {review_id} round 1 subject is not its exact Arc successor"
+                )
+        else:
+            violations.append(f"Book review {review_id} has an invalid correction round")
     return violations
 
 

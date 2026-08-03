@@ -499,7 +499,7 @@ def test_executor_persists_complete_task_evidence_without_token_deltas(tmp_path:
                         .where(agent_tasks.c.id == plan.task_id)
                     )
                 ).one()
-                assert tuple(task_plan_schema) == ("agent-task-plan", 3)
+                assert tuple(task_plan_schema) == ("agent-task-plan", 4)
                 attempt_row = (
                     await connection.execute(
                         select(

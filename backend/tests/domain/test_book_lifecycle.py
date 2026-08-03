@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 from alembic import command
 from pydantic import ValidationError
+from pydantic_ai import ModelResponse, TextPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -16,7 +18,11 @@ from app.agents.contracts import (
     BookDiscussionResult,
     BookDiscussionSuggestion,
 )
-from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
+from app.agents.registry import (
+    DEFAULT_EVALUATION_STRATEGY_REGISTRY,
+    DEFAULT_TASK_REGISTRY,
+)
+from app.agents.roles import build_agent
 from app.db.engine import create_sqlite_async_engine
 from app.db.maintenance import alembic_config
 from app.db.schema import (
@@ -143,6 +149,85 @@ def test_book_arc_topology_is_semantic_count_free_and_final_last() -> None:
         BookArcContract.model_validate(count_bearing_contract)
 
 
+def test_book_candidate_requires_exact_completion_requirement_ownership() -> None:
+    base = _book_topology().arcs[0]
+    common = {
+        "direction": "Follow the physical evidence to the memory-edit source.",
+        "constraints": _book_constraints(),
+        "selected_title": "《证词回声》",
+        "rolling_plan": _book_rolling_plan(),
+        "completion_contract": _completion_contract(),
+    }
+
+    with pytest.raises(
+        ValidationError,
+        match="must exactly reuse keys.*invented_requirement",
+    ):
+        BookCandidatePack(
+            **common,
+            arc_topology=BookArcTopology(
+                arcs=[
+                    base.model_copy(
+                        update={
+                            "completion_requirement_keys": [
+                                "memory_conflict_resolved",
+                                "invented_requirement",
+                            ]
+                        }
+                    )
+                ]
+            ),
+        )
+
+    with pytest.raises(
+        ValidationError,
+        match="must have at least one owning Arc.*memory_conflict_resolved",
+    ):
+        BookCandidatePack(
+            **common,
+            arc_topology=BookArcTopology(
+                arcs=[base.model_copy(update={"completion_requirement_keys": []})]
+            ),
+        )
+
+
+def test_book_candidate_completion_key_error_uses_framework_output_repair() -> None:
+    valid = BookCandidatePack(
+        direction="Follow the physical evidence to the memory-edit source.",
+        constraints=_book_constraints(),
+        selected_title="《证词回声》",
+        rolling_plan=_book_rolling_plan(),
+        completion_contract=_completion_contract(),
+        arc_topology=_book_topology(),
+    )
+    invalid = valid.model_dump(mode="json")
+    invalid["arc_topology"]["arcs"][0]["completion_requirement_keys"] = [
+        "invented_requirement"
+    ]
+    request_count = 0
+
+    def response(_messages: list[object], _info: AgentInfo) -> ModelResponse:
+        nonlocal request_count
+        request_count += 1
+        payload = invalid if request_count == 1 else valid.model_dump(mode="json")
+        return ModelResponse(parts=[TextPart(json.dumps(payload, ensure_ascii=False))])
+
+    definition = DEFAULT_TASK_REGISTRY.get(
+        role="book_strategist",
+        task_kind="book.synthesize",
+        contract_version=1,
+    )
+    result = asyncio.run(
+        build_agent(
+            model=FunctionModel(response, model_name="book-key-repair"),
+            definition=definition,
+        ).run("Synthesize one internally consistent Book candidate.")
+    )
+
+    assert request_count == 2
+    assert result.output == valid
+
+
 async def _insert_successful_book_evaluator_task(
     engine: AsyncEngine,
     *,
@@ -211,7 +296,11 @@ def test_book_requires_review_and_user_approval_before_formal_baseline(
                 match="lack an owning Story Arc",
             ):
                 await book_service.apply_candidate(
-                    ApplyBookCandidateRequest(
+                    # Deliberately bypass the public Pydantic boundary so this
+                    # white-box negative case proves the Domain keeps its
+                    # independent fail-closed check. Normal Agent/API input is
+                    # rejected earlier and covered by the output-repair test.
+                    ApplyBookCandidateRequest.model_construct(
                         project_id="project-a",
                         book_id=project.result.book_id,
                         expected_workspace_lock_version=1,

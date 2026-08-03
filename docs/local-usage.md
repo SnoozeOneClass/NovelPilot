@@ -134,8 +134,9 @@ npm.cmd run audit:secrets
 
 其中：
 
-- `test:fast` 执行 fresh migration、schema check、backend lint/type check 和无模型
-  单元/契约测试。它能快速发现局部错误，但不能单独宣称后端可运行；
+- `test:fast` 在隔离临时库执行 fresh migration、schema drift/health、
+  downgrade/upgrade 往返，再执行 backend lint/type check 和无模型单元/契约测试。
+  它不会读取或迁移普通项目数据库；它能快速发现局部错误，但不能单独宣称后端可运行；
 - `test:backend-real` 固定显式绑定 `jemmy-gpt-5.4-mini`，先通过生产 Adapter
   探测 structured output、正文流和 usage，再在隔离空数据库中运行 S1～S5；
 - 工程场景通过 `create_app()`、FastAPI lifespan、唯一 Run Engine、公开 API、

@@ -13,7 +13,7 @@
     "backend:lint": "scripts\\python.cmd -m ruff check backend scripts",
     "backend:test": "scripts\\python.cmd -m pytest backend/tests",
     "backend:typecheck": "scripts\\python.cmd -m mypy backend",
-    "test:fast": "npm.cmd run backend:migrate:test && npm.cmd run backend:schema-check && npm.cmd run backend:lint && npm.cmd run backend:typecheck && npm.cmd run backend:test",
+    "test:fast": "npm.cmd run backend:migrate:test && npm.cmd run backend:lint && npm.cmd run backend:typecheck && npm.cmd run backend:test",
     "test:backend-real": "scripts\\python.cmd scripts/backend_real_acceptance.py",
     "frontend:dev": "npm.cmd --prefix frontend run dev",
     "frontend:lint": "npm.cmd --prefix frontend run lint",

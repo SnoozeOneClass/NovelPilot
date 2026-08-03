@@ -33,6 +33,7 @@ class SuccessfulTaskRecord:
     book_baseline_id: str | None
     arc_baseline_id: str | None
     chapter_baseline_id: str | None
+    subject_arc_baseline_id: str | None
     canon_baseline_id: str
     correction_lineage_id: str | None
     correction_lineage_origin: str | None
@@ -139,6 +140,7 @@ class ActionableTaskRecord:
     book_baseline_id: str | None
     arc_baseline_id: str | None
     chapter_baseline_id: str | None
+    subject_arc_baseline_id: str | None
     canon_baseline_id: str
     correction_lineage_id: str | None
     correction_lineage_origin: str | None
@@ -258,6 +260,7 @@ class ExecutionRepository:
                     agent_tasks.c.book_baseline_id,
                     agent_tasks.c.arc_baseline_id,
                     agent_tasks.c.chapter_baseline_id,
+                    agent_tasks.c.subject_arc_baseline_id,
                     agent_tasks.c.canon_baseline_id,
                     agent_tasks.c.correction_lineage_id,
                     agent_tasks.c.correction_lineage_origin,
@@ -339,6 +342,9 @@ class ExecutionRepository:
             book_baseline_id=cast(str | None, row["book_baseline_id"]),
             arc_baseline_id=cast(str | None, row["arc_baseline_id"]),
             chapter_baseline_id=cast(str | None, row["chapter_baseline_id"]),
+            subject_arc_baseline_id=cast(
+                str | None, row["subject_arc_baseline_id"]
+            ),
             canon_baseline_id=cast(str, row["canon_baseline_id"]),
             correction_lineage_id=cast(str | None, row["correction_lineage_id"]),
             correction_lineage_origin=cast(
@@ -694,6 +700,7 @@ class ExecutionRepository:
                 book_baseline_id=plan.book_baseline_id,
                 arc_baseline_id=plan.arc_baseline_id,
                 chapter_baseline_id=plan.chapter_baseline_id,
+                subject_arc_baseline_id=plan.subject_arc_baseline_id,
                 canon_baseline_id=plan.canon_baseline_id,
                 correction_lineage_id=plan.correction_lineage_id,
                 correction_lineage_origin=plan.correction_lineage_origin,
@@ -1338,6 +1345,7 @@ class ExecutionRepository:
                     agent_tasks.c.book_baseline_id,
                     agent_tasks.c.arc_baseline_id,
                     agent_tasks.c.chapter_baseline_id,
+                    agent_tasks.c.subject_arc_baseline_id,
                     agent_tasks.c.canon_baseline_id,
                     agent_tasks.c.correction_lineage_id,
                     agent_tasks.c.correction_lineage_origin,
@@ -1394,6 +1402,9 @@ class ExecutionRepository:
             book_baseline_id=cast(str | None, row["book_baseline_id"]),
             arc_baseline_id=cast(str | None, row["arc_baseline_id"]),
             chapter_baseline_id=cast(str | None, row["chapter_baseline_id"]),
+            subject_arc_baseline_id=cast(
+                str | None, row["subject_arc_baseline_id"]
+            ),
             canon_baseline_id=cast(str, row["canon_baseline_id"]),
             correction_lineage_id=cast(str | None, row["correction_lineage_id"]),
             correction_lineage_origin=cast(

@@ -27,6 +27,11 @@ from app.domain.arc.contracts import (
     SubmitArcRequest,
 )
 from app.domain.book.commands import BookCommandService
+from app.domain.book_parent_cases import (
+    BookParentCaseBinding,
+    BookParentCaseError,
+    resolve_book_parent_review_case,
+)
 from app.domain.book.contracts import (
     ApplyBookCandidateTaskRequest,
     ApplyBookDiscussionTaskRequest,
@@ -194,6 +199,7 @@ class _TaskInstruction:
     arc_baseline_id: str | None = None
     chapter_id: str | None = None
     chapter_baseline_id: str | None = None
+    subject_arc_baseline_id: str | None = None
     canon_baseline_id: str | None = None
     correction_lineage_id: str | None = None
     correction_lineage_origin: Literal[
@@ -223,6 +229,7 @@ def _book_parent_review_instruction(
     correction_lineage_origin: Literal["review_initiated", "user_initiated"],
     automatic_correction_round: Literal[0, 1],
     source_arc_book_request_id: str,
+    subject_arc_baseline_id: str | None,
     canon_baseline_id: str | None = None,
     source_book_parent_review_id: str | None = None,
     source_feedback_id: str | None = None,
@@ -239,6 +246,7 @@ def _book_parent_review_instruction(
         correction_lineage_id=correction_lineage_id,
         correction_lineage_origin=correction_lineage_origin,
         automatic_correction_round=automatic_correction_round,
+        subject_arc_baseline_id=subject_arc_baseline_id,
         source_book_parent_review_id=source_book_parent_review_id,
         source_arc_book_request_id=source_arc_book_request_id,
         source_feedback_id=source_feedback_id,
@@ -521,6 +529,7 @@ class DomainRunDriver:
                 "book_baseline_id": instruction.book_baseline_id,
                 "arc_baseline_id": instruction.arc_baseline_id,
                 "chapter_baseline_id": instruction.chapter_baseline_id,
+                "subject_arc_baseline_id": instruction.subject_arc_baseline_id,
                 "canon_baseline_id": instruction.canon_baseline_id,
                 "correction_lineage_id": instruction.correction_lineage_id,
                 "automatic_correction_round": instruction.automatic_correction_round,
@@ -607,6 +616,58 @@ class DomainRunDriver:
                 if book_workspace is not None:
                     workspace_lock_version = book_workspace.lock_version
                     workspace_work_cycle_id = book_workspace.work_cycle_id
+            if instruction.task_kind == "evaluate.book_parent_contract":
+                if (
+                    project is None
+                    or instruction.book_baseline_id is None
+                    or instruction.source_arc_book_request_id is None
+                    or instruction.correction_lineage_id is None
+                    or instruction.correction_lineage_origin
+                    not in {"review_initiated", "user_initiated"}
+                    or instruction.automatic_correction_round not in {0, 1}
+                    or workspace_work_cycle_id is None
+                ):
+                    raise HarnessInvariantError(
+                        "Book parent task instruction lacks its exact case identity."
+                    )
+                try:
+                    await resolve_book_parent_review_case(
+                        store,
+                        binding=BookParentCaseBinding(
+                            project_id=run.project_id,
+                            book_id=instruction.book_id,
+                            request_id=instruction.source_arc_book_request_id,
+                            target_book_baseline_id=instruction.book_baseline_id,
+                            subject_arc_baseline_id=(
+                                instruction.subject_arc_baseline_id
+                            ),
+                            canon_baseline_id=(
+                                instruction.canon_baseline_id
+                                or project.current_canon_baseline_id
+                            ),
+                            workspace_lock_version=(
+                                instruction.workspace_lock_version
+                            ),
+                            workspace_work_cycle_id=workspace_work_cycle_id,
+                            correction_lineage_id=(
+                                instruction.correction_lineage_id
+                            ),
+                            correction_lineage_origin=(
+                                instruction.correction_lineage_origin
+                            ),
+                            automatic_correction_round=(
+                                instruction.automatic_correction_round
+                            ),
+                            predecessor_review_id=(
+                                instruction.source_book_parent_review_id
+                            ),
+                            source_feedback_id=instruction.source_feedback_id,
+                        ),
+                    )
+                except BookParentCaseError as error:
+                    raise HarnessInvariantError(
+                        str(error), failure_code=error.invariant
+                    ) from error
         if project is None:
             raise HarnessInvariantError("Runnable project no longer exists.")
         if (
@@ -680,6 +741,14 @@ class DomainRunDriver:
                 source_arc_book_request_id=instruction.source_arc_book_request_id,
                 source_arc_closure_id=instruction.source_arc_closure_id,
                 canon_baseline_id=instruction.canon_baseline_id,
+                book_baseline_id=instruction.book_baseline_id,
+                subject_arc_baseline_id=instruction.subject_arc_baseline_id,
+                workspace_lock_version=instruction.workspace_lock_version,
+                workspace_work_cycle_id=workspace_work_cycle_id,
+                correction_lineage_id=instruction.correction_lineage_id,
+                correction_lineage_origin=instruction.correction_lineage_origin,
+                automatic_correction_round=instruction.automatic_correction_round,
+                source_feedback_id=instruction.source_feedback_id,
             )
         except Exception as error:
             raise ContextAssemblyError(
@@ -697,6 +766,7 @@ class DomainRunDriver:
                 instruction.book_baseline_id or "none",
                 instruction.arc_baseline_id or "none",
                 instruction.chapter_baseline_id or "none",
+                instruction.subject_arc_baseline_id or "none",
                 instruction.correction_lineage_id or "none",
                 str(instruction.automatic_correction_round)
                 if instruction.automatic_correction_round is not None
@@ -742,6 +812,7 @@ class DomainRunDriver:
             book_baseline_id=instruction.book_baseline_id,
             arc_baseline_id=instruction.arc_baseline_id,
             chapter_baseline_id=instruction.chapter_baseline_id,
+            subject_arc_baseline_id=instruction.subject_arc_baseline_id,
             correction_lineage_id=instruction.correction_lineage_id,
             correction_lineage_origin=instruction.correction_lineage_origin,
             automatic_correction_round=instruction.automatic_correction_round,
@@ -1127,6 +1198,14 @@ class DomainRunDriver:
                         raise HarnessInvariantError(
                             "Applied Book-parent feedback lost its source Arc."
                         )
+                    subject_arc = await store.arcs.get(
+                        project_id=project.id,
+                        arc_id=book_change.arc_id,
+                    )
+                    if subject_arc is None:
+                        raise HarnessInvariantError(
+                            "Applied Book-parent feedback lost its current Arc subject."
+                        )
                     return _book_parent_review_instruction(
                         book_id=book.id,
                         workspace_lock_version=book_workspace.lock_version,
@@ -1136,6 +1215,7 @@ class DomainRunDriver:
                         automatic_correction_round=0,
                         source_book_parent_review_id=book_parent_review.id,
                         source_arc_book_request_id=book_parent_review.request_id,
+                        subject_arc_baseline_id=subject_arc.current_baseline_id,
                         source_feedback_id=correction_feedback.id,
                     )
                 if correction_feedback.arc_closure_review_id is not None:
@@ -1242,6 +1322,14 @@ class DomainRunDriver:
                     raise HarnessInvariantError(
                         "Open Arc-to-Book request lost its source Arc."
                     )
+                subject_arc = await store.arcs.get(
+                    project_id=project.id,
+                    arc_id=full_change.arc_id,
+                )
+                if subject_arc is None:
+                    raise HarnessInvariantError(
+                        "Open Arc-to-Book request lost its current Arc subject."
+                    )
                 return _book_parent_review_instruction(
                     book_id=book.id,
                     workspace_lock_version=book_workspace.lock_version,
@@ -1250,6 +1338,7 @@ class DomainRunDriver:
                     correction_lineage_origin="review_initiated",
                     automatic_correction_round=0,
                     source_arc_book_request_id=change.id,
+                    subject_arc_baseline_id=subject_arc.current_baseline_id,
                 )
 
             for change in unresolved_changes:
@@ -1435,6 +1524,9 @@ class DomainRunDriver:
                                 automatic_correction_round=1,
                                 source_book_parent_review_id=book_parent_review.id,
                                 source_arc_book_request_id=change.id,
+                                subject_arc_baseline_id=(
+                                    correction_arc.current_baseline_id
+                                ),
                                 source_feedback_id=book_parent_review.source_feedback_id,
                             )
 

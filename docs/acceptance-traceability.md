@@ -26,7 +26,9 @@ npm.cmd run architecture:inventory
 npm.cmd run experiment:live-book
 ```
 
-- `test:fast`：迁移、Schema、lint、type check 和无模型局部测试；不产生后端验收结论。
+- `test:fast`：在隔离临时库执行 fresh migration、Schema drift/health、downgrade/upgrade
+  往返，再执行 lint、type check 和无模型局部测试；它不读取或迁移普通项目数据库，
+  也不产生后端验收结论。
 - `test:backend-real`：先做 S0 Profile 探测，再运行 S1～S5。
 - `acceptance`：依次执行 `test:fast` 与 `test:backend-real`。
 - `architecture:inventory`：非结论性的源码所有权清单，不能代替运行。
@@ -62,7 +64,7 @@ Run Engine 在真实异步循环运行，Provider 请求仍是外部 HTTP。
 | S1 基础纵切 | Book discussion → Book 审批 → Arc 规划/审批 → Chapter plan/draft/observe/evaluate/commit | producer、持久化和 consumer 都成功；任务绑定具体 baseline |
 | S2 开放世界证据 | 前文沉默，当前章首次建立普通事实 | 沉默不是 `explicit_conflict`；不为证明“过去没发生”而改写历史 |
 | S3 派生证据权威 | 正文明确建立事实，Observation/Canon 从正文派生 | prose 是叙事来源；若发生 evidence-only repair，必须保持同一 prose ref |
-| S4 分层语义压力 | Chapter 反馈与 Book 正式承诺发生张力 | 同一反馈依次进入 Chapter、Arc、Book 审查；Book 可保留当前基线并授权 Arc 纠正，或让 successor 停在人工批准；下层不能直接替换上层 |
+| S4 分层语义压力 | Chapter 反馈与 Book 正式承诺发生张力 | 同一反馈依次进入 Chapter、Arc、Book 审查；Book 可保留当前基线并授权 Arc 纠正，或让 successor 停在人工批准；若发生 Book round-1，原请求保持不变而 task/review 必须绑定由 round-0 产生的精确 Arc successor；下层不能直接替换上层 |
 | S5 持久恢复 | 第一章正式提交后安全暂停、关闭 lifespan、同库重开并继续 | current pointer、work cycle、delivery 和事件不靠内存流重建；任务不重复投递 |
 
 任务数和最长时间只是费用/失控保护，不是小说完成条件。每层仍由自身语义终止契约

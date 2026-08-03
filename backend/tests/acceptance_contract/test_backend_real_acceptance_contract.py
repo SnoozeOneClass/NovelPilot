@@ -138,7 +138,7 @@ def test_evidence_only_repair_oracle_binds_back_to_frozen_prose() -> None:
     ]
 
 
-def test_evidence_only_repair_oracle_rejects_an_unexercised_path() -> None:
+def test_evidence_only_repair_oracle_accepts_a_correct_first_pass() -> None:
     case = load_case("derived-evidence-v1")[0]
 
     checks, outcome = _assert_derived_evidence_invariants(
@@ -146,14 +146,12 @@ def test_evidence_only_repair_oracle_rejects_an_unexercised_path() -> None:
         evidence={"tasks": []},
     )
 
-    assert outcome == "evidence_only_repair_not_exercised"
+    assert outcome == "evidence_only_repair_not_needed"
     assert checks == [
         {
             "id": "derived_evidence_authority",
-            "ok": False,
-            "detail": (
-                "the scenario never exercised an applied evidence-only Chapter repair"
-            ),
+            "ok": True,
+            "detail": "first-pass derived evidence required no evidence-only repair",
         }
     ]
 
@@ -172,7 +170,15 @@ def test_hierarchical_oracle_requires_one_traceable_feedback_to_book_chain() -> 
             {
                 "id": "evaluate-chapter-1",
                 "source_feedback_id": "feedback-1",
-            }
+            },
+            {
+                "id": "evaluate-book-parent-1",
+                "task_kind": "evaluate.book_parent_contract",
+                "scope_layer": "book",
+                "arc_baseline_id": None,
+                "subject_arc_baseline_id": "arc-v1",
+                "source_book_parent_review_id": None,
+            },
         ],
         "chapter_reviews": [
             {
@@ -190,6 +196,7 @@ def test_hierarchical_oracle_requires_one_traceable_feedback_to_book_chain() -> 
             {
                 "id": "arc-review-1",
                 "request_id": "chapter-arc-request-1",
+                "target_arc_baseline_id": "arc-v1",
             }
         ],
         "arc_book_change_requests": [
@@ -202,7 +209,14 @@ def test_hierarchical_oracle_requires_one_traceable_feedback_to_book_chain() -> 
             {
                 "id": "book-review-1",
                 "request_id": "arc-book-request-1",
+                "source_task_id": "evaluate-book-parent-1",
+                "subject_arc_baseline_id": "arc-v1",
+                "correction_lineage_id": "book-lineage-1",
             }
+        ],
+        "arc_baselines": [
+            {"id": "arc-v1", "parent_baseline_id": None},
+            {"id": "arc-v2", "parent_baseline_id": "arc-v1"},
         ],
     }
 
@@ -236,11 +250,25 @@ def test_hierarchical_oracle_requires_one_traceable_feedback_to_book_chain() -> 
         {
             "id": "book-review-2",
             "request_id": "arc-book-request-1",
+            "source_task_id": "evaluate-book-parent-2",
+            "subject_arc_baseline_id": "arc-v2",
             "disposition": "keep_book",
             "automatic_correction_round": 1,
             "predecessor_review_id": "book-review-1",
+            "correction_lineage_id": "book-lineage-1",
         }
     )
+    evidence["tasks"].append(
+        {
+            "id": "evaluate-book-parent-2",
+            "task_kind": "evaluate.book_parent_contract",
+            "scope_layer": "book",
+            "arc_baseline_id": None,
+            "subject_arc_baseline_id": "arc-v2",
+            "source_book_parent_review_id": "book-review-1",
+        }
+    )
+    assert _hierarchical_chain_violations(evidence) == []
     assert (
         _hierarchical_terminal(
             state=state,
@@ -249,6 +277,11 @@ def test_hierarchical_oracle_requires_one_traceable_feedback_to_book_chain() -> 
         )
         == "book_baseline_kept"
     )
+    evidence["book_parent_reviews"][1]["subject_arc_baseline_id"] = "arc-v1"
+    evidence["tasks"][2]["subject_arc_baseline_id"] = "arc-v1"
+    assert _hierarchical_chain_violations(evidence) == [
+        "Book review book-review-2 round 1 subject is not its exact Arc successor"
+    ]
     evidence["book_parent_reviews"] = [
         {
             "id": "unrelated-book-review",

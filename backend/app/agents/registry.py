@@ -65,7 +65,9 @@ BOOK_CANDIDATE_CONTRACT = (
     "conditions, and exactly one final last Arc. It must not allocate Chapter counts, "
     "Chapter titles, events, scenes, IDs, or ordinals. Treat whole-book scale guidance "
     "as advisory only. Every Arc must explicitly list the Book completion requirement keys "
-    "it is responsible for, every current required key must have at least one owning Arc, "
+    "it is responsible for by copying the exact requirement_key strings declared in this "
+    "same candidate's completion_contract; never invent, rename, or paraphrase those keys. "
+    "Every current required key must have at least one owning Arc, "
     "and each responsible Arc's goal and exit conditions must semantically entail every "
     "indispensable named subject, action, exclusion, causal link, outcome strength, and "
     "evidence expectation in that requirement without copying its wording. Broad goals such "
@@ -540,6 +542,7 @@ class TaskRegistry:
         book_baseline_id: str | None = None,
         arc_baseline_id: str | None = None,
         chapter_baseline_id: str | None = None,
+        subject_arc_baseline_id: str | None = None,
         correction_lineage_id: str | None = None,
         correction_lineage_origin: Literal[
             "review_initiated", "user_initiated"
@@ -583,6 +586,7 @@ class TaskRegistry:
             book_baseline_id=book_baseline_id,
             arc_baseline_id=arc_baseline_id,
             chapter_baseline_id=chapter_baseline_id,
+            subject_arc_baseline_id=subject_arc_baseline_id,
             canon_baseline_id=canon_baseline_id,
             correction_lineage_id=correction_lineage_id,
             correction_lineage_origin=correction_lineage_origin,
@@ -1150,7 +1154,7 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
                 "Synthesize the frozen creator brief and discussion into one coherent Book "
                 f"candidate. {BOOK_CANDIDATE_CONTRACT}"
             ),
-            output_schema_version=4,
+            output_schema_version=5,
         ),
         _native(
             "book_strategist",
@@ -1164,7 +1168,7 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
                 "repeat the Harness-frozen historical prefix, ordinals, IDs, or baseline "
                 f"metadata. {BOOK_CANDIDATE_CONTRACT}"
             ),
-            output_schema_version=4,
+            output_schema_version=5,
             context_policy_version=3,
         ),
         _native(
@@ -1190,7 +1194,7 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
                 "such as clarify roles or resolve the incident. Do not "
                 "invent storage IDs, approval state, routes, or commands."
             ),
-            output_schema_version=5,
+            output_schema_version=6,
             context_policy_version=3,
             repairable_components=BOOK_REPAIRABLE_COMPONENTS,
         ),

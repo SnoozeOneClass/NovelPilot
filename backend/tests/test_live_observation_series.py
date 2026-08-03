@@ -7,8 +7,10 @@ from typing import Any
 import pytest
 
 from scripts.live_book_observation_series import (
+    ObservationApiError,
     ObservationConfigurationError,
     load_case,
+    run_observation_slot,
     run_series,
 )
 
@@ -90,7 +92,7 @@ class FakeObservationApi:
         return self._state(project_id)
 
     def approve_book(self, *, project_id: str, key: str) -> dict[str, Any]:
-        assert key.endswith(":book-approve")
+        assert key.endswith(":book-approve:book-submission-1:book-review-1")
         mode = self.projects[project_id]["mode"]
         self.projects[project_id]["stage"] = 3 if mode == "participatory" else 4
         self.actions.append((project_id, "book_approval"))
@@ -102,7 +104,7 @@ class FakeObservationApi:
         project_id: str,
         key: str,
     ) -> dict[str, Any]:
-        assert ":arc-approve:" in key
+        assert key.endswith(":arc-approve:arc-gate-1")
         self.projects[project_id]["stage"] = 4
         self.actions.append((project_id, "arc_approval"))
         return self._state(project_id)
@@ -210,6 +212,10 @@ class FakeObservationApi:
                 "current_baseline_id": None if stage < 3 else f"{project_id}:book-baseline",
                 "workspace_state": "approved" if stage >= 3 else "drafting",
                 "workspace_lock_version": 1,
+                "pending_submission_id": (
+                    "book-submission-1" if stage == 2 else None
+                ),
+                "pending_review_id": "book-review-1" if stage == 2 else None,
                 "discussion": {
                     "turn_count": 1,
                     "suggestions": [
@@ -227,6 +233,7 @@ class FakeObservationApi:
                 "lifecycle_status": "completed" if stage == 4 else "planning",
                 "workspace_state": "approved" if stage == 4 else "planning",
                 "closure_cumulative_chapter_count": 20,
+                "approval_gate_id": "arc-gate-1" if stage == 3 else None,
             },
             "current_chapter": None,
             "latest_event_sequence": stage,
@@ -432,6 +439,67 @@ class HeartbeatThenCrashObservationApi(SlowObservationApi):
         return self._state(project_id)
 
 
+class TwoArcApprovalInstancesApi(FakeObservationApi):
+    def approve_arc(self, *, project_id: str, key: str) -> dict[str, Any]:
+        project = self.projects[project_id]
+        approval_count = int(project.get("approval_count", 0)) + 1
+        project["approval_count"] = approval_count
+        expected_gate = f"arc-gate-{approval_count}"
+        assert key.endswith(f":arc-approve:{expected_gate}")
+        project["stage"] = 7 if approval_count == 1 else 4
+        self.actions.append((project_id, key))
+        return self._state(project_id)
+
+    def _state(self, project_id: str) -> dict[str, Any]:
+        if int(self.projects[project_id]["stage"]) != 7:
+            return super()._state(project_id)
+        state = super()._state(project_id)
+        state["run"]["status"] = "waiting_for_user"
+        state["run"]["wait_reason_code"] = "arc_approval_required"
+        state["commands"] = [{"command_id": "approve_arc", "enabled": True}]
+        state["current_arc"]["approval_gate_id"] = "arc-gate-2"
+        return state
+
+
+class ArcApprovalCommandErrorApi(FakeObservationApi):
+    def approve_arc(self, *, project_id: str, key: str) -> dict[str, Any]:
+        assert key.endswith(":arc-approve:arc-gate-1")
+        raise ObservationApiError(
+            409,
+            "idempotency_conflict",
+            "observer action was rejected",
+        )
+
+    def diagnostics(self, project_id: str) -> dict[str, Any]:
+        return {
+            "project_id": project_id,
+            "run_id": f"{project_id}:run",
+            "task_count": 3,
+            "attempt_count": 3,
+            "arc_count": 1,
+            "completion_id": None,
+            "completion_version": None,
+            "attempts": [
+                {
+                    "task_id": f"{project_id}:task",
+                    "task_kind": "evaluate.arc",
+                    "attempt_id": f"{project_id}:attempt",
+                    "attempt_number": 1,
+                    "attempt_status": "succeeded",
+                    "retry_kind": "initial",
+                    "provider_request_count": 1,
+                    "transport_retry_count": 0,
+                    "model_request_count": 1,
+                    "input_tokens": 120,
+                    "output_tokens": 40,
+                    "total_tokens": 160,
+                    "error_code": None,
+                    "error_category": None,
+                }
+            ],
+        }
+
+
 def test_frozen_series_runs_exact_mode_schedule_without_rescue(tmp_path: Path) -> None:
     case = load_case("benchmark-mother-natural-book-v1")
     api = FakeObservationApi()
@@ -497,6 +565,59 @@ def test_frozen_series_runs_exact_mode_schedule_without_rescue(tmp_path: Path) -
     )
     assert all("%" not in line for line in announcements)
     assert all(case.prompt not in line for line in announcements)
+
+
+def test_same_arc_uses_distinct_idempotency_keys_for_distinct_approval_gates() -> None:
+    api = TwoArcApprovalInstancesApi()
+    report, stop_series = run_observation_slot(
+        api=api,
+        case=load_case("benchmark-mother-natural-book-v1"),
+        profile_id="grok-4.5",
+        frozen={},
+        series_id="two-gates",
+        slot=1,
+        mode="participatory",
+        sleep_seconds=0,
+        heartbeat_seconds=60,
+        sleep=lambda _seconds: None,
+    )
+
+    approval_keys = [
+        action
+        for _project_id, action in api.actions
+        if ":arc-approve:" in action
+    ]
+    assert approval_keys == [
+        "two-gates:1:arc-approve:arc-gate-1",
+        "two-gates:1:arc-approve:arc-gate-2",
+    ]
+    assert report["status"] == "completed"
+    assert stop_series is False
+
+
+def test_command_error_still_collects_authoritative_wait_and_attempts() -> None:
+    report, stop_series = run_observation_slot(
+        api=ArcApprovalCommandErrorApi(),
+        case=load_case("benchmark-mother-natural-book-v1"),
+        profile_id="grok-4.5",
+        frozen={},
+        series_id="command-error",
+        slot=1,
+        mode="participatory",
+        sleep_seconds=0,
+        heartbeat_seconds=60,
+        sleep=lambda _seconds: None,
+    )
+
+    assert report["status"] == "failed"
+    assert report["final_authoritative_state"]["run_status"] == "waiting_for_user"
+    assert report["final_authoritative_state"]["wait_reason_code"] == (
+        "arc_approval_required"
+    )
+    assert report["attempt_metrics"]["attempt_count"] == 3
+    assert report["attempt_metrics"]["total_tokens"] == 160
+    assert [item["code"] for item in report["issues"]] == ["product_api_error"]
+    assert stop_series is False
 
 
 def test_advisory_chapter_range_is_recorded_without_failing_a_completed_run(

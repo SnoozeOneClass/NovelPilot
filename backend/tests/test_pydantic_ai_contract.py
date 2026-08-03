@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 
 import pytest
 from pydantic import BaseModel
@@ -16,8 +16,15 @@ class ArcPlanContract(BaseModel):
     beats: list[str]
 
 
-models.ALLOW_MODEL_REQUESTS = False
 pytestmark = pytest.mark.synthetic_integration
+
+
+@pytest.fixture(autouse=True)
+def _disallow_real_model_requests() -> Iterator[None]:
+    """Keep synthetic tests isolated without poisoning later test modules."""
+
+    with models.override_allow_model_requests(False):
+        yield
 
 
 def test_native_output_is_framework_validated_and_reports_usage() -> None:

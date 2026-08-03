@@ -171,6 +171,7 @@ class AgentTaskPlan(BaseModel):
     book_baseline_id: str | None = None
     arc_baseline_id: str | None = None
     chapter_baseline_id: str | None = None
+    subject_arc_baseline_id: str | None = None
     canon_baseline_id: str
     correction_lineage_id: str | None = None
     correction_lineage_origin: Literal["review_initiated", "user_initiated"] | None = (
@@ -299,6 +300,13 @@ class AgentTaskPlan(BaseModel):
         )
         if not baseline_shape_is_valid:
             raise ValueError("Baseline IDs do not match scope_layer.")
+        if (
+            self.task_kind != "evaluate.book_parent_contract"
+            and self.subject_arc_baseline_id is not None
+        ):
+            raise ValueError(
+                "Only a Book parent-contract task may freeze an Arc review subject."
+            )
         if (self.rubric_id is None) != (self.rubric_version is None):
             raise ValueError("rubric_id and rubric_version must be present together.")
         if (self.evaluation_strategy_id is None) != (

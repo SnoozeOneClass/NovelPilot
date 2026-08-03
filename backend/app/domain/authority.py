@@ -12,6 +12,12 @@ from app.agents.contracts import ArcPlanProposal
 from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
 from app.db.uow import StoreSession
 from app.domain.book.contracts import CompletionContract
+from app.domain.book_parent_cases import (
+    BookParentCaseBinding,
+    BookParentCaseError,
+    BookParentReviewCase,
+    resolve_book_parent_review_case,
+)
 from app.domain.commands import (
     CommandEffect,
     CommandEnvelope,
@@ -40,10 +46,7 @@ from app.store.authority import (
     BookProgressHandoffRecord,
 )
 from app.store.command_bus import CommandBus
-from app.store.change_requests import (
-    ArcBookChangeRequestRecord as StoredArcBookChangeRequestRecord,
-    ChapterArcChangeRequestRecord,
-)
+from app.store.change_requests import ChapterArcChangeRequestRecord
 from app.store.completion import BookCompletionRecord
 from app.store.books import BookBaselineRecord, BookRecord, BookWorkspaceRecord
 from app.store.chapters import (
@@ -700,11 +703,13 @@ class LoopAuthorityCommandService:
                     )
                 ).unpack_and_verify()
             )
-            change, book, baseline, workspace = await self._book_parent_snapshot(
+            book_parent_case = await self._book_parent_snapshot(
                 session,
                 request=request,
                 task=task,
             )
+            change = book_parent_case.change
+            baseline = book_parent_case.book_baseline
             disposition = cast(
                 Literal[
                     "keep_book",
@@ -744,6 +749,7 @@ class LoopAuthorityCommandService:
                     "request_id": change.id,
                     "request_evidence_ref_id": change.evidence_ref_id,
                     "target_book_baseline_id": baseline.id,
+                    "subject_arc_baseline_id": task.subject_arc_baseline_id,
                     "canon_baseline_id": task.canon_baseline_id,
                     "predecessor_review_id": task.source_book_parent_review_id,
                     "strategy_id": task.evaluation_strategy_id,
@@ -769,7 +775,7 @@ class LoopAuthorityCommandService:
                 attempt_id=request.attempt_id,
                 task_kind="evaluate.book_parent_contract",
             )
-            current = await self._book_parent_snapshot(
+            current_case = await self._book_parent_snapshot(
                 session,
                 request=request,
                 task=task,
@@ -777,7 +783,7 @@ class LoopAuthorityCommandService:
             if (
                 current_task != task
                 or task.delivery_state != "pending"
-                or current != (change, book, baseline, workspace)
+                or current_case != book_parent_case
             ):
                 raise CommandPreconditionError(
                     "Book parent-review authority changed before delivery."
@@ -786,14 +792,7 @@ class LoopAuthorityCommandService:
                 project_id=request.project_id,
                 request_id=request.request_id,
             )
-            source_review = (
-                None
-                if task.source_book_parent_review_id is None
-                else await session.book_parent_reviews.get(
-                    project_id=request.project_id,
-                    review_id=task.source_book_parent_review_id,
-                )
-            )
+            source_review = book_parent_case.predecessor_review
             if (
                 (latest is None) != (source_review is None)
                 or (
@@ -838,6 +837,7 @@ class LoopAuthorityCommandService:
                 arc_id=change.arc_id,
                 request_id=request.request_id,
                 target_book_baseline_id=baseline.id,
+                subject_arc_baseline_id=task.subject_arc_baseline_id,
                 source_task_id=task.task_id,
                 source_attempt_id=task.attempt_id,
                 strategy_id=self._required_text(
@@ -2652,145 +2652,55 @@ class LoopAuthorityCommandService:
         return change, arc, baseline, workspace
 
     @staticmethod
-    async def _arc_book_source_is_current(
-        session: StoreSession,
-        *,
-        change: StoredArcBookChangeRequestRecord,
-        source_arc: ArcRecord,
-    ) -> bool:
-        source_count = sum(
-            (
-                change.source_candidate_review_id is not None,
-                change.source_arc_parent_review_id is not None,
-                change.source_arc_closure_review_id is not None,
-            )
-        )
-        if source_count != 1:
-            return False
-        if change.source_candidate_review_id is not None:
-            if change.source_candidate_submission_id is None:
-                return False
-            submission = await session.arcs.get_submission(
-                project_id=change.project_id,
-                submission_id=change.source_candidate_submission_id,
-            )
-            candidate_review = await session.arcs.get_review(
-                project_id=change.project_id,
-                review_id=change.source_candidate_review_id,
-            )
-            return (
-                submission is not None
-                and candidate_review is not None
-                and submission.arc_id == source_arc.id
-                and candidate_review.arc_id == source_arc.id
-                and candidate_review.submission_id == submission.id
-                and candidate_review.decision == "escalate_to_book"
-                and submission.base_arc_baseline_id
-                == source_arc.current_baseline_id
-            )
-        if change.source_arc_parent_review_id is not None:
-            parent_review = await session.arc_parent_reviews.get(
-                project_id=change.project_id,
-                review_id=change.source_arc_parent_review_id,
-            )
-            return (
-                parent_review is not None
-                and parent_review.arc_id == source_arc.id
-                and parent_review.disposition == "book_review_required"
-                and parent_review.target_arc_baseline_id
-                == source_arc.current_baseline_id
-            )
-        assert change.source_arc_closure_review_id is not None
-        closure_review = await session.arc_closure_reviews.get(
-            project_id=change.project_id,
-            review_id=change.source_arc_closure_review_id,
-        )
-        return (
-            closure_review is not None
-            and closure_review.arc_id == source_arc.id
-            and closure_review.disposition == "book_review_required"
-            and closure_review.arc_baseline_id == source_arc.current_baseline_id
-        )
-
-    @staticmethod
     async def _book_parent_snapshot(
         session: StoreSession,
         *,
         request: RecordBookParentReviewRequest,
         task: SuccessfulTaskRecord,
-    ) -> tuple[
-        StoredArcBookChangeRequestRecord,
-        BookRecord,
-        BookBaselineRecord,
-        BookWorkspaceRecord,
-    ]:
-        change = await session.changes.get_arc_book(
-            project_id=request.project_id,
-            request_id=request.request_id,
-        )
-        book = await session.books.get_for_project(request.project_id)
-        workspace = (
-            None
-            if book is None
-            else await session.books.get_workspace(
-                project_id=request.project_id,
-                book_id=request.book_id,
-            )
-        )
-        baseline = (
-            None
-            if book is None or book.current_baseline_id is None
-            else await session.books.get_baseline(
-                project_id=request.project_id,
-                book_id=request.book_id,
-                baseline_id=book.current_baseline_id,
-            )
-        )
-        project = await session.projects.get(request.project_id)
-        source_arc = (
-            None
-            if change is None
-            else await session.arcs.get(
-                project_id=request.project_id,
-                arc_id=change.arc_id,
-            )
-        )
-        source_is_current = (
-            False
-            if change is None or source_arc is None
-            else await LoopAuthorityCommandService._arc_book_source_is_current(
-                session,
-                change=change,
-                source_arc=source_arc,
-            )
-        )
+    ) -> BookParentReviewCase:
         if (
-            change is None
-            or change.book_id != request.book_id
-            or change.status not in {"open", "reviewed"}
-            or book is None
-            or book.id != request.book_id
-            or book.lifecycle_status != "active"
-            or book.current_completion_id is not None
-            or baseline is None
-            or baseline.id != change.target_book_baseline_id
-            or workspace is None
-            or task.scope_layer != "book"
+            task.scope_layer != "book"
             or task.book_id != request.book_id
-            or task.book_baseline_id != baseline.id
-            or source_arc is None
-            or source_arc.book_id != request.book_id
             or task.arc_baseline_id is not None
-            or not source_is_current
-            or task.workspace_lock_version != workspace.lock_version
+            or task.chapter_baseline_id is not None
+            or task.book_baseline_id is None
+            or task.workspace_lock_version is None
+            or task.workspace_work_cycle_id is None
             or task.source_arc_book_request_id != request.request_id
-            or project is None
-            or project.current_canon_baseline_id != task.canon_baseline_id
+            or task.correction_lineage_id is None
+            or task.correction_lineage_origin
+            not in {"review_initiated", "user_initiated"}
+            or task.automatic_correction_round not in {0, 1}
         ):
             raise CommandPreconditionError(
-                "Book parent-review facts are stale or incomplete."
+                "Book parent-review task identity is incomplete."
             )
-        return change, book, baseline, workspace
+        try:
+            return await resolve_book_parent_review_case(
+                session,
+                binding=BookParentCaseBinding(
+                    project_id=request.project_id,
+                    book_id=request.book_id,
+                    request_id=request.request_id,
+                    target_book_baseline_id=task.book_baseline_id,
+                    subject_arc_baseline_id=task.subject_arc_baseline_id,
+                    canon_baseline_id=task.canon_baseline_id,
+                    workspace_lock_version=task.workspace_lock_version,
+                    workspace_work_cycle_id=task.workspace_work_cycle_id,
+                    correction_lineage_id=task.correction_lineage_id,
+                    correction_lineage_origin=cast(
+                        Literal["review_initiated", "user_initiated"],
+                        task.correction_lineage_origin,
+                    ),
+                    automatic_correction_round=cast(
+                        Literal[0, 1], task.automatic_correction_round
+                    ),
+                    predecessor_review_id=task.source_book_parent_review_id,
+                    source_feedback_id=task.source_feedback_id,
+                ),
+            )
+        except BookParentCaseError as error:
+            raise CommandPreconditionError(str(error)) from error
 
     @staticmethod
     async def _arc_closure_snapshot(

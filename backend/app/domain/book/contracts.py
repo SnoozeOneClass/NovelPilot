@@ -179,7 +179,8 @@ class CompletionContract(BaseModel):
         min_length=1,
         description=(
             "Keyed semantic conditions that must all be satisfied before the "
-            "novel can complete."
+            "novel can complete. Every requirement_key must be copied exactly "
+            "into at least one Arc contract's completion_requirement_keys."
         ),
     )
 
@@ -252,7 +253,8 @@ class BookArcContract(BaseModel):
             "Book completion requirement keys whose semantic outcome this Story Arc "
             "is responsible for advancing or establishing. This assigns Book-level "
             "responsibility only; it does not prescribe Chapter counts, titles, events, "
-            "or scenes."
+            "or scenes. Every value must exactly match a requirement_key declared in "
+            "the same candidate's completion_contract; never invent or paraphrase a key."
         ),
     )
     is_final: bool = Field(
@@ -373,6 +375,31 @@ class BookCandidatePack(BaseModel):
             "per-Arc Chapter counts, Chapter titles, events, scenes, or identities."
         )
     )
+
+    @model_validator(mode="after")
+    def _completion_requirements_have_exact_arc_owners(self) -> BookCandidatePack:
+        requirement_keys = {
+            item.requirement_key
+            for item in self.completion_contract.completion_requirements
+        }
+        assigned_keys = {
+            key
+            for arc in self.arc_topology.arcs
+            for key in arc.completion_requirement_keys
+        }
+        unknown = assigned_keys.difference(requirement_keys)
+        if unknown:
+            raise ValueError(
+                "Arc completion_requirement_keys must exactly reuse keys from "
+                "completion_contract; unknown keys: " + ", ".join(sorted(unknown))
+            )
+        missing = requirement_keys.difference(assigned_keys)
+        if missing:
+            raise ValueError(
+                "Every completion_contract requirement_key must have at least one "
+                "owning Arc; missing keys: " + ", ".join(sorted(missing))
+            )
+        return self
 
 
 class BookSuccessorCandidateProposal(BaseModel):

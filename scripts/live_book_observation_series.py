@@ -761,6 +761,7 @@ def run_observation_slot(
     transitions: list[JsonObject] = []
     action_counts: Counter[str] = Counter()
     final_state: JsonObject = {}
+    state: JsonObject = {}
     diagnostics: JsonObject = {"attempts": []}
     events: list[JsonObject] = []
     snapshot: JsonObject | None = None
@@ -862,7 +863,10 @@ def run_observation_slot(
                     workspace_lock_version=int(book["workspace_lock_version"]),
                     message=str(suggestion["message"]),
                     suggestion_id=str(suggestion["id"]),
-                    key=f"{series_id}:{slot}:book-input:{turn}",
+                    key=(
+                        f"{series_id}:{slot}:book-input:{turn}:"
+                        f"{suggestion['id']}"
+                    ),
                 )
                 action_counts["book_input"] += 1
                 last_progress_at = emit_progress(
@@ -881,9 +885,21 @@ def run_observation_slot(
                 continue
 
             if _command_enabled(state, "approve_book"):
+                book = cast(JsonObject, state.get("book", {}))
+                pending_submission_id = book.get("pending_submission_id")
+                pending_review_id = book.get("pending_review_id")
+                if not isinstance(pending_submission_id, str) or not isinstance(
+                    pending_review_id, str
+                ):
+                    raise ValueError(
+                        "Book approval is enabled without its pending submission/review identity."
+                    )
                 state = api.approve_book(
                     project_id=project_id,
-                    key=f"{series_id}:{slot}:book-approve",
+                    key=(
+                        f"{series_id}:{slot}:book-approve:"
+                        f"{pending_submission_id}:{pending_review_id}"
+                    ),
                 )
                 action_counts["book_approval"] += 1
                 last_progress_at = emit_progress(
@@ -891,7 +907,13 @@ def run_observation_slot(
                     message="actor approved the reviewed Book baseline",
                     authoritative_state=_compact_state(state),
                 )
-                gates.append({"kind": "book_approval"})
+                gates.append(
+                    {
+                        "kind": "book_approval",
+                        "submission_id": pending_submission_id,
+                        "review_id": pending_review_id,
+                    }
+                )
                 continue
 
             if _command_enabled(state, "approve_arc"):
@@ -904,9 +926,16 @@ def run_observation_slot(
                     )
                     break
                 arc = cast(JsonObject, state.get("current_arc") or {})
+                approval_gate_id = arc.get("approval_gate_id")
+                if not isinstance(approval_gate_id, str):
+                    raise ValueError(
+                        "Arc approval is enabled without its approval gate identity."
+                    )
                 state = api.approve_arc(
                     project_id=project_id,
-                    key=f"{series_id}:{slot}:arc-approve:{arc.get('arc_id')}",
+                    key=(
+                        f"{series_id}:{slot}:arc-approve:{approval_gate_id}"
+                    ),
                 )
                 action_counts["arc_approval"] += 1
                 last_progress_at = emit_progress(
@@ -922,6 +951,7 @@ def run_observation_slot(
                         "kind": "arc_approval",
                         "arc_id": arc.get("arc_id"),
                         "arc_ordinal": arc.get("ordinal"),
+                        "approval_gate_id": approval_gate_id,
                     }
                 )
                 continue
@@ -937,21 +967,6 @@ def run_observation_slot(
             sleep(sleep_seconds)
             state = api.get_state(project_id)
 
-        final_state = _compact_state(state)
-        diagnostics = api.diagnostics(project_id)
-        events = api.events(project_id)
-        if str(cast(JsonObject, state.get("run", {})).get("status")) == "completed":
-            if diagnostics.get("completion_id") is None:
-                issues.append(
-                    _issue("completion_identity_missing", "Completed Run has no completion identity.")
-                )
-            try:
-                snapshot = api.snapshot(project_id)
-                export_result = api.export(project_id)
-                action_counts["export_markdown"] += 1
-            except ObservationApiError as exc:
-                issues.append(_issue("export_failed", f"{exc.code}: {exc.message}"))
-        stop_series = _provider_is_hard_unavailable(diagnostics)
     except ObservationApiUnavailable as exc:
         issues.append(_issue("local_api_unavailable", str(exc)))
         stop_series = True
@@ -959,6 +974,58 @@ def run_observation_slot(
         issues.append(_issue("product_api_error", f"{exc.code}: {exc.message}"))
     except (KeyError, TypeError, ValueError) as exc:
         issues.append(_issue("observation_contract_error", str(exc)))
+
+    # Evidence collection is a read-only observer concern. A failed user command
+    # must not erase a still-readable authoritative wait/failure state from the
+    # report or make real Provider work appear as zero attempts.
+    try:
+        state = api.get_state(project_id)
+        final_state = _compact_state(state)
+    except ObservationApiError as exc:
+        if state:
+            final_state = _compact_state(state)
+        issues.append(
+            _issue("state_collection_failed", f"{exc.code}: {exc.message}")
+        )
+    except ObservationApiUnavailable as exc:
+        if state:
+            final_state = _compact_state(state)
+        issues.append(_issue("state_collection_failed", str(exc)))
+        stop_series = True
+    try:
+        diagnostics = api.diagnostics(project_id)
+    except ObservationApiError as exc:
+        issues.append(
+            _issue("diagnostics_collection_failed", f"{exc.code}: {exc.message}")
+        )
+    except ObservationApiUnavailable as exc:
+        issues.append(_issue("diagnostics_collection_failed", str(exc)))
+        stop_series = True
+    try:
+        events = api.events(project_id)
+    except ObservationApiError as exc:
+        issues.append(
+            _issue("events_collection_failed", f"{exc.code}: {exc.message}")
+        )
+    except ObservationApiUnavailable as exc:
+        issues.append(_issue("events_collection_failed", str(exc)))
+        stop_series = True
+
+    if str(cast(JsonObject, state.get("run", {})).get("status")) == "completed":
+        if diagnostics.get("completion_id") is None:
+            issues.append(
+                _issue("completion_identity_missing", "Completed Run has no completion identity.")
+            )
+        try:
+            snapshot = api.snapshot(project_id)
+            export_result = api.export(project_id)
+            action_counts["export_markdown"] += 1
+        except ObservationApiError as exc:
+            issues.append(_issue("export_failed", f"{exc.code}: {exc.message}"))
+        except ObservationApiUnavailable as exc:
+            issues.append(_issue("export_failed", str(exc)))
+            stop_series = True
+    stop_series = stop_series or _provider_is_hard_unavailable(diagnostics)
 
     finished_wall = datetime.now(UTC)
     attempt_metrics = _attempt_metrics(diagnostics)

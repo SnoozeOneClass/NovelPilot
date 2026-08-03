@@ -187,6 +187,33 @@ def test_registry_rejects_baseline_ids_outside_the_owning_scope(
         )
 
 
+def test_registry_rejects_book_parent_subject_on_another_task_kind() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="Only a Book parent-contract task may freeze an Arc review subject",
+    ):
+        DEFAULT_TASK_REGISTRY.freeze_plan(
+            task_id="invalid-arc-parent-subject",
+            project_id="project-a",
+            run_id="run-a",
+            task_key="invalid:arc-parent-subject",
+            action_key="evaluate.arc_parent_contract",
+            role="evaluator",
+            task_kind="evaluate.arc_parent_contract",
+            contract_version=1,
+            book_id="book-a",
+            arc_id="arc-a",
+            book_baseline_id="book-baseline-a",
+            arc_baseline_id="arc-baseline-a",
+            subject_arc_baseline_id="arc-baseline-a",
+            canon_baseline_id="canon-a",
+            semantic_goal="Exercise the Book-parent-only subject contract.",
+            prompt="Return the requested semantic result.",
+            context_manifest={"schema_id": "subject-scope-contract-test"},
+            profile_snapshot=_profile(),
+        )
+
+
 def test_role_agent_has_no_function_tools_and_no_shared_history() -> None:
     seen_message_counts: list[int] = []
 
@@ -280,11 +307,18 @@ def test_cross_field_semantic_rules_are_present_in_model_visible_contracts() -> 
     assert set(completion) == {"completion_requirements"}
     assert "arc_topology" in book_candidate.output_schema["properties"]
     assert "advisory" in book_candidate.task_instructions
+    assert "copying the exact requirement_key strings" in (
+        book_candidate.task_instructions
+    )
+    arc_key_description = book_candidate.output_schema["$defs"][
+        "BookArcContract"
+    ]["properties"]["completion_requirement_keys"]["description"]
+    assert "exactly match a requirement_key" in arc_key_description
     assert "semantically entail every indispensable named subject" in (
         book_candidate.task_instructions
     )
     assert "clarify roles" in book_candidate.task_instructions
-    assert book_candidate.output_schema_version == 4
+    assert book_candidate.output_schema_version == 5
 
     book_properties = book_evaluation.output_schema["properties"]
     assert "Exactly one semantic coverage judgment" in (
@@ -393,7 +427,7 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
         },
         "chapter": {"observations", "canon"},
     }
-    expected_versions = {"book": 5, "arc": 6, "chapter": 4}
+    expected_versions = {"book": 6, "arc": 6, "chapter": 4}
     for layer, definition in definitions.items():
         assert definition.output_schema_version == expected_versions[layer]
         assert set(definition.output_schema["properties"]) == {"changes"}
