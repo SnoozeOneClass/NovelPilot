@@ -115,9 +115,12 @@ Loop 的主体是 harness：harness 决定每一轮怎么开始、给 LLM 什么
 Arc 收束失败同样只是一项 Arc 层审查输入。即使 Arc 层确认需要修订，也必须由 ArcPlanner 提出候选、经过 Arc 评估和模式对应的批准，再由 Harness 提交新基线。Book baseline 的任何替换都必须经过 Book 层审阅，并在两种运行模式下都获得人工批准。
 
 同层候选的一轮有界修复针对的是完整语义问题，不是 Evaluator 首次点名字段的
-机械集合。Book/Arc 的 `observed_components` 只作诊断；Harness 按层冻结完整候选
+机械集合。Book 的 `observed_components` 只作诊断；Harness 为 Book 冻结完整候选
 修复包络，Repair Agent 可修正同一问题在包络内的全部出现位置，但不能触碰正式
-baseline、Book 标题、历史 Arc 前缀或跨层内容。Chapter 仍按 plan/prose/
+baseline、Book 标题或历史 Arc 前缀。Arc 不使用组件分类和稀疏 patch：Harness
+冻结精确 Book Arc contract、Arc 标题、完整当前大纲与 issue ledger，Agent 返回一份
+完整的未来逐章大纲，Harness 保留标题、已提交前缀、稳定身份和 provenance。
+Chapter 仍按 plan/prose/
 observation/Canon 的依赖关系使用精确组件授权。这个差异来自对象职责，而不是三层
 生命周期原则不一致；所有层仍只有一轮纠正和一次关联复评。
 
@@ -227,22 +230,23 @@ Book 还必须把每个正式 completion requirement 通过稳定 key 分配给�
 
 故事弧 Loop 负责阶段性推进。
 
-目标来源：当前故事弧的上层目标来自正式 Book baseline 中与当前 ordinal 唯一对应的 Arc contract。Arc Planner 根据该 contract、当前故事状态和上一弧 handoff 展开具体阶段契约；不能重新发明自己的全书职责。
+目标来源：当前故事弧的上层目标来自正式 Book baseline 中与当前 ordinal 唯一对应的 Arc contract。它本身就是当前 Arc 的唯一阶段契约；Arc Planner 只能根据该只读契约、当前故事状态和上一弧 handoff 展开逐章大纲，不能再发明第二套阶段契约或重新解释自己的全书职责。
 
 上下文构造：harness 应为故事弧级判断提供当前精确 Book Arc contract、相关全书约束、上一弧 handoff、当前 Arc 的完整逐章大纲、弧内已提交章节、关键角色阶段状态、伏笔阶段状态和节奏历史。逐章大纲只覆盖当前 Arc 从生效点到收束所需的未来区间，不预写整本书，也不把其他未来 Arc 的完整拓扑暴露给 Chapter。
 
 当前 Arc 只接收其 Book Arc contract 明确承担的 completion requirement 内容，
-不接收整本 completion contract。Arc 负责把这些上层要求落实到 closure signals
-和逐章大纲；Book 不因此获得章节规划权，Chapter 也不能重新解释 requirement 的
-全书归属。
+不接收整本 completion contract。Book Arc contract 的 `exit_conditions` 是唯一
+Arc 语义收束契约；Arc 只负责把这些上层要求展开为标题和逐章大纲，不再生成一套
+closure signals。Book 不因此获得章节规划权，Chapter 也不能重新解释 requirement
+的全书归属。
 
-执行：Arc Planner 在 Arc 获批前同时提出阶段契约和完整逐章大纲；每个大纲项至少说明标题、核心事件、章末钩子和场景序列。LLM 也可以解释阶段偏差、判断多章累积效果，并在 Arc 层已获得修订权限时提出后继计划。大纲是宏观职责锚点，不是要求 Chapter 逐字复述的隐藏协议。
+执行：Arc Planner 在 Arc 获批前提出 Arc 标题和完整逐章大纲；每个大纲项至少说明标题、核心事件、章末钩子和场景序列。LLM 也可以解释阶段偏差、判断多章累积效果，并在 Arc 层已获得修订权限时返回一份完整的未来逐章大纲。Harness 负责保留 Arc 标题、已提交前缀、稳定身份与 provenance。大纲是宏观职责锚点，不是要求 Chapter 逐字复述的隐藏协议。
 
 观测：故事弧 Loop 观测多章累积效果、阶段目标完成度、节奏变化、冲突升级、伏笔推进和关系转折。
 
-验证：验证重点是当前故事弧是否完成阶段目标，是否仍服务全书目标，是否需要追加章节、压缩目标、重排节奏或回到阶段规划。
+验证：验证重点是已提交事实是否满足当前 Book Arc contract 的 `exit_conditions`，以及是否应关闭当前 Arc、整体重生未来大纲、逐级升级到 Book、纠正 Chapter 派生证据或等待用户。Arc Evaluator 不能改写 Book contract，也不能把文学质量意见扩张成收束门禁。
 
-状态转移：harness 根据已提交事实和验证结果决定在当前正式 Arc baseline 的派生检查点前继续弧内章节；逐章大纲耗尽时只触发最低限度的 Arc 收束评估，不直接证明 Arc 已完成。只有 Arc 契约的收束条件被正式事实满足后才能退出当前 Arc；非最终 Arc 由 Harness 按 Book 拓扑确定性交接到下一 ordinal，最终 Arc 才进入 Book completion 判断。如果仍需生成新的故事事实，必须由 Arc 层审阅后通过正式 Arc 修订冻结新的未来计划和检查点，不能在原 baseline 下静默追加。Arc successor 只替换生效点之后的未来大纲，已提交章节继续绑定其当时的来源 baseline；同一个 Story Arc 的各 baseline 在读取时合并成一条连续 Arc。其他合法出口包括逐级升级到 Book Loop、要求下层证据纠正、等待用户或失败暂停。
+状态转移：harness 根据已提交事实和验证结果决定在当前正式 Arc baseline 的派生检查点前继续弧内章节；逐章大纲耗尽时只触发最低限度的 Arc 收束评估，不直接证明 Arc 已完成。收束评审只返回一个互斥结果：`closed`、`revise_arc`、`escalate_to_book`、`correct_chapter_evidence` 或 `needs_user`。只有 Book Arc contract 的 `exit_conditions` 被正式事实满足后才能退出当前 Arc；非最终 Arc 由 Harness 按 Book 拓扑确定性交接到下一 ordinal，最终 Arc 才进入 Book completion 判断。如果仍需生成新的故事事实，必须由 Arc 层审阅后通过正式 Arc 修订冻结新的未来计划和检查点，不能在原 baseline 下静默追加。Arc successor 只替换生效点之后的未来大纲，保留标题与已提交章节的来源 baseline；同一个 Story Arc 的各 baseline 在读取时合并成一条连续 Arc。其他合法出口包括逐级升级到 Book Loop、要求下层证据纠正、等待用户或失败暂停。
 
 ### 6.3 章节 Loop
 
@@ -250,7 +254,7 @@ Book 还必须把每个正式 completion requirement 通过稳定 key 分配给�
 
 目标来源：章节的宏观职责来自当前正式 Arc baseline 中由 Harness 确定性分配的逐章大纲项。Chapter Writer 根据该项、最新 Canon、已提交事实和上一章结果生成更细的单章计划，但不能重新发明本章在 Arc 中承担什么。
 
-上下文构造：章节计划与正文任务获得当前大纲项和至多一个下一章大纲项，用于控制衔接；观察、Canon 抽取和章节评审只获得当前项。所有 Chapter 任务还应获得必要故事正史、相关角色状态、伏笔状态、世界规则、上一章结果和可用工具，但不获得当前 Arc 的其余远期逐章大纲。
+上下文构造：章节计划与正文任务获得当前 ordinal 对应的精确只读 Book Arc contract、当前大纲项和至多一个下一章大纲项，用于控制衔接；观察、Canon 抽取和章节评审获得同一 Book assignment 与当前项。所有 Chapter 任务还应获得必要故事正史、相关角色状态、伏笔状态、世界规则、上一章结果和可用工具，但不获得当前 Arc 的其余远期逐章大纲。
 
 执行：LLM 完成正文生成、局部修订、审稿判断、状态抽取或偏差解释等语义动作。
 

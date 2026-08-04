@@ -8,7 +8,6 @@ from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict
 
-from app.agents.contracts import ArcPlanProposal
 from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
 from app.db.uow import StoreSession
 from app.domain.book.contracts import CompletionContract
@@ -26,10 +25,16 @@ from app.domain.commands import (
     EventDraft,
 )
 from app.domain.evaluation import (
+    ArcClosureClosed,
+    ArcClosureCorrectChapterEvidence,
     ArcClosureEvaluation,
+    ArcClosureEscalateToBook,
+    ArcClosureNeedsUser,
+    ArcClosureReviseArc,
     ArcParentContractEvaluation,
     BookCompletionEvaluation,
     BookParentContractEvaluation,
+    CreatorInputNeed,
 )
 from app.store.arcs import (
     ArcBaselineRecord,
@@ -429,17 +434,10 @@ class LoopAuthorityCommandService:
                     review_id=task.source_arc_parent_review_id,
                 )
             )
-            if (
-                (latest is None) != (source_review is None)
-                or (
-                    latest is not None
-                    and source_review is not None
-                    and latest.id != source_review.id
-                )
+            if (latest is None) != (source_review is None) or (
+                latest is not None and source_review is not None and latest.id != source_review.id
             ):
-                raise CommandPreconditionError(
-                    "Arc parent-review predecessor is not current."
-                )
+                raise CommandPreconditionError("Arc parent-review predecessor is not current.")
             lineage = self._review_lineage_links(
                 task=task,
                 source_review=source_review,
@@ -483,18 +481,14 @@ class LoopAuthorityCommandService:
                         task.evaluation_strategy_version, "evaluation strategy"
                     ),
                     rubric_id=self._required_text(task.rubric_id, "rubric"),
-                    rubric_version=self._required_int(
-                        task.rubric_version, "rubric"
-                    ),
+                    rubric_version=self._required_int(task.rubric_version, "rubric"),
                     arc_contract_judgment=evaluation.arc_contract_judgment,
                     parent_review_judgment=evaluation.book_review_concern,
                     disposition=disposition,
                     resolution_owner=self._arc_resolution_owner(disposition),
                     detail_ref_id=task.result_ref_id,
                     precheck_ref_id=precheck_ref.id,
-                    user_question_ref_id=(
-                        None if question_ref is None else question_ref.id
-                    ),
+                    user_question_ref_id=(None if question_ref is None else question_ref.id),
                     exact_input_fingerprint=exact_input_fingerprint,
                     correction_lineage_id=lineage.lineage_id,
                     correction_lineage_origin=lineage.lineage_origin,
@@ -502,9 +496,7 @@ class LoopAuthorityCommandService:
                     review_ordinal=lineage.review_ordinal,
                     predecessor_review_id=lineage.predecessor_review_id,
                     source_feedback_id=task.source_feedback_id,
-                    source_exhausted_review_id=(
-                        lineage.source_exhausted_review_id
-                    ),
+                    source_exhausted_review_id=(lineage.source_exhausted_review_id),
                     opened_arc_workspace_id=None,
                     created_at_ms=timestamp,
                 )
@@ -512,14 +504,10 @@ class LoopAuthorityCommandService:
             if not await session.changes.mark_chapter_arc_reviewed(
                 project_id=request.project_id,
                 request_id=request.request_id,
-                expected_latest_review_id=(
-                    None if source_review is None else source_review.id
-                ),
+                expected_latest_review_id=(None if source_review is None else source_review.id),
                 review_id=review_id,
             ):
-                raise CommandPreconditionError(
-                    "Chapter-to-Arc latest review pointer CAS failed."
-                )
+                raise CommandPreconditionError("Chapter-to-Arc latest review pointer CAS failed.")
             opened_change_id: str | None = None
             downstream_action: Literal[
                 "none",
@@ -590,9 +578,7 @@ class LoopAuthorityCommandService:
                 if evidence_chapter is None or evidence_chapter.arc_id != request.arc_id:
                     raise AuthorityTaskFailure(
                         code="evaluation_contract_invalid",
-                        message=(
-                            "Arc parent evidence target is not a Chapter in the current Arc."
-                        ),
+                        message=("Arc parent evidence target is not a Chapter in the current Arc."),
                     )
                 downstream_action = await self._open_chapter_correction(
                     session,
@@ -655,9 +641,7 @@ class LoopAuthorityCommandService:
                 command_id=envelope.command_id,
                 updated_at_ms=timestamp,
             ):
-                raise CommandPreconditionError(
-                    "Arc parent-review delivery changed concurrently."
-                )
+                raise CommandPreconditionError("Arc parent-review delivery changed concurrently.")
             return CommandEffect(
                 result=RecordArcParentReviewResult(
                     project_id=request.project_id,
@@ -793,17 +777,10 @@ class LoopAuthorityCommandService:
                 request_id=request.request_id,
             )
             source_review = book_parent_case.predecessor_review
-            if (
-                (latest is None) != (source_review is None)
-                or (
-                    latest is not None
-                    and source_review is not None
-                    and latest.id != source_review.id
-                )
+            if (latest is None) != (source_review is None) or (
+                latest is not None and source_review is not None and latest.id != source_review.id
             ):
-                raise CommandPreconditionError(
-                    "Book parent-review predecessor is not current."
-                )
+                raise CommandPreconditionError("Book parent-review predecessor is not current.")
             lineage = self._review_lineage_links(
                 task=task,
                 source_review=source_review,
@@ -840,24 +817,18 @@ class LoopAuthorityCommandService:
                 subject_arc_baseline_id=task.subject_arc_baseline_id,
                 source_task_id=task.task_id,
                 source_attempt_id=task.attempt_id,
-                strategy_id=self._required_text(
-                    task.evaluation_strategy_id, "evaluation strategy"
-                ),
+                strategy_id=self._required_text(task.evaluation_strategy_id, "evaluation strategy"),
                 strategy_version=self._required_int(
                     task.evaluation_strategy_version, "evaluation strategy"
                 ),
                 rubric_id=self._required_text(task.rubric_id, "rubric"),
-                rubric_version=self._required_int(
-                    task.rubric_version, "rubric"
-                ),
+                rubric_version=self._required_int(task.rubric_version, "rubric"),
                 book_contract_judgment=evaluation.book_contract_judgment,
                 disposition=disposition,
                 resolution_owner=self._book_resolution_owner(disposition),
                 detail_ref_id=task.result_ref_id,
                 precheck_ref_id=precheck_ref.id,
-                user_question_ref_id=(
-                    None if question_ref is None else question_ref.id
-                ),
+                user_question_ref_id=(None if question_ref is None else question_ref.id),
                 exact_input_fingerprint=exact_input_fingerprint,
                 correction_lineage_id=lineage.lineage_id,
                 correction_lineage_origin=lineage.lineage_origin,
@@ -873,14 +844,10 @@ class LoopAuthorityCommandService:
             if not await session.changes.mark_arc_book_reviewed(
                 project_id=request.project_id,
                 request_id=request.request_id,
-                expected_latest_review_id=(
-                    None if source_review is None else source_review.id
-                ),
+                expected_latest_review_id=(None if source_review is None else source_review.id),
                 review_id=review_id,
             ):
-                raise CommandPreconditionError(
-                    "Arc-to-Book latest review pointer CAS failed."
-                )
+                raise CommandPreconditionError("Arc-to-Book latest review pointer CAS failed.")
             downstream_action: Literal[
                 "none",
                 "arc_correction_opened",
@@ -914,22 +881,18 @@ class LoopAuthorityCommandService:
                         )
                     downstream_action = "request_resolved"
                 else:
-                    downstream_action = (
-                        await self._open_arc_correction_from_book_review(
-                            session,
-                            task=task,
-                            review=review_record,
-                            timestamp=timestamp,
-                        )
-                    )
-            elif disposition == "arc_evidence_review_required":
-                downstream_action = (
-                    await self._open_arc_correction_from_book_review(
+                    downstream_action = await self._open_arc_correction_from_book_review(
                         session,
                         task=task,
                         review=review_record,
                         timestamp=timestamp,
                     )
+            elif disposition == "arc_evidence_review_required":
+                downstream_action = await self._open_arc_correction_from_book_review(
+                    session,
+                    task=task,
+                    review=review_record,
+                    timestamp=timestamp,
                 )
             if disposition == "waiting_for_user" and not await session.runs.ensure_wait_for_user(
                 run_id=task.run_id,
@@ -940,9 +903,7 @@ class LoopAuthorityCommandService:
                 ),
                 now_ms=timestamp,
             ):
-                raise CommandPreconditionError(
-                    "Run could not enter the Book parent-review wait."
-                )
+                raise CommandPreconditionError("Run could not enter the Book parent-review wait.")
             if not await session.execution.mark_delivery_applied(
                 project_id=request.project_id,
                 task_id=request.task_id,
@@ -950,9 +911,7 @@ class LoopAuthorityCommandService:
                 command_id=envelope.command_id,
                 updated_at_ms=timestamp,
             ):
-                raise CommandPreconditionError(
-                    "Book parent-review delivery changed concurrently."
-                )
+                raise CommandPreconditionError("Book parent-review delivery changed concurrently.")
             return CommandEffect(
                 result=RecordBookParentReviewResult(
                     project_id=request.project_id,
@@ -1013,24 +972,16 @@ class LoopAuthorityCommandService:
                 request=request,
                 task=task,
             )
-            plan = ArcPlanProposal.model_validate_json(
-                (
-                    await session.content.get_packed(
-                        project_id=request.project_id,
-                        ref_id=baseline.plan_ref_id,
-                    )
-                ).unpack_and_verify()
-            )
-            self._validate_arc_signal_coverage(evaluation=evaluation, plan=plan)
+            creator_input_need = self._arc_closure_creator_input_need(evaluation)
+            (
+                arc_contract_judgment,
+                parent_review_judgment,
+            ) = self._arc_closure_legacy_judgments(evaluation)
             chapter_manifest = {
                 "schema_id": "arc-closure-chapter-set-v2",
                 "arc_ordinal": arc.ordinal,
-                "closure_cumulative_chapter_count": (
-                    baseline.closure_cumulative_chapter_count
-                ),
-                "cumulative_committed_chapter_count": (
-                    cumulative_committed_chapter_count
-                ),
+                "closure_cumulative_chapter_count": (baseline.closure_cumulative_chapter_count),
+                "cumulative_committed_chapter_count": (cumulative_committed_chapter_count),
                 "chapters": [
                     {
                         "chapter_id": chapter.chapter_id,
@@ -1055,10 +1006,9 @@ class LoopAuthorityCommandService:
                 self._bounded_review_disposition(
                     disposition=self._arc_closure_disposition(
                         evaluation=evaluation,
-                        plan=plan,
                     ),
                     task=task,
-                    has_creator_question=evaluation.creator_input_need is not None,
+                    has_creator_question=creator_input_need is not None,
                     correction_dispositions=frozenset(
                         {
                             "arc_revision_warranted",
@@ -1071,8 +1021,7 @@ class LoopAuthorityCommandService:
                 "schema_id": "arc-closure-precheck-v2",
                 "passed": True,
                 "checkpoint_reached_exactly": (
-                    cumulative_committed_chapter_count
-                    == baseline.closure_cumulative_chapter_count
+                    cumulative_committed_chapter_count == baseline.closure_cumulative_chapter_count
                 ),
                 "arc_status": arc.lifecycle_status,
                 "workspace_state": workspace.state,
@@ -1080,23 +1029,15 @@ class LoopAuthorityCommandService:
             }
             prepared_precheck = prepare_canonical_json(precheck)
             prepared_question = (
-                None
-                if evaluation.creator_input_need is None
-                else prepare_canonical_json(evaluation.creator_input_need)
+                None if creator_input_need is None else prepare_canonical_json(creator_input_need)
             )
             prepared_normalized = prepare_canonical_json(
                 {
-                    "schema_id": "formal-arc-closure-result-v3",
+                    "schema_id": "formal-arc-closure-result-v4",
                     "arc_ordinal": arc.ordinal,
                     "disposition": disposition,
-                    "signal_statuses": [
-                        item.model_dump(mode="json")
-                        for item in evaluation.signal_statuses
-                    ],
-                    "summary": evaluation.summary,
-                    "cumulative_committed_chapter_count": (
-                        cumulative_committed_chapter_count
-                    ),
+                    "outcome": evaluation.outcome.model_dump(mode="json"),
+                    "cumulative_committed_chapter_count": (cumulative_committed_chapter_count),
                     "chapter_set_fingerprint": prepared_manifest.sha256,
                 }
             )
@@ -1105,12 +1046,8 @@ class LoopAuthorityCommandService:
                     "book_baseline_id": task.book_baseline_id,
                     "arc_baseline_id": task.arc_baseline_id,
                     "canon_baseline_id": task.canon_baseline_id,
-                    "closure_cumulative_chapter_count": (
-                        baseline.closure_cumulative_chapter_count
-                    ),
-                    "cumulative_committed_chapter_count": (
-                        cumulative_committed_chapter_count
-                    ),
+                    "closure_cumulative_chapter_count": (baseline.closure_cumulative_chapter_count),
+                    "cumulative_committed_chapter_count": (cumulative_committed_chapter_count),
                     "chapter_set_fingerprint": prepared_manifest.sha256,
                     "strategy_id": task.evaluation_strategy_id,
                     "strategy_version": task.evaluation_strategy_version,
@@ -1154,12 +1091,9 @@ class LoopAuthorityCommandService:
                 or current_baseline != baseline
                 or current_workspace != workspace
                 or current_chapters != chapters
-                or current_cumulative_committed_chapter_count
-                != cumulative_committed_chapter_count
+                or current_cumulative_committed_chapter_count != cumulative_committed_chapter_count
             ):
-                raise CommandPreconditionError(
-                    "Arc closure authority changed before delivery."
-                )
+                raise CommandPreconditionError("Arc closure authority changed before delivery.")
             latest = await session.arc_closure_reviews.get_latest_for_arc(
                 project_id=request.project_id,
                 arc_id=request.arc_id,
@@ -1172,17 +1106,10 @@ class LoopAuthorityCommandService:
                     review_id=task.source_arc_closure_review_id,
                 )
             )
-            if (
-                (latest is None) != (source_review is None)
-                or (
-                    latest is not None
-                    and source_review is not None
-                    and latest.id != source_review.id
-                )
+            if (latest is None) != (source_review is None) or (
+                latest is not None and source_review is not None and latest.id != source_review.id
             ):
-                raise CommandPreconditionError(
-                    "Arc closure predecessor review is not current."
-                )
+                raise CommandPreconditionError("Arc closure predecessor review is not current.")
             lineage = self._review_lineage_links(
                 task=task,
                 source_review=source_review,
@@ -1229,35 +1156,25 @@ class LoopAuthorityCommandService:
                 canon_baseline_id=task.canon_baseline_id,
                 terminal_chapter_id=chapters[-1].chapter_id,
                 terminal_chapter_baseline_id=chapters[-1].id,
-                cumulative_committed_chapter_count=(
-                    cumulative_committed_chapter_count
-                ),
-                closure_cumulative_chapter_count=(
-                    baseline.closure_cumulative_chapter_count
-                ),
+                cumulative_committed_chapter_count=(cumulative_committed_chapter_count),
+                closure_cumulative_chapter_count=(baseline.closure_cumulative_chapter_count),
                 chapter_set_fingerprint=prepared_manifest.sha256,
                 chapter_set_manifest_ref_id=manifest_ref.id,
                 source_task_id=task.task_id,
                 source_attempt_id=task.attempt_id,
-                strategy_id=self._required_text(
-                    task.evaluation_strategy_id, "evaluation strategy"
-                ),
+                strategy_id=self._required_text(task.evaluation_strategy_id, "evaluation strategy"),
                 strategy_version=self._required_int(
                     task.evaluation_strategy_version, "evaluation strategy"
                 ),
                 rubric_id=self._required_text(task.rubric_id, "rubric"),
-                rubric_version=self._required_int(
-                    task.rubric_version, "rubric"
-                ),
-                arc_contract_judgment=evaluation.arc_contract_judgment,
-                parent_review_judgment=evaluation.book_review_concern,
+                rubric_version=self._required_int(task.rubric_version, "rubric"),
+                arc_contract_judgment=arc_contract_judgment,
+                parent_review_judgment=parent_review_judgment,
                 disposition=disposition,
                 resolution_owner=self._arc_resolution_owner(disposition),
                 detail_ref_id=task.result_ref_id,
                 precheck_ref_id=precheck_ref.id,
-                user_question_ref_id=(
-                    None if question_ref is None else question_ref.id
-                ),
+                user_question_ref_id=(None if question_ref is None else question_ref.id),
                 exact_input_fingerprint=exact_input_fingerprint,
                 correction_lineage_id=lineage.lineage_id,
                 correction_lineage_origin=lineage.lineage_origin,
@@ -1305,7 +1222,7 @@ class LoopAuthorityCommandService:
                     semantic_kind="arc.formal_closure_result",
                     media_type="application/json",
                     schema_id="formal-arc-closure-result",
-                    schema_version=3,
+                    schema_version=4,
                     ref_id=normalized_ref_id,
                     created_at_ms=timestamp,
                 )
@@ -1314,7 +1231,9 @@ class LoopAuthorityCommandService:
                     arc_id=request.arc_id,
                 )
                 version = await session.arc_closures.next_version(arc_id=request.arc_id)
-                if version != (1 if previous_closure is None else previous_closure.closure_version + 1):
+                if version != (
+                    1 if previous_closure is None else previous_closure.closure_version + 1
+                ):
                     raise CommandPreconditionError("Arc closure version is not contiguous.")
                 await session.arc_closures.insert(
                     ArcClosureRecord(
@@ -1332,9 +1251,7 @@ class LoopAuthorityCommandService:
                         canon_baseline_id=task.canon_baseline_id,
                         terminal_chapter_id=chapters[-1].chapter_id,
                         terminal_chapter_baseline_id=chapters[-1].id,
-                        cumulative_committed_chapter_count=(
-                            cumulative_committed_chapter_count
-                        ),
+                        cumulative_committed_chapter_count=(cumulative_committed_chapter_count),
                         chapter_set_fingerprint=prepared_manifest.sha256,
                         chapter_set_manifest_ref_id=manifest_ref.id,
                         normalized_result_ref_id=normalized_ref.id,
@@ -1389,12 +1306,13 @@ class LoopAuthorityCommandService:
                     )
                 )
             elif disposition == "chapter_evidence_review_required":
-                target = evaluation.chapter_evidence_target
-                if target is None:
+                outcome = evaluation.outcome
+                if not isinstance(outcome, ArcClosureCorrectChapterEvidence):
                     raise AuthorityTaskFailure(
                         code="evaluation_contract_invalid",
                         message="Arc closure evidence review has no semantic Chapter target.",
                     )
+                target = outcome.target
                 evidence_chapter = await session.chapters.get_by_book_ordinal(
                     project_id=request.project_id,
                     book_id=request.book_id,
@@ -1446,9 +1364,7 @@ class LoopAuthorityCommandService:
                 command_id=envelope.command_id,
                 updated_at_ms=timestamp,
             ):
-                raise CommandPreconditionError(
-                    "Arc closure task delivery changed concurrently."
-                )
+                raise CommandPreconditionError("Arc closure task delivery changed concurrently.")
             return CommandEffect(
                 result=RecordArcClosureReviewResult(
                     project_id=request.project_id,
@@ -1522,9 +1438,7 @@ class LoopAuthorityCommandService:
                 or workspace.state != "idle"
                 or workspace.lock_version != request.expected_workspace_lock_version
             ):
-                raise CommandPreconditionError(
-                    "Arc closure revision authorization is stale."
-                )
+                raise CommandPreconditionError("Arc closure revision authorization is stale.")
             revision_origin = (
                 "user_initiated"
                 if review.correction_lineage_origin == "user_initiated"
@@ -1532,9 +1446,7 @@ class LoopAuthorityCommandService:
             )
             if (
                 revision_origin == "automatic_arc_recovery"
-                and await session.arcs.has_automatic_recovery_baseline(
-                    arc_id=request.arc_id
-                )
+                and await session.arcs.has_automatic_recovery_baseline(arc_id=request.arc_id)
             ):
                 if not await session.runs.ensure_wait_for_user(
                     run_id=(
@@ -1600,17 +1512,13 @@ class LoopAuthorityCommandService:
                 record=updated,
                 expected_lock_version=workspace.lock_version,
             ):
-                raise CommandPreconditionError(
-                    "Arc closure revision workspace CAS failed."
-                )
+                raise CommandPreconditionError("Arc closure revision workspace CAS failed.")
             if not await session.arc_closure_reviews.mark_workspace_opened(
                 project_id=request.project_id,
                 review_id=review.id,
                 workspace_id=workspace.id,
             ):
-                raise CommandPreconditionError(
-                    "Arc closure review workspace pointer CAS failed."
-                )
+                raise CommandPreconditionError("Arc closure review workspace pointer CAS failed.")
             return CommandEffect(
                 result=OpenArcClosureRevisionResult(
                     project_id=request.project_id,
@@ -1728,42 +1636,32 @@ class LoopAuthorityCommandService:
                 or book.lifecycle_status != "active"
                 or book.current_baseline_id != review.book_baseline_id
                 or book.latest_completion_review_id != review.id
-                or book.current_progress_handoff_id
-                != review.book_progress_handoff_id
+                or book.current_progress_handoff_id != review.book_progress_handoff_id
                 or book.current_completion_id is not None
                 or workspace is None
                 or workspace.state != "idle"
-                or workspace.lock_version
-                != request.expected_workspace_lock_version
+                or workspace.lock_version != request.expected_workspace_lock_version
                 or closure is None
                 or terminal_arc is None
                 or terminal_arc.current_closure_id != closure.id
                 or terminal_arc.lifecycle_status != "completed"
-                or (
-                    terminal_arc.ordinal == 1
-                    and review.book_progress_handoff_id is not None
-                )
+                or (terminal_arc.ordinal == 1 and review.book_progress_handoff_id is not None)
                 or (
                     terminal_arc.ordinal > 1
                     and (
                         review_handoff is None
-                        or review_handoff.book_baseline_id
-                        != review.book_baseline_id
-                        or review_handoff.next_arc_ordinal
-                        != terminal_arc.ordinal
+                        or review_handoff.book_baseline_id != review.book_baseline_id
+                        or review_handoff.next_arc_ordinal != terminal_arc.ordinal
                         or prior_closure is None
                         or prior_arc is None
                         or prior_arc.ordinal != terminal_arc.ordinal - 1
                         or prior_arc.current_closure_id != prior_closure.id
                         or terminal_workspace is None
-                        or terminal_workspace.book_progress_handoff_id
-                        != review_handoff.id
+                        or terminal_workspace.book_progress_handoff_id != review_handoff.id
                     )
                 )
             ):
-                raise CommandPreconditionError(
-                    "Book completion revision authorization is stale."
-                )
+                raise CommandPreconditionError("Book completion revision authorization is stale.")
             pending = await session.books.find_pending_submission(
                 project_id=request.project_id,
                 book_id=request.book_id,
@@ -1799,9 +1697,7 @@ class LoopAuthorityCommandService:
                 record=updated,
                 expected_lock_version=workspace.lock_version,
             ):
-                raise CommandPreconditionError(
-                    "Book completion revision workspace CAS failed."
-                )
+                raise CommandPreconditionError("Book completion revision workspace CAS failed.")
             if not await session.book_completion_reviews.mark_workspace_opened(
                 project_id=request.project_id,
                 review_id=review.id,
@@ -1872,12 +1768,10 @@ class LoopAuthorityCommandService:
                 terminal_arc,
                 progress_handoff,
                 chapter_count,
-            ) = (
-                await self._book_completion_snapshot(
-                    session,
-                    request=request,
-                    task=task,
-                )
+            ) = await self._book_completion_snapshot(
+                session,
+                request=request,
+                task=task,
             )
             terminal_closure = closures[-1]
             contract = CompletionContract.model_validate_json(
@@ -1905,9 +1799,7 @@ class LoopAuthorityCommandService:
                     ),
                     task=task,
                     has_creator_question=evaluation.creator_input_need is not None,
-                    correction_dispositions=frozenset(
-                        {"book_revision_warranted"}
-                    ),
+                    correction_dispositions=frozenset({"book_revision_warranted"}),
                 ),
             )
             prepared_statuses = prepare_canonical_json(
@@ -1922,8 +1814,7 @@ class LoopAuthorityCommandService:
                     "book_baseline_current": True,
                     "closure_inputs_frozen": True,
                     "progress_handoff_frozen": (
-                        terminal_arc.ordinal == 1
-                        or progress_handoff is not None
+                        terminal_arc.ordinal == 1 or progress_handoff is not None
                     ),
                     "committed_chapter_count": chapter_count,
                 }
@@ -1941,9 +1832,7 @@ class LoopAuthorityCommandService:
                             "arc_closure_id": closure.id,
                             "arc_baseline_id": closure.arc_baseline_id,
                             "canon_baseline_id": closure.canon_baseline_id,
-                            "chapter_set_fingerprint": (
-                                closure.chapter_set_fingerprint
-                            ),
+                            "chapter_set_fingerprint": (closure.chapter_set_fingerprint),
                         }
                         for closure in closures
                     ],
@@ -1977,9 +1866,7 @@ class LoopAuthorityCommandService:
                 task_kind="evaluate.book_completion",
             )
             if current_task != task or task.delivery_state != "pending":
-                raise CommandPreconditionError(
-                    "Book completion task changed before delivery."
-                )
+                raise CommandPreconditionError("Book completion task changed before delivery.")
             current = await self._book_completion_snapshot(
                 session,
                 request=request,
@@ -1994,9 +1881,7 @@ class LoopAuthorityCommandService:
                 progress_handoff,
                 chapter_count,
             ):
-                raise CommandPreconditionError(
-                    "Book completion authority changed before delivery."
-                )
+                raise CommandPreconditionError("Book completion authority changed before delivery.")
             latest = await session.book_completion_reviews.get_latest_for_book(
                 project_id=request.project_id,
                 book_id=request.book_id,
@@ -2009,14 +1894,8 @@ class LoopAuthorityCommandService:
                     review_id=task.source_book_completion_review_id,
                 )
             )
-            if (
-                source_review is not None
-                and latest is not None
-                and latest.id != source_review.id
-            ):
-                raise CommandPreconditionError(
-                    "Book completion predecessor review is not current."
-                )
+            if source_review is not None and latest is not None and latest.id != source_review.id:
+                raise CommandPreconditionError("Book completion predecessor review is not current.")
             if source_review is None and latest is not None:
                 if (
                     latest.arc_closure_id == terminal_closure.id
@@ -2077,9 +1956,7 @@ class LoopAuthorityCommandService:
                         [
                             {
                                 "arc_closure_id": closure.id,
-                                "chapter_set_fingerprint": (
-                                    closure.chapter_set_fingerprint
-                                ),
+                                "chapter_set_fingerprint": (closure.chapter_set_fingerprint),
                             }
                             for closure in closures
                         ]
@@ -2093,18 +1970,14 @@ class LoopAuthorityCommandService:
                         task.evaluation_strategy_version, "evaluation strategy"
                     ),
                     rubric_id=self._required_text(task.rubric_id, "rubric"),
-                    rubric_version=self._required_int(
-                        task.rubric_version, "rubric"
-                    ),
+                    rubric_version=self._required_int(task.rubric_version, "rubric"),
                     requirement_statuses_ref_id=statuses_ref.id,
                     book_contract_judgment=evaluation.book_contract_judgment,
                     disposition=disposition,
                     resolution_owner=self._book_resolution_owner(disposition),
                     detail_ref_id=task.result_ref_id,
                     precheck_ref_id=precheck_ref.id,
-                    user_question_ref_id=(
-                        None if question_ref is None else question_ref.id
-                    ),
+                    user_question_ref_id=(None if question_ref is None else question_ref.id),
                     exact_input_fingerprint=exact_input_fingerprint,
                     correction_lineage_id=lineage.lineage_id,
                     correction_lineage_origin=lineage.lineage_origin,
@@ -2112,9 +1985,7 @@ class LoopAuthorityCommandService:
                     review_ordinal=lineage.review_ordinal,
                     predecessor_review_id=lineage.predecessor_review_id,
                     source_feedback_id=task.source_feedback_id,
-                    source_exhausted_review_id=(
-                        lineage.source_exhausted_review_id
-                    ),
+                    source_exhausted_review_id=(lineage.source_exhausted_review_id),
                     opened_book_workspace_id=None,
                     created_at_ms=timestamp,
                 )
@@ -2127,9 +1998,7 @@ class LoopAuthorityCommandService:
                 new_review_id=review_id,
                 updated_at_ms=timestamp,
             ):
-                raise CommandPreconditionError(
-                    "Book completion review pointer CAS failed."
-                )
+                raise CommandPreconditionError("Book completion review pointer CAS failed.")
             if disposition == "waiting_for_user" and not await session.runs.ensure_wait_for_user(
                 run_id=task.run_id,
                 reason_code=(
@@ -2239,10 +2108,8 @@ class LoopAuthorityCommandService:
                 or not (
                     closure.book_baseline_id == baseline.id
                     or (
-                        baseline.parent_baseline_id
-                        == closure.book_baseline_id
-                        and baseline.topology_effective_after_arc_ordinal
-                        >= source_arc.ordinal
+                        baseline.parent_baseline_id == closure.book_baseline_id
+                        and baseline.topology_effective_after_arc_ordinal >= source_arc.ordinal
                     )
                 )
                 or project is None
@@ -2252,12 +2119,10 @@ class LoopAuthorityCommandService:
                     "Book progress handoff authority is stale or mismatched."
                 )
             next_arc_ordinal = source_arc.ordinal + 1
-            existing = (
-                await session.book_progress_handoffs.get_for_book_baseline_ordinal(
-                    project_id=request.project_id,
-                    book_baseline_id=baseline.id,
-                    next_arc_ordinal=next_arc_ordinal,
-                )
+            existing = await session.book_progress_handoffs.get_for_book_baseline_ordinal(
+                project_id=request.project_id,
+                book_baseline_id=baseline.id,
+                next_arc_ordinal=next_arc_ordinal,
             )
             if existing is not None:
                 raise CommandPreconditionError(
@@ -2276,9 +2141,7 @@ class LoopAuthorityCommandService:
                 project_id=request.project_id,
                 book_id=request.book_id,
             )
-            version = await session.book_progress_handoffs.next_version(
-                book_id=request.book_id
-            )
+            version = await session.book_progress_handoffs.next_version(book_id=request.book_id)
             if version != (1 if previous is None else previous.handoff_version + 1):
                 raise CommandPreconditionError("Book handoff version is not contiguous.")
             await session.book_progress_handoffs.insert(
@@ -2436,13 +2299,10 @@ class LoopAuthorityCommandService:
                 or terminal_arc.ordinal != baseline.final_arc_ordinal
                 or terminal_chapter is None
                 or terminal_chapter.chapter_id != closure.terminal_chapter_id
-                or terminal_chapter.chapter_baseline_id
-                != closure.terminal_chapter_baseline_id
+                or terminal_chapter.chapter_baseline_id != closure.terminal_chapter_baseline_id
                 or task is None
                 or task.delivery_state != "applied"
-                or await session.completion.count_committed_chapters(
-                    book_id=request.book_id
-                )
+                or await session.completion.count_committed_chapters(book_id=request.book_id)
                 != review.committed_chapter_count
                 or await session.changes.has_unresolved(project_id=request.project_id)
                 or await session.feedback.has_unapplied(project_id=request.project_id)
@@ -2492,9 +2352,7 @@ class LoopAuthorityCommandService:
                     terminal_arc_id=terminal_arc.arc_id,
                     terminal_arc_baseline_id=terminal_arc.arc_baseline_id,
                     terminal_chapter_id=terminal_chapter.chapter_id,
-                    terminal_chapter_baseline_id=(
-                        terminal_chapter.chapter_baseline_id
-                    ),
+                    terminal_chapter_baseline_id=(terminal_chapter.chapter_baseline_id),
                     canon_baseline_id=closure.canon_baseline_id,
                     committed_chapter_count=review.committed_chapter_count,
                     source_task_id=review.source_task_id,
@@ -2646,9 +2504,7 @@ class LoopAuthorityCommandService:
             or project is None
             or project.current_canon_baseline_id != task.canon_baseline_id
         ):
-            raise CommandPreconditionError(
-                "Arc parent-review facts are stale or incomplete."
-            )
+            raise CommandPreconditionError("Arc parent-review facts are stale or incomplete.")
         return change, arc, baseline, workspace
 
     @staticmethod
@@ -2668,13 +2524,10 @@ class LoopAuthorityCommandService:
             or task.workspace_work_cycle_id is None
             or task.source_arc_book_request_id != request.request_id
             or task.correction_lineage_id is None
-            or task.correction_lineage_origin
-            not in {"review_initiated", "user_initiated"}
+            or task.correction_lineage_origin not in {"review_initiated", "user_initiated"}
             or task.automatic_correction_round not in {0, 1}
         ):
-            raise CommandPreconditionError(
-                "Book parent-review task identity is incomplete."
-            )
+            raise CommandPreconditionError("Book parent-review task identity is incomplete.")
         try:
             return await resolve_book_parent_review_case(
                 session,
@@ -2692,9 +2545,7 @@ class LoopAuthorityCommandService:
                         Literal["review_initiated", "user_initiated"],
                         task.correction_lineage_origin,
                     ),
-                    automatic_correction_round=cast(
-                        Literal[0, 1], task.automatic_correction_round
-                    ),
+                    automatic_correction_round=cast(Literal[0, 1], task.automatic_correction_round),
                     predecessor_review_id=task.source_book_parent_review_id,
                     source_feedback_id=task.source_feedback_id,
                 ),
@@ -2762,9 +2613,7 @@ class LoopAuthorityCommandService:
             or len(committed) != baseline.closure_cumulative_chapter_count
             or not arc_chapters
         ):
-            raise CommandPreconditionError(
-                "Arc closure checkpoint facts are stale or incomplete."
-            )
+            raise CommandPreconditionError("Arc closure checkpoint facts are stale or incomplete.")
         return arc, baseline, workspace, arc_chapters, len(committed)
 
     @staticmethod
@@ -2849,14 +2698,9 @@ class LoopAuthorityCommandService:
             book_id=request.book_id,
         )
         closure_matches_book_lineage = False
-        if (
-            terminal_closure is not None
-            and baseline is not None
-            and workspace is not None
-        ):
+        if terminal_closure is not None and baseline is not None and workspace is not None:
             closure_matches_book_lineage = (
-                source_review is None
-                and terminal_closure.book_baseline_id == baseline.id
+                source_review is None and terminal_closure.book_baseline_id == baseline.id
             ) or (
                 source_review is not None
                 and source_review.book_id == request.book_id
@@ -2867,15 +2711,12 @@ class LoopAuthorityCommandService:
                 and baseline.parent_baseline_id == source_review.book_baseline_id
                 and task.automatic_correction_round == 1
             )
-        chapter_count = await session.completion.count_committed_chapters(
-            book_id=request.book_id
-        )
+        chapter_count = await session.completion.count_committed_chapters(book_id=request.book_id)
         handoff_matches_terminal_arc = False
         if terminal_arc is not None and baseline is not None:
             if terminal_arc.ordinal == 1:
                 handoff_matches_terminal_arc = (
-                    progress_handoff is None
-                    and task.source_book_progress_handoff_id is None
+                    progress_handoff is None and task.source_book_progress_handoff_id is None
                 )
             elif (
                 progress_handoff is not None
@@ -2883,32 +2724,25 @@ class LoopAuthorityCommandService:
                 and terminal_workspace is not None
             ):
                 expected_handoff_baseline_id = (
-                    baseline.id
-                    if source_review is None
-                    else source_review.book_baseline_id
+                    baseline.id if source_review is None else source_review.book_baseline_id
                 )
                 handoff_matches_terminal_arc = (
                     progress_handoff.book_id == request.book_id
                     and progress_handoff.next_arc_ordinal == terminal_arc.ordinal
                     and progress_handoff.source_arc_closure_id == closures[-2].id
-                    and progress_handoff.book_baseline_id
-                    == expected_handoff_baseline_id
-                    and terminal_workspace.book_progress_handoff_id
-                    == progress_handoff.id
+                    and progress_handoff.book_baseline_id == expected_handoff_baseline_id
+                    and terminal_workspace.book_progress_handoff_id == progress_handoff.id
                     and (
                         (
                             source_review is None
                             and book is not None
-                            and book.current_progress_handoff_id
-                            == progress_handoff.id
+                            and book.current_progress_handoff_id == progress_handoff.id
                         )
                         or (
                             source_review is not None
-                            and source_review.book_progress_handoff_id
-                            == progress_handoff.id
+                            and source_review.book_progress_handoff_id == progress_handoff.id
                             and workspace is not None
-                            and workspace.source_book_progress_handoff_id
-                            == progress_handoff.id
+                            and workspace.source_book_progress_handoff_id == progress_handoff.id
                         )
                     )
                 )
@@ -2934,17 +2768,13 @@ class LoopAuthorityCommandService:
             or terminal_arc.ordinal != baseline.final_arc_ordinal
             or not handoff_matches_terminal_arc
             or len(arcs) != baseline.final_arc_ordinal
-            or tuple(arc.ordinal for arc in arcs)
-            != tuple(range(1, baseline.final_arc_ordinal + 1))
+            or tuple(arc.ordinal for arc in arcs) != tuple(range(1, baseline.final_arc_ordinal + 1))
             or any(arc.lifecycle_status != "completed" for arc in arcs)
             or len(closures) != len(arcs)
-            or tuple(closure.arc_id for closure in closures)
-            != tuple(arc.id for arc in arcs)
+            or tuple(closure.arc_id for closure in closures) != tuple(arc.id for arc in arcs)
             or chapter_count < 1
         ):
-            raise CommandPreconditionError(
-                "Book completion facts are stale or incomplete."
-            )
+            raise CommandPreconditionError("Book completion facts are stale or incomplete.")
         return (
             book,
             baseline,
@@ -2992,17 +2822,13 @@ class LoopAuthorityCommandService:
             or workspace is None
             or workspace.state not in {"idle", "blocked_by_upstream"}
             or workspace.arc_baseline_id != arc.current_baseline_id
-            or (source_arc_parent_review_id is None)
-            == (source_arc_closure_review_id is None)
+            or (source_arc_parent_review_id is None) == (source_arc_closure_review_id is None)
         ):
-            raise CommandPreconditionError(
-                "Chapter correction authority is stale or incomplete."
-            )
+            raise CommandPreconditionError("Chapter correction authority is stale or incomplete.")
         if evidence_only:
             historical_blocker = (
                 "formal_arc_closure_exists"
-                if arc.current_closure_id is not None
-                or arc.lifecycle_status == "completed"
+                if arc.current_closure_id is not None or arc.lifecycle_status == "completed"
                 else None
             )
         else:
@@ -3022,9 +2848,7 @@ class LoopAuthorityCommandService:
                 reason_code="historical_rewrite_unsupported",
                 now_ms=timestamp,
             ):
-                raise CommandPreconditionError(
-                    "Run could not enter the historical-rewrite wait."
-                )
+                raise CommandPreconditionError("Run could not enter the historical-rewrite wait.")
             return "historical_rewrite_unsupported"
 
         baseline = (
@@ -3037,18 +2861,12 @@ class LoopAuthorityCommandService:
             )
         )
         if chapter.current_baseline_id is not None and baseline is None:
-            raise CommandPreconditionError(
-                "Current Chapter baseline is missing for correction."
-            )
-        preserved_plan_ref_id = (
-            workspace.plan_ref_id if baseline is None else baseline.plan_ref_id
-        )
+            raise CommandPreconditionError("Current Chapter baseline is missing for correction.")
+        preserved_plan_ref_id = workspace.plan_ref_id if baseline is None else baseline.plan_ref_id
         preserved_draft_ref_id = (
             workspace.draft_ref_id if baseline is None else baseline.prose_ref_id
         )
-        if evidence_only and (
-            preserved_plan_ref_id is None or preserved_draft_ref_id is None
-        ):
+        if evidence_only and (preserved_plan_ref_id is None or preserved_draft_ref_id is None):
             raise CommandPreconditionError(
                 "Evidence correction has no frozen plan/prose to preserve."
             )
@@ -3090,9 +2908,7 @@ class LoopAuthorityCommandService:
         ):
             raise CommandPreconditionError("Chapter correction workspace CAS failed.")
         return (
-            "chapter_evidence_correction_opened"
-            if evidence_only
-            else "chapter_correction_opened"
+            "chapter_evidence_correction_opened" if evidence_only else "chapter_correction_opened"
         )
 
     @staticmethod
@@ -3126,17 +2942,11 @@ class LoopAuthorityCommandService:
             or workspace.state not in {"idle", "blocked_by_upstream"}
             or workspace.book_baseline_id != review.target_book_baseline_id
         ):
-            raise CommandPreconditionError(
-                "Book guidance cannot open the current Arc correction."
-            )
+            raise CommandPreconditionError("Book guidance cannot open the current Arc correction.")
         revision_origin = (
             "user_initiated"
             if review.correction_lineage_origin == "user_initiated"
-            else (
-                "initial"
-                if arc.current_baseline_id is None
-                else "automatic_arc_recovery"
-            )
+            else ("initial" if arc.current_baseline_id is None else "automatic_arc_recovery")
         )
         if (
             revision_origin == "automatic_arc_recovery"
@@ -3147,9 +2957,7 @@ class LoopAuthorityCommandService:
                 reason_code="arc_revision_limit_reached",
                 now_ms=timestamp,
             ):
-                raise CommandPreconditionError(
-                    "Run could not enter the Arc revision-limit wait."
-                )
+                raise CommandPreconditionError("Run could not enter the Arc revision-limit wait.")
             return "arc_revision_limit_reached"
 
         pending = await session.arcs.find_pending_submission(
@@ -3163,9 +2971,7 @@ class LoopAuthorityCommandService:
             reason_code="book_parent_guidance",
             closed_at_ms=timestamp,
         ):
-            raise CommandPreconditionError(
-                "Arc submission changed before Book guidance."
-            )
+            raise CommandPreconditionError("Arc submission changed before Book guidance.")
         gate = await session.arcs.find_pending_gate(
             project_id=review.project_id,
             arc_id=arc.id,
@@ -3176,9 +2982,7 @@ class LoopAuthorityCommandService:
             state="superseded",
             closed_at_ms=timestamp,
         ):
-            raise CommandPreconditionError(
-                "Arc approval gate changed before Book guidance."
-            )
+            raise CommandPreconditionError("Arc approval gate changed before Book guidance.")
         updated = replace(
             workspace,
             state="active",
@@ -3215,40 +3019,21 @@ class LoopAuthorityCommandService:
         return "arc_correction_opened"
 
     @staticmethod
-    def _validate_arc_signal_coverage(
-        *, evaluation: ArcClosureEvaluation, plan: ArcPlanProposal
-    ) -> None:
-        expected = {item.signal_key for item in plan.closure_signals}
-        actual = {item.signal_key for item in evaluation.signal_statuses}
-        if expected != actual:
-            raise AuthorityTaskFailure(
-                code="evaluation_contract_invalid",
-                message=(
-                    "Arc closure evaluation did not cover the exact frozen signal set."
-                ),
-            )
-
-    @staticmethod
     def _validate_requirement_coverage(
         *, evaluation: BookCompletionEvaluation, contract: CompletionContract
     ) -> None:
-        expected = {
-            item.requirement_key for item in contract.completion_requirements
-        }
+        expected = {item.requirement_key for item in contract.completion_requirements}
         actual = {item.requirement_key for item in evaluation.requirement_statuses}
         if expected != actual:
             raise AuthorityTaskFailure(
                 code="evaluation_contract_invalid",
-                message=(
-                    "Book completion evaluation did not cover the exact completion contract."
-                ),
+                message=("Book completion evaluation did not cover the exact completion contract."),
             )
 
     @staticmethod
     def _arc_closure_disposition(
         *,
         evaluation: ArcClosureEvaluation,
-        plan: ArcPlanProposal,
     ) -> Literal[
         "pass",
         "arc_revision_warranted",
@@ -3257,30 +3042,46 @@ class LoopAuthorityCommandService:
         "waiting_for_user",
         "no_legal_route",
     ]:
-        if evaluation.creator_input_need is not None:
-            return "waiting_for_user"
-        if evaluation.book_review_concern == "book_review_required":
+        outcome = evaluation.outcome
+        if isinstance(outcome, ArcClosureClosed):
+            return "pass"
+        if isinstance(outcome, ArcClosureReviseArc):
+            return "arc_revision_warranted"
+        if isinstance(outcome, ArcClosureEscalateToBook):
             return "book_review_required"
-        if evaluation.arc_contract_judgment == "revision_warranted":
-            return "arc_revision_warranted"
-        if (
-            evaluation.chapter_evidence_concern
-            == "chapter_evidence_review_required"
-        ):
+        if isinstance(outcome, ArcClosureCorrectChapterEvidence):
             return "chapter_evidence_review_required"
-        statuses = {item.signal_key: item.status for item in evaluation.signal_statuses}
-        required_satisfied = all(
-            not signal.required or statuses[signal.signal_key] == "satisfied"
-            for signal in plan.closure_signals
-        )
-        if (
-            evaluation.arc_contract_judgment == "remains_applicable"
-            and required_satisfied
+        if isinstance(outcome, ArcClosureNeedsUser):
+            return "waiting_for_user"
+        raise AssertionError("Unknown Arc closure outcome.")
+
+    @staticmethod
+    def _arc_closure_creator_input_need(
+        evaluation: ArcClosureEvaluation,
+    ) -> CreatorInputNeed | None:
+        outcome = evaluation.outcome
+        return outcome.creator_input_need if isinstance(outcome, ArcClosureNeedsUser) else None
+
+    @staticmethod
+    def _arc_closure_legacy_judgments(
+        evaluation: ArcClosureEvaluation,
+    ) -> tuple[
+        Literal["remains_applicable", "revision_warranted", "unable_to_judge"],
+        Literal["not_required", "book_review_required"],
+    ]:
+        outcome = evaluation.outcome
+        if isinstance(outcome, ArcClosureReviseArc):
+            return "revision_warranted", "not_required"
+        if isinstance(outcome, ArcClosureEscalateToBook):
+            return "remains_applicable", "book_review_required"
+        if isinstance(outcome, ArcClosureNeedsUser):
+            return "unable_to_judge", "not_required"
+        if isinstance(
+            outcome,
+            (ArcClosureClosed, ArcClosureCorrectChapterEvidence),
         ):
-            return "pass" if not evaluation.issues else "no_legal_route"
-        if evaluation.arc_contract_judgment == "remains_applicable":
-            return "arc_revision_warranted"
-        return "no_legal_route"
+            return "remains_applicable", "not_required"
+        raise AssertionError("Unknown Arc closure outcome.")
 
     @staticmethod
     def _arc_parent_disposition(
@@ -3299,10 +3100,7 @@ class LoopAuthorityCommandService:
             return "book_review_required"
         if evaluation.arc_contract_judgment == "revision_warranted":
             return "arc_revision_warranted"
-        if (
-            evaluation.chapter_evidence_concern
-            == "chapter_evidence_review_required"
-        ):
+        if evaluation.chapter_evidence_concern == "chapter_evidence_review_required":
             return "chapter_evidence_review_required"
         if evaluation.arc_contract_judgment == "remains_applicable":
             return "keep_arc"
@@ -3344,9 +3142,7 @@ class LoopAuthorityCommandService:
             return "waiting_for_user"
         if evaluation.book_contract_judgment == "unable_to_judge":
             return "no_legal_route"
-        all_satisfied = all(
-            item.status == "satisfied" for item in evaluation.requirement_statuses
-        )
+        all_satisfied = all(item.status == "satisfied" for item in evaluation.requirement_statuses)
         return "complete_book" if all_satisfied else "book_revision_warranted"
 
     @staticmethod
@@ -3365,10 +3161,7 @@ class LoopAuthorityCommandService:
                     "supply a concrete creator-owned question."
                 ),
             )
-        if (
-            task.automatic_correction_round == 1
-            and disposition in correction_dispositions
-        ):
+        if task.automatic_correction_round == 1 and disposition in correction_dispositions:
             if not has_creator_question:
                 raise AuthorityTaskFailure(
                     code="evaluation_contract_invalid",
@@ -3386,8 +3179,7 @@ class LoopAuthorityCommandService:
     ) -> tuple[str, str, int]:
         if (
             task.correction_lineage_id is None
-            or task.correction_lineage_origin
-            not in {"review_initiated", "user_initiated"}
+            or task.correction_lineage_origin not in {"review_initiated", "user_initiated"}
             or task.automatic_correction_round not in {0, 1}
         ):
             raise CommandPreconditionError(
@@ -3406,12 +3198,8 @@ class LoopAuthorityCommandService:
         task: SuccessfulTaskRecord,
         source_review: object | None,
     ) -> _ReviewLineageLinks:
-        lineage_id, lineage_origin, correction_round = (
-            cls._require_correction_lineage(task)
-        )
-        source_id = (
-            None if source_review is None else str(getattr(source_review, "id"))
-        )
+        lineage_id, lineage_origin, correction_round = cls._require_correction_lineage(task)
+        source_id = None if source_review is None else str(getattr(source_review, "id"))
         if lineage_origin == "review_initiated":
             if task.source_feedback_id is not None:
                 raise CommandPreconditionError(
@@ -3426,10 +3214,8 @@ class LoopAuthorityCommandService:
             else:
                 if (
                     source_review is None
-                    or getattr(source_review, "correction_lineage_id")
-                    != lineage_id
-                    or getattr(source_review, "correction_lineage_origin")
-                    != "review_initiated"
+                    or getattr(source_review, "correction_lineage_id") != lineage_id
+                    or getattr(source_review, "correction_lineage_origin") != "review_initiated"
                     or getattr(source_review, "automatic_correction_round") != 0
                 ):
                     raise CommandPreconditionError(
@@ -3445,8 +3231,7 @@ class LoopAuthorityCommandService:
             if correction_round == 0:
                 if (
                     source_review is None
-                    or getattr(source_review, "automatic_correction_round")
-                    not in {0, 1}
+                    or getattr(source_review, "automatic_correction_round") not in {0, 1}
                     or getattr(source_review, "disposition") != "waiting_for_user"
                     or getattr(source_review, "resolution_owner") != "creator"
                     or getattr(source_review, "user_question_ref_id") is None
@@ -3459,22 +3244,17 @@ class LoopAuthorityCommandService:
             else:
                 if (
                     source_review is None
-                    or getattr(source_review, "correction_lineage_id")
-                    != lineage_id
-                    or getattr(source_review, "correction_lineage_origin")
-                    != "user_initiated"
+                    or getattr(source_review, "correction_lineage_id") != lineage_id
+                    or getattr(source_review, "correction_lineage_origin") != "user_initiated"
                     or getattr(source_review, "automatic_correction_round") != 0
-                    or getattr(source_review, "source_feedback_id")
-                    != task.source_feedback_id
+                    or getattr(source_review, "source_feedback_id") != task.source_feedback_id
                     or getattr(source_review, "source_exhausted_review_id") is None
                 ):
                     raise CommandPreconditionError(
                         "User round-one review is not linked to its user lineage root."
                     )
                 predecessor_id = source_id
-                exhausted_id = str(
-                    getattr(source_review, "source_exhausted_review_id")
-                )
+                exhausted_id = str(getattr(source_review, "source_exhausted_review_id"))
         return _ReviewLineageLinks(
             lineage_id=lineage_id,
             lineage_origin=lineage_origin,

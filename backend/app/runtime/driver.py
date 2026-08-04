@@ -120,7 +120,9 @@ def _normalize_delivery_failure(error: Exception) -> NormalizedDeliveryFailure:
                     "loc": list(item["loc"]),
                     "message": item["msg"],
                 }
-                for item in error.errors(include_url=False, include_context=False, include_input=False)
+                for item in error.errors(
+                    include_url=False, include_context=False, include_input=False
+                )
             ]
         }
         return NormalizedDeliveryFailure(
@@ -202,9 +204,7 @@ class _TaskInstruction:
     subject_arc_baseline_id: str | None = None
     canon_baseline_id: str | None = None
     correction_lineage_id: str | None = None
-    correction_lineage_origin: Literal[
-        "review_initiated", "user_initiated"
-    ] | None = None
+    correction_lineage_origin: Literal["review_initiated", "user_initiated"] | None = None
     automatic_correction_round: Literal[0, 1] | None = None
     source_arc_parent_review_id: str | None = None
     source_book_parent_review_id: str | None = None
@@ -284,8 +284,14 @@ _SEMANTIC_GOALS: dict[str, str] = {
     "book.revise": "Revise the whole-book candidate only for the active formal Book change.",
     "book.repair": "Repair only the evaluator-authorized Book components.",
     "arc.plan": "Plan the next rolling Story Arc under the approved Book and current Canon.",
-    "arc.revise": "Revise the current Story Arc only for its active formal change.",
-    "arc.repair": "Repair only the evaluator-authorized Story Arc components.",
+    "arc.revise": (
+        "Regenerate the complete remaining Story Arc Chapter outline for its active "
+        "formal change while preserving committed history."
+    ),
+    "arc.repair": (
+        "Regenerate the complete Harness-bounded future Chapter outline against the "
+        "frozen Arc issue ledger."
+    ),
     "chapter.plan": "Plan the next Chapter under the approved Book, Arc, and current Canon.",
     "chapter.revise.plan": "Revise the committed Chapter plan only within the active change.",
     "chapter.draft": "Write the complete Chapter prose from the frozen Chapter plan.",
@@ -308,11 +314,10 @@ _SEMANTIC_GOALS: dict[str, str] = {
     "evaluate.arc_parent_contract": (
         "Review one evidence-bound Chapter concern at immediate-parent Arc authority."
     ),
-    "evaluate.book_parent_contract": (
-        "Review one evidence-bound Arc concern at Book authority."
-    ),
+    "evaluate.book_parent_contract": ("Review one evidence-bound Arc concern at Book authority."),
     "evaluate.arc_closure": (
-        "Judge every frozen Arc closure signal against the exact committed boundary."
+        "Judge all assigned Book Arc exit conditions from the exact committed boundary "
+        "and return one legal authority outcome."
     ),
     "evaluate.book_completion": (
         "Judge whole-Book completion requirements after the planned final Arc closes."
@@ -362,9 +367,7 @@ class DomainRunDriver:
 
     async def drive_one(self, run: GenerationRunRecord) -> None:
         async with UnitOfWork(self._engine) as store:
-            queued_feedback = await store.feedback.get_oldest_routed(
-                project_id=run.project_id
-            )
+            queued_feedback = await store.feedback.get_oldest_routed(project_id=run.project_id)
             actionable = await store.execution.find_actionable_for_run(run_id=run.id)
         if queued_feedback is not None:
             if run.status == "failure_paused":
@@ -429,8 +432,7 @@ class DomainRunDriver:
                     action_key=action_key,
                     failure_code="evaluation_contract_invalid",
                     message=(
-                        "The Agent task strategy, rubric, or typed contract could "
-                        "not be frozen."
+                        "The Agent task strategy, rubric, or typed contract could not be frozen."
                     ),
                     error=error,
                     phase="evaluation_contract",
@@ -533,21 +535,11 @@ class DomainRunDriver:
                 "canon_baseline_id": instruction.canon_baseline_id,
                 "correction_lineage_id": instruction.correction_lineage_id,
                 "automatic_correction_round": instruction.automatic_correction_round,
-                "source_arc_parent_review_id": (
-                    instruction.source_arc_parent_review_id
-                ),
-                "source_book_parent_review_id": (
-                    instruction.source_book_parent_review_id
-                ),
-                "source_arc_closure_review_id": (
-                    instruction.source_arc_closure_review_id
-                ),
-                "source_book_completion_review_id": (
-                    instruction.source_book_completion_review_id
-                ),
-                "source_chapter_arc_request_id": (
-                    instruction.source_chapter_arc_request_id
-                ),
+                "source_arc_parent_review_id": (instruction.source_arc_parent_review_id),
+                "source_book_parent_review_id": (instruction.source_book_parent_review_id),
+                "source_arc_closure_review_id": (instruction.source_arc_closure_review_id),
+                "source_book_completion_review_id": (instruction.source_book_completion_review_id),
+                "source_chapter_arc_request_id": (instruction.source_chapter_arc_request_id),
                 "source_arc_book_request_id": instruction.source_arc_book_request_id,
                 "source_arc_closure_id": instruction.source_arc_closure_id,
                 "source_feedback_id": instruction.source_feedback_id,
@@ -638,50 +630,31 @@ class DomainRunDriver:
                             book_id=instruction.book_id,
                             request_id=instruction.source_arc_book_request_id,
                             target_book_baseline_id=instruction.book_baseline_id,
-                            subject_arc_baseline_id=(
-                                instruction.subject_arc_baseline_id
-                            ),
+                            subject_arc_baseline_id=(instruction.subject_arc_baseline_id),
                             canon_baseline_id=(
-                                instruction.canon_baseline_id
-                                or project.current_canon_baseline_id
+                                instruction.canon_baseline_id or project.current_canon_baseline_id
                             ),
-                            workspace_lock_version=(
-                                instruction.workspace_lock_version
-                            ),
+                            workspace_lock_version=(instruction.workspace_lock_version),
                             workspace_work_cycle_id=workspace_work_cycle_id,
-                            correction_lineage_id=(
-                                instruction.correction_lineage_id
-                            ),
-                            correction_lineage_origin=(
-                                instruction.correction_lineage_origin
-                            ),
-                            automatic_correction_round=(
-                                instruction.automatic_correction_round
-                            ),
-                            predecessor_review_id=(
-                                instruction.source_book_parent_review_id
-                            ),
+                            correction_lineage_id=(instruction.correction_lineage_id),
+                            correction_lineage_origin=(instruction.correction_lineage_origin),
+                            automatic_correction_round=(instruction.automatic_correction_round),
+                            predecessor_review_id=(instruction.source_book_parent_review_id),
                             source_feedback_id=instruction.source_feedback_id,
                         ),
                     )
                 except BookParentCaseError as error:
-                    raise HarnessInvariantError(
-                        str(error), failure_code=error.invariant
-                    ) from error
+                    raise HarnessInvariantError(str(error), failure_code=error.invariant) from error
         if project is None:
             raise HarnessInvariantError("Runnable project no longer exists.")
         if (
             workspace_lock_version != instruction.workspace_lock_version
             or workspace_work_cycle_id is None
         ):
-            raise HarnessInvariantError(
-                "Task freeze lost its exact workspace semantic work cycle."
-            )
+            raise HarnessInvariantError("Task freeze lost its exact workspace semantic work cycle.")
         profile_id = self._profile_id(project, instruction.role)
         if profile_id is None:
-            raise HarnessInvariantError(
-                f"No Profile is selected for role {instruction.role!r}."
-            )
+            raise HarnessInvariantError(f"No Profile is selected for role {instruction.role!r}.")
         try:
             profile = self._profiles.resolve(profile_id).snapshot
         except ProfileConfigurationError as error:
@@ -722,21 +695,11 @@ class DomainRunDriver:
                 source_arc_parent_review_id=instruction.source_arc_parent_review_id,
                 source_book_parent_review_id=instruction.source_book_parent_review_id,
                 source_arc_closure_review_id=instruction.source_arc_closure_review_id,
-                source_book_completion_review_id=(
-                    instruction.source_book_completion_review_id
-                ),
-                source_book_candidate_review_id=(
-                    instruction.source_book_candidate_review_id
-                ),
-                source_arc_candidate_review_id=(
-                    instruction.source_arc_candidate_review_id
-                ),
-                source_chapter_candidate_review_id=(
-                    instruction.source_chapter_candidate_review_id
-                ),
-                source_book_progress_handoff_id=(
-                    instruction.source_book_progress_handoff_id
-                ),
+                source_book_completion_review_id=(instruction.source_book_completion_review_id),
+                source_book_candidate_review_id=(instruction.source_book_candidate_review_id),
+                source_arc_candidate_review_id=(instruction.source_arc_candidate_review_id),
+                source_chapter_candidate_review_id=(instruction.source_chapter_candidate_review_id),
+                source_book_progress_handoff_id=(instruction.source_book_progress_handoff_id),
                 source_chapter_arc_request_id=instruction.source_chapter_arc_request_id,
                 source_arc_book_request_id=instruction.source_arc_book_request_id,
                 source_arc_closure_id=instruction.source_arc_closure_id,
@@ -798,9 +761,7 @@ class DomainRunDriver:
             task_kind=instruction.task_kind,
             contract_version=1,
             book_id=instruction.book_id,
-            canon_baseline_id=(
-                instruction.canon_baseline_id or project.current_canon_baseline_id
-            ),
+            canon_baseline_id=(instruction.canon_baseline_id or project.current_canon_baseline_id),
             semantic_goal=semantic_goal,
             prompt=context.prompt,
             context_manifest=context.manifest,
@@ -819,19 +780,11 @@ class DomainRunDriver:
             source_arc_parent_review_id=instruction.source_arc_parent_review_id,
             source_book_parent_review_id=instruction.source_book_parent_review_id,
             source_arc_closure_review_id=instruction.source_arc_closure_review_id,
-            source_book_completion_review_id=(
-                instruction.source_book_completion_review_id
-            ),
-            source_book_candidate_review_id=(
-                instruction.source_book_candidate_review_id
-            ),
+            source_book_completion_review_id=(instruction.source_book_completion_review_id),
+            source_book_candidate_review_id=(instruction.source_book_candidate_review_id),
             source_arc_candidate_review_id=instruction.source_arc_candidate_review_id,
-            source_chapter_candidate_review_id=(
-                instruction.source_chapter_candidate_review_id
-            ),
-            source_book_progress_handoff_id=(
-                instruction.source_book_progress_handoff_id
-            ),
+            source_chapter_candidate_review_id=(instruction.source_chapter_candidate_review_id),
+            source_book_progress_handoff_id=(instruction.source_book_progress_handoff_id),
             source_chapter_arc_request_id=instruction.source_chapter_arc_request_id,
             source_arc_book_request_id=instruction.source_arc_book_request_id,
             source_arc_closure_id=instruction.source_arc_closure_id,
@@ -990,18 +943,14 @@ class DomainRunDriver:
             return
         if task.task_kind == "verify_evidence.chapter":
             if task.chapter_id is None:
-                raise HarnessInvariantError(
-                    "Chapter evidence evaluator task has no chapter_id."
-                )
+                raise HarnessInvariantError("Chapter evidence evaluator task has no chapter_id.")
             async with UnitOfWork(self._engine) as store:
                 chapter_submission = await store.chapters.find_pending_submission(
                     project_id=task.project_id,
                     chapter_id=task.chapter_id,
                 )
             if chapter_submission is None:
-                raise HarnessInvariantError(
-                    "Chapter evidence evaluator result has no submission."
-                )
+                raise HarnessInvariantError("Chapter evidence evaluator result has no submission.")
             await self._chapters.record_evidence_review(
                 RecordChapterReviewRequest(
                     project_id=task.project_id,
@@ -1133,11 +1082,9 @@ class DomainRunDriver:
             if book_workspace is None:
                 raise HarnessInvariantError("Book workspace is missing.")
 
-            correction_feedback = (
-                await store.feedback.get_unstarted_correction_lineage(
-                    project_id=project.id,
-                    run_id=run.id,
-                )
+            correction_feedback = await store.feedback.get_unstarted_correction_lineage(
+                project_id=project.id,
+                run_id=run.id,
             )
             if correction_feedback is not None:
                 lineage_id = correction_feedback.resulting_correction_lineage_id
@@ -1163,9 +1110,7 @@ class DomainRunDriver:
                         arc_id=arc_parent_review.arc_id,
                     )
                     if arc is None or workspace is None:
-                        raise HarnessInvariantError(
-                            "Applied Arc-parent feedback lost its target."
-                        )
+                        raise HarnessInvariantError("Applied Arc-parent feedback lost its target.")
                     return _TaskInstruction(
                         role="evaluator",
                         task_kind="evaluate.arc_parent_contract",
@@ -1280,9 +1225,7 @@ class DomainRunDriver:
                     "Applied correction feedback has no relational source review."
                 )
 
-            unresolved_changes = await store.changes.list_unresolved(
-                project_id=project.id
-            )
+            unresolved_changes = await store.changes.list_unresolved(project_id=project.id)
             for change in unresolved_changes:
                 if change.status != "open":
                     continue
@@ -1298,9 +1241,7 @@ class DomainRunDriver:
                         arc_id=change.target_id,
                     )
                     if target is None:
-                        raise HarnessInvariantError(
-                            "Open Chapter-to-Arc request lost its target."
-                        )
+                        raise HarnessInvariantError("Open Chapter-to-Arc request lost its target.")
                     return _TaskInstruction(
                         role="evaluator",
                         task_kind="evaluate.arc_parent_contract",
@@ -1319,9 +1260,7 @@ class DomainRunDriver:
                     request_id=change.id,
                 )
                 if full_change is None:
-                    raise HarnessInvariantError(
-                        "Open Arc-to-Book request lost its source Arc."
-                    )
+                    raise HarnessInvariantError("Open Arc-to-Book request lost its source Arc.")
                 subject_arc = await store.arcs.get(
                     project_id=project.id,
                     arc_id=full_change.arc_id,
@@ -1370,21 +1309,16 @@ class DomainRunDriver:
                                 expected_target_baseline_id=change.target_baseline_id,
                                 expected_workspace_lock_version=target.lock_version,
                             ),
-                            idempotency_key=(
-                                f"engine:activate-arc-review:{review.id}"
-                            ),
+                            idempotency_key=(f"engine:activate-arc-review:{review.id}"),
                         )
                     if (
-                        review.disposition
-                        in {"keep_arc", "chapter_evidence_review_required"}
+                        review.disposition in {"keep_arc", "chapter_evidence_review_required"}
                         and review.automatic_correction_round == 0
                     ):
-                        correction = (
-                            await store.chapters.get_correction_workspace_for_review(
-                                project_id=project.id,
-                                arc_id=change.target_id,
-                                source_arc_parent_review_id=review.id,
-                            )
+                        correction = await store.chapters.get_correction_workspace_for_review(
+                            project_id=project.id,
+                            arc_id=change.target_id,
+                            source_arc_parent_review_id=review.id,
                         )
                         if correction is None:
                             raise HarnessInvariantError(
@@ -1411,8 +1345,7 @@ class DomainRunDriver:
                             if (
                                 target is None
                                 or current_arc is None
-                                or current_arc.current_baseline_id
-                                != change.target_baseline_id
+                                or current_arc.current_baseline_id != change.target_baseline_id
                             ):
                                 raise HarnessInvariantError(
                                     "Arc parent successor target is no longer current."
@@ -1446,8 +1379,7 @@ class DomainRunDriver:
                             "Reviewed Arc-to-Book request lost its authority."
                         )
                     if (
-                        book_parent_review.disposition
-                        == "book_revision_warranted"
+                        book_parent_review.disposition == "book_revision_warranted"
                         and book_parent_review.opened_book_workspace_id is None
                     ):
                         return _CommandInstruction(
@@ -1460,8 +1392,7 @@ class DomainRunDriver:
                                 expected_workspace_lock_version=book_workspace.lock_version,
                             ),
                             idempotency_key=(
-                                f"engine:activate-book-review:"
-                                f"{book_parent_review.id}"
+                                f"engine:activate-book-review:{book_parent_review.id}"
                             ),
                         )
                     if (
@@ -1502,8 +1433,7 @@ class DomainRunDriver:
                         if (
                             arc_correction_workspace.correction_lineage_id
                             != book_parent_review.correction_lineage_id
-                            or arc_correction_workspace.automatic_correction_round
-                            != 1
+                            or arc_correction_workspace.automatic_correction_round != 1
                         ):
                             raise HarnessInvariantError(
                                 "Book parent successor lost its correction lineage."
@@ -1514,9 +1444,7 @@ class DomainRunDriver:
                                 workspace_lock_version=book_workspace.lock_version,
                                 book_baseline_id=book.current_baseline_id,
                                 canon_baseline_id=project.current_canon_baseline_id,
-                                correction_lineage_id=(
-                                    book_parent_review.correction_lineage_id
-                                ),
+                                correction_lineage_id=(book_parent_review.correction_lineage_id),
                                 correction_lineage_origin=cast(
                                     Literal["review_initiated", "user_initiated"],
                                     book_parent_review.correction_lineage_origin,
@@ -1524,9 +1452,7 @@ class DomainRunDriver:
                                 automatic_correction_round=1,
                                 source_book_parent_review_id=book_parent_review.id,
                                 source_arc_book_request_id=change.id,
-                                subject_arc_baseline_id=(
-                                    correction_arc.current_baseline_id
-                                ),
+                                subject_arc_baseline_id=(correction_arc.current_baseline_id),
                                 source_feedback_id=book_parent_review.source_feedback_id,
                             )
 
@@ -1537,8 +1463,7 @@ class DomainRunDriver:
                 book=book,
                 workspace=book_workspace,
                 has_open_book_change=any(
-                    change.request_kind == "arc_to_book"
-                    and change.status == "reviewed"
+                    change.request_kind == "arc_to_book" and change.status == "reviewed"
                     for change in unresolved_changes
                 ),
             )
@@ -1582,10 +1507,7 @@ class DomainRunDriver:
         lock_version = cast(int, getattr(workspace, "lock_version"))
         current_baseline = cast(str | None, getattr(book, "current_baseline_id"))
         if pending is not None:
-            if (
-                submission_review is None
-                or submission_review.submission_id != pending.id
-            ):
+            if submission_review is None or submission_review.submission_id != pending.id:
                 task_kind = (
                     "verify_repair.book"
                     if cast(int, getattr(workspace, "semantic_repair_count")) > 0
@@ -1652,9 +1574,7 @@ class DomainRunDriver:
                 task_kind="book.repair",
                 book_id=book_id,
                 book_baseline_id=current_baseline,
-                workspace_work_cycle_id=cast(
-                    str, getattr(workspace, "work_cycle_id")
-                ),
+                workspace_work_cycle_id=cast(str, getattr(workspace, "work_cycle_id")),
                 source_book_candidate_review_id=active_repair_review.id,
             )
             if not repaired:
@@ -1674,9 +1594,7 @@ class DomainRunDriver:
                     source_book_candidate_review_id=active_repair_review.id,
                 )
             if not candidate_ready:
-                raise HarnessInvariantError(
-                    "Applied Book repair lost the complete candidate."
-                )
+                raise HarnessInvariantError("Applied Book repair lost the complete candidate.")
         if current_baseline is None and not candidate_ready:
             return _TaskInstruction(
                 role="book_strategist",
@@ -1692,12 +1610,8 @@ class DomainRunDriver:
                 task_kind="book.revise",
                 book_id=book_id,
                 book_baseline_id=current_baseline,
-                workspace_work_cycle_id=cast(
-                    str, getattr(workspace, "work_cycle_id")
-                ),
-                source_feedback_id=cast(
-                    str | None, getattr(workspace, "source_feedback_id")
-                ),
+                workspace_work_cycle_id=cast(str, getattr(workspace, "work_cycle_id")),
+                source_feedback_id=cast(str | None, getattr(workspace, "source_feedback_id")),
                 source_book_parent_review_id=cast(
                     str | None, getattr(workspace, "source_book_parent_review_id")
                 ),
@@ -1717,9 +1631,7 @@ class DomainRunDriver:
                     book_id=book_id,
                     workspace_lock_version=lock_version,
                     book_baseline_id=current_baseline,
-                    source_feedback_id=cast(
-                        str | None, getattr(workspace, "source_feedback_id")
-                    ),
+                    source_feedback_id=cast(str | None, getattr(workspace, "source_feedback_id")),
                     source_book_parent_review_id=cast(
                         str | None,
                         getattr(workspace, "source_book_parent_review_id"),
@@ -1797,18 +1709,14 @@ class DomainRunDriver:
                 closure_id=latest.current_closure_id,
             )
             if closure is None:
-                raise HarnessInvariantError(
-                    "Completed Story Arc lost its formal closure."
-                )
+                raise HarnessInvariantError("Completed Story Arc lost its formal closure.")
             if latest.ordinal < book_baseline.arc_contract_count:
                 if latest.ordinal >= book_baseline.final_arc_ordinal:
                     raise HarnessInvariantError(
                         "Book topology marks a non-terminal Arc as final.",
                         failure_code="book_arc_route_gap",
                     )
-                handoff = await getattr(
-                    session, "book_progress_handoffs"
-                ).get_for_arc_closure(
+                handoff = await getattr(session, "book_progress_handoffs").get_for_arc_closure(
                     project_id=project_id,
                     arc_closure_id=closure.id,
                 )
@@ -1843,9 +1751,7 @@ class DomainRunDriver:
                         expected_ordinal=handoff.next_arc_ordinal,
                         source_progress_handoff_id=handoff.id,
                     ),
-                    idempotency_key=(
-                        f"engine:create-arc-from-handoff:{handoff.id}"
-                    ),
+                    idempotency_key=(f"engine:create-arc-from-handoff:{handoff.id}"),
                 )
             if latest.ordinal != book_baseline.final_arc_ordinal:
                 raise HarnessInvariantError(
@@ -1854,15 +1760,10 @@ class DomainRunDriver:
                 )
             completion_review = (
                 None
-                if cast(
-                    str | None, getattr(book, "latest_completion_review_id")
-                )
-                is None
+                if cast(str | None, getattr(book, "latest_completion_review_id")) is None
                 else await getattr(session, "book_completion_reviews").get(
                     project_id=project_id,
-                    review_id=cast(
-                        str, getattr(book, "latest_completion_review_id")
-                    ),
+                    review_id=cast(str, getattr(book, "latest_completion_review_id")),
                 )
             )
             revision_predecessor = (
@@ -1890,8 +1791,7 @@ class DomainRunDriver:
                 )
                 if predecessor is not None and (
                     predecessor.book_baseline_id != book_baseline_id
-                    and book_baseline.parent_baseline_id
-                    != predecessor.book_baseline_id
+                    and book_baseline.parent_baseline_id != predecessor.book_baseline_id
                 ):
                     raise HarnessInvariantError(
                         "Book completion successor is not a direct Book lineage child."
@@ -1900,9 +1800,7 @@ class DomainRunDriver:
                     role="evaluator",
                     task_kind="evaluate.book_completion",
                     book_id=book_id,
-                    workspace_lock_version=cast(
-                        int, getattr(book_workspace, "lock_version")
-                    ),
+                    workspace_lock_version=cast(int, getattr(book_workspace, "lock_version")),
                     book_baseline_id=book_baseline_id,
                     canon_baseline_id=closure.canon_baseline_id,
                     correction_lineage_id=(
@@ -1923,9 +1821,7 @@ class DomainRunDriver:
                             predecessor.correction_lineage_origin,
                         )
                     ),
-                    automatic_correction_round=(
-                        0 if predecessor is None else 1
-                    ),
+                    automatic_correction_round=(0 if predecessor is None else 1),
                     source_book_completion_review_id=(
                         None if predecessor is None else predecessor.id
                     ),
@@ -1939,9 +1835,7 @@ class DomainRunDriver:
                         )
                     ),
                     source_feedback_id=(
-                        None
-                        if predecessor is None
-                        else predecessor.source_feedback_id
+                        None if predecessor is None else predecessor.source_feedback_id
                     ),
                 )
             if completion_review.disposition == "complete_book":
@@ -1952,9 +1846,7 @@ class DomainRunDriver:
                         book_id=book_id,
                         completion_review_id=completion_review.id,
                     ),
-                    idempotency_key=(
-                        f"engine:commit-book-completion:{completion_review.id}"
-                    ),
+                    idempotency_key=(f"engine:commit-book-completion:{completion_review.id}"),
                 )
             if (
                 completion_review.disposition == "book_revision_warranted"
@@ -1971,8 +1863,7 @@ class DomainRunDriver:
                         ),
                     ),
                     idempotency_key=(
-                        "engine:open-book-completion-revision:"
-                        f"{completion_review.id}"
+                        f"engine:open-book-completion-revision:{completion_review.id}"
                     ),
                 )
             if completion_review.disposition in {
@@ -1984,8 +1875,7 @@ class DomainRunDriver:
                     "Runnable Book completion has no completed disposition action."
                 )
             raise HarnessInvariantError(
-                "Unknown Book completion disposition "
-                f"{completion_review.disposition!r}."
+                f"Unknown Book completion disposition {completion_review.disposition!r}."
             )
 
         workspace = await arcs.get_workspace(project_id=project_id, arc_id=arc.id)
@@ -2018,14 +1908,9 @@ class DomainRunDriver:
             )
         )
         if pending is not None:
-            if (
-                submission_review is None
-                or submission_review.submission_id != pending.id
-            ):
+            if submission_review is None or submission_review.submission_id != pending.id:
                 task_kind = (
-                    "verify_repair.arc"
-                    if workspace.semantic_repair_count > 0
-                    else "evaluate.arc"
+                    "verify_repair.arc" if workspace.semantic_repair_count > 0 else "evaluate.arc"
                 )
                 return _TaskInstruction(
                     role="evaluator",
@@ -2035,22 +1920,12 @@ class DomainRunDriver:
                     workspace_lock_version=workspace.lock_version,
                     book_baseline_id=pending.book_baseline_id,
                     arc_baseline_id=pending.base_arc_baseline_id,
-                    source_arc_candidate_review_id=(
-                        workspace.active_repair_review_id
-                    ),
+                    source_arc_candidate_review_id=(workspace.active_repair_review_id),
                     source_arc_parent_review_id=workspace.source_arc_parent_review_id,
-                    source_arc_closure_review_id=(
-                        workspace.source_arc_closure_review_id
-                    ),
-                    source_book_parent_review_id=(
-                        workspace.source_book_parent_review_id
-                    ),
-                    source_book_completion_review_id=(
-                        workspace.source_book_completion_review_id
-                    ),
-                    source_book_progress_handoff_id=(
-                        workspace.book_progress_handoff_id
-                    ),
+                    source_arc_closure_review_id=(workspace.source_arc_closure_review_id),
+                    source_book_parent_review_id=(workspace.source_book_parent_review_id),
+                    source_book_completion_review_id=(workspace.source_book_completion_review_id),
+                    source_book_progress_handoff_id=(workspace.book_progress_handoff_id),
                     source_feedback_id=workspace.source_feedback_id,
                 )
             if submission_review.decision == "pass":
@@ -2069,9 +1944,7 @@ class DomainRunDriver:
                         review_id=submission_review.id,
                         expected_current_baseline_id=arc.current_baseline_id,
                     ),
-                    idempotency_key=(
-                        f"engine:commit-arc:{pending.id}:{submission_review.id}"
-                    ),
+                    idempotency_key=(f"engine:commit-arc:{pending.id}:{submission_review.id}"),
                 )
             raise HarnessInvariantError("Rejected Arc submission remained pending.")
 
@@ -2098,25 +1971,14 @@ class DomainRunDriver:
                     workspace_work_cycle_id=workspace.work_cycle_id,
                     source_arc_candidate_review_id=active_repair_review.id,
                     source_arc_parent_review_id=workspace.source_arc_parent_review_id,
-                    source_arc_closure_review_id=(
-                        workspace.source_arc_closure_review_id
-                    ),
-                    source_book_parent_review_id=(
-                        workspace.source_book_parent_review_id
-                    ),
-                    source_book_completion_review_id=(
-                        workspace.source_book_completion_review_id
-                    ),
-                    source_book_progress_handoff_id=(
-                        workspace.book_progress_handoff_id
-                    ),
+                    source_arc_closure_review_id=(workspace.source_arc_closure_review_id),
+                    source_book_parent_review_id=(workspace.source_book_parent_review_id),
+                    source_book_completion_review_id=(workspace.source_book_completion_review_id),
+                    source_book_progress_handoff_id=(workspace.book_progress_handoff_id),
                     source_feedback_id=workspace.source_feedback_id,
                 )
                 if not repaired:
-                    if (
-                        workspace.semantic_repair_count
-                        >= workspace.semantic_repair_limit
-                    ):
+                    if workspace.semantic_repair_count >= workspace.semantic_repair_limit:
                         raise HarnessInvariantError(
                             "Arc semantic correction for this frozen review is exhausted.",
                             failure_code="semantic_repair_exhausted",
@@ -2130,27 +1992,17 @@ class DomainRunDriver:
                         book_baseline_id=workspace.book_baseline_id,
                         arc_baseline_id=workspace.base_arc_baseline_id,
                         source_arc_candidate_review_id=active_repair_review.id,
-                        source_arc_parent_review_id=(
-                            workspace.source_arc_parent_review_id
-                        ),
-                        source_arc_closure_review_id=(
-                            workspace.source_arc_closure_review_id
-                        ),
-                        source_book_parent_review_id=(
-                            workspace.source_book_parent_review_id
-                        ),
+                        source_arc_parent_review_id=(workspace.source_arc_parent_review_id),
+                        source_arc_closure_review_id=(workspace.source_arc_closure_review_id),
+                        source_book_parent_review_id=(workspace.source_book_parent_review_id),
                         source_book_completion_review_id=(
                             workspace.source_book_completion_review_id
                         ),
-                        source_book_progress_handoff_id=(
-                            workspace.book_progress_handoff_id
-                        ),
+                        source_book_progress_handoff_id=(workspace.book_progress_handoff_id),
                         source_feedback_id=workspace.source_feedback_id,
                     )
                 if workspace.plan_ref_id is None:
-                    raise HarnessInvariantError(
-                        "Applied Story Arc repair lost the complete plan."
-                    )
+                    raise HarnessInvariantError("Applied Story Arc repair lost the complete plan.")
             if workspace.base_arc_baseline_id is not None:
                 revised = await execution.has_applied_task(
                     project_id=project_id,
@@ -2163,16 +2015,10 @@ class DomainRunDriver:
                     workspace_work_cycle_id=workspace.work_cycle_id,
                     source_feedback_id=workspace.source_feedback_id,
                     source_arc_parent_review_id=workspace.source_arc_parent_review_id,
-                    source_arc_closure_review_id=(
-                        workspace.source_arc_closure_review_id
-                    ),
+                    source_arc_closure_review_id=(workspace.source_arc_closure_review_id),
                     source_book_parent_review_id=workspace.source_book_parent_review_id,
-                    source_book_completion_review_id=(
-                        workspace.source_book_completion_review_id
-                    ),
-                    source_book_progress_handoff_id=(
-                        workspace.book_progress_handoff_id
-                    ),
+                    source_book_completion_review_id=(workspace.source_book_completion_review_id),
+                    source_book_progress_handoff_id=(workspace.book_progress_handoff_id),
                 )
                 if not revised:
                     return _TaskInstruction(
@@ -2184,21 +2030,13 @@ class DomainRunDriver:
                         book_baseline_id=workspace.book_baseline_id,
                         arc_baseline_id=workspace.base_arc_baseline_id,
                         source_feedback_id=workspace.source_feedback_id,
-                        source_arc_parent_review_id=(
-                            workspace.source_arc_parent_review_id
-                        ),
-                        source_arc_closure_review_id=(
-                            workspace.source_arc_closure_review_id
-                        ),
-                        source_book_parent_review_id=(
-                            workspace.source_book_parent_review_id
-                        ),
+                        source_arc_parent_review_id=(workspace.source_arc_parent_review_id),
+                        source_arc_closure_review_id=(workspace.source_arc_closure_review_id),
+                        source_book_parent_review_id=(workspace.source_book_parent_review_id),
                         source_book_completion_review_id=(
                             workspace.source_book_completion_review_id
                         ),
-                        source_book_progress_handoff_id=(
-                            workspace.book_progress_handoff_id
-                        ),
+                        source_book_progress_handoff_id=(workspace.book_progress_handoff_id),
                     )
             elif workspace.plan_ref_id is None:
                 return _TaskInstruction(
@@ -2209,9 +2047,7 @@ class DomainRunDriver:
                     workspace_lock_version=workspace.lock_version,
                     book_baseline_id=workspace.book_baseline_id,
                     arc_baseline_id=None,
-                    source_book_progress_handoff_id=(
-                        workspace.book_progress_handoff_id
-                    ),
+                    source_book_progress_handoff_id=(workspace.book_progress_handoff_id),
                 )
             if workspace.plan_ref_id is not None:
                 return _CommandInstruction(
@@ -2226,11 +2062,11 @@ class DomainRunDriver:
                 )
             raise HarnessInvariantError("Active Story Arc workspace has no plan action.")
         if workspace.state == "idle" and arc.lifecycle_status == "closing":
-            active_lower_correction = (
-                await getattr(session, "chapters").get_non_idle_workspace_for_arc(
-                    project_id=project_id,
-                    arc_id=arc.id,
-                )
+            active_lower_correction = await getattr(
+                session, "chapters"
+            ).get_non_idle_workspace_for_arc(
+                project_id=project_id,
+                arc_id=arc.id,
             )
             if active_lower_correction is not None:
                 _, lower_workspace = active_lower_correction
@@ -2275,15 +2111,14 @@ class DomainRunDriver:
                         arc.id,
                         cast(str, arc.current_baseline_id),
                     )
-                    lineage_origin: Literal[
-                        "review_initiated", "user_initiated"
-                    ] = "review_initiated"
+                    lineage_origin: Literal["review_initiated", "user_initiated"] = (
+                        "review_initiated"
+                    )
                     correction_round: Literal[0, 1] = 0
                     source_review_id = None
                 else:
                     if (
-                        workspace.correction_lineage_id
-                        != source_review.correction_lineage_id
+                        workspace.correction_lineage_id != source_review.correction_lineage_id
                         or workspace.automatic_correction_round != 1
                     ):
                         raise HarnessInvariantError(
@@ -2323,23 +2158,17 @@ class DomainRunDriver:
                         expected_workspace_lock_version=workspace.lock_version,
                     ),
                     idempotency_key=(
-                        f"engine:open-arc-closure-revision:"
-                        f"{latest_closure_review.id}"
+                        f"engine:open-arc-closure-revision:{latest_closure_review.id}"
                     ),
                 )
             if (
-                latest_closure_review.disposition
-                == "chapter_evidence_review_required"
+                latest_closure_review.disposition == "chapter_evidence_review_required"
                 and latest_closure_review.automatic_correction_round == 0
             ):
-                correction = (
-                    await getattr(
-                        session, "chapters"
-                    ).get_correction_workspace_for_review(
-                        project_id=project_id,
-                        arc_id=arc.id,
-                        source_arc_closure_review_id=latest_closure_review.id,
-                    )
+                correction = await getattr(session, "chapters").get_correction_workspace_for_review(
+                    project_id=project_id,
+                    arc_id=arc.id,
+                    source_arc_closure_review_id=latest_closure_review.id,
                 )
                 if correction is None:
                     raise HarnessInvariantError(
@@ -2352,9 +2181,7 @@ class DomainRunDriver:
                     != latest_closure_review.correction_lineage_id
                     or correction_workspace.automatic_correction_round != 1
                 ):
-                    raise HarnessInvariantError(
-                        "Arc closure successor evidence is incomplete."
-                    )
+                    raise HarnessInvariantError("Arc closure successor evidence is incomplete.")
                 return _TaskInstruction(
                     role="evaluator",
                     task_kind="evaluate.arc_closure",
@@ -2364,9 +2191,7 @@ class DomainRunDriver:
                     book_baseline_id=book_baseline_id,
                     arc_baseline_id=arc.current_baseline_id,
                     canon_baseline_id=canon_baseline_id,
-                    correction_lineage_id=(
-                        latest_closure_review.correction_lineage_id
-                    ),
+                    correction_lineage_id=(latest_closure_review.correction_lineage_id),
                     correction_lineage_origin=cast(
                         Literal["review_initiated", "user_initiated"],
                         latest_closure_review.correction_lineage_origin,
@@ -2429,13 +2254,8 @@ class DomainRunDriver:
             )
             if baseline is None:
                 raise HarnessInvariantError("Current Story Arc baseline does not exist.")
-            cumulative_committed = await chapters.count_committed_for_book(
-                book_id=book_id
-            )
-            if (
-                cumulative_committed
-                < baseline.closure_cumulative_chapter_count
-            ):
+            cumulative_committed = await chapters.count_committed_for_book(book_id=book_id)
+            if cumulative_committed < baseline.closure_cumulative_chapter_count:
                 try:
                     arc_plan = ArcPlanProposal.model_validate_json(
                         (
@@ -2463,10 +2283,7 @@ class DomainRunDriver:
                     )
                 except ArcOutlineProjectionError as error:
                     raise HarnessInvariantError(
-                        (
-                            "The next Chapter has no unique assignment in the "
-                            "current Arc baseline."
-                        ),
+                        ("The next Chapter has no unique assignment in the current Arc baseline."),
                         failure_code="arc_outline_slot_missing",
                     ) from error
                 return _CommandInstruction(
@@ -2522,17 +2339,10 @@ class DomainRunDriver:
                 review_id=workspace.source_arc_parent_review_id,
             )
             if source_review is None:
-                raise HarnessInvariantError(
-                    "Chapter correction lost its source Arc parent review."
-                )
-            evidence_correction = (
-                source_review.disposition
-                == "chapter_evidence_review_required"
-            )
+                raise HarnessInvariantError("Chapter correction lost its source Arc parent review.")
+            evidence_correction = source_review.disposition == "chapter_evidence_review_required"
         elif workspace.source_arc_closure_review_id is not None:
-            source_closure_review = await getattr(
-                store, "arc_closure_reviews"
-            ).get(
+            source_closure_review = await getattr(store, "arc_closure_reviews").get(
                 project_id=project_id,
                 review_id=workspace.source_arc_closure_review_id,
             )
@@ -2541,8 +2351,7 @@ class DomainRunDriver:
                     "Chapter correction lost its source Arc closure review."
                 )
             evidence_correction = (
-                source_closure_review.disposition
-                == "chapter_evidence_review_required"
+                source_closure_review.disposition == "chapter_evidence_review_required"
             )
         pending = await chapters.find_pending_submission(
             project_id=project_id,
@@ -2557,10 +2366,7 @@ class DomainRunDriver:
             )
         )
         if pending is not None:
-            if (
-                submission_review is None
-                or submission_review.submission_id != pending.id
-            ):
+            if submission_review is None or submission_review.submission_id != pending.id:
                 task_kind = (
                     "verify_evidence.chapter"
                     if evidence_correction
@@ -2589,15 +2395,9 @@ class DomainRunDriver:
                         Literal[0, 1] | None,
                         workspace.automatic_correction_round,
                     ),
-                    source_arc_parent_review_id=(
-                        workspace.source_arc_parent_review_id
-                    ),
-                    source_arc_closure_review_id=(
-                        workspace.source_arc_closure_review_id
-                    ),
-                    source_chapter_candidate_review_id=(
-                        workspace.active_repair_review_id
-                    ),
+                    source_arc_parent_review_id=(workspace.source_arc_parent_review_id),
+                    source_arc_closure_review_id=(workspace.source_arc_closure_review_id),
+                    source_chapter_candidate_review_id=(workspace.active_repair_review_id),
                     source_feedback_id=workspace.source_feedback_id,
                 )
             if submission_review.decision == "pass":
@@ -2645,8 +2445,7 @@ class DomainRunDriver:
                     expected_workspace_lock_version=workspace.lock_version,
                 ),
                 idempotency_key=(
-                    f"engine:submit-chapter-evidence:{chapter.id}:"
-                    f"{workspace.lock_version}"
+                    f"engine:submit-chapter-evidence:{chapter.id}:{workspace.lock_version}"
                 ),
             )
 
@@ -2730,9 +2529,7 @@ class DomainRunDriver:
             repairs_plan = "plan" in scope
             repairs_prose = "prose" in scope and not repairs_plan
             if repair.repair_stage == "derived_dependency_closure" and (
-                repairs_plan
-                or repairs_prose
-                or not scope <= {"observations", "canon"}
+                repairs_plan or repairs_prose or not scope <= {"observations", "canon"}
             ):
                 raise HarnessInvariantError(
                     "Chapter derived dependency closure has an illegal repair scope."
@@ -2765,9 +2562,7 @@ class DomainRunDriver:
                 and scope.intersection({"observations", "canon"})
                 and not observations_repaired
             ):
-                return self._chapter_task(
-                    "chapter.repair.observation", chapter, workspace
-                )
+                return self._chapter_task("chapter.repair.observation", chapter, workspace)
             return _CommandInstruction(
                 kind="submit_chapter",
                 request=SubmitChapterRequest(
@@ -2830,12 +2625,8 @@ class DomainRunDriver:
             workspace_lock_version=cast(int, getattr(workspace, "lock_version")),
             book_baseline_id=cast(str, getattr(workspace, "book_baseline_id")),
             arc_baseline_id=cast(str, getattr(workspace, "arc_baseline_id")),
-            chapter_baseline_id=cast(
-                str | None, getattr(workspace, "base_chapter_baseline_id")
-            ),
-            correction_lineage_id=cast(
-                str | None, getattr(workspace, "correction_lineage_id")
-            ),
+            chapter_baseline_id=cast(str | None, getattr(workspace, "base_chapter_baseline_id")),
+            correction_lineage_id=cast(str | None, getattr(workspace, "correction_lineage_id")),
             correction_lineage_origin=cast(
                 Literal["review_initiated", "user_initiated"] | None,
                 getattr(workspace, "correction_lineage_origin"),
@@ -2853,9 +2644,7 @@ class DomainRunDriver:
             source_chapter_candidate_review_id=cast(
                 str | None, getattr(workspace, "active_repair_review_id")
             ),
-            source_feedback_id=cast(
-                str | None, getattr(workspace, "source_feedback_id")
-            ),
+            source_feedback_id=cast(str | None, getattr(workspace, "source_feedback_id")),
         )
 
     async def _apply_command(self, instruction: _CommandInstruction) -> None:

@@ -48,6 +48,7 @@ from app.domain.arc.commands import ArcCommandService
 from app.domain.arc.contracts import (
     ApplyArcTaskRequest,
     ArcEvaluation,
+    ArcOutlineRegeneration,
     CommitArcAutoRequest,
     RecordArcReviewRequest,
     SubmitArcRequest,
@@ -118,9 +119,7 @@ async def _prepare_arc_parent_fixture(
                     code="arc_authority_required",
                     subject="preserved Chapter evidence",
                     summary="The Chapter evidence requires Arc authority.",
-                    evidence=[
-                        "The frozen Chapter evidence raises a concern about its direct Arc."
-                    ],
+                    evidence=["The frozen Chapter evidence raises a concern about its direct Arc."],
                     observed_components=["observations", "canon"],
                 )
             ],
@@ -178,9 +177,7 @@ async def _record_arc_parent(
         source_chapter_arc_request_id=fixture.request_id,
         result=evaluation,
     )
-    recorded = await LoopAuthorityCommandService(
-        CommandBus(engine)
-    ).record_arc_parent_review(
+    recorded = await LoopAuthorityCommandService(CommandBus(engine)).record_arc_parent_review(
         RecordArcParentReviewRequest(
             project_id=foundation.project_id,
             book_id=foundation.book_id,
@@ -216,9 +213,7 @@ def test_book_parent_review_uses_relational_source_arc_baseline(
                     arc_contract_judgment="remains_applicable",
                     book_review_concern="book_review_required",
                     chapter_evidence_concern="not_required",
-                    summary=(
-                        "The requested change affects the approved Book promise."
-                    ),
+                    summary=("The requested change affects the approved Book promise."),
                     issues=[
                         EvaluationIssue(
                             kind="parent_authority_concern",
@@ -228,9 +223,7 @@ def test_book_parent_review_uses_relational_source_arc_baseline(
                                 "Only Book authority may decide whether to replace "
                                 "the evidence-preservation promise."
                             ),
-                            evidence=[
-                                "The Chapter request asks Arc to reverse a Book promise."
-                            ],
+                            evidence=["The Chapter request asks Arc to reverse a Book promise."],
                         )
                     ],
                 ),
@@ -240,8 +233,7 @@ def test_book_parent_review_uses_relational_source_arc_baseline(
             async with engine.connect() as connection:
                 request_id = await connection.scalar(
                     select(arc_book_change_requests.c.id).where(
-                        arc_book_change_requests.c.arc_id
-                        == foundation.arc_id
+                        arc_book_change_requests.c.arc_id == foundation.arc_id
                     )
                 )
                 book_lock = await connection.scalar(
@@ -402,9 +394,18 @@ def test_arc_successor_is_the_exact_subject_of_runtime_book_parent_round_one(
                     ref_id=source_plan_ref_id,
                 )
             assert correction_lock is not None
-            successor_plan = ArcPlanProposal.model_validate_json(
-                packed_plan.unpack_and_verify()
-            )
+            successor_plan = ArcPlanProposal.model_validate_json(packed_plan.unpack_and_verify())
+            successor_outline = [
+                successor_plan.chapter_outline[0].model_copy(
+                    update={
+                        "hook": (
+                            "The successor preserves the Book promise while making "
+                            "the remaining evidence explicit."
+                        )
+                    }
+                ),
+                *successor_plan.chapter_outline[1:],
+            ]
             planner_task, planner_attempt = await insert_successful_task(
                 engine,
                 project_id=foundation.project_id,
@@ -421,7 +422,7 @@ def test_arc_successor_is_the_exact_subject_of_runtime_book_parent_round_one(
                 canon_baseline_id=foundation.canon_baseline_id,
                 workspace_lock_version=correction_lock,
                 source_book_parent_review_id=round_zero.result.review_id,
-                result=successor_plan,
+                result=ArcOutlineRegeneration(chapter_outline=successor_outline),
             )
             arc_service = ArcCommandService(CommandBus(engine))
             applied = await arc_service.apply_task_result(
@@ -440,9 +441,7 @@ def test_arc_successor_is_the_exact_subject_of_runtime_book_parent_round_one(
                     project_id=foundation.project_id,
                     book_id=foundation.book_id,
                     arc_id=foundation.arc_id,
-                    expected_workspace_lock_version=(
-                        applied.result.workspace_lock_version
-                    ),
+                    expected_workspace_lock_version=(applied.result.workspace_lock_version),
                 ),
                 idempotency_key="book-guided-arc-successor:submit",
             )
@@ -468,9 +467,7 @@ def test_arc_successor_is_the_exact_subject_of_runtime_book_parent_round_one(
                     summary="The formal Arc successor follows the Book judgment.",
                 ),
             )
-            strategy = DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
-                "evaluate.arc"
-            )
+            strategy = DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task("evaluate.arc")
             reviewed = await arc_service.record_review(
                 RecordArcReviewRequest(
                     project_id=foundation.project_id,
@@ -511,10 +508,7 @@ def test_arc_successor_is_the_exact_subject_of_runtime_book_parent_round_one(
             assert instruction.arc_baseline_id is None
             assert instruction.subject_arc_baseline_id == committed.result.baseline_id
             assert instruction.source_arc_book_request_id == request_id
-            assert (
-                instruction.source_book_parent_review_id
-                == round_zero.result.review_id
-            )
+            assert instruction.source_book_parent_review_id == round_zero.result.review_id
             assert instruction.automatic_correction_round == 1
 
             async with engine.connect() as connection:
@@ -537,24 +531,16 @@ def test_arc_successor_is_the_exact_subject_of_runtime_book_parent_round_one(
                     arc_id=None,
                     chapter_id=None,
                     semantic_goal="Reject a stale origin masquerading as the subject.",
-                    source_book_parent_review_id=(
-                        instruction.source_book_parent_review_id
-                    ),
-                    source_arc_book_request_id=(
-                        instruction.source_arc_book_request_id
-                    ),
+                    source_book_parent_review_id=(instruction.source_book_parent_review_id),
+                    source_arc_book_request_id=(instruction.source_arc_book_request_id),
                     canon_baseline_id=foundation.canon_baseline_id,
                     book_baseline_id=foundation.book_baseline_id,
                     subject_arc_baseline_id=foundation.arc_baseline_id,
                     workspace_lock_version=book_cycle.lock_version,
                     workspace_work_cycle_id=book_cycle.work_cycle_id,
                     correction_lineage_id=instruction.correction_lineage_id,
-                    correction_lineage_origin=(
-                        instruction.correction_lineage_origin
-                    ),
-                    automatic_correction_round=(
-                        instruction.automatic_correction_round
-                    ),
+                    correction_lineage_origin=(instruction.correction_lineage_origin),
+                    automatic_correction_round=(instruction.automatic_correction_round),
                 )
             context = await HarnessContextBuilder(engine).build(
                 task_kind=instruction.task_kind,
@@ -563,9 +549,7 @@ def test_arc_successor_is_the_exact_subject_of_runtime_book_parent_round_one(
                 arc_id=None,
                 chapter_id=None,
                 semantic_goal="Review the exact formal Arc successor at Book authority.",
-                source_book_parent_review_id=(
-                    instruction.source_book_parent_review_id
-                ),
+                source_book_parent_review_id=(instruction.source_book_parent_review_id),
                 source_arc_book_request_id=instruction.source_arc_book_request_id,
                 canon_baseline_id=foundation.canon_baseline_id,
                 book_baseline_id=foundation.book_baseline_id,
@@ -574,9 +558,7 @@ def test_arc_successor_is_the_exact_subject_of_runtime_book_parent_round_one(
                 workspace_work_cycle_id=book_cycle.work_cycle_id,
                 correction_lineage_id=instruction.correction_lineage_id,
                 correction_lineage_origin=instruction.correction_lineage_origin,
-                automatic_correction_round=(
-                    instruction.automatic_correction_round
-                ),
+                automatic_correction_round=(instruction.automatic_correction_round),
             )
             assert context.manifest["facts"]["authority_subject_arc_baseline_id"] == (
                 committed.result.baseline_id
@@ -630,12 +612,8 @@ def test_arc_successor_is_the_exact_subject_of_runtime_book_parent_round_one(
                                 book_parent_reviews.c.automatic_correction_round,
                                 book_parent_reviews.c.subject_arc_baseline_id,
                             )
-                            .where(
-                                book_parent_reviews.c.request_id == request_id
-                            )
-                            .order_by(
-                                book_parent_reviews.c.automatic_correction_round
-                            )
+                            .where(book_parent_reviews.c.request_id == request_id)
+                            .order_by(book_parent_reviews.c.automatic_correction_round)
                         )
                     ).all()
                 )
@@ -657,10 +635,7 @@ def test_arc_successor_is_the_exact_subject_of_runtime_book_parent_round_one(
                 (1, committed.result.baseline_id),
             ]
             assert round_one_task_binding.arc_baseline_id is None
-            assert (
-                round_one_task_binding.subject_arc_baseline_id
-                == committed.result.baseline_id
-            )
+            assert round_one_task_binding.subject_arc_baseline_id == committed.result.baseline_id
             assert request_status == "resolved"
         finally:
             await engine.dispose()
@@ -685,9 +660,7 @@ def _derived_evidence_issue() -> EvaluationIssue:
         code="chapter_evidence_mismatch",
         subject="committed Chapter observation",
         summary="The derived Chapter evidence overstates the approved prose.",
-        evidence=[
-            "The committed observation and the approved prose make contrary statements."
-        ],
+        evidence=["The committed observation and the approved prose make contrary statements."],
         candidate_claim="The observation records knowledge the prose does not establish.",
         contrary_formal_statement=(
             "The approved prose explicitly leaves the witness's knowledge unresolved."
@@ -724,9 +697,7 @@ def test_initial_authority_creator_wait_projects_and_starts_user_lineage(
                             code="creator_intent_required",
                             subject="creator-controlled story intent",
                             summary="Only the creator can decide the missing intent.",
-                            evidence=[
-                                "Committed story evidence cannot resolve this preference."
-                            ],
+                            evidence=["Committed story evidence cannot resolve this preference."],
                             creator_question=_creator_need().question,
                         )
                     ],
@@ -735,9 +706,7 @@ def test_initial_authority_creator_wait_projects_and_starts_user_lineage(
                 lineage_id="initial-wait-lineage",
                 correction_round=0,
             )
-            state = await ProjectStateQuery(engine).get_project(
-                foundation.project_id
-            )
+            state = await ProjectStateQuery(engine).get_project(foundation.project_id)
             assert state is not None
             assert state.run.status == "waiting_for_user"
             assert state.run.wait_reason_code == "arc_parent_review_needs_user"
@@ -749,8 +718,7 @@ def test_initial_authority_creator_wait_projects_and_starts_user_lineage(
                 assert (
                     await connection.scalar(
                         select(chapter_workspaces.c.lock_version).where(
-                            chapter_workspaces.c.chapter_id
-                            == fixture.chapter.chapter_id
+                            chapter_workspaces.c.chapter_id == fixture.chapter.chapter_id
                         )
                     )
                     == fixture.chapter.workspace_lock_version
@@ -778,18 +746,14 @@ def test_initial_authority_creator_wait_projects_and_starts_user_lineage(
             )
             assert applied.result.resulting_correction_lineage_id is not None
 
-            refreshed = await ProjectStateQuery(engine).get_project(
-                foundation.project_id
-            )
+            refreshed = await ProjectStateQuery(engine).get_project(foundation.project_id)
             assert refreshed is not None
             assert refreshed.run.status == "running"
             assert refreshed.creator_input_request is None
             async with UnitOfWork(engine) as store:
-                pending_lineage = (
-                    await store.feedback.get_unstarted_correction_lineage(
-                        project_id=foundation.project_id,
-                        run_id=foundation.run_id,
-                    )
+                pending_lineage = await store.feedback.get_unstarted_correction_lineage(
+                    project_id=foundation.project_id,
+                    run_id=foundation.run_id,
                 )
             assert pending_lineage is not None
             assert pending_lineage.id == queued.result.feedback_id
@@ -858,9 +822,7 @@ def test_round_one_recurrence_needs_creator_question_and_cannot_open_round_two(
                     evaluation=ArcParentContractEvaluation(
                         arc_contract_judgment="remains_applicable",
                         book_review_concern="not_required",
-                        chapter_evidence_concern=(
-                            "chapter_evidence_review_required"
-                        ),
+                        chapter_evidence_concern=("chapter_evidence_review_required"),
                         chapter_evidence_target=target,
                         summary="The same correction is requested again.",
                         issues=[_derived_evidence_issue()],
@@ -872,9 +834,7 @@ def test_round_one_recurrence_needs_creator_question_and_cannot_open_round_two(
             assert captured.value.code == "evaluation_contract_invalid"
             async with engine.connect() as connection:
                 assert (
-                    await connection.scalar(
-                        select(func.count()).select_from(arc_parent_reviews)
-                    )
+                    await connection.scalar(select(func.count()).select_from(arc_parent_reviews))
                     == 1
                 )
 
@@ -895,9 +855,7 @@ def test_round_one_recurrence_needs_creator_question_and_cannot_open_round_two(
                             summary=(
                                 "Committed evidence cannot determine the creator-owned intent."
                             ),
-                            evidence=[
-                                "The bounded evidence correction has already been consumed."
-                            ],
+                            evidence=["The bounded evidence correction has already been consumed."],
                             creator_question=_creator_need().question,
                         )
                     ],
@@ -907,9 +865,7 @@ def test_round_one_recurrence_needs_creator_question_and_cannot_open_round_two(
                 correction_round=1,
                 source_review_id=round_zero_review_id,
             )
-            state = await ProjectStateQuery(engine).get_project(
-                foundation.project_id
-            )
+            state = await ProjectStateQuery(engine).get_project(foundation.project_id)
             assert state is not None
             assert state.run.wait_reason_code == "evidence_correction_needs_user"
             assert state.creator_input_request is not None
@@ -919,8 +875,7 @@ def test_round_one_recurrence_needs_creator_question_and_cannot_open_round_two(
                 assert (
                     await connection.scalar(
                         select(chapter_workspaces.c.lock_version).where(
-                            chapter_workspaces.c.chapter_id
-                            == fixture.chapter.chapter_id
+                            chapter_workspaces.c.chapter_id == fixture.chapter.chapter_id
                         )
                     )
                     == correction_lock
@@ -1026,9 +981,7 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
                             code="arc_authority_required",
                             subject="earlier derived evidence",
                             summary="Arc authority must inspect earlier derived evidence.",
-                            evidence=[
-                                "The reviewed Chapter evidence challenges its current Arc."
-                            ],
+                            evidence=["The reviewed Chapter evidence challenges its current Arc."],
                             observed_components=["observations", "canon"],
                         )
                     ],
@@ -1063,8 +1016,7 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
                     chapter_evidence_target=ChapterEvidenceTarget(
                         chapter_book_ordinal=1,
                         correction_goal=(
-                            "Clarify the observation already supported by the "
-                            "approved prose."
+                            "Clarify the observation already supported by the approved prose."
                         ),
                     ),
                     summary="Chapter one needs evidence-only correction.",
@@ -1075,20 +1027,27 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
             )
             async with engine.connect() as connection:
                 workspace = (
-                    await connection.execute(
-                        select(chapter_workspaces).where(
-                            chapter_workspaces.c.chapter_id == first.chapter_id
+                    (
+                        await connection.execute(
+                            select(chapter_workspaces).where(
+                                chapter_workspaces.c.chapter_id == first.chapter_id
+                            )
                         )
                     )
-                ).mappings().one()
+                    .mappings()
+                    .one()
+                )
                 original = (
-                    await connection.execute(
-                        select(chapter_baselines).where(
-                            chapter_baselines.c.id
-                            == first_commit.result.chapter_baseline_id
+                    (
+                        await connection.execute(
+                            select(chapter_baselines).where(
+                                chapter_baselines.c.id == first_commit.result.chapter_baseline_id
+                            )
                         )
                     )
-                ).mappings().one()
+                    .mappings()
+                    .one()
+                )
             assert workspace["plan_ref_id"] == original["plan_ref_id"]
             assert workspace["draft_ref_id"] == original["prose_ref_id"]
             assert workspace["revision_origin"] == "arc_evidence_correction"
@@ -1103,14 +1062,9 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
                 source_arc_parent_review_id=parent_review_id,
             )
             correction_items = correction_context.manifest["items"]
-            assert not any(
-                item["group"] == "chapter_guidance"
-                for item in correction_items
-            )
+            assert not any(item["group"] == "chapter_guidance" for item in correction_items)
             review_items = [
-                item
-                for item in correction_items
-                if item["group"] == "arc_parent_review"
+                item for item in correction_items if item["group"] == "arc_parent_review"
             ]
             assert len(review_items) == 1
             assert review_items[0]["role"] == "review_finding"
@@ -1139,9 +1093,7 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
                             "Mara directly witnesses written memory evidence changing."
                         ),
                         resolved=False,
-                        evidence_hint=(
-                            "Mara directly watches the blue ink add a confession."
-                        ),
+                        evidence_hint=("Mara directly watches the blue ink add a confession."),
                     )
                 ],
             )
@@ -1182,9 +1134,7 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
                 SubmitChapterRequest(
                     project_id=first.foundation.project_id,
                     chapter_id=first.chapter_id,
-                    expected_workspace_lock_version=(
-                        applied.result.workspace_lock_version
-                    ),
+                    expected_workspace_lock_version=(applied.result.workspace_lock_version),
                 ),
                 idempotency_key="evidence:submit",
             )
@@ -1303,9 +1253,7 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
                     chapter_id=first.chapter_id,
                     submission_id=submitted.result.submission_id,
                     review_id=reviewed.result.review_id,
-                    expected_current_chapter_baseline_id=(
-                        first_commit.result.chapter_baseline_id
-                    ),
+                    expected_current_chapter_baseline_id=(first_commit.result.chapter_baseline_id),
                     expected_canon_baseline_id=second_commit.result.canon_after_id,
                 ),
                 idempotency_key="evidence:commit",
@@ -1315,17 +1263,18 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
 
             async with engine.connect() as connection:
                 revised = (
-                    await connection.execute(
-                        select(chapter_baselines).where(
-                            chapter_baselines.c.id
-                            == committed.result.chapter_baseline_id
+                    (
+                        await connection.execute(
+                            select(chapter_baselines).where(
+                                chapter_baselines.c.id == committed.result.chapter_baseline_id
+                            )
                         )
                     )
-                ).mappings().one()
+                    .mappings()
+                    .one()
+                )
                 second_pointer = await connection.scalar(
-                    select(chapters.c.current_baseline_id).where(
-                        chapters.c.id == second.chapter_id
-                    )
+                    select(chapters.c.current_baseline_id).where(chapters.c.id == second.chapter_id)
                 )
                 committed_chapter_count = await connection.scalar(
                     select(func.count())
@@ -1365,9 +1314,7 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
                 for item in json.loads(packed_world_facts.unpack_and_verify())
             ]
             mara_entry = next(item for item in corrected_canon if item.subject == "Mara")
-            assert mara_entry.source_chapter_baseline_id == (
-                committed.result.chapter_baseline_id
-            )
+            assert mara_entry.source_chapter_baseline_id == (committed.result.chapter_baseline_id)
             assert mara_entry.source_prose_ref_id == revised["prose_ref_id"]
             assert mara_entry.evidence.hint == (
                 "Mara directly watches the blue ink add a confession."
@@ -1417,17 +1364,13 @@ def test_second_automatic_arc_revision_waits_without_opening_workspace(
                 lineage_id="arc-revision-limit-lineage",
                 correction_round=0,
             )
-            activated = await ChangeRequestCommandService(
-                CommandBus(engine)
-            ).activate(
+            activated = await ChangeRequestCommandService(CommandBus(engine)).activate(
                 ActivateChangeRequest(
                     project_id=foundation.project_id,
                     change_request_id=fixture.request_id,
                     request_kind="chapter_to_arc",
                     expected_target_baseline_id=foundation.arc_baseline_id,
-                    expected_workspace_lock_version=(
-                        fixture.arc_workspace_lock_version
-                    ),
+                    expected_workspace_lock_version=(fixture.arc_workspace_lock_version),
                 ),
                 idempotency_key="arc-revision-limit:activate",
             )

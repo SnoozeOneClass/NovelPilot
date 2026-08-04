@@ -5,7 +5,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from app.agents.contracts import ArcChapterOutlineEntry, ArcPlanProposal, JsonValue
+from app.agents.contracts import ArcChapterOutlineEntry, ArcPlanProposal
+from app.domain.book.contracts import BookArcContract, BookCompletionRequirement
 from app.store.arcs import ArcBaselineRecord
 
 
@@ -48,9 +49,7 @@ def resolve_outline_entry(
                 f"v{baseline.baseline_version}'s planned future interval."
             ),
         )
-    expected_book_ordinal = (
-        baseline.planned_after_cumulative_chapter_count + offset + 1
-    )
+    expected_book_ordinal = baseline.planned_after_cumulative_chapter_count + offset + 1
     if book_ordinal is not None and book_ordinal != expected_book_ordinal:
         raise ArcOutlineProjectionError(
             "book_arc_ordinal_mismatch",
@@ -69,41 +68,33 @@ def resolve_outline_entry(
     )
 
 
-def arc_contract_summary(plan: ArcPlanProposal) -> dict[str, JsonValue]:
-    """Return only the stage-level contract needed by Chapter semantic work."""
-
-    return {
-        "title": plan.title,
-        "desired_state_transition": plan.desired_state_transition.model_dump(
-            mode="json"
-        ),
-        "character_obligations": list(plan.character_obligations),
-        "foreshadowing_obligations": list(plan.foreshadowing_obligations),
-        "prohibitions": list(plan.prohibitions),
-        "closure_signals": [
-            signal.model_dump(mode="json") for signal in plan.closure_signals
-        ],
-    }
-
-
 def render_chapter_outline_window(
     *,
-    contract_plan: ArcPlanProposal,
+    arc_ordinal: int,
+    arc_title: str,
+    assigned_book_arc_contract: BookArcContract,
+    assigned_completion_requirements: tuple[BookCompletionRequirement, ...],
     current: ResolvedArcOutlineEntry,
     next_entry: ResolvedArcOutlineEntry | None,
     include_next: bool,
 ) -> tuple[str, str]:
-    """Render a canonical semantic window and its deterministic content hash."""
+    """Render the exact parent assignment and bounded Chapter window."""
 
     document: dict[str, Any] = {
-        "arc_contract_summary": arc_contract_summary(contract_plan),
+        "assigned_book_arc_contract": {
+            "arc_ordinal": arc_ordinal,
+            "contract": assigned_book_arc_contract.model_dump(mode="json"),
+            "assigned_completion_requirements": [
+                requirement.model_dump(mode="json")
+                for requirement in assigned_completion_requirements
+            ],
+        },
+        "story_arc_title": arc_title,
         "current": current.assignment.model_dump(mode="json"),
     }
     if include_next:
         document["next"] = (
-            None
-            if next_entry is None
-            else next_entry.assignment.model_dump(mode="json")
+            None if next_entry is None else next_entry.assignment.model_dump(mode="json")
         )
     rendered = json.dumps(
         document,

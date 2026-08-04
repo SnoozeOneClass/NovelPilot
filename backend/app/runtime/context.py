@@ -19,7 +19,12 @@ from app.domain.arc.outline import (
     render_chapter_outline_window,
     resolve_outline_entry,
 )
-from app.domain.book.contracts import BookArcTopology, CompletionContract
+from app.domain.book.contracts import (
+    BookArcContract,
+    BookArcTopology,
+    BookCompletionRequirement,
+    CompletionContract,
+)
 from app.domain.book_parent_cases import (
     BookParentCaseBinding,
     BookParentCaseError,
@@ -202,23 +207,25 @@ class ContextPolicyDefinition:
                     "pre_repair_context_read_only",
                     "Pre-repair diagnosis and content must remain read-only.",
                 )
-            if item.role in {
-                "formal_contract",
-                "formal_outcome",
-                "formal_prose",
-                "derived_evidence",
-                "canon_projection",
-                "review_finding",
-            } and item.access == "writable_target":
+            if (
+                item.role
+                in {
+                    "formal_contract",
+                    "formal_outcome",
+                    "formal_prose",
+                    "derived_evidence",
+                    "canon_projection",
+                    "review_finding",
+                }
+                and item.access == "writable_target"
+            ):
                 raise ContextFactError(
                     "authoritative_context_read_only",
                     "Formal and derived authority blocks cannot be writable.",
                 )
         writable = [item for item in items if item.access == "writable_target"]
         if writable and (
-            len(writable) != 1
-            or not writable[0].target
-            or writable[0].role != "target_descriptor"
+            len(writable) != 1 or not writable[0].target or writable[0].role != "target_descriptor"
         ):
             raise ContextFactError(
                 "repair_target_only_writable",
@@ -260,9 +267,7 @@ _TASK_CONTEXT_POLICY_GROUPS: dict[str, frozenset[str]] = {
             "canon",
         }
     ),
-    "evaluate.book": frozenset(
-        {"book_working", "canon"}
-    ),
+    "evaluate.book": frozenset({"book_working", "canon"}),
     "verify_repair.book": frozenset(
         {
             "book_working",
@@ -378,9 +383,7 @@ _TASK_CONTEXT_POLICY_GROUPS: dict[str, frozenset[str]] = {
             "recent_prose",
         }
     ),
-    "chapter.observe": frozenset(
-        {"arc_chapter_current", "chapter_plan", "chapter_prose", "canon"}
-    ),
+    "chapter.observe": frozenset({"arc_chapter_current", "chapter_plan", "chapter_prose", "canon"}),
     "chapter.revise.observe": frozenset(
         {
             "arc_chapter_current",
@@ -513,9 +516,7 @@ _TASK_REQUIRED_CONTEXT_GROUPS: dict[str, frozenset[str]] = {
             "canon",
         }
     ),
-    "book.synthesize": frozenset(
-        {"book_working", "book_discussion_state", "canon"}
-    ),
+    "book.synthesize": frozenset({"book_working", "book_discussion_state", "canon"}),
     "book.revise": frozenset(
         {
             "book_baseline",
@@ -525,9 +526,7 @@ _TASK_REQUIRED_CONTEXT_GROUPS: dict[str, frozenset[str]] = {
             "canon",
         }
     ),
-    "book.repair": frozenset(
-        {"book_working", "book_candidate_review", "canon"}
-    ),
+    "book.repair": frozenset({"book_working", "book_candidate_review", "canon"}),
     "evaluate.book": frozenset({"book_working", "canon"}),
     "verify_repair.book": frozenset(
         {
@@ -538,9 +537,7 @@ _TASK_REQUIRED_CONTEXT_GROUPS: dict[str, frozenset[str]] = {
         }
     ),
     "arc.plan": frozenset({"book_baseline", "canon"}),
-    "arc.revise": frozenset(
-        {"book_baseline", "arc_baseline", "arc_outline_projection", "canon"}
-    ),
+    "arc.revise": frozenset({"book_baseline", "arc_baseline", "arc_outline_projection", "canon"}),
     "arc.repair": frozenset(
         {
             "book_baseline",
@@ -550,9 +547,7 @@ _TASK_REQUIRED_CONTEXT_GROUPS: dict[str, frozenset[str]] = {
             "canon",
         }
     ),
-    "evaluate.arc": frozenset(
-        {"book_baseline", "arc_outline_projection", "arc_working", "canon"}
-    ),
+    "evaluate.arc": frozenset({"book_baseline", "arc_outline_projection", "arc_working", "canon"}),
     "verify_repair.arc": frozenset(
         {
             "book_baseline",
@@ -563,21 +558,13 @@ _TASK_REQUIRED_CONTEXT_GROUPS: dict[str, frozenset[str]] = {
             "canon",
         }
     ),
-    "chapter.plan": frozenset(
-        {"book_baseline", "arc_chapter_window", "canon"}
-    ),
-    "chapter.revise.plan": frozenset(
-        {"book_baseline", "arc_chapter_window", "canon"}
-    ),
-    "chapter.draft": frozenset(
-        {"arc_chapter_window", "chapter_plan", "canon"}
-    ),
+    "chapter.plan": frozenset({"book_baseline", "arc_chapter_window", "canon"}),
+    "chapter.revise.plan": frozenset({"book_baseline", "arc_chapter_window", "canon"}),
+    "chapter.draft": frozenset({"arc_chapter_window", "chapter_plan", "canon"}),
     "chapter.revise.draft": frozenset(
         {"arc_chapter_window", "chapter_plan", "chapter_prose", "canon"}
     ),
-    "chapter.observe": frozenset(
-        {"arc_chapter_current", "chapter_plan", "chapter_prose", "canon"}
-    ),
+    "chapter.observe": frozenset({"arc_chapter_current", "chapter_plan", "chapter_prose", "canon"}),
     "chapter.revise.observe": frozenset(
         {"arc_chapter_current", "chapter_plan", "chapter_prose", "canon"}
     ),
@@ -705,23 +692,15 @@ _TASK_REQUIRED_ANY_CONTEXT_GROUPS: dict[
         ),
     ),
     "chapter.revise.plan": (
-        frozenset(
-            {"chapter_guidance", "arc_parent_review", "arc_closure_review"}
-        ),
+        frozenset({"chapter_guidance", "arc_parent_review", "arc_closure_review"}),
     ),
     "chapter.revise.draft": (
-        frozenset(
-            {"chapter_guidance", "arc_parent_review", "arc_closure_review"}
-        ),
+        frozenset({"chapter_guidance", "arc_parent_review", "arc_closure_review"}),
     ),
     "chapter.revise.observe": (
-        frozenset(
-            {"chapter_guidance", "arc_parent_review", "arc_closure_review"}
-        ),
+        frozenset({"chapter_guidance", "arc_parent_review", "arc_closure_review"}),
     ),
-    "verify_evidence.chapter": (
-        frozenset({"arc_parent_review", "arc_closure_review"}),
-    ),
+    "verify_evidence.chapter": (frozenset({"arc_parent_review", "arc_closure_review"}),),
 }
 
 
@@ -953,29 +932,17 @@ def _build_context_policy(
     task_kind: str,
     groups: frozenset[str],
 ) -> ContextPolicyDefinition:
-    repair_task = task_kind in _REPAIR_TASKS or task_kind.startswith(
-        "chapter.repair."
-    )
-    verify_task = task_kind.startswith("verify_repair.") or (
-        task_kind == "verify_evidence.chapter"
-    )
+    repair_task = task_kind in _REPAIR_TASKS or task_kind.startswith("chapter.repair.")
+    verify_task = task_kind.startswith("verify_repair.") or (task_kind == "verify_evidence.chapter")
     blocks: list[ContextBlockPolicy] = []
     for group in sorted(groups):
         try:
             role, scope, block_time, use = _GROUP_SEMANTICS[group]
         except KeyError as exc:  # pragma: no cover - import-time registry guard.
             raise ValueError(f"No CXT1 semantics for context group {group!r}.") from exc
-        if (
-            verify_task
-            and group in _MUTABLE_CANDIDATE_GROUPS
-            and block_time == "current"
-        ):
+        if verify_task and group in _MUTABLE_CANDIDATE_GROUPS and block_time == "current":
             block_time = "post_repair"
-        elif (
-            repair_task
-            and group in _MUTABLE_CANDIDATE_GROUPS
-            and block_time == "current"
-        ):
+        elif repair_task and group in _MUTABLE_CANDIDATE_GROUPS and block_time == "current":
             block_time = "pre_repair"
         blocks.append(
             ContextBlockPolicy(
@@ -1051,10 +1018,7 @@ class HarnessContextBuilder:
         workspace_lock_version: int | None = None,
         workspace_work_cycle_id: str | None = None,
         correction_lineage_id: str | None = None,
-        correction_lineage_origin: Literal[
-            "review_initiated", "user_initiated"
-        ]
-        | None = None,
+        correction_lineage_origin: Literal["review_initiated", "user_initiated"] | None = None,
         automatic_correction_round: Literal[0, 1] | None = None,
         source_feedback_id: str | None = None,
     ) -> FrozenTaskContext:
@@ -1129,11 +1093,7 @@ class HarnessContextBuilder:
                 expected_prose_ref_id: str | None = None,
             ) -> None:
                 ref_key = None if ref_id is None else (group, ref_id)
-                if (
-                    group not in allowed_groups
-                    or ref_id is None
-                    or ref_key in seen_refs
-                ):
+                if group not in allowed_groups or ref_id is None or ref_key in seen_refs:
                     return
                 block_policy = context_policy.block_for(group)
                 packed = await store.content.get_packed(project_id=project_id, ref_id=ref_id)
@@ -1146,15 +1106,10 @@ class HarnessContextBuilder:
                     ref_id=ref_id,
                     sha256=packed.reference.blob_sha256,
                 )
-                if (
-                    packed.reference.semantic_kind
-                    == "chapter.committed_observations"
-                ):
+                if packed.reference.semantic_kind == "chapter.committed_observations":
                     try:
-                        committed_observation = (
-                            CommittedChapterObservation.model_validate_json(
-                                raw_content
-                            )
+                        committed_observation = CommittedChapterObservation.model_validate_json(
+                            raw_content
                         )
                     except ValueError as exc:
                         raise ContextFactError(
@@ -1215,18 +1170,10 @@ class HarnessContextBuilder:
                     source = _ContextSource(
                         ref_id=ref_id,
                         sha256=packed.reference.blob_sha256,
-                        chapter_id=(
-                            committed_observation.source.chapter_id
-                        ),
-                        chapter_baseline_id=(
-                            committed_observation.source.chapter_baseline_id
-                        ),
-                        prose_ref_id=(
-                            committed_observation.source.prose_ref_id
-                        ),
-                        prose_sha256=(
-                            committed_observation.source.prose_sha256
-                        ),
+                        chapter_id=(committed_observation.source.chapter_id),
+                        chapter_baseline_id=(committed_observation.source.chapter_baseline_id),
+                        prose_ref_id=(committed_observation.source.prose_ref_id),
+                        prose_sha256=(committed_observation.source.prose_sha256),
                     )
                 seen_refs.add((group, ref_id))
                 items.append(
@@ -1252,6 +1199,7 @@ class HarnessContextBuilder:
                 value: JsonValue,
                 *,
                 semantic_kind: str,
+                sources: tuple[_ContextSource, ...] = (),
             ) -> None:
                 if group not in allowed_groups:
                     return
@@ -1272,12 +1220,10 @@ class HarnessContextBuilder:
                         use=block_policy.use,
                         access=block_policy.access,
                         target=block_policy.target,
-                        content_sha256=hashlib.sha256(
-                            text.encode("utf-8")
-                        ).hexdigest(),
+                        content_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
                         semantic_kind=semantic_kind,
                         text=text,
-                        sources=(),
+                        sources=sources,
                     )
                 )
 
@@ -1304,8 +1250,7 @@ class HarnessContextBuilder:
                         access=block_policy.access,
                         target=block_policy.target,
                         content_sha256=(
-                            content_sha256
-                            or hashlib.sha256(text.encode("utf-8")).hexdigest()
+                            content_sha256 or hashlib.sha256(text.encode("utf-8")).hexdigest()
                         ),
                         semantic_kind=semantic_kind,
                         text=text,
@@ -1326,6 +1271,7 @@ class HarnessContextBuilder:
             )
             if book_workspace is None:
                 raise LookupError("Book workspace does not exist.")
+            book_arc_assignment_sources: tuple[_ContextSource, ...]
             if book.current_baseline_id is not None:
                 book_baseline = await store.books.get_baseline(
                     project_id=project_id,
@@ -1354,13 +1300,12 @@ class HarnessContextBuilder:
                     "approved_book_completion_contract",
                     book_baseline.completion_contract_ref_id,
                 )
+                packed_completion_contract = await store.content.get_packed(
+                    project_id=project_id,
+                    ref_id=book_baseline.completion_contract_ref_id,
+                )
                 book_completion_contract = CompletionContract.model_validate_json(
-                    (
-                        await store.content.get_packed(
-                            project_id=project_id,
-                            ref_id=book_baseline.completion_contract_ref_id,
-                        )
-                    ).unpack_and_verify()
+                    packed_completion_contract.unpack_and_verify()
                 )
                 packed_topology = await store.content.get_packed(
                     project_id=project_id,
@@ -1370,10 +1315,8 @@ class HarnessContextBuilder:
                     packed_topology.unpack_and_verify()
                 )
                 if (
-                    len(book_arc_topology.arcs)
-                    != book_baseline.arc_contract_count
-                    or book_baseline.final_arc_ordinal
-                    != book_baseline.arc_contract_count
+                    len(book_arc_topology.arcs) != book_baseline.arc_contract_count
+                    or book_baseline.final_arc_ordinal != book_baseline.arc_contract_count
                     or not book_arc_topology.arcs[-1].is_final
                 ):
                     raise ContextFactError(
@@ -1385,10 +1328,21 @@ class HarnessContextBuilder:
                     "approved_book_arc_topology",
                     book_baseline.arc_topology_ref_id,
                 )
+                book_arc_assignment_sources = (
+                    _ContextSource(
+                        ref_id=book_baseline.arc_topology_ref_id,
+                        sha256=packed_topology.reference.blob_sha256,
+                    ),
+                    _ContextSource(
+                        ref_id=book_baseline.completion_contract_ref_id,
+                        sha256=(packed_completion_contract.reference.blob_sha256),
+                    ),
+                )
             else:
                 book_baseline = None
                 book_arc_topology = None
                 book_completion_contract = None
+                book_arc_assignment_sources = ()
                 await add(
                     "book_working",
                     "book_direction_working_draft",
@@ -1471,8 +1425,7 @@ class HarnessContextBuilder:
             )
             if source_book_candidate_review_id is not None and (
                 active_book_review is None
-                or book_workspace.active_repair_review_id
-                != source_book_candidate_review_id
+                or book_workspace.active_repair_review_id != source_book_candidate_review_id
             ):
                 raise ContextFactError(
                     "book_repair_source_invalid",
@@ -1516,9 +1469,7 @@ class HarnessContextBuilder:
                     "constraints": book_workspace.candidate_constraints_ref_id,
                     "selected_title": book_workspace.candidate_titles_ref_id,
                     "rolling_plan": book_workspace.candidate_rolling_plan_ref_id,
-                    "completion_contract": (
-                        book_workspace.candidate_completion_contract_ref_id
-                    ),
+                    "completion_contract": (book_workspace.candidate_completion_contract_ref_id),
                     "arc_topology": book_workspace.candidate_arc_topology_ref_id,
                 }
                 for component, ref_id in pre_repair_refs:
@@ -1575,10 +1526,7 @@ class HarnessContextBuilder:
                 if (
                     source_arc_review is None
                     or source_arc_review.book_id != book_id
-                    or (
-                        arc_id is not None
-                        and source_arc_review.arc_id != arc_id
-                    )
+                    or (arc_id is not None and source_arc_review.arc_id != arc_id)
                 ):
                     raise ContextFactError(
                         "arc_parent_review_source_invalid",
@@ -1597,10 +1545,7 @@ class HarnessContextBuilder:
                 if (
                     source_book_review is None
                     or source_book_review.book_id != book_id
-                    or (
-                        arc_id is not None
-                        and source_book_review.arc_id != arc_id
-                    )
+                    or (arc_id is not None and source_book_review.arc_id != arc_id)
                 ):
                     raise ContextFactError(
                         "book_parent_review_source_invalid",
@@ -1619,10 +1564,7 @@ class HarnessContextBuilder:
                 if (
                     source_closure_review is None
                     or source_closure_review.book_id != book_id
-                    or (
-                        arc_id is not None
-                        and source_closure_review.arc_id != arc_id
-                    )
+                    or (arc_id is not None and source_closure_review.arc_id != arc_id)
                 ):
                     raise ContextFactError(
                         "arc_closure_review_source_invalid",
@@ -1638,10 +1580,7 @@ class HarnessContextBuilder:
                     project_id=project_id,
                     review_id=source_book_completion_review_id,
                 )
-                if (
-                    source_completion_review is None
-                    or source_completion_review.book_id != book_id
-                ):
+                if source_completion_review is None or source_completion_review.book_id != book_id:
                     raise ContextFactError(
                         "book_completion_review_source_invalid",
                         "Source Book completion review does not match the frozen task scope.",
@@ -1654,8 +1593,7 @@ class HarnessContextBuilder:
             if task_kind == "book.revise":
                 if (
                     source_book_parent_review_id is not None
-                    and book_workspace.source_book_parent_review_id
-                    != source_book_parent_review_id
+                    and book_workspace.source_book_parent_review_id != source_book_parent_review_id
                 ) or (
                     source_book_completion_review_id is not None
                     and book_workspace.source_book_completion_review_id
@@ -1680,8 +1618,7 @@ class HarnessContextBuilder:
                             source_book_completion_review_id is None
                             or book_workspace.source_book_completion_review_id
                             != source_book_completion_review_id
-                            or book_workspace.source_book_progress_handoff_id
-                            != handoff.id
+                            or book_workspace.source_book_progress_handoff_id != handoff.id
                         )
                     )
                 ):
@@ -1702,15 +1639,14 @@ class HarnessContextBuilder:
                             ),
                         },
                     ),
-                    semantic_kind=(
-                        "application/vnd.novelpilot.book-progress-handoff+json"
-                    ),
+                    semantic_kind=("application/vnd.novelpilot.book-progress-handoff+json"),
                 )
 
             arc = None
             arc_workspace = None
             arc_baseline = None
-            arc_repair_changed_components: list[str] | None = None
+            assigned_book_arc_contract: BookArcContract | None = None
+            assigned_book_completion_requirements: tuple[BookCompletionRequirement, ...] = ()
             authority_subject_arc_id: str | None = None
             authority_subject_arc_baseline_id: str | None = None
             if arc_id is not None:
@@ -1721,12 +1657,19 @@ class HarnessContextBuilder:
                 )
                 if arc is None or arc_workspace is None or arc.book_id != book_id:
                     raise LookupError("Task context Story Arc does not exist.")
-                if task_kind.startswith("arc.") or task_kind in {
-                    "evaluate.arc",
-                    "verify_repair.arc",
-                    "evaluate.arc_parent_contract",
-                    "evaluate.arc_closure",
-                }:
+                if (
+                    task_kind.startswith("arc.")
+                    or task_kind.startswith("chapter.")
+                    or task_kind
+                    in {
+                        "evaluate.arc",
+                        "verify_repair.arc",
+                        "evaluate.chapter",
+                        "verify_repair.chapter",
+                        "evaluate.arc_parent_contract",
+                        "evaluate.arc_closure",
+                    }
+                ):
                     if (
                         book_baseline is None
                         or book_arc_topology is None
@@ -1742,9 +1685,7 @@ class HarnessContextBuilder:
                     assigned_contract = book_arc_topology.arcs[arc.ordinal - 1]
                     completion_by_key = {
                         requirement.requirement_key: requirement
-                        for requirement in (
-                            book_completion_contract.completion_requirements
-                        )
+                        for requirement in (book_completion_contract.completion_requirements)
                     }
                     missing_assigned_keys = set(
                         assigned_contract.completion_requirement_keys
@@ -1755,26 +1696,32 @@ class HarnessContextBuilder:
                             "Assigned Book Arc contract references unknown current completion "
                             "requirements.",
                         )
-                    add_synthetic(
-                        "book_baseline",
-                        "assigned_book_arc_contract",
-                        cast(
-                            JsonValue,
-                            {
-                                "arc_ordinal": arc.ordinal,
-                                "contract": assigned_contract.model_dump(mode="json"),
-                                "assigned_completion_requirements": [
-                                    completion_by_key[key].model_dump(mode="json")
-                                    for key in (
-                                        assigned_contract.completion_requirement_keys
-                                    )
-                                ],
-                            },
-                        ),
-                        semantic_kind=(
-                            "application/vnd.novelpilot.book-arc-contract+json"
-                        ),
+                    assigned_book_arc_contract = assigned_contract
+                    assigned_book_completion_requirements = tuple(
+                        completion_by_key[key]
+                        for key in assigned_contract.completion_requirement_keys
                     )
+                    if not (
+                        task_kind.startswith("chapter.")
+                        or task_kind in {"evaluate.chapter", "verify_repair.chapter"}
+                    ):
+                        add_synthetic(
+                            "book_baseline",
+                            "assigned_book_arc_contract",
+                            cast(
+                                JsonValue,
+                                {
+                                    "arc_ordinal": arc.ordinal,
+                                    "contract": assigned_contract.model_dump(mode="json"),
+                                    "assigned_completion_requirements": [
+                                        requirement.model_dump(mode="json")
+                                        for requirement in (assigned_book_completion_requirements)
+                                    ],
+                                },
+                            ),
+                            semantic_kind=("application/vnd.novelpilot.book-arc-contract+json"),
+                            sources=book_arc_assignment_sources,
+                        )
                 selected_arc_baseline_id = (
                     arc.current_baseline_id
                     if arc.current_baseline_id is not None
@@ -1820,8 +1767,7 @@ class HarnessContextBuilder:
                 )
                 if source_arc_candidate_review_id is not None and (
                     active_arc_review is None
-                    or arc_workspace.active_repair_review_id
-                    != source_arc_candidate_review_id
+                    or arc_workspace.active_repair_review_id != source_arc_candidate_review_id
                 ):
                     raise ContextFactError(
                         "arc_repair_source_invalid",
@@ -1843,10 +1789,7 @@ class HarnessContextBuilder:
                         project_id=project_id,
                         submission_id=active_arc_review.submission_id,
                     )
-                    if (
-                        pre_repair_arc_submission is None
-                        or arc_workspace.plan_ref_id is None
-                    ):
+                    if pre_repair_arc_submission is None or arc_workspace.plan_ref_id is None:
                         raise ContextFactError(
                             "arc_pre_repair_submission_present",
                             "Arc repair verification lost its frozen before/after candidate.",
@@ -1872,16 +1815,15 @@ class HarnessContextBuilder:
                             )
                         ).unpack_and_verify()
                     )
-                    arc_repair_changed_components = [
-                        component
-                        for component in type(pre_repair_plan).model_fields
-                        if getattr(pre_repair_plan, component)
-                        != getattr(repaired_plan, component)
-                    ]
-                    if not arc_repair_changed_components:
+                    if repaired_plan.title != pre_repair_plan.title:
+                        raise ContextFactError(
+                            "arc_repair_preserves_title",
+                            "Arc repair changed the Harness-protected Arc title.",
+                        )
+                    if repaired_plan.chapter_outline == pre_repair_plan.chapter_outline:
                         raise ContextFactError(
                             "arc_repair_changed_component_present",
-                            "Arc repair verification found no changed candidate component.",
+                            "Arc repair verification found no changed future outline.",
                         )
                 if arc_workspace.prior_arc_id and arc_workspace.prior_arc_baseline_id:
                     prior_baseline = await store.arcs.get_baseline(
@@ -1911,8 +1853,7 @@ class HarnessContextBuilder:
                                 prior_closure.normalized_result_ref_id,
                             )
                 handoff_id = source_book_progress_handoff_id or (
-                    arc_workspace.book_progress_handoff_id
-                    or book.current_progress_handoff_id
+                    arc_workspace.book_progress_handoff_id or book.current_progress_handoff_id
                 )
                 if handoff_id is not None:
                     handoff = await store.book_progress_handoffs.get(
@@ -1933,9 +1874,7 @@ class HarnessContextBuilder:
                                     ),
                                 },
                             ),
-                            semantic_kind=(
-                                "application/vnd.novelpilot.book-progress-handoff+json"
-                            ),
+                            semantic_kind=("application/vnd.novelpilot.book-progress-handoff+json"),
                         )
                 if source_arc_closure_id is not None:
                     current_closure = await store.arc_closures.get(
@@ -1981,17 +1920,12 @@ class HarnessContextBuilder:
                     closure_id=source_arc_closure_id,
                 )
                 if source_closure is None or source_closure.book_id != book_id:
-                    raise LookupError(
-                        "Source formal Arc closure does not match the Book task."
-                    )
+                    raise LookupError("Source formal Arc closure does not match the Book task.")
                 formal_closures = await store.arc_closures.list_current_for_book(
                     project_id=project_id,
                     book_id=book_id,
                 )
-                if (
-                    not formal_closures
-                    or formal_closures[-1].id != source_closure.id
-                ):
+                if not formal_closures or formal_closures[-1].id != source_closure.id:
                     raise ContextFactError(
                         "book_completion_closure_set_invalid",
                         "Book completion source is not the latest formal Arc closure.",
@@ -2006,16 +1940,12 @@ class HarnessContextBuilder:
                         formal_closure.normalized_result_ref_id,
                     )
                 if source_book_completion_review_id is not None:
-                    source_completion_review = (
-                        await store.book_completion_reviews.get(
-                            project_id=project_id,
-                            review_id=source_book_completion_review_id,
-                        )
+                    source_completion_review = await store.book_completion_reviews.get(
+                        project_id=project_id,
+                        review_id=source_book_completion_review_id,
                     )
                     if source_completion_review is None:
-                        raise LookupError(
-                            "Book completion successor lost its predecessor review."
-                        )
+                        raise LookupError("Book completion successor lost its predecessor review.")
                     await add(
                         "book_completion_review",
                         "predecessor_book_completion_review",
@@ -2065,9 +1995,7 @@ class HarnessContextBuilder:
                         "assignment": entry.assignment.model_dump(mode="json"),
                         "source": {
                             "kind": "formal",
-                            "baseline_version": (
-                                entry.source_arc_baseline_version
-                            ),
+                            "baseline_version": (entry.source_arc_baseline_version),
                         },
                     }
 
@@ -2083,11 +2011,7 @@ class HarnessContextBuilder:
                 if candidate_task:
                     if (
                         arc_workspace.plan_ref_id is None
-                        or (
-                            arc_workspace
-                            .planned_after_cumulative_chapter_count
-                            is None
-                        )
+                        or (arc_workspace.planned_after_cumulative_chapter_count is None)
                         or arc_workspace.planned_after_arc_chapter_count is None
                     ):
                         raise ContextFactError(
@@ -2107,12 +2031,8 @@ class HarnessContextBuilder:
                             "arc_candidate_outline_plan_valid",
                             "Arc candidate outline is not a valid typed plan.",
                         ) from exc
-                    effective_book_count = (
-                        arc_workspace.planned_after_cumulative_chapter_count
-                    )
-                    effective_arc_count = (
-                        arc_workspace.planned_after_arc_chapter_count
-                    )
+                    effective_book_count = arc_workspace.planned_after_cumulative_chapter_count
+                    effective_arc_count = arc_workspace.planned_after_arc_chapter_count
                     required_future_count = len(candidate_plan.chapter_outline)
                     if (
                         arc_workspace.closure_cumulative_chapter_count
@@ -2131,14 +2051,9 @@ class HarnessContextBuilder:
                             if entry.arc_ordinal <= effective_arc_count
                         ]
                     )
-                    if (
-                        [entry.arc_ordinal for entry in formal_prefix]
-                        != list(range(1, effective_arc_count + 1))
-                        or any(
-                            entry.status != "committed"
-                            for entry in formal_prefix
-                        )
-                    ):
+                    if [entry.arc_ordinal for entry in formal_prefix] != list(
+                        range(1, effective_arc_count + 1)
+                    ) or any(entry.status != "committed" for entry in formal_prefix):
                         raise ContextFactError(
                             "arc_candidate_outline_prefix_committed",
                             (
@@ -2146,14 +2061,8 @@ class HarnessContextBuilder:
                                 "continuous committed prefix."
                             ),
                         )
-                    projected_entries = [
-                        semantic_formal_entry(entry)
-                        for entry in formal_prefix
-                    ]
-                    source_baseline_ids = {
-                        entry.source_arc_baseline_id
-                        for entry in formal_prefix
-                    }
+                    projected_entries = [semantic_formal_entry(entry) for entry in formal_prefix]
+                    source_baseline_ids = {entry.source_arc_baseline_id for entry in formal_prefix}
                     projected_entries.extend(
                         {
                             "book_ordinal": effective_book_count + offset + 1,
@@ -2163,9 +2072,7 @@ class HarnessContextBuilder:
                             "assignment": assignment.model_dump(mode="json"),
                             "source": {"kind": "candidate"},
                         }
-                        for offset, assignment in enumerate(
-                            candidate_plan.chapter_outline
-                        )
+                        for offset, assignment in enumerate(candidate_plan.chapter_outline)
                     )
                     projection_kind = "candidate"
                     candidate_plan_source = _ContextSource(
@@ -2179,34 +2086,25 @@ class HarnessContextBuilder:
                             "Formal Arc outline projection has no current baseline.",
                         )
                     projected_entries = [
-                        semantic_formal_entry(entry)
-                        for entry in formal_projection.entries
+                        semantic_formal_entry(entry) for entry in formal_projection.entries
                     ]
                     source_baseline_ids = {
-                        entry.source_arc_baseline_id
-                        for entry in formal_projection.entries
+                        entry.source_arc_baseline_id for entry in formal_projection.entries
                     }
                     if current_arc_baseline is not None:
                         source_baseline_ids.add(current_arc_baseline.id)
                     projection_kind = "formal"
 
-                if [
-                    cast(int, entry["arc_ordinal"])
-                    for entry in projected_entries
-                ] != list(range(1, len(projected_entries) + 1)):
+                if [cast(int, entry["arc_ordinal"]) for entry in projected_entries] != list(
+                    range(1, len(projected_entries) + 1)
+                ):
                     raise ContextFactError(
                         "arc_outline_projection_ordinals_contiguous",
                         "Arc outline projection contains an Arc-ordinal gap.",
                     )
                 if projected_entries:
-                    first_book_ordinal = cast(
-                        int,
-                        projected_entries[0]["book_ordinal"]
-                    )
-                    if [
-                        cast(int, entry["book_ordinal"])
-                        for entry in projected_entries
-                    ] != list(
+                    first_book_ordinal = cast(int, projected_entries[0]["book_ordinal"])
+                    if [cast(int, entry["book_ordinal"]) for entry in projected_entries] != list(
                         range(
                             first_book_ordinal,
                             first_book_ordinal + len(projected_entries),
@@ -2253,30 +2151,20 @@ class HarnessContextBuilder:
                         project_id=project_id,
                         ref_id=source_baseline.plan_ref_id,
                     )
-                    outline_sources[source_baseline.plan_ref_id] = (
-                        _ContextSource(
-                            ref_id=source_baseline.plan_ref_id,
-                            sha256=packed_source.reference.blob_sha256,
-                            arc_baseline_id=source_baseline.id,
-                            arc_baseline_version=(
-                                source_baseline.baseline_version
-                            ),
-                        )
+                    outline_sources[source_baseline.plan_ref_id] = _ContextSource(
+                        ref_id=source_baseline.plan_ref_id,
+                        sha256=packed_source.reference.blob_sha256,
+                        arc_baseline_id=source_baseline.id,
+                        arc_baseline_version=(source_baseline.baseline_version),
                     )
                 if candidate_plan_source is not None:
-                    outline_sources[candidate_plan_source.ref_id] = (
-                        candidate_plan_source
-                    )
+                    outline_sources[candidate_plan_source.ref_id] = candidate_plan_source
                 add_rendered(
                     "arc_outline_projection",
                     f"{projection_kind}_coherent_story_arc_outline",
                     rendered_outline,
-                    content_sha256=hashlib.sha256(
-                        rendered_outline.encode("utf-8")
-                    ).hexdigest(),
-                    semantic_kind=(
-                        "application/vnd.novelpilot.arc-outline-projection+json"
-                    ),
+                    content_sha256=hashlib.sha256(rendered_outline.encode("utf-8")).hexdigest(),
+                    semantic_kind=("application/vnd.novelpilot.arc-outline-projection+json"),
                     sources=tuple(outline_sources.values()),
                 )
 
@@ -2320,10 +2208,7 @@ class HarnessContextBuilder:
                             arc_id=arc.id,
                             baseline_id=source_baseline_id,
                         )
-                        if (
-                            source_baseline is None
-                            or source_baseline.book_id != book_id
-                        ):
+                        if source_baseline is None or source_baseline.book_id != book_id:
                             raise ContextFactError(
                                 "chapter_outline_source_matches_arc",
                                 "Chapter outline provenance does not belong to its Story Arc.",
@@ -2348,9 +2233,7 @@ class HarnessContextBuilder:
                                 ref_id=source_baseline.plan_ref_id,
                                 sha256=packed_plan.reference.blob_sha256,
                                 arc_baseline_id=source_baseline.id,
-                                arc_baseline_version=(
-                                    source_baseline.baseline_version
-                                ),
+                                arc_baseline_version=(source_baseline.baseline_version),
                             ),
                         )
 
@@ -2380,11 +2263,7 @@ class HarnessContextBuilder:
                         arc_id=arc.id,
                     )
                     next_chapter = next(
-                        (
-                            item
-                            for item in arc_chapters
-                            if item.arc_ordinal == next_arc_ordinal
-                        ),
+                        (item for item in arc_chapters if item.arc_ordinal == next_arc_ordinal),
                         None,
                     )
                     next_source_baseline_id = (
@@ -2398,9 +2277,7 @@ class HarnessContextBuilder:
                         candidate_next_source,
                     ) = await load_outline_source(next_source_baseline_id)
                     next_offset = (
-                        next_arc_ordinal
-                        - next_outline_baseline.planned_after_arc_chapter_count
-                        - 1
+                        next_arc_ordinal - next_outline_baseline.planned_after_arc_chapter_count - 1
                     )
                     if 0 <= next_offset < len(next_outline_plan.chapter_outline):
                         try:
@@ -2409,9 +2286,7 @@ class HarnessContextBuilder:
                                 plan=next_outline_plan,
                                 arc_ordinal=next_arc_ordinal,
                                 book_ordinal=(
-                                    None
-                                    if next_chapter is None
-                                    else next_chapter.book_ordinal
+                                    None if next_chapter is None else next_chapter.book_ordinal
                                 ),
                             )
                         except ArcOutlineProjectionError as exc:
@@ -2420,9 +2295,8 @@ class HarnessContextBuilder:
                                 str(exc),
                             ) from exc
                         next_outline_source = candidate_next_source
-                    elif (
-                        next_chapter is not None
-                        or next_offset != len(next_outline_plan.chapter_outline)
+                    elif next_chapter is not None or next_offset != len(
+                        next_outline_plan.chapter_outline
                     ):
                         raise ContextFactError(
                             "chapter_next_outline_projection_valid",
@@ -2433,34 +2307,37 @@ class HarnessContextBuilder:
                         )
 
                     include_next = "arc_chapter_window" in allowed_groups
-                    rendered_window, projection_sha256 = (
-                        render_chapter_outline_window(
-                            contract_plan=current_outline_plan,
-                            current=current_outline_entry,
-                            next_entry=next_outline_entry,
-                            include_next=include_next,
+                    if assigned_book_arc_contract is None:
+                        raise ContextFactError(
+                            "chapter_parent_assignment_present",
+                            "Chapter context has no exact assigned Book Arc contract.",
                         )
+                    rendered_window, projection_sha256 = render_chapter_outline_window(
+                        arc_ordinal=arc.ordinal,
+                        arc_title=current_outline_plan.title,
+                        assigned_book_arc_contract=(assigned_book_arc_contract),
+                        assigned_completion_requirements=(assigned_book_completion_requirements),
+                        current=current_outline_entry,
+                        next_entry=next_outline_entry,
+                        include_next=include_next,
                     )
-                    sources = [current_outline_source]
+                    sources = [
+                        *book_arc_assignment_sources,
+                        current_outline_source,
+                    ]
                     if (
                         next_outline_source is not None
-                        and next_outline_source.ref_id
-                        != current_outline_source.ref_id
+                        and next_outline_source.ref_id != current_outline_source.ref_id
                     ):
                         sources.append(next_outline_source)
-                    item_group = (
-                        "arc_chapter_window"
-                        if include_next
-                        else "arc_chapter_current"
-                    )
+                    sources = list({source.ref_id: source for source in sources}.values())
+                    item_group = "arc_chapter_window" if include_next else "arc_chapter_current"
                     add_rendered(
                         item_group,
                         "assigned_arc_chapter_window",
                         rendered_window,
                         content_sha256=projection_sha256,
-                        semantic_kind=(
-                            "application/vnd.novelpilot.arc-chapter-window+json"
-                        ),
+                        semantic_kind=("application/vnd.novelpilot.arc-chapter-window+json"),
                         sources=tuple(sources),
                     )
                     arc_chapter_window_manifest = {
@@ -2468,14 +2345,10 @@ class HarnessContextBuilder:
                         "current_book_ordinal": current_outline_entry.book_ordinal,
                         "current_arc_ordinal": current_outline_entry.arc_ordinal,
                         "next_book_ordinal": (
-                            None
-                            if next_outline_entry is None
-                            else next_outline_entry.book_ordinal
+                            None if next_outline_entry is None else next_outline_entry.book_ordinal
                         ),
                         "next_arc_ordinal": (
-                            None
-                            if next_outline_entry is None
-                            else next_outline_entry.arc_ordinal
+                            None if next_outline_entry is None else next_outline_entry.arc_ordinal
                         ),
                         "includes_next": include_next,
                         "sources": [
@@ -2483,9 +2356,7 @@ class HarnessContextBuilder:
                                 "ref_id": source.ref_id,
                                 "sha256": source.sha256,
                                 "arc_baseline_id": source.arc_baseline_id,
-                                "arc_baseline_version": (
-                                    source.arc_baseline_version
-                                ),
+                                "arc_baseline_version": (source.arc_baseline_version),
                             }
                             for source in sources
                         ],
@@ -2584,11 +2455,7 @@ class HarnessContextBuilder:
             scoped_committed = (
                 committed
                 if arc_id is None
-                else [
-                    baseline
-                    for baseline in committed
-                    if baseline.arc_id == arc_id
-                ]
+                else [baseline for baseline in committed if baseline.arc_id == arc_id]
             )
             if arc_id is not None:
                 for baseline in scoped_committed:
@@ -2616,9 +2483,7 @@ class HarnessContextBuilder:
                     arc_id=arc_id,
                 )
                 prior_chapter_ids = {
-                    item.id
-                    for item in chapter_rows
-                    if item.arc_ordinal < chapter.arc_ordinal
+                    item.id for item in chapter_rows if item.arc_ordinal < chapter.arc_ordinal
                 }
                 recent_baselines = [
                     baseline
@@ -2653,20 +2518,16 @@ class HarnessContextBuilder:
                 if source_chapter_arc_request_id is None:
                     raise ContextFactError(
                         "chapter_arc_request_id_present",
-                        "Arc parent-contract context requires an exact Chapter-to-Arc request."
+                        "Arc parent-contract context requires an exact Chapter-to-Arc request.",
                     )
                 request = await store.changes.get_chapter_arc(
                     project_id=project_id,
                     request_id=source_chapter_arc_request_id,
                 )
-                if (
-                    request is None
-                    or request.book_id != book_id
-                    or request.arc_id != arc_id
-                ):
+                if request is None or request.book_id != book_id or request.arc_id != arc_id:
                     raise ContextFactError(
                         "chapter_arc_request_matches_task",
-                        "Source Chapter-to-Arc request does not match the task."
+                        "Source Chapter-to-Arc request does not match the task.",
                     )
                 if (
                     arc is None
@@ -2711,13 +2572,10 @@ class HarnessContextBuilder:
                         "Source Chapter-to-Arc request lost its immutable reviewed candidate.",
                     )
                 if (
-                    source_chapter_review.submission_id
-                    != source_chapter_submission.id
+                    source_chapter_review.submission_id != source_chapter_submission.id
                     or source_chapter_review.decision != "escalate_to_arc"
-                    or request.evidence_ref_id
-                    != source_chapter_review.detail_ref_id
-                    or source_chapter_submission.arc_baseline_id
-                    != request.target_arc_baseline_id
+                    or request.evidence_ref_id != source_chapter_review.detail_ref_id
+                    or source_chapter_submission.arc_baseline_id != request.target_arc_baseline_id
                 ):
                     raise ContextFactError(
                         "chapter_arc_source_submission_review_binding",
@@ -2759,9 +2617,7 @@ class HarnessContextBuilder:
                         review_id=source_arc_parent_review_id,
                     )
                     if predecessor is None:
-                        raise LookupError(
-                            "Arc parent successor lost its predecessor review."
-                        )
+                        raise LookupError("Arc parent successor lost its predecessor review.")
                     await add(
                         "arc_parent_review",
                         "predecessor_arc_parent_review",
@@ -2777,9 +2633,7 @@ class HarnessContextBuilder:
                     or correction_lineage_origin is None
                     or automatic_correction_round is None
                 ):
-                    raise ValueError(
-                        "Book parent-contract context requires one exact frozen case."
-                    )
+                    raise ValueError("Book parent-contract context requires one exact frozen case.")
                 try:
                     book_parent_case = await resolve_book_parent_review_case(
                         store,
@@ -2843,9 +2697,7 @@ class HarnessContextBuilder:
                         review_id=book_request.source_arc_parent_review_id,
                     )
                     if source_arc_parent is None:
-                        raise LookupError(
-                            "Arc-to-Book request lost its Arc parent review."
-                        )
+                        raise LookupError("Arc-to-Book request lost its Arc parent review.")
                     await add(
                         "arc_book_request",
                         "source_arc_parent_review",
@@ -2857,14 +2709,12 @@ class HarnessContextBuilder:
                         review_id=book_request.source_arc_closure_review_id,
                     )
                     if source_arc_closure is None:
-                        raise LookupError(
-                            "Arc-to-Book request lost its Arc closure review."
-                        )
+                        raise LookupError("Arc-to-Book request lost its Arc closure review.")
                     await add(
                         "arc_book_request",
                         "source_arc_closure_review",
                         source_arc_closure.detail_ref_id,
-                )
+                    )
                 book_predecessor = book_parent_case.predecessor_review
                 if book_predecessor is not None:
                     await add(
@@ -2872,18 +2722,11 @@ class HarnessContextBuilder:
                         "predecessor_book_parent_review",
                         book_predecessor.detail_ref_id,
                     )
-            if (
-                task_kind == "evaluate.book_completion"
-                and source_arc_closure_id is None
-            ):
-                raise ValueError(
-                    "Book completion context requires the planned final Arc closure."
-                )
+            if task_kind == "evaluate.book_completion" and source_arc_closure_id is None:
+                raise ValueError("Book completion context requires the planned final Arc closure.")
 
             book_candidate_kind: Literal["initial", "successor"] = (
-                "initial"
-                if book_workspace.base_book_baseline_id is None
-                else "successor"
+                "initial" if book_workspace.base_book_baseline_id is None else "successor"
             )
             unfinished_book_arcs = [
                 item for item in book_arcs if item.lifecycle_status != "completed"
@@ -2907,8 +2750,7 @@ class HarnessContextBuilder:
                     ),
                     "scope": _task_scope(task_kind),
                     "repair_authorized": (
-                        task_kind in _REPAIR_TASKS
-                        or task_kind.startswith("chapter.repair.")
+                        task_kind in _REPAIR_TASKS or task_kind.startswith("chapter.repair.")
                     ),
                 }
                 if resolved_definition.repairable_components:
@@ -2921,18 +2763,10 @@ class HarnessContextBuilder:
                         list(_protected_repair_authority(task_kind)),
                     )
                 changed_components = (
-                    book_repair_changed_components
-                    if task_kind == "verify_repair.book"
-                    else (
-                        arc_repair_changed_components
-                        if task_kind == "verify_repair.arc"
-                        else None
-                    )
+                    book_repair_changed_components if task_kind == "verify_repair.book" else None
                 )
                 if changed_components is not None:
-                    target_payload["changed_components"] = cast(
-                        list[JsonValue], changed_components
-                    )
+                    target_payload["changed_components"] = cast(list[JsonValue], changed_components)
                 if task_kind.startswith("verify_repair."):
                     target_payload["current_candidate_selector"] = {
                         "time": "post_repair",
@@ -2941,10 +2775,7 @@ class HarnessContextBuilder:
                         "role": "review_finding",
                         "time": "pre_repair",
                     }
-                    if any(
-                        block.role == "comparison_snapshot"
-                        for block in context_policy.blocks
-                    ):
+                    if any(block.role == "comparison_snapshot" for block in context_policy.blocks):
                         target_payload["comparison_selector"] = {
                             "role": "comparison_snapshot",
                             "time": "pre_repair",
@@ -2953,9 +2784,7 @@ class HarnessContextBuilder:
                     "context_target",
                     "semantic_task_target",
                     cast(JsonValue, target_payload),
-                    semantic_kind=(
-                        "application/vnd.novelpilot.context-target+json"
-                    ),
+                    semantic_kind=("application/vnd.novelpilot.context-target+json"),
                 )
 
             facts: dict[str, JsonValue] = {
@@ -2973,28 +2802,18 @@ class HarnessContextBuilder:
                 facts["candidate_kind"] = book_candidate_kind
                 facts["historical_prefix_arc_count"] = historical_prefix_arc_count
                 if book_candidate_topology is not None:
-                    facts["candidate_arc_contract_count"] = len(
-                        book_candidate_topology.arcs
-                    )
-                    facts["candidate_final_arc_ordinal"] = len(
-                        book_candidate_topology.arcs
-                    )
+                    facts["candidate_arc_contract_count"] = len(book_candidate_topology.arcs)
+                    facts["candidate_final_arc_ordinal"] = len(book_candidate_topology.arcs)
             if book_baseline is not None:
                 facts["approved_title"] = book_baseline.approved_title
-                facts["book_arc_contract_count"] = (
-                    book_baseline.arc_contract_count
-                )
-                facts["book_final_arc_ordinal"] = (
-                    book_baseline.final_arc_ordinal
-                )
+                facts["book_arc_contract_count"] = book_baseline.arc_contract_count
+                facts["book_final_arc_ordinal"] = book_baseline.final_arc_ordinal
                 facts["topology_effective_after_arc_ordinal"] = (
                     book_baseline.topology_effective_after_arc_ordinal
                 )
             if authority_subject_arc_id is not None:
                 facts["authority_subject_arc_id"] = authority_subject_arc_id
-                facts["authority_subject_arc_baseline_id"] = (
-                    authority_subject_arc_baseline_id
-                )
+                facts["authority_subject_arc_baseline_id"] = authority_subject_arc_baseline_id
             if arc is not None and arc_workspace is not None:
                 facts.update(
                     {
@@ -3002,15 +2821,12 @@ class HarnessContextBuilder:
                         "arc_ordinal": arc.ordinal,
                         "arc_is_final": (
                             book_baseline is not None
-                            and arc.ordinal
-                            == book_baseline.final_arc_ordinal
+                            and arc.ordinal == book_baseline.final_arc_ordinal
                         ),
                         "arc_lifecycle_status": arc.lifecycle_status,
                         "arc_baseline_id": arc.current_baseline_id,
                         "arc_parent_baseline_id": (
-                            None
-                            if arc_baseline is None
-                            else arc_baseline.id
+                            None if arc_baseline is None else arc_baseline.id
                         ),
                         "arc_workspace_lock_version": arc_workspace.lock_version,
                         "arc_closure_cumulative_chapter_count": (
@@ -3020,24 +2836,16 @@ class HarnessContextBuilder:
                         ),
                         "arc_planned_after_cumulative_chapter_count": (
                             arc_workspace.planned_after_cumulative_chapter_count
-                            if (
-                                arc_workspace
-                                .planned_after_cumulative_chapter_count
-                                is not None
-                            )
+                            if (arc_workspace.planned_after_cumulative_chapter_count is not None)
                             else (
                                 None
                                 if arc_baseline is None
-                                else (
-                                    arc_baseline
-                                    .planned_after_cumulative_chapter_count
-                                )
+                                else (arc_baseline.planned_after_cumulative_chapter_count)
                             )
                         ),
                         "arc_planned_after_arc_chapter_count": (
                             arc_workspace.planned_after_arc_chapter_count
-                            if arc_workspace.planned_after_arc_chapter_count
-                            is not None
+                            if arc_workspace.planned_after_arc_chapter_count is not None
                             else (
                                 None
                                 if arc_baseline is None
@@ -3053,34 +2861,30 @@ class HarnessContextBuilder:
                         "chapter_book_ordinal": chapter.book_ordinal,
                         "chapter_arc_ordinal": chapter.arc_ordinal,
                         "chapter_lifecycle_status": chapter.lifecycle_status,
-                        "chapter_outline_arc_baseline_id": (
-                            chapter.outline_arc_baseline_id
-                        ),
+                        "chapter_outline_arc_baseline_id": (chapter.outline_arc_baseline_id),
                         "chapter_workspace_lock_version": chapter_workspace.lock_version,
                     }
                 )
-            if task_kind in {"evaluate.arc", "verify_repair.arc"} and (
-                arc_workspace is not None
-            ):
+            if task_kind in {"evaluate.arc", "verify_repair.arc"} and (arc_workspace is not None):
                 facts["active_applied_guidance_present"] = (
                     arc_workspace.source_feedback_id is not None
                 )
-            elif task_kind in {
-                "evaluate.chapter",
-                "verify_repair.chapter",
-            } and chapter_workspace is not None:
+            elif (
+                task_kind
+                in {
+                    "evaluate.chapter",
+                    "verify_repair.chapter",
+                }
+                and chapter_workspace is not None
+            ):
                 facts["active_applied_guidance_present"] = (
                     chapter_workspace.source_feedback_id is not None
                 )
             if task_kind == "evaluate.arc_parent_contract":
-                facts["source_change_request_present"] = (
-                    source_chapter_arc_request_id is not None
-                )
+                facts["source_change_request_present"] = source_chapter_arc_request_id is not None
                 facts["source_change_request_layer"] = "chapter_to_arc"
             elif task_kind == "evaluate.book_parent_contract":
-                facts["source_change_request_present"] = (
-                    source_arc_book_request_id is not None
-                )
+                facts["source_change_request_present"] = source_arc_book_request_id is not None
                 facts["source_change_request_layer"] = "arc_to_book"
 
         if task_kind.startswith("verify_repair."):
@@ -3091,11 +2895,7 @@ class HarnessContextBuilder:
                 "current": 1,
                 "post_repair": 2,
             }
-            items.sort(
-                key=lambda item: (
-                    3 if item.group == "context_target" else order[item.time]
-                )
-            )
+            items.sort(key=lambda item: 3 if item.group == "context_target" else order[item.time])
 
         context_policy.validate(items)
         manifest_items: list[JsonValue] = [
@@ -3119,9 +2919,7 @@ class HarnessContextBuilder:
                             if source.arc_baseline_id is None
                             else {
                                 "arc_baseline_id": source.arc_baseline_id,
-                                "arc_baseline_version": (
-                                    source.arc_baseline_version
-                                ),
+                                "arc_baseline_version": (source.arc_baseline_version),
                             }
                         ),
                         **(
@@ -3129,9 +2927,7 @@ class HarnessContextBuilder:
                             if source.chapter_baseline_id is None
                             else {
                                 "chapter_id": source.chapter_id,
-                                "chapter_baseline_id": (
-                                    source.chapter_baseline_id
-                                ),
+                                "chapter_baseline_id": (source.chapter_baseline_id),
                                 "prose_ref_id": source.prose_ref_id,
                                 "prose_sha256": source.prose_sha256,
                             }
@@ -3143,7 +2939,7 @@ class HarnessContextBuilder:
             for item in items
         ]
         manifest: dict[str, JsonValue] = {
-            "schema_id": "novelpilot-task-context-manifest-v7",
+            "schema_id": "novelpilot-task-context-manifest-v8",
             "task_kind": task_kind,
             "facts": facts,
             "items": manifest_items,
@@ -3184,11 +2980,7 @@ class HarnessContextBuilder:
         }
         manifest["authority_sources"] = cast(
             dict[str, JsonValue],
-            {
-                key: value
-                for key, value in authority_sources.items()
-                if value is not None
-            },
+            {key: value for key, value in authority_sources.items() if value is not None},
         )
         model_facts = _model_visible_facts(facts, task_kind=task_kind)
         if evaluation_strategy is not None:
@@ -3264,7 +3056,7 @@ class HarnessContextBuilder:
             prompt_parts.extend(
                 [
                     (
-                        '<NOVELPILOT_CONTEXT '
+                        "<NOVELPILOT_CONTEXT "
                         f'role="{item.role}" '
                         f'scope="{item.scope}" '
                         f'time="{item.time}" '
@@ -3307,9 +3099,7 @@ def _semantic_target_name(
                 else "repaired_book_successor_candidate"
             )
         return (
-            "initial_book_candidate"
-            if candidate_kind == "initial"
-            else "book_successor_candidate"
+            "initial_book_candidate" if candidate_kind == "initial" else "book_successor_candidate"
         )
     named = {
         "evaluate.arc": "current_arc_candidate",

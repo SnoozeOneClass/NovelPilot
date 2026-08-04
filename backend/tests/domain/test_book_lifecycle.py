@@ -202,9 +202,7 @@ def test_book_candidate_completion_key_error_uses_framework_output_repair() -> N
         arc_topology=_book_topology(),
     )
     invalid = valid.model_dump(mode="json")
-    invalid["arc_topology"]["arcs"][0]["completion_requirement_keys"] = [
-        "invented_requirement"
-    ]
+    invalid["arc_topology"]["arcs"][0]["completion_requirement_keys"] = ["invented_requirement"]
     request_count = 0
 
     def response(_messages: list[object], _info: AgentInfo) -> ModelResponse:
@@ -533,7 +531,9 @@ def test_stale_book_workspace_cannot_overwrite_newer_candidate(tmp_path: Path) -
             with pytest.raises(CommandPreconditionError, match="stale"):
                 await service.apply_candidate(
                     request.model_copy(
-                        update={"candidate": request.candidate.model_copy(update={"direction": "old"})}
+                        update={
+                            "candidate": request.candidate.model_copy(update={"direction": "old"})
+                        }
                     ),
                     idempotency_key="candidate-stale",
                 )
@@ -748,7 +748,9 @@ def test_task_driven_book_loop_reaches_baseline_only_after_explicit_approval(
                 idempotency_key="review-loop-book",
             )
             async with engine.connect() as connection:
-                assert await connection.scalar(select(func.count()).select_from(book_baselines)) == 0
+                assert (
+                    await connection.scalar(select(func.count()).select_from(book_baselines)) == 0
+                )
 
             approved = await service.approve_and_commit(
                 ApproveBookRequest(
@@ -1019,7 +1021,7 @@ def test_book_local_repair_is_scope_bounded_and_second_review_failure_pauses_run
                     BookDirectionRepair(
                         component="direction",
                         value=(
-                        "A witness detects a memory edit through an impossible timestamp, "
+                            "A witness detects a memory edit through an impossible timestamp, "
                             "then investigates who altered her testimony."
                         ),
                     ),
@@ -1031,9 +1033,7 @@ def test_book_local_repair_is_scope_bounded_and_second_review_failure_pauses_run
                                 "An impossible physical timestamp exposes rewritten memory "
                                 "and drives the investigation."
                             ),
-                            stable_world_invariants=(
-                                original.constraints.stable_world_invariants
-                            ),
+                            stable_world_invariants=(original.constraints.stable_world_invariants),
                             stable_character_invariants=(
                                 original.constraints.stable_character_invariants
                             ),
@@ -1103,9 +1103,7 @@ def test_book_local_repair_is_scope_bounded_and_second_review_failure_pauses_run
                         ref_id=ref_id,
                     )
                     preserved.append(json.loads(packed.unpack_and_verify()))
-            assert preserved[0] == repaired_candidate.changes[1].value.model_dump(
-                mode="json"
-            )
+            assert preserved[0] == repaired_candidate.changes[1].value.model_dump(mode="json")
             assert preserved[1:] == [
                 original.rolling_plan.model_dump(mode="json"),
                 original.completion_contract.model_dump(mode="json"),
@@ -1149,20 +1147,15 @@ def test_book_local_repair_is_scope_bounded_and_second_review_failure_pauses_run
             pre_repair_candidates = [
                 item
                 for item in manifest_items
-                if isinstance(item, dict)
-                and item["group"] == "book_pre_repair_candidate"
+                if isinstance(item, dict) and item["group"] == "book_pre_repair_candidate"
             ]
             assert pre_repair_candidates
-            assert {
-                item["role"] for item in pre_repair_candidates
-            } == {"comparison_snapshot"}
+            assert {item["role"] for item in pre_repair_candidates} == {"comparison_snapshot"}
             assert verification_context.manifest["schema_id"] == (
-                "novelpilot-task-context-manifest-v7"
+                "novelpilot-task-context-manifest-v8"
             )
             assert verification_context.prompt.index(original.direction) < (
-                verification_context.prompt.index(
-                    repaired_candidate.changes[0].value
-                )
+                verification_context.prompt.index(repaired_candidate.changes[0].value)
             )
             assert '"current_candidate_selector":{"time":"post_repair"}' in (
                 verification_context.prompt

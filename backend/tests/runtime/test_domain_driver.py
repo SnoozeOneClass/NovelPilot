@@ -29,7 +29,7 @@ from app.db.schema import (
     domain_events,
     generation_runs,
 )
-from app.domain.arc.contracts import ArcRepairPatch
+from app.domain.arc.contracts import ArcOutlineRegeneration
 from app.domain.book.contracts import (
     BookArcContract,
     BookArcTopology,
@@ -84,12 +84,16 @@ def _chapter_repair_contract_bytes(
         contract_item="Apply the exact declared synthetic repair scope.",
         observed_components=components,
     )
-    return ChapterRepairContract(
-        repair_stage=stage,
-        authorized_components=components,
-        issues=[issue],
-        issue_fingerprints=["synthetic-driver-repair"],
-    ).model_dump_json().encode()
+    return (
+        ChapterRepairContract(
+            repair_stage=stage,
+            authorized_components=components,
+            issues=[issue],
+            issue_fingerprints=["synthetic-driver-repair"],
+        )
+        .model_dump_json()
+        .encode()
+    )
 
 
 @pytest.mark.parametrize(
@@ -185,15 +189,10 @@ def test_book_parent_review_instruction_freezes_only_book_scope(
 def test_delivery_validation_failure_diagnostics_do_not_copy_model_input() -> None:
     secret_model_input = "sk-must-not-enter-delivery-diagnostics"
     with pytest.raises(ValidationError) as captured:
-        ArcRepairPatch.model_validate(
+        ArcOutlineRegeneration.model_validate(
             {
-                "changes": [
-                    {
-                        "component": "beats",
-                        "value": [],
-                        "untrusted_provider_value": secret_model_input,
-                    }
-                ]
+                "chapter_outline": [],
+                "untrusted_provider_value": secret_model_input,
             }
         )
 
@@ -220,9 +219,7 @@ def test_book_local_repair_review_is_consumed_once_before_verification() -> None
             get_review_for_submission=AsyncMock(return_value=None),
             get_review=AsyncMock(return_value=review),
         )
-        execution = SimpleNamespace(
-            has_applied_task=AsyncMock(side_effect=(False, True))
-        )
+        execution = SimpleNamespace(has_applied_task=AsyncMock(side_effect=(False, True)))
         discussion = BookDiscussionState(
             turn_count=1,
             direction_draft="A stable whole-book direction.",
@@ -332,9 +329,7 @@ def test_arc_local_repair_route_survives_restart_then_is_consumed_once() -> None
             get_review_for_submission=AsyncMock(return_value=None),
             get_review=AsyncMock(return_value=review),
         )
-        execution = SimpleNamespace(
-            has_applied_task=AsyncMock(side_effect=(False, False, True))
-        )
+        execution = SimpleNamespace(has_applied_task=AsyncMock(side_effect=(False, False, True)))
         books = SimpleNamespace(
             get_baseline=AsyncMock(return_value=SimpleNamespace(id="book-baseline"))
         )
@@ -437,9 +432,7 @@ def test_chapter_plan_repair_regenerates_invalidated_downstream_content() -> Non
             unpack_and_verify=lambda: _chapter_repair_contract_bytes(["plan"])
         )
         chapters = SimpleNamespace(
-            get_non_idle_workspace_for_arc=AsyncMock(
-                return_value=(chapter, workspace)
-            ),
+            get_non_idle_workspace_for_arc=AsyncMock(return_value=(chapter, workspace)),
             find_pending_submission=AsyncMock(return_value=None),
             get_review_for_submission=AsyncMock(return_value=None),
             get_review=AsyncMock(return_value=review),
@@ -449,9 +442,7 @@ def test_chapter_plan_repair_regenerates_invalidated_downstream_content() -> Non
             arcs=SimpleNamespace(),
             books=SimpleNamespace(),
             content=SimpleNamespace(get_packed=AsyncMock(return_value=packed_repair)),
-            execution=SimpleNamespace(
-                has_applied_task=AsyncMock(side_effect=has_applied_task)
-            ),
+            execution=SimpleNamespace(has_applied_task=AsyncMock(side_effect=has_applied_task)),
         )
         driver = object.__new__(DomainRunDriver)
         arguments = {
@@ -532,9 +523,7 @@ def test_chapter_prose_repair_regenerates_observations_instead_of_repairing_them
             return str(kwargs["task_kind"]) in applied_tasks
 
         chapters = SimpleNamespace(
-            get_non_idle_workspace_for_arc=AsyncMock(
-                return_value=(chapter, workspace)
-            ),
+            get_non_idle_workspace_for_arc=AsyncMock(return_value=(chapter, workspace)),
             find_pending_submission=AsyncMock(return_value=None),
             get_review_for_submission=AsyncMock(return_value=None),
             get_review=AsyncMock(return_value=review),
@@ -552,9 +541,7 @@ def test_chapter_prose_repair_regenerates_observations_instead_of_repairing_them
                     )
                 )
             ),
-            execution=SimpleNamespace(
-                has_applied_task=AsyncMock(side_effect=has_applied_task)
-            ),
+            execution=SimpleNamespace(has_applied_task=AsyncMock(side_effect=has_applied_task)),
         )
         driver = object.__new__(DomainRunDriver)
         arguments = {
@@ -617,23 +604,6 @@ def _arc_plan(*, chapter_count: int) -> ArcPlanProposal:
     return ArcPlanProposal.model_validate(
         {
             "title": "Bounded fixture Arc",
-            "desired_state_transition": {
-                "start_state": "The investigation has just begun.",
-                "end_state": "The bounded clue has been resolved.",
-            },
-            "conflict_trajectory": ["Discover and resolve the bounded clue."],
-            "pacing_trajectory": ["Advance one macro assignment at a time."],
-            "character_obligations": ["The investigator acts on verified evidence."],
-            "foreshadowing_obligations": [],
-            "prohibitions": ["Do not overwrite committed history."],
-            "closure_signals": [
-                {
-                    "signal_key": "fixture.resolved",
-                    "description": "The bounded clue is resolved.",
-                    "evidence_expectation": "Committed Chapter prose resolves the clue.",
-                    "required": True,
-                }
-            ],
             "chapter_outline": [
                 {
                     "title": f"Fixture Chapter {index + 1}",
@@ -824,9 +794,7 @@ def test_stale_profile_preflight_fails_once_without_provider_request(
             )
             resolver = SimpleNamespace(
                 resolve=AsyncMock(
-                    side_effect=AssertionError(
-                        "A stale Profile must fail before model binding."
-                    )
+                    side_effect=AssertionError("A stale Profile must fail before model binding.")
                 )
             )
             executor = AgentExecutor(
@@ -860,9 +828,7 @@ def test_stale_profile_preflight_fails_once_without_provider_request(
                             generation_runs.c.blocking_task_id,
                             generation_runs.c.failure_code,
                             generation_runs.c.lock_version,
-                        ).where(
-                            generation_runs.c.id == created.result.generation_run_id
-                        )
+                        ).where(generation_runs.c.id == created.result.generation_run_id)
                     )
                 ).one()
                 task = (
@@ -871,9 +837,7 @@ def test_stale_profile_preflight_fails_once_without_provider_request(
                             agent_tasks.c.id,
                             agent_tasks.c.status,
                             agent_tasks.c.delivery_state,
-                        ).where(
-                            agent_tasks.c.project_id == created.result.project_id
-                        )
+                        ).where(agent_tasks.c.project_id == created.result.project_id)
                     )
                 ).one()
                 attempt = (
@@ -885,18 +849,15 @@ def test_stale_profile_preflight_fails_once_without_provider_request(
                             agent_task_attempts.c.model_request_count,
                             agent_task_attempts.c.error_code,
                             agent_task_attempts.c.error_category,
-                        ).where(
-                            agent_task_attempts.c.project_id == created.result.project_id
-                        )
+                        ).where(agent_task_attempts.c.project_id == created.result.project_id)
                     )
                 ).one()
                 attempt_count = int(
                     (
                         await connection.execute(
-                            select(func.count()).select_from(agent_task_attempts).where(
-                                agent_task_attempts.c.project_id
-                                == created.result.project_id
-                            )
+                            select(func.count())
+                            .select_from(agent_task_attempts)
+                            .where(agent_task_attempts.c.project_id == created.result.project_id)
                         )
                     ).scalar_one()
                 )
@@ -965,28 +926,26 @@ def test_rejected_domain_delivery_failure_pauses_once_and_requires_explicit_retr
                 book_id=created.result.book_id,
                 canon_baseline_id=created.result.canon_baseline_id,
                 workspace_lock_version=1,
-                    result=BookCandidatePack(
-                        direction="A direction that will be rejected by the delivery stub.",
-                        constraints=BookCreativeConstraints(
-                            genre_reader_promise="A deterministic test mystery.",
-                            premise_story_engine="Evidence exposes a controlled contradiction.",
-                            stable_world_invariants=["Committed evidence remains stable."],
-                            stable_character_invariants=["The investigator follows evidence."],
-                            core_selling_points=["Deterministic delivery behavior"],
-                            prohibited_outcomes=["Do not erase committed facts."],
-                        ),
-                        selected_title="Rejected Delivery",
-                        rolling_plan=BookRollingPlan(
-                            long_term_character_directions=[
-                                "The investigator learns from verified evidence."
-                            ],
-                            whole_book_pacing_strategy="Use one bounded fixture Arc.",
-                            ending_tendency="End at the deterministic assertion.",
-                            arc_planning_guidelines=[
-                                "Close only after committed evidence."
-                            ],
-                            whole_book_scale_guidance="One or two Chapters is advisory.",
-                        ),
+                result=BookCandidatePack(
+                    direction="A direction that will be rejected by the delivery stub.",
+                    constraints=BookCreativeConstraints(
+                        genre_reader_promise="A deterministic test mystery.",
+                        premise_story_engine="Evidence exposes a controlled contradiction.",
+                        stable_world_invariants=["Committed evidence remains stable."],
+                        stable_character_invariants=["The investigator follows evidence."],
+                        core_selling_points=["Deterministic delivery behavior"],
+                        prohibited_outcomes=["Do not erase committed facts."],
+                    ),
+                    selected_title="Rejected Delivery",
+                    rolling_plan=BookRollingPlan(
+                        long_term_character_directions=[
+                            "The investigator learns from verified evidence."
+                        ],
+                        whole_book_pacing_strategy="Use one bounded fixture Arc.",
+                        ending_tendency="End at the deterministic assertion.",
+                        arc_planning_guidelines=["Close only after committed evidence."],
+                        whole_book_scale_guidance="One or two Chapters is advisory.",
+                    ),
                     completion_contract=CompletionContract(
                         completion_requirements=[
                             BookCompletionRequirement(
@@ -1005,9 +964,7 @@ def test_rejected_domain_delivery_failure_pauses_once_and_requires_explicit_retr
                                 core_goal="Complete the deterministic assertion.",
                                 handoff_from_previous="Begin from the fixture premise.",
                                 exit_conditions=["The fixture ending is committed."],
-                                completion_requirement_keys=[
-                                    "delivery_failure_fixture"
-                                ],
+                                completion_requirement_keys=["delivery_failure_fixture"],
                                 is_final=True,
                             )
                         ]
@@ -1024,9 +981,7 @@ def test_rejected_domain_delivery_failure_pauses_once_and_requires_explicit_retr
             async def reject_delivery(_task: object) -> None:
                 nonlocal delivery_calls
                 delivery_calls += 1
-                raise CommandPreconditionError(
-                    "Repair patch changed an unauthorized component."
-                )
+                raise CommandPreconditionError("Repair patch changed an unauthorized component.")
 
             monkeypatch.setattr(driver, "_deliver_task", reject_delivery)
             run_engine = RunEngine(
@@ -1093,8 +1048,7 @@ def test_rejected_domain_delivery_failure_pauses_once_and_requires_explicit_retr
                             domain_events.c.payload_json,
                         ).where(
                             domain_events.c.event_type == "run.failure_paused",
-                            domain_events.c.aggregate_id
-                            == created.result.generation_run_id,
+                            domain_events.c.aggregate_id == created.result.generation_run_id,
                         )
                     )
                 ).one()
@@ -1166,9 +1120,7 @@ def test_rejected_domain_delivery_failure_pauses_once_and_requires_explicit_retr
                             agent_task_attempts.c.retry_kind,
                             agent_task_attempts.c.status,
                             agent_task_attempts.c.predecessor_attempt_id,
-                        ).where(
-                            agent_task_attempts.c.id == retried.result.attempt_id
-                        )
+                        ).where(agent_task_attempts.c.id == retried.result.attempt_id)
                     )
                 ).one()
             assert tuple(reset_task) == ("queued", "not_ready")
@@ -1249,18 +1201,14 @@ def test_context_assembly_failure_binds_real_harness_action_and_requires_action_
                             generation_runs.c.failure_code,
                             generation_runs.c.failure_ref_id,
                             generation_runs.c.lock_version,
-                        ).where(
-                            generation_runs.c.id
-                            == created.result.generation_run_id
-                        )
+                        ).where(generation_runs.c.id == created.result.generation_run_id)
                     )
                 ).one()
                 task_count = (
                     await connection.execute(
-                        select(func.count()).select_from(agent_tasks).where(
-                            agent_tasks.c.run_id
-                            == created.result.generation_run_id
-                        )
+                        select(func.count())
+                        .select_from(agent_tasks)
+                        .where(agent_tasks.c.run_id == created.result.generation_run_id)
                     )
                 ).scalar_one()
                 assert run.failure_ref_id is not None
@@ -1283,13 +1231,11 @@ def test_context_assembly_failure_binds_real_harness_action_and_requires_action_
             details = failure_payload["details"]
             assert details["phase"] == "context"
             assert details["task_kind"] == "book.discuss"
-            assert (
-                details["failed_invariant"]
-                == "fixture_authority_input_present"
-            )
-            assert [
-                item["exception_type"] for item in details["cause_chain"]
-            ] == ["ContextAssemblyError", "ContextFactError"]
+            assert details["failed_invariant"] == "fixture_authority_input_present"
+            assert [item["exception_type"] for item in details["cause_chain"]] == [
+                "ContextAssemblyError",
+                "ContextFactError",
+            ]
             assert (
                 "fixture deliberately removed one authority input"
                 in details["cause_chain"][1]["message"]
@@ -1330,10 +1276,7 @@ def test_context_assembly_failure_binds_real_harness_action_and_requires_action_
                             generation_runs.c.blocking_action_key,
                             generation_runs.c.failure_code,
                             generation_runs.c.failure_ref_id,
-                        ).where(
-                            generation_runs.c.id
-                            == created.result.generation_run_id
-                        )
+                        ).where(generation_runs.c.id == created.result.generation_run_id)
                     )
                 ).one()
             assert tuple(resumed) == (None, None, None, None, None)

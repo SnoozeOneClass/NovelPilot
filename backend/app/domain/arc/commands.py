@@ -12,13 +12,12 @@ from app.agents.contracts import ArcPlanProposal
 from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
 from app.db.uow import StoreSession
 from app.domain.arc.contracts import (
-    ARC_REPAIRABLE_COMPONENTS,
     ApplyArcTaskRequest,
     ApplyArcTaskResult,
     ApproveArcRequest,
     ArcEvaluation,
+    ArcOutlineRegeneration,
     ArcRepairContract,
-    ArcRepairPatch,
     CommitArcAutoRequest,
     CommitArcResult,
     CreateStoryArcRequest,
@@ -79,47 +78,33 @@ def _task_matches_workspace(
         and task.book_baseline_id == workspace.book_baseline_id
         and task.arc_baseline_id == workspace.base_arc_baseline_id
         and task.canon_baseline_id == workspace.canon_baseline_id
-        and task.source_arc_candidate_review_id
-        == workspace.active_repair_review_id
-        and task.source_arc_parent_review_id
-        == workspace.source_arc_parent_review_id
-        and task.source_arc_closure_review_id
-        == workspace.source_arc_closure_review_id
-        and task.source_book_parent_review_id
-        == workspace.source_book_parent_review_id
-        and task.source_book_completion_review_id
-        == workspace.source_book_completion_review_id
-        and task.source_book_progress_handoff_id
-        == workspace.book_progress_handoff_id
+        and task.source_arc_candidate_review_id == workspace.active_repair_review_id
+        and task.source_arc_parent_review_id == workspace.source_arc_parent_review_id
+        and task.source_arc_closure_review_id == workspace.source_arc_closure_review_id
+        and task.source_book_parent_review_id == workspace.source_book_parent_review_id
+        and task.source_book_completion_review_id == workspace.source_book_completion_review_id
+        and task.source_book_progress_handoff_id == workspace.book_progress_handoff_id
         and task.source_feedback_id == workspace.source_feedback_id
         and workspace.state == "active"
     )
 
 
-def _merge_arc_repair(
+def _replace_arc_future_outline(
     *,
     current: ArcPlanProposal,
-    patch: ArcRepairPatch,
-    contract: ArcRepairContract,
+    regeneration: ArcOutlineRegeneration,
+    contract: ArcRepairContract | None = None,
 ) -> ArcPlanProposal:
-    authorized = set(contract.authorized_components)
-    if authorized != set(ARC_REPAIRABLE_COMPONENTS):
+    if contract is not None and contract.replacement_scope != "complete_future_outline":
         raise CommandPreconditionError(
-            "Arc repair contract does not match the Harness-declared same-layer envelope."
+            "Arc repair contract does not authorize complete future-outline replacement."
         )
-    requested = {change.component for change in patch.changes}
-    unauthorized = requested.difference(authorized)
-    if unauthorized:
-        raise CommandPreconditionError(
-            "Arc repair changed unauthorized components: "
-            + ", ".join(sorted(unauthorized))
-        )
-    merged = current.model_dump(mode="python")
-    for change in patch.changes:
-        merged[change.component] = change.value
-    proposal = ArcPlanProposal.model_validate(merged)
+    proposal = ArcPlanProposal(
+        title=current.title,
+        chapter_outline=regeneration.chapter_outline,
+    )
     if proposal == current:
-        raise CommandPreconditionError("Arc repair result made no authorized change.")
+        raise CommandPreconditionError("Arc future-outline replacement made no semantic change.")
     return proposal
 
 
@@ -133,8 +118,7 @@ def _derive_outline_closure_checkpoint(
     if (
         planned_after_cumulative_chapter_count < 0
         or planned_after_arc_chapter_count < 0
-        or planned_after_arc_chapter_count
-        > planned_after_cumulative_chapter_count
+        or planned_after_arc_chapter_count > planned_after_cumulative_chapter_count
     ):
         raise CommandPreconditionError("Arc outline effective-point counts are invalid.")
     if initial_plan and not proposal.chapter_outline:
@@ -162,9 +146,7 @@ async def _load_assigned_book_arc_contract(
         or arc_ordinal > baseline.arc_contract_count
         or baseline.final_arc_ordinal != baseline.arc_contract_count
     ):
-        raise CommandPreconditionError(
-            "Story Arc ordinal is outside the assigned Book topology."
-        )
+        raise CommandPreconditionError("Story Arc ordinal is outside the assigned Book topology.")
     topology = BookArcTopology.model_validate_json(
         (
             await session.content.get_packed(
@@ -173,13 +155,8 @@ async def _load_assigned_book_arc_contract(
             )
         ).unpack_and_verify()
     )
-    if (
-        len(topology.arcs) != baseline.arc_contract_count
-        or not topology.arcs[-1].is_final
-    ):
-        raise CommandPreconditionError(
-            "Book Arc topology content disagrees with routing metadata."
-        )
+    if len(topology.arcs) != baseline.arc_contract_count or not topology.arcs[-1].is_final:
+        raise CommandPreconditionError("Book Arc topology content disagrees with routing metadata.")
     return topology.arcs[arc_ordinal - 1]
 
 
@@ -300,7 +277,9 @@ class ArcCommandService:
                 or prior_arc.current_baseline_id is None
                 or prior_arc.current_closure_id is None
             ):
-                raise CommandPreconditionError("The prior Arc is not at a safe completion boundary.")
+                raise CommandPreconditionError(
+                    "The prior Arc is not at a safe completion boundary."
+                )
             if prior_arc is None:
                 if (
                     request.expected_ordinal != 1
@@ -313,17 +292,14 @@ class ArcCommandService:
             else:
                 if (
                     book.current_progress_handoff_id is None
-                    or request.source_progress_handoff_id
-                    != book.current_progress_handoff_id
+                    or request.source_progress_handoff_id != book.current_progress_handoff_id
                 ):
                     raise CommandPreconditionError(
                         "A later Story Arc requires the current Book progress handoff."
                     )
                 prior_closure_id = prior_arc.current_closure_id
                 if prior_closure_id is None:  # guarded above; keeps the FK use explicit.
-                    raise CommandPreconditionError(
-                        "The prior Arc is missing its formal closure."
-                    )
+                    raise CommandPreconditionError("The prior Arc is missing its formal closure.")
                 handoff = await session.book_progress_handoffs.get(
                     project_id=request.project_id,
                     handoff_id=book.current_progress_handoff_id,
@@ -467,8 +443,7 @@ class ArcCommandService:
                 or book is None
                 or book.id != request.book_id
                 or book.current_baseline_id != request.expected_book_baseline_id
-                or project.current_canon_baseline_id
-                != request.expected_canon_baseline_id
+                or project.current_canon_baseline_id != request.expected_canon_baseline_id
                 or arc is None
                 or arc.book_id != request.book_id
                 or arc.current_baseline_id != request.expected_arc_baseline_id
@@ -482,9 +457,7 @@ class ArcCommandService:
                 if arc.current_baseline_id is not None
                 else workspace.base_arc_baseline_id
             )
-            parent_book_rebase = (
-                workspace.stale_reason_code == "upstream_book_revised"
-            )
+            parent_book_rebase = workspace.stale_reason_code == "upstream_book_revised"
             pending = await session.arcs.find_pending_submission(
                 project_id=request.project_id,
                 arc_id=request.arc_id,
@@ -523,9 +496,7 @@ class ArcCommandService:
                     else workspace.revision_origin
                 ),
                 book_progress_handoff_id=(
-                    None
-                    if parent_book_rebase
-                    else workspace.book_progress_handoff_id
+                    None if parent_book_rebase else workspace.book_progress_handoff_id
                 ),
                 source_arc_parent_review_id=None,
                 source_arc_closure_review_id=None,
@@ -597,9 +568,11 @@ class ArcCommandService:
             raise CommandPreconditionError("Task is not an authorized Arc planning task.")
         workspace_snapshot: ArcWorkspaceRecord | None = None
         review_snapshot: ArcReviewRecord | None = None
-        if task.task_kind == "arc.repair":
-            patch = ArcRepairPatch.model_validate_json(raw)
-            proposal: ArcPlanProposal | None = None
+        if task.task_kind == "arc.plan":
+            proposal: ArcPlanProposal | None = ArcPlanProposal.model_validate_json(raw)
+        else:
+            regeneration = ArcOutlineRegeneration.model_validate_json(raw)
+            proposal = None
             async with self._command_bus.read_unit_of_work() as session:
                 workspace_snapshot = await session.arcs.get_workspace(
                     project_id=request.project_id,
@@ -610,49 +583,63 @@ class ArcCommandService:
                     workspace_snapshot,
                     expected_lock_version=request.expected_workspace_lock_version,
                 ):
-                    review_snapshot = (
-                        None
-                        if workspace_snapshot.active_repair_review_id is None
-                        else await session.arcs.get_review(
-                            project_id=request.project_id,
-                            review_id=workspace_snapshot.active_repair_review_id,
-                        )
-                    )
-                    if (
-                        review_snapshot is None
-                        or task.source_arc_candidate_review_id != review_snapshot.id
-                        or review_snapshot.decision != "local_repair"
-                        or review_snapshot.repair_contract_ref_id is None
-                        or workspace_snapshot.plan_ref_id is None
-                        or workspace_snapshot.semantic_repair_count
-                        >= workspace_snapshot.semantic_repair_limit
-                    ):
-                        raise CommandPreconditionError(
-                            "Arc has no active local repair budget."
-                        )
-                    repair_contract = ArcRepairContract.model_validate_json(
-                        (
-                            await session.content.get_packed(
+                    repair_contract: ArcRepairContract | None = None
+                    if task.task_kind == "arc.repair":
+                        review_snapshot = (
+                            None
+                            if workspace_snapshot.active_repair_review_id is None
+                            else await session.arcs.get_review(
                                 project_id=request.project_id,
-                                ref_id=review_snapshot.repair_contract_ref_id,
+                                review_id=workspace_snapshot.active_repair_review_id,
                             )
-                        ).unpack_and_verify()
-                    )
+                        )
+                        if (
+                            review_snapshot is None
+                            or task.source_arc_candidate_review_id != review_snapshot.id
+                            or review_snapshot.decision != "local_repair"
+                            or review_snapshot.repair_contract_ref_id is None
+                            or workspace_snapshot.plan_ref_id is None
+                            or workspace_snapshot.semantic_repair_count
+                            >= workspace_snapshot.semantic_repair_limit
+                        ):
+                            raise CommandPreconditionError("Arc has no active local repair budget.")
+                        repair_contract = ArcRepairContract.model_validate_json(
+                            (
+                                await session.content.get_packed(
+                                    project_id=request.project_id,
+                                    ref_id=review_snapshot.repair_contract_ref_id,
+                                )
+                            ).unpack_and_verify()
+                        )
+                        current_plan_ref_id = workspace_snapshot.plan_ref_id
+                    else:
+                        if workspace_snapshot.base_arc_baseline_id is None:
+                            raise CommandPreconditionError(
+                                "Arc revision has no formal baseline to preserve."
+                            )
+                        base_baseline = await session.arcs.get_baseline(
+                            project_id=request.project_id,
+                            arc_id=request.arc_id,
+                            baseline_id=workspace_snapshot.base_arc_baseline_id,
+                        )
+                        if base_baseline is None:
+                            raise CommandPreconditionError(
+                                "Arc revision base baseline does not exist."
+                            )
+                        current_plan_ref_id = base_baseline.plan_ref_id
                     current_plan = ArcPlanProposal.model_validate_json(
                         (
                             await session.content.get_packed(
                                 project_id=request.project_id,
-                                ref_id=workspace_snapshot.plan_ref_id,
+                                ref_id=current_plan_ref_id,
                             )
                         ).unpack_and_verify()
                     )
-                    proposal = _merge_arc_repair(
+                    proposal = _replace_arc_future_outline(
                         current=current_plan,
-                        patch=patch,
+                        regeneration=regeneration,
                         contract=repair_contract,
                     )
-        else:
-            proposal = ArcPlanProposal.model_validate_json(raw)
         prepared_plan = None if proposal is None else prepare_canonical_json(proposal)
         timestamp = self._now_ms()
         plan_ref_id = self._id_factory()
@@ -728,9 +715,7 @@ class ArcCommandService:
                 planned_after_cumulative_chapter_count = (
                     workspace.planned_after_cumulative_chapter_count
                 )
-                planned_after_arc_chapter_count = (
-                    workspace.planned_after_arc_chapter_count
-                )
+                planned_after_arc_chapter_count = workspace.planned_after_arc_chapter_count
                 if (
                     planned_after_cumulative_chapter_count is None
                     or planned_after_arc_chapter_count is None
@@ -740,18 +725,14 @@ class ArcCommandService:
                     )
             else:
                 planned_after_cumulative_chapter_count = (
-                    await session.chapters.count_committed_for_book(
-                        book_id=request.book_id
-                    )
+                    await session.chapters.count_committed_for_book(book_id=request.book_id)
                 )
-                planned_after_arc_chapter_count = (
-                    await session.chapters.count_committed(arc_id=request.arc_id)
+                planned_after_arc_chapter_count = await session.chapters.count_committed(
+                    arc_id=request.arc_id
                 )
             closure_cumulative_chapter_count = _derive_outline_closure_checkpoint(
                 proposal=proposal,
-                planned_after_cumulative_chapter_count=(
-                    planned_after_cumulative_chapter_count
-                ),
+                planned_after_cumulative_chapter_count=(planned_after_cumulative_chapter_count),
                 planned_after_arc_chapter_count=planned_after_arc_chapter_count,
                 initial_plan=workspace.base_arc_baseline_id is None,
             )
@@ -807,7 +788,7 @@ class ArcCommandService:
                 semantic_kind="arc.plan",
                 media_type="application/json",
                 schema_id="arc-plan-proposal",
-                schema_version=4,
+                schema_version=5,
                 ref_id=plan_ref_id,
                 created_at_ms=timestamp,
             )
@@ -816,13 +797,9 @@ class ArcCommandService:
                 state="active",
                 lock_version=workspace.lock_version + 1,
                 plan_ref_id=plan_ref.id,
-                planned_after_cumulative_chapter_count=(
-                    planned_after_cumulative_chapter_count
-                ),
+                planned_after_cumulative_chapter_count=(planned_after_cumulative_chapter_count),
                 planned_after_arc_chapter_count=planned_after_arc_chapter_count,
-                closure_cumulative_chapter_count=(
-                    closure_cumulative_chapter_count
-                ),
+                closure_cumulative_chapter_count=(closure_cumulative_chapter_count),
                 semantic_repair_count=workspace.semantic_repair_count + repair_increment,
                 stale_reason_code=None,
                 stale_at_ms=None,
@@ -862,12 +839,8 @@ class ArcCommandService:
                             "planned_after_cumulative_chapter_count": (
                                 planned_after_cumulative_chapter_count
                             ),
-                            "planned_after_arc_chapter_count": (
-                                planned_after_arc_chapter_count
-                            ),
-                            "closure_cumulative_chapter_count": (
-                                closure_cumulative_chapter_count
-                            ),
+                            "planned_after_arc_chapter_count": (planned_after_arc_chapter_count),
+                            "closure_cumulative_chapter_count": (closure_cumulative_chapter_count),
                         },
                     ),
                 ),
@@ -963,16 +936,10 @@ class ArcCommandService:
                 "planned_after_cumulative_chapter_count": (
                     workspace.planned_after_cumulative_chapter_count
                 ),
-                "planned_after_arc_chapter_count": (
-                    workspace.planned_after_arc_chapter_count
-                ),
-                "closure_cumulative_chapter_count": (
-                    workspace.closure_cumulative_chapter_count
-                ),
+                "planned_after_arc_chapter_count": (workspace.planned_after_arc_chapter_count),
+                "closure_cumulative_chapter_count": (workspace.closure_cumulative_chapter_count),
                 "guidance_ref_id": workspace.guidance_ref_id,
-                "source_feedback_id": (
-                    None if source_feedback is None else source_feedback.id
-                ),
+                "source_feedback_id": (None if source_feedback is None else source_feedback.id),
             }
             prepared_manifest = prepare_canonical_json(manifest)
             manifest_ref = await session.content.put(
@@ -1003,12 +970,8 @@ class ArcCommandService:
                     planned_after_cumulative_chapter_count=(
                         workspace.planned_after_cumulative_chapter_count
                     ),
-                    planned_after_arc_chapter_count=(
-                        workspace.planned_after_arc_chapter_count
-                    ),
-                    closure_cumulative_chapter_count=(
-                        workspace.closure_cumulative_chapter_count
-                    ),
+                    planned_after_arc_chapter_count=(workspace.planned_after_arc_chapter_count),
+                    closure_cumulative_chapter_count=(workspace.closure_cumulative_chapter_count),
                     content_manifest_ref_id=manifest_ref.id,
                     content_fingerprint=prepared_manifest.sha256,
                     disposition="pending",
@@ -1069,12 +1032,14 @@ class ArcCommandService:
                 )
             ).unpack_and_verify()
         evaluation = ArcEvaluation.model_validate_json(raw)
-        if evaluation.decision == "pass" and request.deterministic_precheck.get("passed") is not True:
+        if (
+            evaluation.decision == "pass"
+            and request.deterministic_precheck.get("passed") is not True
+        ):
             raise CommandPreconditionError("Arc deterministic prechecks did not pass.")
         prepared_precheck = prepare_canonical_json(request.deterministic_precheck)
         repair_contract = (
             ArcRepairContract(
-                authorized_components=list(ARC_REPAIRABLE_COMPONENTS),
                 issues=evaluation.issues,
             )
             if evaluation.decision == "local_repair"
@@ -1130,9 +1095,7 @@ class ArcCommandService:
                 if workspace is not None and workspace.semantic_repair_count > 0
                 else "evaluate.arc"
             )
-            strategy = DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
-                expected_task_kind
-            )
+            strategy = DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(expected_task_kind)
             if (
                 current_task != task
                 or project is None
@@ -1150,8 +1113,7 @@ class ArcCommandService:
                 or task.role != "evaluator"
                 or task.task_kind != expected_task_kind
                 or task.evaluation_strategy_id != strategy.strategy_id
-                or task.evaluation_strategy_version
-                != strategy.strategy_version
+                or task.evaluation_strategy_version != strategy.strategy_version
                 or task.rubric_id != strategy.rubric_id
                 or task.rubric_version != strategy.rubric_version
                 or request.rubric_id != strategy.rubric_id
@@ -1162,44 +1124,35 @@ class ArcCommandService:
                 or task.workspace_lock_version != submission.workspace_lock_version
                 or task.workspace_work_cycle_id != submission.work_cycle_id
                 or workspace.work_cycle_id != submission.work_cycle_id
-                or task.source_arc_candidate_review_id
-                != workspace.active_repair_review_id
+                or task.source_arc_candidate_review_id != workspace.active_repair_review_id
                 or task.source_feedback_id != workspace.source_feedback_id
-                or task.source_arc_parent_review_id
-                != workspace.source_arc_parent_review_id
-                or task.source_arc_closure_review_id
-                != workspace.source_arc_closure_review_id
-                or task.source_book_parent_review_id
-                != workspace.source_book_parent_review_id
+                or task.source_arc_parent_review_id != workspace.source_arc_parent_review_id
+                or task.source_arc_closure_review_id != workspace.source_arc_closure_review_id
+                or task.source_book_parent_review_id != workspace.source_book_parent_review_id
                 or task.source_book_completion_review_id
                 != workspace.source_book_completion_review_id
-                or task.source_book_progress_handoff_id
-                != workspace.book_progress_handoff_id
+                or task.source_book_progress_handoff_id != workspace.book_progress_handoff_id
                 or task.book_baseline_id != submission.book_baseline_id
                 or task.arc_baseline_id != submission.base_arc_baseline_id
                 or task.canon_baseline_id != submission.canon_baseline_id
             ):
                 raise CommandPreconditionError("Arc evaluation facts are stale or mismatched.")
-            if (
-                evaluation.guidance_authority_judgment == "not_present"
-            ) == (workspace.source_feedback_id is not None):
+            if (evaluation.guidance_authority_judgment == "not_present") == (
+                workspace.source_feedback_id is not None
+            ):
                 raise CommandPreconditionError(
                     "Arc evaluation did not classify its exact active guidance."
                 )
             if evaluation.decision == "pass":
-                current_book_chapter_count = (
-                    await session.chapters.count_committed_for_book(
-                        book_id=request.book_id
-                    )
+                current_book_chapter_count = await session.chapters.count_committed_for_book(
+                    book_id=request.book_id
                 )
                 current_arc_chapter_count = await session.chapters.count_committed(
                     arc_id=request.arc_id
                 )
                 if (
-                    current_book_chapter_count
-                    != submission.planned_after_cumulative_chapter_count
-                    or current_arc_chapter_count
-                    != submission.planned_after_arc_chapter_count
+                    current_book_chapter_count != submission.planned_after_cumulative_chapter_count
+                    or current_arc_chapter_count != submission.planned_after_arc_chapter_count
                 ):
                     raise CommandPreconditionError(
                         "Arc outline effective point changed before review."
@@ -1217,15 +1170,10 @@ class ArcCommandService:
                     planned_after_cumulative_chapter_count=(
                         submission.planned_after_cumulative_chapter_count
                     ),
-                    planned_after_arc_chapter_count=(
-                        submission.planned_after_arc_chapter_count
-                    ),
+                    planned_after_arc_chapter_count=(submission.planned_after_arc_chapter_count),
                     initial_plan=submission.base_arc_baseline_id is None,
                 )
-                if (
-                    submission.closure_cumulative_chapter_count
-                    != expected_closure_checkpoint
-                ):
+                if submission.closure_cumulative_chapter_count != expected_closure_checkpoint:
                     raise CommandPreconditionError(
                         "Arc submission checkpoint is not derived from its Chapter outline."
                     )
@@ -1248,7 +1196,7 @@ class ArcCommandService:
                         semantic_kind="arc.repair_contract",
                         media_type="application/json",
                         schema_id="arc-repair-contract",
-                        schema_version=3,
+                        schema_version=4,
                         ref_id=repair_ref_id,
                         created_at_ms=timestamp,
                     )
@@ -1523,13 +1471,9 @@ class ArcCommandService:
                 project_id=request.project_id,
                 arc_id=request.arc_id,
             )
-            parent_arc_baseline_id = (
-                None if workspace is None else workspace.base_arc_baseline_id
-            )
+            parent_arc_baseline_id = None if workspace is None else workspace.base_arc_baseline_id
             parent_book_rebase = (
-                workspace is not None
-                and workspace.revision_origin
-                == "parent_book_baseline_rebase"
+                workspace is not None and workspace.revision_origin == "parent_book_baseline_rebase"
             )
             if (
                 project is None
@@ -1551,13 +1495,9 @@ class ArcCommandService:
                 or submission.base_arc_baseline_id != parent_arc_baseline_id
                 or (
                     not parent_book_rebase
-                    and parent_arc_baseline_id
-                    != request.expected_current_baseline_id
+                    and parent_arc_baseline_id != request.expected_current_baseline_id
                 )
-                or (
-                    parent_book_rebase
-                    and request.expected_current_baseline_id is not None
-                )
+                or (parent_book_rebase and request.expected_current_baseline_id is not None)
                 or book.current_baseline_id != submission.book_baseline_id
                 or project.current_canon_baseline_id != submission.canon_baseline_id
             ):
@@ -1582,19 +1522,13 @@ class ArcCommandService:
                 ):
                     raise CommandPreconditionError("Arc approval gate is stale or incomplete.")
                 final_checkpoint = submission.closure_cumulative_chapter_count
-            cumulative_committed_count = (
-                await session.chapters.count_committed_for_book(
-                    book_id=request.book_id
-                )
+            cumulative_committed_count = await session.chapters.count_committed_for_book(
+                book_id=request.book_id
             )
-            arc_committed_count = await session.chapters.count_committed(
-                arc_id=request.arc_id
-            )
+            arc_committed_count = await session.chapters.count_committed(arc_id=request.arc_id)
             if (
-                cumulative_committed_count
-                != submission.planned_after_cumulative_chapter_count
-                or arc_committed_count
-                != submission.planned_after_arc_chapter_count
+                cumulative_committed_count != submission.planned_after_cumulative_chapter_count
+                or arc_committed_count != submission.planned_after_arc_chapter_count
             ):
                 raise CommandPreconditionError(
                     "Arc outline effective point changed before baseline commit."
@@ -1612,18 +1546,14 @@ class ArcCommandService:
                 planned_after_cumulative_chapter_count=(
                     submission.planned_after_cumulative_chapter_count
                 ),
-                planned_after_arc_chapter_count=(
-                    submission.planned_after_arc_chapter_count
-                ),
+                planned_after_arc_chapter_count=(submission.planned_after_arc_chapter_count),
                 initial_plan=parent_arc_baseline_id is None,
             )
             if final_checkpoint != expected_closure_checkpoint:
                 raise CommandPreconditionError(
                     "Arc baseline checkpoint is not derived from its reviewed Chapter outline."
                 )
-            baseline_version = await session.arcs.next_baseline_version(
-                arc_id=request.arc_id
-            )
+            baseline_version = await session.arcs.next_baseline_version(arc_id=request.arc_id)
             if parent_arc_baseline_id is None:
                 expected_version = 1
             else:
@@ -1638,9 +1568,7 @@ class ArcCommandService:
             if baseline_version != expected_version:
                 raise CommandPreconditionError("Arc baseline version does not follow current head.")
             lifecycle_status: Literal["active", "closing"] = (
-                "closing"
-                if cumulative_committed_count == final_checkpoint
-                else "active"
+                "closing" if cumulative_committed_count == final_checkpoint else "active"
             )
             if authorization_kind == "human_approval":
                 assert gate is not None and approval_id is not None
@@ -1675,9 +1603,7 @@ class ArcCommandService:
                 planned_after_cumulative_chapter_count=(
                     submission.planned_after_cumulative_chapter_count
                 ),
-                planned_after_arc_chapter_count=(
-                    submission.planned_after_arc_chapter_count
-                ),
+                planned_after_arc_chapter_count=(submission.planned_after_arc_chapter_count),
                 closure_cumulative_chapter_count=final_checkpoint,
                 revision_origin=workspace.revision_origin,
                 authorization_kind=authorization_kind,
@@ -1701,10 +1627,8 @@ class ArcCommandService:
                 )
                 if (
                     drafting_workspace is None
-                    or drafting_workspace.state
-                    not in {"active", "blocked_by_upstream", "stale"}
-                    or drafting_workspace.arc_baseline_id
-                    != parent_arc_baseline_id
+                    or drafting_workspace.state not in {"active", "blocked_by_upstream", "stale"}
+                    or drafting_workspace.arc_baseline_id != parent_arc_baseline_id
                 ):
                     raise CommandPreconditionError(
                         "The drafting Chapter cannot be rebound from its old Arc baseline."
@@ -1720,11 +1644,9 @@ class ArcCommandService:
                     raise CommandPreconditionError(
                         "The Arc successor does not cover its current drafting Chapter."
                     ) from exc
-                pending_chapter_submission = (
-                    await session.chapters.find_pending_submission(
-                        project_id=request.project_id,
-                        chapter_id=drafting_chapter.id,
-                    )
+                pending_chapter_submission = await session.chapters.find_pending_submission(
+                    project_id=request.project_id,
+                    chapter_id=drafting_chapter.id,
                 )
                 if (
                     pending_chapter_submission is not None
@@ -1742,9 +1664,7 @@ class ArcCommandService:
                 if not await session.chapters.compare_and_set_outline_source(
                     project_id=request.project_id,
                     chapter_id=drafting_chapter.id,
-                    expected_outline_arc_baseline_id=(
-                        drafting_chapter.outline_arc_baseline_id
-                    ),
+                    expected_outline_arc_baseline_id=(drafting_chapter.outline_arc_baseline_id),
                     new_outline_arc_baseline_id=baseline_id,
                     updated_at_ms=timestamp,
                 ):
@@ -1766,12 +1686,8 @@ class ArcCommandService:
                     source_arc_closure_review_id=None,
                     source_feedback_id=None,
                     correction_lineage_id=workspace.correction_lineage_id,
-                    correction_lineage_origin=(
-                        workspace.correction_lineage_origin
-                    ),
-                    automatic_correction_round=(
-                        workspace.automatic_correction_round
-                    ),
+                    correction_lineage_origin=(workspace.correction_lineage_origin),
+                    automatic_correction_round=(workspace.automatic_correction_round),
                     plan_ref_id=None,
                     draft_ref_id=None,
                     observations_ref_id=None,
@@ -1826,9 +1742,7 @@ class ArcCommandService:
                 planned_after_cumulative_chapter_count=(
                     submission.planned_after_cumulative_chapter_count
                 ),
-                planned_after_arc_chapter_count=(
-                    submission.planned_after_arc_chapter_count
-                ),
+                planned_after_arc_chapter_count=(submission.planned_after_arc_chapter_count),
                 closure_cumulative_chapter_count=final_checkpoint,
                 guidance_ref_id=None,
                 source_feedback_id=None,
@@ -1871,17 +1785,17 @@ class ArcCommandService:
             )
             events = [
                 EventDraft(
-                        event_type="arc.baseline_committed",
-                        aggregate_type="arc",
-                        aggregate_id=request.arc_id,
-                        payload={
-                            "baseline_id": baseline_id,
-                            "baseline_version": baseline_version,
-                            "authorization_kind": authorization_kind,
-                            "closure_cumulative_chapter_count": final_checkpoint,
-                            "lifecycle_status": lifecycle_status,
-                        },
-                    )
+                    event_type="arc.baseline_committed",
+                    aggregate_type="arc",
+                    aggregate_id=request.arc_id,
+                    payload={
+                        "baseline_id": baseline_id,
+                        "baseline_version": baseline_version,
+                        "authorization_kind": authorization_kind,
+                        "closure_cumulative_chapter_count": final_checkpoint,
+                        "lifecycle_status": lifecycle_status,
+                    },
+                )
             ]
             if resolved_requests:
                 events.append(

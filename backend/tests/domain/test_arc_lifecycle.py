@@ -13,9 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.agents.contracts import (
     ArcChapterOutlineEntry,
-    ArcClosureSignal,
     ArcPlanProposal,
-    ArcStateTransition,
 )
 from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
 from app.db.engine import create_sqlite_async_engine
@@ -36,11 +34,9 @@ from app.domain.arc.commands import (
 from app.domain.arc.contracts import (
     ApplyArcTaskRequest,
     ApproveArcRequest,
-    ArcChapterOutlineRepair,
-    ArcClosureSignalsRepair,
     ArcEvaluation,
     ArcEvaluationIssue,
-    ArcRepairPatch,
+    ArcOutlineRegeneration,
     CommitArcAutoRequest,
     CreateStoryArcRequest,
     RecordArcReviewRequest,
@@ -102,26 +98,6 @@ def _arc_plan(
 ) -> ArcPlanProposal:
     return ArcPlanProposal(
         title=title,
-        desired_state_transition=ArcStateTransition(
-            start_state="The memory-edit source is unknown.",
-            end_state="The first memory-edit source is identified.",
-        ),
-        conflict_trajectory=[
-            "Witness accounts contradict one another.",
-            "Physical evidence exposes the first edit source.",
-        ],
-        pacing_trajectory=["investigation", "escalation", "stage closure"],
-        character_obligations=["The investigator commits to verifiable evidence."],
-        foreshadowing_obligations=[],
-        prohibitions=["Do not invalidate committed evidence as a dream."],
-        closure_signals=[
-            ArcClosureSignal(
-                signal_key="first_edit_source_identified",
-                description="The source of the first memory edit is identified.",
-                evidence_expectation="Committed Chapter observations name the source.",
-                required=True,
-            )
-        ],
         chapter_outline=[
             ArcChapterOutlineEntry(
                 title=f"Chapter {index + 1}",
@@ -215,9 +191,7 @@ async def _seed_approved_book(
                                 "The edit source is identified.",
                                 "The central conflict is resolved.",
                             ],
-                            completion_requirement_keys=[
-                                "memory_conflict_resolved"
-                            ],
+                            completion_requirement_keys=["memory_conflict_resolved"],
                             is_final=True,
                         )
                     ]
@@ -265,9 +239,7 @@ async def _seed_approved_book(
             submission_id=submitted.result.submission_id,
             evaluator_task_id=task_id,
             evaluator_attempt_id=attempt_id,
-            rubric_id=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
-                "evaluate.book"
-            ).rubric_id,
+            rubric_id=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task("evaluate.book").rubric_id,
             rubric_version=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
                 "evaluate.book"
             ).rubric_version,
@@ -364,8 +336,7 @@ async def _prepare_reviewed_arc(
     )
     evaluator_task_kind = (
         "verify_repair.arc"
-        if repair_count_before_review is not None
-        and repair_count_before_review > 0
+        if repair_count_before_review is not None and repair_count_before_review > 0
         else "evaluate.arc"
     )
     evaluator_task, evaluator_attempt = await insert_successful_task(
@@ -406,9 +377,7 @@ async def _prepare_reviewed_arc(
             submission_id=submitted.result.submission_id,
             evaluator_task_id=evaluator_task,
             evaluator_attempt_id=evaluator_attempt,
-            rubric_id=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
-                evaluator_task_kind
-            ).rubric_id,
+            rubric_id=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(evaluator_task_kind).rubric_id,
             rubric_version=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
                 evaluator_task_kind
             ).rubric_version,
@@ -477,9 +446,7 @@ def test_full_auto_pass_commits_without_arc_gate_under_book_topology(
             async with engine.connect() as connection:
                 assert await connection.scalar(select(func.count()).select_from(arc_baselines)) == 0
                 assert (
-                    await connection.scalar(
-                        select(func.count()).select_from(arc_approval_gates)
-                    )
+                    await connection.scalar(select(func.count()).select_from(arc_approval_gates))
                     == 0
                 )
 
@@ -577,9 +544,7 @@ def test_participatory_pass_waits_for_exactly_one_reviewed_checkpoint_approval(
             async with engine.connect() as connection:
                 assert await connection.scalar(select(func.count()).select_from(arc_approvals)) == 1
                 assert (
-                    await connection.scalar(
-                        select(func.count()).select_from(arc_approval_gates)
-                    )
+                    await connection.scalar(select(func.count()).select_from(arc_approval_gates))
                     == 1
                 )
                 assert (
@@ -796,9 +761,7 @@ def test_stale_arc_plan_delivery_is_discarded_without_overwriting_workspace(
             async with engine.connect() as connection:
                 assert (
                     await connection.scalar(
-                        select(agent_tasks.c.delivery_state).where(
-                            agent_tasks.c.id == tasks[1][0]
-                        )
+                        select(agent_tasks.c.delivery_state).where(agent_tasks.c.id == tasks[1][0])
                     )
                     == "discarded_stale"
                 )
@@ -808,7 +771,7 @@ def test_stale_arc_plan_delivery_is_discarded_without_overwriting_workspace(
     asyncio.run(exercise())
 
 
-def test_arc_local_repair_is_bounded_by_components_and_one_correction(
+def test_arc_local_repair_regenerates_complete_future_outline_once(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "arc-repair.sqlite3"
@@ -837,7 +800,6 @@ def test_arc_local_repair_is_bounded_by_components_and_one_correction(
                             contract_item=(
                                 "The Arc outline must schedule setup before causal payoff."
                             ),
-                            observed_components=["chapter_outline"],
                         )
                     ],
                 ),
@@ -856,38 +818,11 @@ def test_arc_local_repair_is_bounded_by_components_and_one_correction(
                 )
                 for index, entry in enumerate(setup.plan.chapter_outline)
             ]
-            repaired_closure_signals = [
-                ArcClosureSignal(
-                    signal_key="first_edit_source_identified",
-                    description=(
-                        "The source is identified only after the causal setup is established."
-                    ),
-                    evidence_expectation=(
-                        "Committed Chapter observations establish the setup before naming "
-                        "the source."
-                    ),
-                    required=True,
-                )
-            ]
-            authorized = ArcRepairPatch(
-                changes=[
-                    ArcChapterOutlineRepair(
-                        component="chapter_outline",
-                        value=repaired_outline,
-                    ),
-                    ArcClosureSignalsRepair(
-                        component="closure_signals",
-                        value=repaired_closure_signals,
-                    ),
-                ]
+            authorized = ArcOutlineRegeneration(
+                chapter_outline=repaired_outline,
             )
-            no_op = ArcRepairPatch(
-                changes=[
-                    ArcChapterOutlineRepair(
-                        component="chapter_outline",
-                        value=setup.plan.chapter_outline,
-                    ),
-                ]
+            no_op = ArcOutlineRegeneration(
+                chapter_outline=setup.plan.chapter_outline,
             )
             task_pairs: list[tuple[str, str]] = []
             for suffix, result in (("no-op", no_op), ("authorized", authorized)):
@@ -910,7 +845,7 @@ def test_arc_local_repair_is_bounded_by_components_and_one_correction(
                     )
                 )
             service = ArcCommandService(CommandBus(engine))
-            with pytest.raises(CommandPreconditionError, match="no authorized change"):
+            with pytest.raises(CommandPreconditionError, match="no semantic change"):
                 await service.apply_task_result(
                     ApplyArcTaskRequest(
                         project_id=setup.book.project_id,
@@ -944,35 +879,26 @@ def test_arc_local_repair_is_bounded_by_components_and_one_correction(
                     )
                 ).one()
                 no_op_state = await connection.scalar(
-                    select(agent_tasks.c.delivery_state).where(
-                        agent_tasks.c.id == task_pairs[0][0]
-                    )
+                    select(agent_tasks.c.delivery_state).where(agent_tasks.c.id == task_pairs[0][0])
                 )
                 assert workspace.plan_ref_id is not None
                 packed = await ContentRepository(connection).get_packed(
                     project_id=setup.book.project_id,
                     ref_id=workspace.plan_ref_id,
                 )
-                merged_plan = ArcPlanProposal.model_validate(
-                    json.loads(packed.unpack_and_verify())
-                )
+                merged_plan = ArcPlanProposal.model_validate(json.loads(packed.unpack_and_verify()))
                 assert workspace.semantic_repair_count == 1
                 assert no_op_state == "pending"
                 assert merged_plan.chapter_outline[0].core_event == "Repaired beat"
                 assert merged_plan.title == setup.plan.title
-                assert len(merged_plan.chapter_outline) == len(
-                    setup.plan.chapter_outline
-                )
-                assert merged_plan.closure_signals == repaired_closure_signals
+                assert len(merged_plan.chapter_outline) == len(setup.plan.chapter_outline)
 
             await service.submit_for_review(
                 SubmitArcRequest(
                     project_id=setup.book.project_id,
                     book_id=setup.book.book_id,
                     arc_id=setup.arc_id,
-                    expected_workspace_lock_version=(
-                        repaired.result.workspace_lock_version
-                    ),
+                    expected_workspace_lock_version=(repaired.result.workspace_lock_version),
                 ),
                 idempotency_key="repair:submit-for-verification",
             )
@@ -993,14 +919,19 @@ def test_arc_local_repair_is_bounded_by_components_and_one_correction(
             old_candidate = [
                 item
                 for item in manifest_items
-                if isinstance(item, dict)
-                and item["group"] == "arc_pre_repair_candidate"
+                if isinstance(item, dict) and item["group"] == "arc_pre_repair_candidate"
             ]
             assert len(old_candidate) == 1
             assert old_candidate[0]["role"] == "comparison_snapshot"
             assert verification_context.prompt.index("Witnesses disagree") < (
                 verification_context.prompt.index("Repaired beat")
             )
+            assert (
+                '"exit_conditions":["The edit source is identified.",'
+                '"The central conflict is resolved."]'
+                in verification_context.prompt
+            )
+            assert '"changed_components"' not in verification_context.prompt
             assert '"current_candidate_selector":{"time":"post_repair"}' in (
                 verification_context.prompt
             )
@@ -1012,7 +943,7 @@ def test_arc_local_repair_is_bounded_by_components_and_one_correction(
                 evaluation=ArcEvaluation(
                     guidance_authority_judgment="not_present",
                     decision="local_repair",
-                            summary="A second repair must not start.",
+                    summary="A second repair must not start.",
                     issues=[
                         ArcEvaluationIssue(
                             kind="contract_unfulfilled",
@@ -1025,11 +956,10 @@ def test_arc_local_repair_is_bounded_by_components_and_one_correction(
                             contract_item=(
                                 "The Arc outline must cover every explicit Arc obligation."
                             ),
-                            observed_components=["chapter_outline"],
                         )
                     ],
                 ),
-                    repair_count_before_review=1,
+                repair_count_before_review=1,
             )
             assert exhausted.review.next_action == "failure_paused"
             async with engine.connect() as connection:

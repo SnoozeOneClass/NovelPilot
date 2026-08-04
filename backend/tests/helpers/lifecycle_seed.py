@@ -13,9 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.agents.contracts import (
     ArcChapterOutlineEntry,
-    ArcClosureSignal,
     ArcPlanProposal,
-    ArcStateTransition,
 )
 from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
 from app.db.schema import (
@@ -107,9 +105,7 @@ async def insert_successful_task(
 ) -> tuple[str, str]:
     prepared = prepare_canonical_json(result)
     evaluation_strategy = (
-        DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(task_kind)
-        if role == "evaluator"
-        else None
+        DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(task_kind) if role == "evaluator" else None
     )
     async with engine.begin() as connection:
         if workspace_lock_version is not None:
@@ -146,13 +142,9 @@ async def insert_successful_task(
                     and source_chapter_candidate_review_id is None
                 ):
                     if scope_layer == "book":
-                        source_book_candidate_review_id = (
-                            workspace_identity.active_repair_review_id
-                        )
+                        source_book_candidate_review_id = workspace_identity.active_repair_review_id
                     elif scope_layer == "arc":
-                        source_arc_candidate_review_id = (
-                            workspace_identity.active_repair_review_id
-                        )
+                        source_arc_candidate_review_id = workspace_identity.active_repair_review_id
                     else:
                         source_chapter_candidate_review_id = (
                             workspace_identity.active_repair_review_id
@@ -192,17 +184,11 @@ async def insert_successful_task(
                 source_arc_parent_review_id=source_arc_parent_review_id,
                 source_book_parent_review_id=source_book_parent_review_id,
                 source_arc_closure_review_id=source_arc_closure_review_id,
-                source_book_completion_review_id=(
-                    source_book_completion_review_id
-                ),
+                source_book_completion_review_id=(source_book_completion_review_id),
                 source_book_candidate_review_id=source_book_candidate_review_id,
                 source_arc_candidate_review_id=source_arc_candidate_review_id,
-                source_chapter_candidate_review_id=(
-                    source_chapter_candidate_review_id
-                ),
-                source_book_progress_handoff_id=(
-                    source_book_progress_handoff_id
-                ),
+                source_chapter_candidate_review_id=(source_chapter_candidate_review_id),
+                source_book_progress_handoff_id=(source_book_progress_handoff_id),
                 source_chapter_arc_request_id=source_chapter_arc_request_id,
                 source_arc_book_request_id=source_arc_book_request_id,
                 source_arc_closure_id=source_arc_closure_id,
@@ -220,22 +206,14 @@ async def insert_successful_task(
                 output_schema_version=1,
                 output_schema_fingerprint=prepared.sha256,
                 evaluation_strategy_id=(
-                    None
-                    if evaluation_strategy is None
-                    else evaluation_strategy.strategy_id
+                    None if evaluation_strategy is None else evaluation_strategy.strategy_id
                 ),
                 evaluation_strategy_version=(
-                    None
-                    if evaluation_strategy is None
-                    else evaluation_strategy.strategy_version
+                    None if evaluation_strategy is None else evaluation_strategy.strategy_version
                 ),
-                rubric_id=(
-                    None if evaluation_strategy is None else evaluation_strategy.rubric_id
-                ),
+                rubric_id=(None if evaluation_strategy is None else evaluation_strategy.rubric_id),
                 rubric_version=(
-                    None
-                    if evaluation_strategy is None
-                    else evaluation_strategy.rubric_version
+                    None if evaluation_strategy is None else evaluation_strategy.rubric_version
                 ),
                 harness_policy_id="novelpilot-domain-harness",
                 harness_policy_version=1,
@@ -356,8 +334,7 @@ async def seed_approved_book_and_arc(
                                 else "Resolve the central memory mystery."
                             ),
                             core_goal=(
-                                f"Advance evidence stage {ordinal} through "
-                                "physical investigation."
+                                f"Advance evidence stage {ordinal} through physical investigation."
                             ),
                             handoff_from_previous=(
                                 "Open from the creator-approved mystery premise."
@@ -425,9 +402,7 @@ async def seed_approved_book_and_arc(
             submission_id=submitted.result.submission_id,
             evaluator_task_id=book_task_id,
             evaluator_attempt_id=book_attempt_id,
-            rubric_id=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
-                "evaluate.book"
-            ).rubric_id,
+            rubric_id=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task("evaluate.book").rubric_id,
             rubric_version=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
                 "evaluate.book"
             ).rubric_version,
@@ -473,32 +448,13 @@ async def seed_approved_book_and_arc(
         workspace_lock_version=created_arc.result.workspace_lock_version,
         result=ArcPlanProposal(
             title="The First Contradiction",
-            desired_state_transition=ArcStateTransition(
-                start_state="The first memory contradiction is unexplained.",
-                end_state="The first edit source is identified with physical evidence.",
-            ),
-            conflict_trajectory=["Witnesses disagree", "Physical evidence survives"],
-            pacing_trajectory=["Establish contradiction", "Test it", "Close the stage"],
-            character_obligations=["The investigator changes one belief about memory."],
-            foreshadowing_obligations=["Leave one clue for the next Arc."],
-            prohibitions=["Do not contradict committed Canon."],
-            closure_signals=[
-                ArcClosureSignal(
-                    signal_key="first_edit_identified",
-                    description="The source of the first edit is identified.",
-                    evidence_expectation="Committed Chapter observations identify it.",
-                )
-            ],
             chapter_outline=[
                 ArcChapterOutlineEntry(
                     title=f"Chapter {index + 1}",
                     core_event=(
                         "Witnesses disagree"
                         if index == 0
-                        else (
-                            "The discrepancy leaves physical evidence "
-                            f"at assignment {index + 1}"
-                        )
+                        else (f"The discrepancy leaves physical evidence at assignment {index + 1}")
                     ),
                     hook=(
                         "The surviving evidence demands another test."
@@ -562,9 +518,7 @@ async def seed_approved_book_and_arc(
             submission_id=submitted_arc.result.submission_id,
             evaluator_task_id=evaluator_task_id,
             evaluator_attempt_id=evaluator_attempt_id,
-            rubric_id=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
-                "evaluate.arc"
-            ).rubric_id,
+            rubric_id=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task("evaluate.arc").rubric_id,
             rubric_version=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
                 "evaluate.arc"
             ).rubric_version,

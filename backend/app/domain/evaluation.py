@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -44,18 +44,6 @@ class CreatorInputNeed(BaseModel):
         min_length=1,
         description="Why committed evidence cannot resolve this question without the user.",
     )
-
-
-class ContractSignalStatus(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    signal_key: str = Field(min_length=1)
-    status: EvidenceStatus
-    evidence: list[str] = Field(
-        default_factory=list,
-        description="Committed Chapter or Canon evidence relevant to this signal.",
-    )
-    rationale: str = Field(min_length=1)
 
 
 class CompletionRequirementStatus(BaseModel):
@@ -139,18 +127,13 @@ class ArcParentContractEvaluation(BaseModel):
         book_review_required = self.book_review_concern == "book_review_required"
         revision_warranted = self.arc_contract_judgment == "revision_warranted"
         creator_required = self.creator_input_need is not None
-        if (
-            book_review_required
-            and self.arc_contract_judgment != "remains_applicable"
-        ):
+        if book_review_required and self.arc_contract_judgment != "remains_applicable":
             raise ValueError(
                 "book_review_required keeps the current Arc contract applicable "
                 "until Book authority decides."
             )
         if required != (self.chapter_evidence_target is not None):
-            raise ValueError(
-                "chapter_evidence_review_required needs one semantic Chapter target."
-            )
+            raise ValueError("chapter_evidence_review_required needs one semantic Chapter target.")
         _validate_issue_route(
             required=book_review_required,
             kind="parent_authority_concern",
@@ -173,9 +156,7 @@ class ArcParentContractEvaluation(BaseModel):
             raise ValueError("Arc parent review may select only one authority disposition.")
         if revision_warranted and (required or creator_required):
             raise ValueError("Arc revision cannot hide an evidence route or creator wait.")
-        if self.arc_contract_judgment == "unable_to_judge" and (
-            book_review_required or required
-        ):
+        if self.arc_contract_judgment == "unable_to_judge" and (book_review_required or required):
             raise ValueError("unable_to_judge cannot also select another authority route.")
         if creator_required and (book_review_required or revision_warranted or required):
             raise ValueError(
@@ -265,10 +246,7 @@ class BookParentContractEvaluation(BaseModel):
         )
         if revision_warranted and (evidence_required or creator_required):
             raise ValueError("Book revision cannot hide an evidence route or creator wait.")
-        if (
-            self.book_contract_judgment == "unable_to_judge"
-            and evidence_required
-        ):
+        if self.book_contract_judgment == "unable_to_judge" and evidence_required:
             raise ValueError("unable_to_judge cannot also select an evidence route.")
         if creator_required and (revision_warranted or evidence_required):
             raise ValueError(
@@ -298,126 +276,119 @@ class BookParentContractEvaluation(BaseModel):
         return self
 
 
-class ArcClosureEvaluation(BaseModel):
+class ArcClosureClosed(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    signal_statuses: list[ContractSignalStatus] = Field(min_length=1)
-    arc_contract_judgment: ArcContractJudgment = Field(
+    kind: Literal["closed"]
+    summary: str = Field(
+        min_length=1,
         description=(
-            "Use unable_to_judge only for one standalone creator-owned input need."
-        )
+            "Why the committed Arc evidence semantically satisfies every exit condition "
+            "of the exact assigned Book Arc contract."
+        ),
     )
-    book_review_concern: Literal["not_required", "book_review_required"] = Field(
-        description="Keep not_required for a creator wait or lower evidence review."
-    )
-    chapter_evidence_concern: Literal[
-        "not_required",
-        "chapter_evidence_review_required",
-    ] = Field(
+    evidence: list[str] = Field(
+        min_length=1,
         description=(
-            "Select Chapter evidence review only as its own disposition. Keep this "
-            "not_required for a creator wait."
-        )
-    )
-    chapter_evidence_target: ChapterEvidenceTarget | None = Field(
-        default=None,
-        description="Present exactly when Chapter evidence review is required.",
-    )
-    summary: str = Field(min_length=1)
-    issues: list[EvaluationIssue] = Field(default_factory=list)
-    creator_input_need: CreatorInputNeed | None = Field(
-        default=None,
-        description=(
-            "A standalone creator-owned need. It requires unable_to_judge and cannot "
-            "be combined with revision, Book review, or Chapter evidence review."
+            "Committed Chapter or Canon evidence supporting closure. Use semantic "
+            "evidence, not copied storage identities or exit-condition keys."
         ),
     )
 
-    @field_validator("signal_statuses")
-    @classmethod
-    def _unique_signal_keys(
-        cls, value: list[ContractSignalStatus]
-    ) -> list[ContractSignalStatus]:
-        keys = [item.signal_key for item in value]
-        if len(keys) != len(set(keys)):
-            raise ValueError("Arc closure signal keys must be unique.")
-        return value
+
+class ArcClosureReviseArc(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["revise_arc"]
+    summary: str = Field(min_length=1)
+    issues: list[EvaluationIssue] = Field(min_length=1)
 
     @model_validator(mode="after")
-    def _chapter_evidence_shape(self) -> ArcClosureEvaluation:
-        required = self.chapter_evidence_concern == "chapter_evidence_review_required"
-        book_review_required = self.book_review_concern == "book_review_required"
-        revision_warranted = self.arc_contract_judgment == "revision_warranted"
-        creator_required = self.creator_input_need is not None
-        if required != (self.chapter_evidence_target is not None):
-            raise ValueError(
-                "chapter_evidence_review_required needs one semantic Chapter target."
-            )
-        _validate_issue_route(
-            required=book_review_required,
-            kind="parent_authority_concern",
+    def _local_issue_boundary(self) -> ArcClosureReviseArc:
+        _validate_unique_issue_codes(self.issues)
+        _validate_only_issue_kinds(
             issues=self.issues,
-            route_name="book_review_required",
+            allowed=_LOCAL_REVIEW_ISSUE_KINDS,
+            route_name="Arc closure revision",
         )
-        _validate_issue_route(
-            required=required,
-            kind="derived_evidence_mismatch",
-            issues=self.issues,
-            route_name="chapter_evidence_review_required",
-        )
-        _validate_creator_input_boundary(
-            unable_to_judge=self.arc_contract_judgment == "unable_to_judge",
-            creator_input_need=self.creator_input_need,
-            issues=self.issues,
-            require_standalone=True,
-        )
-        if book_review_required and (revision_warranted or required or creator_required):
-            raise ValueError("Arc closure may select only one authority disposition.")
-        if revision_warranted and (required or creator_required):
-            raise ValueError("Arc revision cannot hide an evidence route or creator wait.")
-        if self.arc_contract_judgment == "unable_to_judge" and (
-            book_review_required or required
-        ):
-            raise ValueError("unable_to_judge cannot also select another authority route.")
-        if creator_required and (book_review_required or revision_warranted or required):
-            raise ValueError(
-                "A creator input need is a standalone Arc-closure disposition and cannot "
-                "also select revision, Book review, or Chapter evidence review."
-            )
-        if creator_required:
-            _validate_only_issue_kinds(
-                issues=self.issues,
-                allowed=frozenset({"creator_owned_unknown"}),
-                route_name="creator wait",
-            )
-        elif book_review_required:
-            _validate_only_issue_kinds(
-                issues=self.issues,
-                allowed=frozenset({"parent_authority_concern"}),
-                route_name="book_review_required",
-            )
-        elif required:
-            _validate_only_issue_kinds(
-                issues=self.issues,
-                allowed=frozenset({"derived_evidence_mismatch"}),
-                route_name="chapter_evidence_review_required",
-            )
-        elif revision_warranted:
-            _validate_only_issue_kinds(
-                issues=self.issues,
-                allowed=_LOCAL_REVIEW_ISSUE_KINDS,
-                route_name="Arc revision",
-            )
-        elif all(item.status == "satisfied" for item in self.signal_statuses):
-            if self.issues:
-                raise ValueError("A satisfied Arc closure cannot carry ignored blockers.")
-        else:
-            _validate_only_issue_kinds(
-                issues=self.issues,
-                allowed=_LOCAL_REVIEW_ISSUE_KINDS,
-                route_name="Arc closure correction",
-            )
         return self
+
+
+class ArcClosureEscalateToBook(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["escalate_to_book"]
+    summary: str = Field(min_length=1)
+    issues: list[EvaluationIssue] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _parent_issue_boundary(self) -> ArcClosureEscalateToBook:
+        _validate_unique_issue_codes(self.issues)
+        _validate_only_issue_kinds(
+            issues=self.issues,
+            allowed=frozenset({"parent_authority_concern"}),
+            route_name="Arc closure Book escalation",
+        )
+        return self
+
+
+class ArcClosureCorrectChapterEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["correct_chapter_evidence"]
+    summary: str = Field(min_length=1)
+    target: ChapterEvidenceTarget
+    issues: list[EvaluationIssue] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _evidence_issue_boundary(self) -> ArcClosureCorrectChapterEvidence:
+        _validate_unique_issue_codes(self.issues)
+        _validate_only_issue_kinds(
+            issues=self.issues,
+            allowed=frozenset({"derived_evidence_mismatch"}),
+            route_name="Arc closure Chapter evidence correction",
+        )
+        return self
+
+
+class ArcClosureNeedsUser(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["needs_user"]
+    summary: str = Field(min_length=1)
+    creator_input_need: CreatorInputNeed
+    issues: list[EvaluationIssue] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _creator_issue_boundary(self) -> ArcClosureNeedsUser:
+        _validate_unique_issue_codes(self.issues)
+        _validate_only_issue_kinds(
+            issues=self.issues,
+            allowed=frozenset({"creator_owned_unknown"}),
+            route_name="Arc closure creator wait",
+        )
+        return self
+
+
+ArcClosureOutcome = Annotated[
+    ArcClosureClosed
+    | ArcClosureReviseArc
+    | ArcClosureEscalateToBook
+    | ArcClosureCorrectChapterEvidence
+    | ArcClosureNeedsUser,
+    Field(discriminator="kind"),
+]
+
+
+class ArcClosureEvaluation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    outcome: ArcClosureOutcome = Field(
+        description=(
+            "Exactly one semantic Arc-closure outcome. Each outcome exposes only its "
+            "own evidence or authority payload, so no field-priority routing is needed."
+        )
+    )
 
 
 class BookCompletionEvaluation(BaseModel):
@@ -457,10 +428,7 @@ class BookCompletionEvaluation(BaseModel):
             issues=self.issues,
             message="Book completion exposes no lower evidence-correction route.",
         )
-        if (
-            self.book_contract_judgment == "revision_warranted"
-            and creator_required
-        ):
+        if self.book_contract_judgment == "revision_warranted" and creator_required:
             raise ValueError("Book revision cannot hide a creator wait.")
         if creator_required:
             _validate_only_issue_kinds(
@@ -476,15 +444,10 @@ class BookCompletionEvaluation(BaseModel):
             )
             if (
                 self.book_contract_judgment == "remains_applicable"
-                and all(
-                    item.status == "satisfied"
-                    for item in self.requirement_statuses
-                )
+                and all(item.status == "satisfied" for item in self.requirement_statuses)
                 and self.issues
             ):
-                raise ValueError(
-                    "A satisfied Book completion cannot carry ignored blockers."
-                )
+                raise ValueError("A satisfied Book completion cannot carry ignored blockers.")
         return self
 
 
@@ -505,13 +468,9 @@ class ChapterEvidenceCorrectionEvaluation(BaseModel):
             and self.descendant_facts_remain_consistent
         )
         if supported and self.issues:
-            raise ValueError(
-                "A passing evidence-correction verification cannot carry blockers."
-            )
+            raise ValueError("A passing evidence-correction verification cannot carry blockers.")
         if not supported and not self.issues:
-            raise ValueError(
-                "A failed evidence-correction verification requires an EP1 blocker."
-            )
+            raise ValueError("A failed evidence-correction verification requires an EP1 blocker.")
         _validate_no_issue_kind(
             kind="parent_authority_concern",
             issues=self.issues,
@@ -533,20 +492,12 @@ def _validate_creator_input_boundary(
     require_standalone: bool = False,
 ) -> None:
     if unable_to_judge and creator_input_need is None:
-        raise ValueError(
-            "unable_to_judge requires one concrete creator input need."
-        )
+        raise ValueError("unable_to_judge requires one concrete creator input need.")
     if require_standalone and creator_input_need is not None and not unable_to_judge:
-        raise ValueError(
-            "A standalone creator input need requires unable_to_judge."
-        )
-    has_creator_unknown = any(
-        issue.kind == "creator_owned_unknown" for issue in issues
-    )
+        raise ValueError("A standalone creator input need requires unable_to_judge.")
+    has_creator_unknown = any(issue.kind == "creator_owned_unknown" for issue in issues)
     if (creator_input_need is not None) != has_creator_unknown:
-        raise ValueError(
-            "A creator input need and creator_owned_unknown blocker are atomic."
-        )
+        raise ValueError("A creator input need and creator_owned_unknown blocker are atomic.")
 
 
 def _validate_issue_route(
@@ -558,9 +509,7 @@ def _validate_issue_route(
 ) -> None:
     present = any(issue.kind == kind for issue in issues)
     if required != present:
-        raise ValueError(
-            f"{route_name} and its {kind} EP1 issue are atomic."
-        )
+        raise ValueError(f"{route_name} and its {kind} EP1 issue are atomic.")
 
 
 def _validate_no_issue_kind(
@@ -582,6 +531,11 @@ def _validate_only_issue_kinds(
     illegal = {issue.kind for issue in issues}.difference(allowed)
     if illegal:
         raise ValueError(
-            f"{route_name} cannot carry unrelated EP1 issue kinds: "
-            f"{', '.join(sorted(illegal))}."
+            f"{route_name} cannot carry unrelated EP1 issue kinds: {', '.join(sorted(illegal))}."
         )
+
+
+def _validate_unique_issue_codes(issues: list[EvaluationIssue]) -> None:
+    codes = [issue.code for issue in issues]
+    if len(codes) != len(set(codes)):
+        raise ValueError("Arc closure issue codes must be unique.")

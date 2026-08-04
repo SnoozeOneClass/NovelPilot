@@ -25,7 +25,6 @@ from app.domain.evaluation import (
     ChapterEvidenceCorrectionEvaluation,
     ChapterEvidenceTarget,
     CompletionRequirementStatus,
-    ContractSignalStatus,
     CreatorInputNeed,
 )
 
@@ -33,9 +32,7 @@ from app.domain.evaluation import (
 def test_ordinary_chapter_fact_is_open_world_and_has_no_truth_protocol() -> None:
     fact = EstablishedFactCandidate(
         statement="Xu Lan has never recorded this event during the prior twelve years.",
-        evidence_hint=(
-            "The current Chapter establishes this through her archive inspection."
-        ),
+        evidence_hint=("The current Chapter establishes this through her archive inspection."),
     )
     assert fact.statement.startswith("Xu Lan")
     assert set(fact.model_dump()) == {"statement", "evidence_hint"}
@@ -123,9 +120,7 @@ def test_ep1_kind_requires_minimum_evidence_without_rejecting_relevant_diagnosti
         code="completion_requirement_not_entailed",
         subject="current_incident_separation",
         summary="The owning Arc is broader than the exact completion requirement.",
-        evidence=[
-            "The requirement names exact actors, actions, and a causal relationship."
-        ],
+        evidence=["The requirement names exact actors, actions, and a causal relationship."],
         contract_item=(
             "Tang Qiao places the page; Gu Xiangchao obstructs verification and causes "
             "the delay and fall."
@@ -216,11 +211,7 @@ def test_layer_authority_and_creator_wait_decisions_fail_closed() -> None:
         guidance_authority_judgment="requires_parent_review",
         decision="escalate_to_arc",
         summary="The diagnostic locations do not grant a local repair.",
-        issues=[
-            chapter_parent.model_copy(
-                update={"observed_components": ["plan", "prose"]}
-            )
-        ],
+        issues=[chapter_parent.model_copy(update={"observed_components": ["plan", "prose"]})],
     )
     assert escalation.decision == "escalate_to_arc"
     assert escalation.issues[0].observed_components == ["plan", "prose"]
@@ -347,7 +338,7 @@ def test_one_decision_cannot_hide_mixed_issues_and_observations_are_diagnostic()
             summary="Mixed local and parent issues cannot share one route.",
             issues=[arc_parent, arc_local],
         )
-    with pytest.raises(ValidationError, match="must be unique"):
+    with pytest.raises(ValidationError, match="observed_components"):
         ArcEvaluationIssue(
             kind="contract_unfulfilled",
             code="arc_exit_missing",
@@ -355,10 +346,7 @@ def test_one_decision_cannot_hide_mixed_issues_and_observations_are_diagnostic()
             summary="The candidate omits the assigned exit.",
             evidence=["The frozen candidate does not complete the transition."],
             contract_item="Complete the assigned Arc transition.",
-            observed_components=[
-                "desired_state_transition",
-                "desired_state_transition",
-            ],
+            observed_components=["chapter_outline"],
         )
 
     chapter_parent = ChapterEvaluationIssue(
@@ -420,27 +408,18 @@ def test_parent_and_evidence_routes_require_their_exact_ep1_issue_kind() -> None
             chapter_evidence_concern="not_required",
             summary="The route omits its issue ledger.",
         )
-    with pytest.raises(
-        ValidationError,
-        match="chapter_evidence_review_required.*atomic",
-    ):
-        ArcClosureEvaluation(
-            signal_statuses=[
-                ContractSignalStatus(
-                    signal_key="exit",
-                    status="satisfied",
-                    evidence=["Formal Chapter 3 establishes the exit state."],
-                    rationale="The frozen closure signal is satisfied.",
-                )
-            ],
-            arc_contract_judgment="remains_applicable",
-            book_review_concern="not_required",
-            chapter_evidence_concern="chapter_evidence_review_required",
-            chapter_evidence_target=ChapterEvidenceTarget(
-                chapter_book_ordinal=2,
-                correction_goal="Correct the derived confession observation.",
-            ),
-            summary="The route omits its evidence mismatch.",
+    with pytest.raises(ValidationError, match="issues"):
+        ArcClosureEvaluation.model_validate(
+            {
+                "outcome": {
+                    "kind": "correct_chapter_evidence",
+                    "summary": "The route omits its evidence mismatch.",
+                    "target": {
+                        "chapter_book_ordinal": 2,
+                        "correction_goal": ("Correct the derived confession observation."),
+                    },
+                }
+            }
         )
     with pytest.raises(
         ValidationError,
@@ -546,21 +525,16 @@ def test_successful_closure_and_completion_cannot_hide_ep1_blockers() -> None:
         evidence=["The requirement calls for a public retraction."],
         contract_item="The witness publicly retracts the altered statement.",
     )
-    with pytest.raises(ValidationError, match="satisfied Arc closure"):
-        ArcClosureEvaluation(
-            signal_statuses=[
-                ContractSignalStatus(
-                    signal_key="exit",
-                    status="satisfied",
-                    evidence=["The formal Chapter establishes the exit state."],
-                    rationale="The frozen signal is satisfied.",
-                )
-            ],
-            arc_contract_judgment="remains_applicable",
-            book_review_concern="not_required",
-            chapter_evidence_concern="not_required",
-            summary="The closure claims success while carrying a blocker.",
-            issues=[local_issue],
+    with pytest.raises(ValidationError, match="issues"):
+        ArcClosureEvaluation.model_validate(
+            {
+                "outcome": {
+                    "kind": "closed",
+                    "summary": "The closure claims success while carrying a blocker.",
+                    "evidence": ["The formal Chapter establishes the exit state."],
+                    "issues": [local_issue.model_dump(mode="json")],
+                }
+            }
         )
     with pytest.raises(ValidationError, match="satisfied Book completion"):
         BookCompletionEvaluation(
@@ -635,35 +609,36 @@ def test_creator_wait_is_standalone_from_bounded_evidence_correction() -> None:
     )
     assert book_wait.creator_input_need == need
 
-    closure_status = ContractSignalStatus(
-        signal_key="intent_resolved",
-        status="unresolved",
-        rationale="The creator-owned intent is deliberately undefined.",
-    )
     with pytest.raises(ValidationError):
-        ArcClosureEvaluation(
-            signal_statuses=[closure_status],
-            arc_contract_judgment="remains_applicable",
-            book_review_concern="not_required",
-            chapter_evidence_concern="chapter_evidence_review_required",
-            chapter_evidence_target=ChapterEvidenceTarget(
-                chapter_book_ordinal=2,
-                correction_goal="Resolve the remaining creator-owned intent ambiguity.",
-            ),
-            summary="An invalid closure combines evidence correction and creator wait.",
-            issues=[creator_issue],
-            creator_input_need=need,
+        ArcClosureEvaluation.model_validate(
+            {
+                "outcome": {
+                    "kind": "correct_chapter_evidence",
+                    "summary": (
+                        "An invalid closure combines evidence correction and creator wait."
+                    ),
+                    "target": {
+                        "chapter_book_ordinal": 2,
+                        "correction_goal": (
+                            "Resolve the remaining creator-owned intent ambiguity."
+                        ),
+                    },
+                    "issues": [creator_issue.model_dump(mode="json")],
+                    "creator_input_need": need.model_dump(mode="json"),
+                }
+            }
         )
-    closure_wait = ArcClosureEvaluation(
-        signal_statuses=[closure_status],
-        arc_contract_judgment="unable_to_judge",
-        book_review_concern="not_required",
-        chapter_evidence_concern="not_required",
-        summary="Only creator intent can resolve the closure review.",
-        issues=[creator_issue],
-        creator_input_need=need,
+    closure_wait = ArcClosureEvaluation.model_validate(
+        {
+            "outcome": {
+                "kind": "needs_user",
+                "summary": "Only creator intent can resolve the closure review.",
+                "issues": [creator_issue.model_dump(mode="json")],
+                "creator_input_need": need.model_dump(mode="json"),
+            }
+        }
     )
-    assert closure_wait.creator_input_need == need
+    assert closure_wait.outcome.creator_input_need == need
 
 
 def test_initial_chapter_result_cannot_encode_repair_recurrence() -> None:

@@ -90,7 +90,9 @@ class ProfileSnapshot(BaseModel):
 
     @field_validator("request_options")
     @classmethod
-    def _request_options_cannot_override_harness(cls, value: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    def _request_options_cannot_override_harness(
+        cls, value: dict[str, JsonValue]
+    ) -> dict[str, JsonValue]:
         forbidden = {
             "timeout",
             "connect_timeout",
@@ -174,9 +176,7 @@ class AgentTaskPlan(BaseModel):
     subject_arc_baseline_id: str | None = None
     canon_baseline_id: str
     correction_lineage_id: str | None = None
-    correction_lineage_origin: Literal["review_initiated", "user_initiated"] | None = (
-        None
-    )
+    correction_lineage_origin: Literal["review_initiated", "user_initiated"] | None = None
     automatic_correction_round: Literal[0, 1] | None = None
     source_arc_parent_review_id: str | None = None
     source_book_parent_review_id: str | None = None
@@ -304,17 +304,12 @@ class AgentTaskPlan(BaseModel):
             self.task_kind != "evaluate.book_parent_contract"
             and self.subject_arc_baseline_id is not None
         ):
-            raise ValueError(
-                "Only a Book parent-contract task may freeze an Arc review subject."
-            )
+            raise ValueError("Only a Book parent-contract task may freeze an Arc review subject.")
         if (self.rubric_id is None) != (self.rubric_version is None):
             raise ValueError("rubric_id and rubric_version must be present together.")
-        if (self.evaluation_strategy_id is None) != (
-            self.evaluation_strategy_version is None
-        ):
+        if (self.evaluation_strategy_id is None) != (self.evaluation_strategy_version is None):
             raise ValueError(
-                "evaluation_strategy_id and evaluation_strategy_version "
-                "must be present together."
+                "evaluation_strategy_id and evaluation_strategy_version must be present together."
             )
         if self.rubric_id is None:
             if self.rubric_text is not None:
@@ -340,16 +335,11 @@ class AgentTaskPlan(BaseModel):
         )
         if sum(source is not None for source in candidate_review_sources) > 1:
             raise ValueError("A Task Plan may bind at most one candidate review.")
-        if (self.workspace_lock_version is None) != (
-            self.workspace_work_cycle_id is None
-        ):
+        if (self.workspace_lock_version is None) != (self.workspace_work_cycle_id is None):
             raise ValueError(
                 "Workspace lock and semantic work-cycle identity must be frozen together."
             )
-        if (
-            self.workspace_work_cycle_id is not None
-            and not self.workspace_work_cycle_id.strip()
-        ):
+        if self.workspace_work_cycle_id is not None and not self.workspace_work_cycle_id.strip():
             raise ValueError("Workspace semantic work-cycle identity must be non-blank.")
         authority_sources = (
             self.source_chapter_arc_request_id,
@@ -372,15 +362,15 @@ class AgentTaskPlan(BaseModel):
             and self.source_feedback_id is not None
         ):
             raise ValueError("Review-initiated correction cannot bind user feedback.")
-        elif (
-            self.correction_lineage_origin == "user_initiated"
-            and self.source_feedback_id is None
-        ):
+        elif self.correction_lineage_origin == "user_initiated" and self.source_feedback_id is None:
             raise ValueError("User-initiated correction must bind its feedback item.")
         if self.toolset:
             raise ValueError("O1 tasks cannot expose run-local or domain write tools.")
         if self.output_mode == "native_json_schema":
-            if self.required_capabilities != ("native_json_schema",) or self.model_request_limit != 2:
+            if (
+                self.required_capabilities != ("native_json_schema",)
+                or self.model_request_limit != 2
+            ):
                 raise ValueError("Native tasks require native_json_schema and two model requests.")
         elif self.required_capabilities != ("text_streaming",) or self.model_request_limit != 1:
             raise ValueError("Prose tasks require text_streaming and one model request.")
@@ -590,41 +580,6 @@ class BookDiscussionResult(BaseModel):
     )
 
 
-class ArcStateTransition(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    start_state: str = Field(
-        min_length=1,
-        description="Authoritative stage state that the Arc begins from.",
-    )
-    end_state: str = Field(
-        min_length=1,
-        description="Observable stage state that the Arc must establish at closure.",
-    )
-
-
-class ArcClosureSignal(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    signal_key: str = Field(
-        min_length=1,
-        pattern=r"^[a-z0-9][a-z0-9_.-]*$",
-        description="Stable semantic key used to match closure evidence.",
-    )
-    description: str = Field(
-        min_length=1,
-        description="Observable condition whose satisfaction can be evaluated.",
-    )
-    evidence_expectation: str = Field(
-        min_length=1,
-        description="What committed Chapter or Canon evidence can prove the signal.",
-    )
-    required: bool = Field(
-        default=True,
-        description="Whether Arc closure requires this signal to be satisfied.",
-    )
-
-
 class ArcChapterOutlineEntry(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -663,31 +618,12 @@ class ArcChapterOutlineEntry(BaseModel):
 class ArcPlanProposal(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    title: str = Field(min_length=1, description="Creator-facing title for this Story Arc.")
-    desired_state_transition: ArcStateTransition
-    conflict_trajectory: list[str] = Field(
+    title: str = Field(
         min_length=1,
-        description="Ordered stage-level escalation and resolution trajectory.",
-    )
-    pacing_trajectory: list[str] = Field(
-        min_length=1,
-        description="Stage-level pacing phases without prescribing every Chapter.",
-    )
-    character_obligations: list[str] = Field(
-        min_length=1,
-        description="Character or relationship changes this Arc must establish.",
-    )
-    foreshadowing_obligations: list[str] = Field(
-        default_factory=list,
-        description="Foreshadowing promises to plant, advance, or pay off in this Arc.",
-    )
-    prohibitions: list[str] = Field(
-        min_length=1,
-        description="Book constraints and outcomes this Arc must not violate.",
-    )
-    closure_signals: list[ArcClosureSignal] = Field(
-        min_length=1,
-        description="Observable contract used by the mandatory Arc closure evaluation.",
+        description=(
+            "Creator-facing title for this Story Arc. It is presentation content, not "
+            "a semantic completion gate."
+        ),
     )
     chapter_outline: list[ArcChapterOutlineEntry] = Field(
         default_factory=list,
@@ -700,17 +636,13 @@ class ArcPlanProposal(BaseModel):
         ),
     )
 
-    @field_validator("closure_signals")
+    @field_validator("title")
     @classmethod
-    def _unique_closure_signals(
-        cls, value: list[ArcClosureSignal]
-    ) -> list[ArcClosureSignal]:
-        keys = [signal.signal_key for signal in value]
-        if len(keys) != len(set(keys)):
-            raise ValueError("Arc closure signal keys must be unique.")
-        if not any(signal.required for signal in value):
-            raise ValueError("An Arc contract needs at least one required closure signal.")
+    def _non_blank_title(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Story Arc title must be non-blank.")
         return value
+
 
 class ChapterPlanProposal(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -835,9 +767,7 @@ class ChapterObservationsRepair(BaseModel):
     )
     established_facts: list[EstablishedFactCandidate] = Field(
         default_factory=list,
-        description=(
-            "Replacement unbound facts established by the same frozen Chapter prose."
-        ),
+        description=("Replacement unbound facts established by the same frozen Chapter prose."),
     )
 
 
@@ -959,39 +889,27 @@ class EvaluationIssue(BaseModel):
             and bool(self.contrary_formal_statement.strip())
         )
         has_any_statement = (
-            self.candidate_claim is not None
-            or self.contrary_formal_statement is not None
+            self.candidate_claim is not None or self.contrary_formal_statement is not None
         )
-        if (
-            self.kind in {"explicit_conflict", "derived_evidence_mismatch"}
-            and not statement_pair
-        ):
-            raise ValueError(
-                f"{self.kind} requires affirmative candidate and formal statements."
-            )
+        if self.kind in {"explicit_conflict", "derived_evidence_mismatch"} and not statement_pair:
+            raise ValueError(f"{self.kind} requires affirmative candidate and formal statements.")
         if has_any_statement and not statement_pair:
             raise ValueError(
                 "Candidate/formal diagnostic statements must be supplied together and "
                 "must both be non-blank."
             )
 
-        has_contract_item = self.contract_item is not None and bool(
-            self.contract_item.strip()
-        )
+        has_contract_item = self.contract_item is not None and bool(self.contract_item.strip())
         if self.contract_item is not None and not has_contract_item:
             raise ValueError("A supplied contract item must be non-blank.")
         if self.kind == "contract_unfulfilled" and not has_contract_item:
-            raise ValueError(
-                "contract_unfulfilled requires one explicit contract item."
-            )
+            raise ValueError("contract_unfulfilled requires one explicit contract item.")
 
         has_support_gap = self.support_gap is not None and bool(self.support_gap.strip())
         if self.support_gap is not None and not has_support_gap:
             raise ValueError("A supplied support gap must be non-blank.")
         if self.kind == "unsupported_strong_conclusion" and not has_support_gap:
-            raise ValueError(
-                "unsupported_strong_conclusion requires one support gap."
-            )
+            raise ValueError("unsupported_strong_conclusion requires one support gap.")
 
         has_creator_question = self.creator_question is not None and bool(
             self.creator_question.strip()
@@ -1076,42 +994,28 @@ class _ChapterEvaluationResultBase(BaseModel):
             self.guidance_authority_judgment == "requires_parent_review"
             and self.decision != "escalate_to_arc"
         ):
-            raise ValueError(
-                "Chapter guidance requiring parent authority must escalate to Arc."
-            )
+            raise ValueError("Chapter guidance requiring parent authority must escalate to Arc.")
         if self.decision == "pass" and issues:
             raise ValueError("A passing Chapter evaluation cannot carry blocking issues.")
         if self.decision != "pass" and not issues:
             raise ValueError("A non-passing Chapter evaluation requires blocking issues.")
-        observed_scope = {
-            component
-            for issue in issues
-            for component in issue.observed_components
-        }
+        observed_scope = {component for issue in issues for component in issue.observed_components}
         if self.decision == "local_repair" and any(
             not issue.observed_components for issue in issues
         ):
-            raise ValueError(
-                "Every Chapter local-repair issue requires observed components."
-            )
+            raise ValueError("Every Chapter local-repair issue requires observed components.")
         if self.decision == "local_repair" and any(
             issue.kind == "parent_authority_concern" for issue in issues
         ):
-            raise ValueError(
-                "A parent-authority concern cannot authorize a Chapter-local repair."
-            )
+            raise ValueError("A parent-authority concern cannot authorize a Chapter-local repair.")
         if self.decision == "escalate_to_arc" and not any(
             issue.kind == "parent_authority_concern" for issue in issues
         ):
-            raise ValueError(
-                "escalate_to_arc requires an evidence-bound parent-authority concern."
-            )
+            raise ValueError("escalate_to_arc requires an evidence-bound parent-authority concern.")
         if self.decision == "escalate_to_arc" and any(
             issue.kind != "parent_authority_concern" for issue in issues
         ):
-            raise ValueError(
-                "escalate_to_arc may carry only direct-parent concerns."
-            )
+            raise ValueError("escalate_to_arc may carry only direct-parent concerns.")
         if (
             self.decision == "local_repair"
             and "plan" in observed_scope

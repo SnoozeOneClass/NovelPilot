@@ -32,9 +32,7 @@ def test_chapter_context_projects_current_and_next_without_full_arc_outline(
                 target_chapter_count=3,
                 arc_contract_count=2,
             )
-            created = await ChapterCommandService(
-                CommandBus(engine)
-            ).create_chapter(
+            created = await ChapterCommandService(CommandBus(engine)).create_chapter(
                 CreateChapterRequest(
                     project_id=foundation.project_id,
                     book_id=foundation.book_id,
@@ -55,19 +53,14 @@ def test_chapter_context_projects_current_and_next_without_full_arc_outline(
                 semantic_goal="Plan the assigned Chapter.",
             )
             assert "Witnesses disagree" in plan_context.prompt
-            assert (
-                "physical evidence at assignment 2"
-                in plan_context.prompt
-            )
-            assert (
-                "physical evidence at assignment 3"
-                not in plan_context.prompt
-            )
+            assert "physical evidence at assignment 2" in plan_context.prompt
+            assert "physical evidence at assignment 3" not in plan_context.prompt
             assert "approved_story_arc_plan" not in plan_context.prompt
-            assert (
-                plan_context.manifest["schema_id"]
-                == "novelpilot-task-context-manifest-v7"
-            )
+            assert '"assigned_book_arc_contract"' in plan_context.prompt
+            assert "Evidence stage 1 is resolved." in plan_context.prompt
+            assert "arc_contract_summary" not in plan_context.prompt
+            assert "closure_signals" not in plan_context.prompt
+            assert plan_context.manifest["schema_id"] == "novelpilot-task-context-manifest-v8"
             assert (
                 '<NOVELPILOT_CONTEXT role="current_assignment" '
                 'scope="chapter" time="current" use="constraint" '
@@ -80,7 +73,7 @@ def test_chapter_context_projects_current_and_next_without_full_arc_outline(
             assert projection["current_arc_ordinal"] == 1
             assert projection["next_arc_ordinal"] == 2
             assert projection["includes_next"] is True
-            assert len(cast(list[object], projection["sources"])) == 1
+            assert len(cast(list[object], projection["sources"])) == 3
 
             with pytest.raises(
                 ContextFactError,
@@ -104,10 +97,7 @@ def test_chapter_context_projects_current_and_next_without_full_arc_outline(
                 chapter_id=None,
                 semantic_goal="Evaluate the complete Arc outline.",
             )
-            assert (
-                "physical evidence at assignment 3"
-                in arc_context.prompt
-            )
+            assert "physical evidence at assignment 3" in arc_context.prompt
             arc_facts = cast(
                 dict[str, object],
                 arc_context.manifest["facts"],
@@ -115,24 +105,24 @@ def test_chapter_context_projects_current_and_next_without_full_arc_outline(
             assert arc_facts["active_applied_guidance_present"] is False
             assert '"active_applied_guidance_present":false' in arc_context.prompt
 
-            state = await ProjectStateQuery(engine).get_project(
-                foundation.project_id
-            )
+            state = await ProjectStateQuery(engine).get_project(foundation.project_id)
             assert state is not None
             assert state.book.arc_contract_count == 2
             assert state.book.final_arc_ordinal == 2
-            assert [
-                item.lifecycle_status for item in state.book.arc_topology
-            ] == ["active", "planned"]
+            assert [item.lifecycle_status for item in state.book.arc_topology] == [
+                "active",
+                "planned",
+            ]
             assert state.current_arc is not None
             assert state.current_arc.is_final is False
             assert state.current_arc.outline is not None
-            assert [
-                item.status for item in state.current_arc.outline.entries
-            ] == ["drafting", "planned", "planned"]
+            assert [item.status for item in state.current_arc.outline.entries] == [
+                "drafting",
+                "planned",
+                "planned",
+            ]
             assert {
-                item.source_arc_baseline_version
-                for item in state.current_arc.outline.entries
+                item.source_arc_baseline_version for item in state.current_arc.outline.entries
             } == {1}
         finally:
             await engine.dispose()

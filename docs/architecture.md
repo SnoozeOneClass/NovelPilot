@@ -58,7 +58,7 @@ Pydantic AI 接管通用能力：Provider/Model 调用、原生 JSON Schema、�
 | 角色 | 职责 |
 | --- | --- |
 | BookStrategist | Book 讨论、候选综合与正式修订候选 |
-| ArcPlanner | 当前 Story Arc 契约、从生效点到收束检查点的完整逐章大纲，以及获得授权后的未来计划修订候选 |
+| ArcPlanner | 读取 Book 对当前 ordinal 的精确只读契约，提出 Story Arc 标题与从生效点到收束检查点的完整逐章大纲，并在获得授权后整体重生尚未提交的未来大纲 |
 | ChapterWriter | 在 Harness 分配的当前 Arc 大纲项内完成 Chapter 细化计划、正文、观察与局部修订 |
 | Evaluator | 按任务绑定的 Book/Arc/Chapter、父层审查、Arc 收束、Book 边界和证据纠正策略只读评审 |
 
@@ -93,12 +93,14 @@ Agent Task 必须冻结同一个周期。`local_repair` 不是“取最新评审
 失败/停滞路径，不再自动循环。这与连接层的五次 transport retry 完全不同：
 Provider 重放始终执行同一份冻结 Task Plan，不能产生新的领域纠正授权。
 
-Book/Arc 的这一次纠正按“完整同层语义问题”授权，而不是按 Evaluator 首次点名的
-字段授权。`observed_components` 只记录诊断位置；Harness 为 Repair 冻结完整同层
+Book 的这一次纠正按“完整同层语义问题”授权，而不是按 Evaluator 首次点名的
+字段授权。`observed_components` 只记录诊断位置；Harness 为 Book Repair 冻结完整
 候选包络，Agent 扫描每个原始 issue 在包络中的全部出现位置并只返回实际变化。
-Book 包络不含正式标题且 topology 只允许未来 suffix，Arc 包络只含当前 Arc
-candidate；Verifier 读取 before/after、原始 issue ledger 和 Harness 生成的实际
-变化清单。Chapter 的 `observed_components` 同样只表示问题出现的位置，但仍采用
+Book 包络不含正式标题且 topology 只允许未来 suffix。Arc 不再拥有组件分类或稀疏
+patch 协议：Harness 冻结精确 Book Arc contract、Arc 标题、当前完整大纲和原始 issue
+ledger，Arc Agent 返回一份完整的未来 `chapter_outline`；Harness 保留标题、已提交
+前缀、稳定身份与 provenance，并拒绝无变化的结果。Chapter 的
+`observed_components` 同样只表示问题出现的位置，但仍采用
 dependency-aware 窄授权：只有 `local_repair` 后 Harness 才从诊断位置派生并冻结
 独立 Repair Contract；`escalate_to_arc` 即使提到 plan/prose 也不会产生本地修改
 权限，plan-only 约束只检查真正的 Repair Contract。初次 Chapter 评审不暴露
@@ -118,9 +120,9 @@ handoff。
 - Agent 只提出、修订或评审；Harness 通过 Domain Command 写权威状态。
 - 上游 baseline 更新后，未提交的下游 workspace 会失效并显式重绑；已提交历史不会被自动 rebase/replay。
 - 每个正式 Book baseline 冻结一个有序语义 Arc 拓扑，并且恰好标记一个最终 Arc。Book 只规定各 Arc 在全书中的职责、核心目标、前序交接和退出条件，不分配章节标题、章节事件、场景或每弧章数。
-- 每个 Book Arc contract 通过 `completion_requirement_keys` 显式承担当前 Book completion contract 中的要求。Harness 校验 key 身份、完整覆盖和 successor future suffix 的责任归属；现有 Book Evaluator 在同一次评审中逐项判断 `aligned / strength_mismatch / infeasible`，不新增第二个评审调用。这里的 `aligned` 是语义蕴含：负责 Arc 的目标与退出条件达成后，要求中不可省略的命名主体、行为、排除项、因果边、结果强度和证据预期必须必然成立；仅仅“方向相关”“澄清角色”或“排除统一布局”不能替代精确责任，缺失或只被暗示时必须判为 `strength_mismatch`，但不要求逐字匹配。Arc 只获得分配给自己的要求并负责把它们落实为 closure signals 与逐章大纲，因此 Book 仍不越级规划 Chapter。
+- 每个 Book Arc contract 通过 `completion_requirement_keys` 显式承担当前 Book completion contract 中的要求。Harness 校验 key 身份、完整覆盖和 successor future suffix 的责任归属；现有 Book Evaluator 在同一次评审中逐项判断 `aligned / strength_mismatch / infeasible`，不新增第二个评审调用。这里的 `aligned` 是语义蕴含：负责 Arc 的目标与退出条件达成后，要求中不可省略的命名主体、行为、排除项、因果边、结果强度和证据预期必须必然成立；仅仅“方向相关”“澄清角色”或“排除统一布局”不能替代精确责任，缺失或只被暗示时必须判为 `strength_mismatch`，但不要求逐字匹配。Arc 只获得分配给自己的精确 Book Arc contract；其中的 `exit_conditions` 是唯一 Arc 语义收束契约，Arc 只负责把它展开为标题与逐章大纲，因此 Book 仍不越级规划 Chapter。
 - 用户给出的章节数只作为软规模建议传给规划 Agent，不参与 Route、Arc 收束、Book 完成或拓扑修订门禁。
-- 每个正式 Arc baseline 冻结一个明确生效点和恰好覆盖其未来区间的 `chapter_outline`；初始 Arc 必须至少包含一章，合法 successor 可以在生效点已经等于新检查点时包含零个未来项。
+- 每个正式 Arc baseline 冻结标题、明确生效点和恰好覆盖其未来区间的 `chapter_outline`；初始 Arc 必须至少包含一章，合法 successor 可以在生效点已经等于新检查点时包含零个未来项。
 - Harness 创建 Chapter 时确定性分配唯一大纲项，并把来源 Arc baseline 固定到 Chapter 身份上。Chapter 自身的 revision 不能改写这项 provenance。
 - Arc successor 只替换生效点之后的未来大纲。已有正式 Chapter 保持原来源；唯一尚未提交的当前 Chapter 在同一事务中重绑到 successor 并清空依赖旧大纲的草稿内容。
 - 后端把同一 `story_arcs.id` 的 baseline lineage 投影成一条连续 Arc：已存在 Chapter 使用稳定 provenance，未来项只取当前 baseline。前端和模型不得自行拼接 v1/v2。
@@ -136,8 +138,12 @@ handoff。
 `Book > Story Arc > Chapter` 是正式语义权威顺序。下层可以提交证据和直属上层审查请求，但不能判断或替换上层 baseline：
 
 - Chapter 只在当前 Book/Arc baseline、当前 Canon 和当前章目标齐备时启动。正文、observations 与 Canon intent 通过独立评审并由原子 Command 提交，才算 Chapter 退出成功。
-- Arc 只在当前 Book baseline、当前 ordinal 对应的精确 Book Arc contract，以及合法的上一 Arc progress handoff（首 Arc 除外）齐备时启动。`closure_cumulative_chapter_count` 由 Arc 获批时的生效点加完整大纲长度确定，只触发最低限度的收束检查；只有 Arc 契约被已提交事实满足并形成 formal closure，Arc 才算结束。
+- Arc 只在当前 Book baseline、当前 ordinal 对应的精确 Book Arc contract，以及合法的上一 Arc progress handoff（首 Arc 除外）齐备时启动。`closure_cumulative_chapter_count` 由 Arc 获批时的生效点加完整大纲长度确定，只触发最低限度的收束检查；只有该 Book Arc contract 的 `exit_conditions` 被已提交事实满足并形成 formal closure，Arc 才算结束。
 - 非最终 formal Arc closure 不调用 Book 模型任务；Harness 只按当前 Book 拓扑确定性提交下一 ordinal 的 handoff。只有规划中的最终 Arc closure 才触发 `evaluate.book_completion`，并使用所有正式 Arc closure 与累计 Canon 判断整书终止。它不能隐式创建未规划的 Arc。
+
+Arc 收束评审只返回一个互斥结果：`closed`、`revise_arc`、
+`escalate_to_book`、`correct_chapter_evidence` 或 `needs_user`。Harness 根据这个
+discriminated outcome 选择唯一 Route；评审不能同时表达多条动作再让代码猜优先级。
 
 Arc Planner 和 Arc candidate/closure Evaluator 可以看到当前 Arc 的完整逐章大纲。正常 Chapter 计划与正文只看到当前项和至多一个下一项；Chapter 观察、Canon 抽取和评审只看到当前项。大纲遵循软语义约束：Chapter 必须完成宏观职责，但不要求标题、措辞、场景数量或事件描述逐字匹配。逐章大纲耗尽只触发 Arc 收束检查，不等于收束通过，也不引入周期性 Arc 质量复盘。
 
@@ -172,7 +178,7 @@ Observation/Canon 都是可纠正的派生状态，发生争议时回到对应�
 
 每个 Agent task 使用固定 CXT1 Context View。模型可见上下文块只暴露六个
 属性：`role / scope / time / use / access / target`；内部 ID、hash 和完整
-source binding 只写入 `novelpilot-task-context-manifest-v7`。评审或修复任务
+source binding 只写入 `novelpilot-task-context-manifest-v8`。评审或修复任务
 恰好拥有一个逻辑 `target_descriptor`；正式契约、正式结果、正式正文、派生
 证据、Canon 和旧评审均为只读。Book 不重读全部 Chapter，Arc 只消费当前
 Arc 的正式事实，Chapter 只消费当前 assignment、至多下一 assignment、
@@ -182,8 +188,8 @@ Book 讨论上下文也按用途拆开：`book.discuss` 可以读取当前 discu
 和 transcript，`book.synthesize` 只读取已归并的当前 state；Book
 repair/evaluate 不读取 transcript。Book 的 completion contract 与完整 Arc
 topology 只进入 Book revision、Book parent review 和 Book completion 等
-Book 权威任务；Arc 只接收 Book 明确分配给当前 Arc 的 contract，Chapter
-再接收该 Arc 的正式 contract 与当前 outline window，不能把整书
+Book 权威任务；Arc 只接收 Book 明确分配给当前 ordinal 的精确 contract，Chapter
+再接收同一份精确 Book Arc contract 与当前/下一 Arc outline window，不能把整书
 completion/topology 当成本层可评或可改目标。Arc/Chapter candidate
 Evaluator 同时读取当前 Arc 已提交 facts，避免在缺少正式历史时做冲突判断。
 

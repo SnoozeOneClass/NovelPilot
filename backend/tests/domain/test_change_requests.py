@@ -11,9 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.agents.contracts import (
     ArcChapterOutlineEntry,
-    ArcClosureSignal,
     ArcPlanProposal,
-    ArcStateTransition,
     ChapterEvaluationIssue,
     LayerEvaluationResult,
 )
@@ -45,6 +43,7 @@ from app.domain.arc.contracts import (
     ApplyArcTaskRequest,
     ArcEvaluation,
     ArcEvaluationIssue,
+    ArcOutlineRegeneration,
     CommitArcAutoRequest,
     RecordArcReviewRequest,
     SubmitArcRequest,
@@ -80,6 +79,7 @@ from app.domain.evaluation import (
 from app.domain.project_state import ProjectStateQuery
 from app.runtime.context import HarnessContextBuilder
 from app.store.command_bus import CommandBus
+from app.store.content import ContentRepository
 from tests.domain.test_arc_lifecycle import _prepare_reviewed_arc
 from tests.domain.test_chapter_lifecycle import _prepare_reviewed_chapter
 from tests.helpers.lifecycle_seed import insert_successful_task
@@ -131,9 +131,7 @@ async def _commit_book_v2(
                     whole_book_role="Resolve the revised memory mystery.",
                     core_goal="Permit the evidence-bound escalated reveal.",
                     handoff_from_previous="Continue the current active Arc.",
-                    exit_conditions=[
-                        "The escalated reveal is supported and resolved."
-                    ],
+                    exit_conditions=["The escalated reveal is supported and resolved."],
                     completion_requirement_keys=["memory_conflict_resolved"],
                     is_final=True,
                 )
@@ -206,9 +204,7 @@ async def _commit_book_v2(
             submission_id=submitted.result.submission_id,
             evaluator_task_id=evaluator_task,
             evaluator_attempt_id=evaluator_attempt,
-            rubric_id=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
-                "evaluate.book"
-            ).rubric_id,
+            rubric_id=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task("evaluate.book").rubric_id,
             rubric_version=DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
                 "evaluate.book"
             ).rubric_version,
@@ -357,9 +353,7 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                     chapter_id=first.chapter_id,
                     submission_id=first.submission_id,
                     review_id=first.review_id,
-                    expected_canon_baseline_id=(
-                        first.foundation.canon_baseline_id
-                    ),
+                    expected_canon_baseline_id=(first.foundation.canon_baseline_id),
                 ),
                 idempotency_key="change:commit-first-chapter",
             )
@@ -436,10 +430,7 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                 source_chapter_arc_request_id=change_request_id,
                 canon_baseline_id=ready.foundation.canon_baseline_id,
             )
-            labels = {
-                str(item["label"])
-                for item in frozen_context.manifest["items"]
-            }
+            labels = {str(item["label"]) for item in frozen_context.manifest["items"]}
             assert {
                 "chapter_to_arc_request_evidence",
                 "source_chapter_candidate_manifest",
@@ -502,27 +493,7 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                     == "reviewed"
                 )
 
-            plan = ArcPlanProposal(
-                title="The First Contradiction, Revised",
-                desired_state_transition=ArcStateTransition(
-                    start_state="The memory contradiction remains unexplained.",
-                    end_state="The edit source is identified through physical evidence.",
-                ),
-                conflict_trajectory=[
-                    "Witnesses disagree",
-                    "The revised evidence can now appear",
-                ],
-                pacing_trajectory=["Investigate", "Verify", "Close the stage"],
-                character_obligations=["Mara changes one belief through evidence."],
-                foreshadowing_obligations=["Leave one clue for the next Arc."],
-                prohibitions=["Do not contradict committed Canon."],
-                closure_signals=[
-                    ArcClosureSignal(
-                        signal_key="first_edit_identified",
-                        description="The first edit source is identified.",
-                        evidence_expectation="Committed observations identify the source.",
-                    )
-                ],
+            plan = ArcOutlineRegeneration(
                 chapter_outline=[
                     ArcChapterOutlineEntry(
                         title="The surviving trace",
@@ -573,9 +544,11 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
             )
             assert '"title":"Chapter 1"' in candidate_context.prompt
             assert '"title":"The surviving trace"' in candidate_context.prompt
-            assert "physical evidence at assignment 2" not in (
-                candidate_context.prompt
+            assert (
+                '"exit_conditions":["Evidence stage 1 is resolved.",'
+                '"The central memory conflict is resolved."]' in candidate_context.prompt
             )
+            assert "physical evidence at assignment 2" not in (candidate_context.prompt)
             assert any(
                 item["label"] == "candidate_coherent_story_arc_outline"
                 for item in candidate_context.manifest["items"]
@@ -642,10 +615,7 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                             arc_baselines.c.plan_ref_id,
                             arc_baselines.c.submission_id,
                             arc_baselines.c.review_id,
-                        ).where(
-                            arc_baselines.c.id
-                            == ready.foundation.arc_baseline_id
-                        )
+                        ).where(arc_baselines.c.id == ready.foundation.arc_baseline_id)
                     )
                 ).one()
             committed = await arc_service.commit_baseline_auto(
@@ -682,13 +652,15 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                         chapters.c.id == ready.chapter_id
                     )
                 )
+                successor_plan_ref_id = await connection.scalar(
+                    select(arc_baselines.c.plan_ref_id).where(
+                        arc_baselines.c.id == committed.result.baseline_id
+                    )
+                )
                 assert tuple(change) == ("resolved", committed.result.baseline_id)
                 assert tuple(chapter_workspace) == ("active", None)
                 assert outline_source == committed.result.baseline_id
-                assert (
-                    await connection.scalar(select(func.count()).select_from(arc_baselines))
-                    == 2
-                )
+                assert await connection.scalar(select(func.count()).select_from(arc_baselines)) == 2
                 assert (
                     await connection.execute(
                         select(
@@ -700,15 +672,29 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                             arc_baselines.c.plan_ref_id,
                             arc_baselines.c.submission_id,
                             arc_baselines.c.review_id,
-                        ).where(
-                            arc_baselines.c.id
-                            == ready.foundation.arc_baseline_id
-                        )
+                        ).where(arc_baselines.c.id == ready.foundation.arc_baseline_id)
                     )
                 ).one() == historical_arc_binding
-            state = await ProjectStateQuery(engine).get_project(
-                ready.foundation.project_id
-            )
+                assert successor_plan_ref_id is not None
+                original_plan = ArcPlanProposal.model_validate_json(
+                    (
+                        await ContentRepository(connection).get_packed(
+                            project_id=ready.foundation.project_id,
+                            ref_id=historical_arc_binding.plan_ref_id,
+                        )
+                    ).unpack_and_verify()
+                )
+                successor_plan = ArcPlanProposal.model_validate_json(
+                    (
+                        await ContentRepository(connection).get_packed(
+                            project_id=ready.foundation.project_id,
+                            ref_id=successor_plan_ref_id,
+                        )
+                    ).unpack_and_verify()
+                )
+                assert successor_plan.title == original_plan.title
+                assert successor_plan.chapter_outline == plan.chapter_outline
+            state = await ProjectStateQuery(engine).get_project(ready.foundation.project_id)
             assert state is not None
             assert state.current_arc is not None
             assert state.current_arc.outline is not None
@@ -740,20 +726,11 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                 await connection.execute(
                     chapters.update()
                     .where(chapters.c.id == ready.chapter_id)
-                    .values(
-                        outline_arc_baseline_id=(
-                            ready.foundation.arc_baseline_id
-                        )
-                    )
+                    .values(outline_arc_baseline_id=(ready.foundation.arc_baseline_id))
                 )
             with pytest.raises(ArcOutlineProjectionError) as corrupted:
-                await ProjectStateQuery(engine).get_project(
-                    ready.foundation.project_id
-                )
-            assert (
-                corrupted.value.reason_code
-                == "chapter_source_not_governing_interval"
-            )
+                await ProjectStateQuery(engine).get_project(ready.foundation.project_id)
+            assert corrupted.value.reason_code == "chapter_source_not_governing_interval"
         finally:
             await engine.dispose()
 
@@ -784,9 +761,7 @@ def test_rejected_change_request_keeps_formal_baselines_and_blocks_source_for_us
                             code="arc_reveal_scope",
                             subject="proposed reveal",
                             summary="The proposed reveal appears to require an Arc change.",
-                            evidence=[
-                                "The proposed reveal exceeds the current Arc assignment."
-                            ],
+                            evidence=["The proposed reveal exceeds the current Arc assignment."],
                             observed_components=["plan"],
                         )
                     ],
@@ -822,10 +797,7 @@ def test_rejected_change_request_keeps_formal_baselines_and_blocks_source_for_us
                 )
                 assert request_status == "superseded"
                 assert workspace_state == "blocked_by_user"
-                assert (
-                    await connection.scalar(select(func.count()).select_from(arc_baselines))
-                    == 1
-                )
+                assert await connection.scalar(select(func.count()).select_from(arc_baselines)) == 1
         finally:
             await engine.dispose()
 
@@ -859,9 +831,7 @@ def test_arc_to_book_request_resolves_only_when_authorized_book_v2_is_approved(
                             kind="parent_authority_concern",
                             code="book_direction_concern",
                             subject="current Book direction",
-                            summary=(
-                                "The Arc evidence warrants review by Book authority."
-                            ),
+                            summary=("The Arc evidence warrants review by Book authority."),
                             evidence=[
                                 "The current Arc cannot resolve the concern without changing Book intent."
                             ],
@@ -975,8 +945,7 @@ def test_arc_to_book_request_resolves_only_when_authorized_book_v2_is_approved(
                 assert tuple(request_row) == ("resolved", new_baseline_id)
                 assert tuple(source_row) == ("stale", "upstream_book_revised")
                 assert (
-                    await connection.scalar(select(func.count()).select_from(book_baselines))
-                    == 2
+                    await connection.scalar(select(func.count()).select_from(book_baselines)) == 2
                 )
         finally:
             await engine.dispose()
