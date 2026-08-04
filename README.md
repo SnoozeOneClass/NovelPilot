@@ -84,14 +84,17 @@ npm.cmd run audit:secrets
 
 前端 lint、测试、类型检查与构建只作为仓库完整性检查；当前阶段不据此宣称前端产品设计已经完成。
 
-工程真实场景通过后，才由用户显式启动当前冻结的四轮真实模型观测：
+工程真实场景通过后，才由用户显式启动当前冻结的真实模型观测。默认运行完整四轮；
+针对一次修复做双模式回归时，可以只运行一轮全自动和一轮参与模式：
 
 ```cmd
 npm.cmd run experiment:live-book
+npm.cmd run experiment:live-book -- --runs 2
 ```
 
-命令使用应用当前选中的 Profile，顺序固定为
-`full_auto → participatory → full_auto → participatory`。工程验收不会调用这条命令，
+命令使用应用当前选中的 Profile。四轮顺序固定为
+`full_auto → participatory → full_auto → participatory`；`--runs 2` 固定取前两个槽位，
+只形成双模式回归证据，不替代四轮长跑里程碑。工程验收不会调用这条命令，
 不会替换当前 selected Profile，也不会重置普通项目数据库。终端只播报权威阶段变化、
 正常 actor 动作和每 60 秒无变化心跳；命令结束后通过
 `data/live-observations/latest-series.json` 定位证据，再由后续 Codex 会话分析。

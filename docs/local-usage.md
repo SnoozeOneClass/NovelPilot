@@ -143,18 +143,19 @@ npm.cmd run audit:secrets
 - secret audit 扫描 `data/` 和 `output/`，发现 API key 时只报告脱敏路径、
   Profile id 和值类型。
 
-## 8. 四次真实模型观测
+## 8. 两次或四次真实模型观测
 
 只有工程真实场景通过后才由用户手动执行。先启动后端，再用一个独立命令运行：
 
-```powershell
+```cmd
 npm.cmd run experiment:live-book
+npm.cmd run experiment:live-book -- --runs 2
 ```
 
 runner 默认使用应用当前选中的 Profile；需要刻意覆盖时才传
 `-- --profile-id <profile-id>`。runner 只检查本地已记录的 Profile readiness、Prompt
-SHA-256、固定四轮顺序与 fingerprint，不会先发 Provider 探测请求，也不会输出
-secret。四轮各创建一个全新普通项目：
+SHA-256、冻结顺序与 fingerprint，不会先发 Provider 探测请求，也不会输出 secret。
+默认四轮各创建一个全新普通项目：
 
 ```text
 1 full_auto
@@ -162,6 +163,9 @@ secret。四轮各创建一个全新普通项目：
 3 full_auto
 4 participatory
 ```
+
+传入 `--runs 2` 时固定执行该顺序的前两个槽位，即一轮 `full_auto` 和一轮
+`participatory`。它适合修复后的双模式回归，但不能替代四轮整书稳定性里程碑。
 
 终端会立即刷新真实阶段播报，不显示无法证明的完成百分比：
 
@@ -180,9 +184,9 @@ Experiment <series-id> started | profile=<profile-id> | schedule=...
 
 固定 actor 只执行正常产品动作：推荐 Book 回答、Book 批准，以及 participatory Arc 批准。它没有 Retry、Resume、Pause、数据库编辑、Prompt 编辑或模型输出修改能力。
 
-每轮结束立即写入独立脱敏报告；自然失败不补跑该轮，只要 Provider 仍可调用就继续下一个新项目。鉴权、额度、Profile 或能力问题阻止后续调用时，剩余 slot 标记 `not_run`。aggregate 只汇总事实，不生成 4/4 verdict。
+每轮结束立即写入独立脱敏报告；自然失败不补跑该轮，只要 Provider 仍可调用就继续下一个新项目。鉴权、额度、Profile 或能力问题阻止后续调用时，剩余 slot 标记 `not_run`。aggregate 只汇总事实，不生成统计意义上的稳定性保证。
 
-命令会在 `data/live-observations/latest-series.json` 写入最新批次指针，并在批次目录持续更新 `series.json`：`active_observation` 是最新的非权威槽位观察，会被后续观察覆盖；`running` 表示仍在执行或曾被意外中断，`finished` 只表示四个 slot 的证据采集已经收束，不代表四本小说成功。slot 报告落盘后会清除对应 `active_observation`。结束后读取 `aggregate.json`、四份 slot 报告和普通项目数据库，再让 Codex 做一次集中分析。运行期间不需要 Codex 观察，也不会自动诊断、修改代码或补跑。
+命令会在 `data/live-observations/latest-series.json` 写入最新批次指针，并在批次目录持续更新 `series.json`：`active_observation` 是最新的非权威槽位观察，会被后续观察覆盖；`running` 表示仍在执行或曾被意外中断，`finished` 只表示本次计划中的全部 slot 证据已经收束，不代表小说全部成功。slot 报告落盘后会清除对应 `active_observation`。结束后读取 `aggregate.json`、本次计划对应的两份或四份 slot 报告和普通项目数据库，再让 Codex 做一次集中分析。运行期间不需要 Codex 观察，也不会自动诊断、修改代码或补跑。
 
 该命令使用普通本地数据库，不创建隔离数据库，也不隐式重置或迁移数据库。开发期如果决定清空旧测试数据，应在服务停止时作为独立且显式的操作完成。
 

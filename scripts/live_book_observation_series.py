@@ -23,6 +23,7 @@ CASE_DIR = ROOT_DIR / "scripts" / "live_acceptance_cases"
 DEFAULT_REPORT_ROOT = ROOT_DIR / "data" / "live-observations"
 DEFAULT_CASE_ID = "benchmark-mother-natural-book-v1"
 EXPECTED_SCHEDULE = ("full_auto", "participatory", "full_auto", "participatory")
+SUPPORTED_RUN_COUNTS = (2, 4)
 SERIES_STATE_FILENAME = "series.json"
 LATEST_SERIES_FILENAME = "latest-series.json"
 
@@ -639,6 +640,14 @@ def _series_status_counts(reports: list[JsonObject]) -> JsonObject:
     }
 
 
+def _schedule_for_runs(case: ObservationCase, runs: int) -> tuple[Mode, ...]:
+    if runs not in SUPPORTED_RUN_COUNTS or runs > len(case.schedule):
+        raise ObservationConfigurationError(
+            "The frozen series requires exactly two or four runs."
+        )
+    return case.schedule[:runs]
+
+
 def _write_series_checkpoint(
     *,
     report_root: Path,
@@ -646,6 +655,7 @@ def _write_series_checkpoint(
     series_id: str,
     case_id: str,
     profile_id: str,
+    mode_schedule: tuple[Mode, ...],
     started_at: str,
     reports: list[JsonObject],
     next_slot: int | None,
@@ -661,6 +671,8 @@ def _write_series_checkpoint(
         "status": status,
         "case_id": case_id,
         "profile_id": profile_id,
+        "mode_schedule": list(mode_schedule),
+        "planned_slot_count": len(mode_schedule),
         "started_at": started_at,
         "updated_at": updated_at,
         "finished_at": finished_at,
@@ -712,6 +724,7 @@ def run_observation_slot(
     frozen: JsonObject,
     series_id: str,
     slot: int,
+    total_slots: int,
     mode: Mode,
     sleep_seconds: float,
     heartbeat_seconds: float,
@@ -735,7 +748,7 @@ def run_observation_slot(
         progress_callback(
             ObservationProgress(
                 slot=slot,
-                total_slots=len(case.schedule),
+                total_slots=total_slots,
                 mode=mode,
                 project_id=project_id,
                 kind=kind,
@@ -1092,8 +1105,7 @@ def run_series(
     monotonic: Any = time.monotonic,
     announce: Callable[[str], None] | None = None,
 ) -> tuple[Path, JsonObject]:
-    if runs != len(case.schedule) or runs != 4:
-        raise ObservationConfigurationError("This frozen series requires exactly four runs.")
+    schedule = _schedule_for_runs(case, runs)
     if heartbeat_seconds <= 0:
         raise ObservationConfigurationError("Heartbeat interval must be positive.")
     announce_line = announce or (lambda _message: None)
@@ -1113,7 +1125,7 @@ def run_series(
         "framework_versions": _framework_versions(),
         "harness_contract": case.harness_contract,
         "actor_policy": case.actor_policy,
-        "mode_schedule": list(case.schedule),
+        "mode_schedule": list(schedule),
     }
     _atomic_json(
         series_dir / "frozen-series.json",
@@ -1130,6 +1142,7 @@ def run_series(
         series_id=series_id,
         case_id=case.case_id,
         profile_id=resolved_profile_id,
+        mode_schedule=schedule,
         started_at=started_at.isoformat(),
         reports=[],
         next_slot=1,
@@ -1137,12 +1150,12 @@ def run_series(
     )
     announce_line(
         f"Experiment {series_id} started | profile={resolved_profile_id} | "
-        f"schedule={','.join(case.schedule)}"
+        f"schedule={','.join(schedule)}"
     )
 
     reports: list[JsonObject] = []
     stop_series = False
-    for index, mode in enumerate(case.schedule, start=1):
+    for index, mode in enumerate(schedule, start=1):
         def record_progress(progress: ObservationProgress) -> None:
             _write_series_checkpoint(
                 report_root=resolved_report_root,
@@ -1150,6 +1163,7 @@ def run_series(
                 series_id=series_id,
                 case_id=case.case_id,
                 profile_id=resolved_profile_id,
+                mode_schedule=schedule,
                 started_at=started_at.isoformat(),
                 reports=reports,
                 next_slot=index,
@@ -1185,6 +1199,7 @@ def run_series(
                 frozen=frozen,
                 series_id=series_id,
                 slot=index,
+                total_slots=len(schedule),
                 mode=mode,
                 sleep_seconds=sleep_seconds,
                 heartbeat_seconds=heartbeat_seconds,
@@ -1200,9 +1215,10 @@ def run_series(
             series_id=series_id,
             case_id=case.case_id,
             profile_id=resolved_profile_id,
+            mode_schedule=schedule,
             started_at=started_at.isoformat(),
             reports=reports,
-            next_slot=index + 1 if index < len(case.schedule) else None,
+            next_slot=index + 1 if index < len(schedule) else None,
             status="running",
         )
         issue_codes = [
@@ -1210,7 +1226,7 @@ def run_series(
             for issue in cast(list[JsonObject], report.get("issues", []))
         ]
         result_line = (
-            f"[{index}/{len(case.schedule)} {mode}] "
+            f"[{index}/{len(schedule)} {mode}] "
             f"slot {report['status']}"
         )
         elapsed_seconds = report.get("elapsed_seconds")
@@ -1230,7 +1246,7 @@ def run_series(
         "series_id": series_id,
         "case_id": case.case_id,
         "profile_id": resolved_profile_id,
-        "mode_schedule": list(case.schedule),
+        "mode_schedule": list(schedule),
         "status_counts": _series_status_counts(reports),
         "slots": [
             {
@@ -1257,7 +1273,10 @@ def run_series(
         "issue_index": issue_index,
         "technical_rescue_count": 0,
         "engineering_acceptance_dependency": False,
-        "note": "This is a factual observation index, not a 4/4 success verdict.",
+        "note": (
+            "This is a factual observation index, not a statistical stability "
+            "guarantee."
+        ),
     }
     _atomic_json(series_dir / "aggregate.json", aggregate)
     finished_at = datetime.now(UTC).isoformat()
@@ -1267,6 +1286,7 @@ def run_series(
         series_id=series_id,
         case_id=case.case_id,
         profile_id=resolved_profile_id,
+        mode_schedule=schedule,
         started_at=started_at.isoformat(),
         reports=reports,
         next_slot=None,
@@ -1284,8 +1304,8 @@ def run_series(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the frozen four-slot whole-book experiment without Codex attendance "
-            "or technical rescue."
+            "Run the frozen two- or four-slot whole-book experiment without Codex "
+            "attendance or technical rescue."
         )
     )
     parser.add_argument("--case", default=DEFAULT_CASE_ID)
@@ -1293,7 +1313,16 @@ def _parser() -> argparse.ArgumentParser:
         "--profile-id",
         help="Profile override. By default the application's selected Profile is used.",
     )
-    parser.add_argument("--runs", default=4, type=int)
+    parser.add_argument(
+        "--runs",
+        default=4,
+        type=int,
+        choices=SUPPORTED_RUN_COUNTS,
+        help=(
+            "Run either the two-mode regression pair (2) or the full four-run "
+            "stability series (4)."
+        ),
+    )
     parser.add_argument(
         "--api-base-url",
         default=os.environ.get("NOVELPILOT_API_BASE_URL", "http://127.0.0.1:8010"),

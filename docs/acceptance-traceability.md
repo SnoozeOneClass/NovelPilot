@@ -22,6 +22,7 @@ npm.cmd run test:fast
 npm.cmd run test:backend-real
 npm.cmd run acceptance
 npm.cmd run experiment:live-book
+npm.cmd run experiment:live-book -- --runs 2
 ```
 
 - `test:fast`：在隔离临时库执行 fresh migration、Schema drift/health、downgrade/upgrade
@@ -29,8 +30,9 @@ npm.cmd run experiment:live-book
   也不产生后端验收结论。
 - `test:backend-real`：先做 S0 Profile 探测，再运行 S1～S5。
 - `acceptance`：依次执行 `test:fast` 与 `test:backend-real`。
-- `experiment:live-book`：仍由用户手动启动，保持四次长跑、当前 selected Profile
-  和无技术救援边界；任何其他测试命令都不会调用它。
+- `experiment:live-book`：仍由用户手动启动，默认保持四次长跑、当前 selected Profile
+  和无技术救援边界；`--runs 2` 只执行 `full_auto → participatory` 双模式回归，
+  不替代四次长跑里程碑。任何其他测试命令都不会调用它。
 
 前端 lint、测试、类型检查与构建属于仓库完整性检查，不作为后端验收结论，也不表示前端产品设计已经完成。
 
@@ -130,8 +132,8 @@ data/backend-real-acceptance/
 报告是数据库权威证据的脱敏索引，不成为第二套小说事实。失败数据库被保留，便于在
 不重跑模型的情况下确认第一个 producer→persistence→consumer 断点。
 
-四次长跑仍写入 `data/live-observations/`，使用普通项目数据库和当前 selected
-Profile；它不会被 `acceptance` 隐式启动或重置。
+整书观测仍写入 `data/live-observations/`，使用普通项目数据库和当前 selected
+Profile；默认四次长跑与 `--runs 2` 双模式回归都不会被 `acceptance` 隐式启动或重置。
 
 当前已接受的四轮事实摘要见 [稳定后端基线](stable-backend-baseline.md)。原始数据库、
 Prompt、Context、正文与诊断附件仍只保留在 git ignored 的本地目录。

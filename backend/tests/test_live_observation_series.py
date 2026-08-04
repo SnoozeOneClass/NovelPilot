@@ -567,6 +567,46 @@ def test_frozen_series_runs_exact_mode_schedule_without_rescue(tmp_path: Path) -
     assert all(case.prompt not in line for line in announcements)
 
 
+def test_two_run_series_executes_one_full_auto_and_one_participatory_slot(
+    tmp_path: Path,
+) -> None:
+    case = load_case("benchmark-mother-natural-book-v1")
+    api = FakeObservationApi()
+    announcements: list[str] = []
+
+    series_dir, aggregate = run_series(
+        api=api,
+        case=case,
+        profile_id=None,
+        runs=2,
+        report_root=tmp_path,
+        sleep_seconds=0.001,
+        sleep=lambda _seconds: None,
+        announce=announcements.append,
+    )
+
+    expected_schedule = ["full_auto", "participatory"]
+    assert aggregate["mode_schedule"] == expected_schedule
+    assert aggregate["status_counts"] == {
+        "completed": 2,
+        "failed": 0,
+        "not_run": 0,
+    }
+    assert [item["mode"] for item in aggregate["slots"]] == expected_schedule
+    assert len(api.projects) == 2
+    assert [action for _project_id, action in api.actions].count("arc_approval") == 1
+    frozen = json.loads(
+        (series_dir / "frozen-series.json").read_text(encoding="utf-8")
+    )
+    assert frozen["frozen"]["mode_schedule"] == expected_schedule
+    state = json.loads((series_dir / "series.json").read_text(encoding="utf-8"))
+    assert state["mode_schedule"] == expected_schedule
+    assert state["planned_slot_count"] == 2
+    assert state["recorded_slot_count"] == 2
+    assert any("[1/2 full_auto] slot started" in line for line in announcements)
+    assert any("[2/2 participatory] slot completed" in line for line in announcements)
+
+
 def test_same_arc_uses_distinct_idempotency_keys_for_distinct_approval_gates() -> None:
     api = TwoArcApprovalInstancesApi()
     report, stop_series = run_observation_slot(
@@ -576,6 +616,7 @@ def test_same_arc_uses_distinct_idempotency_keys_for_distinct_approval_gates() -
         frozen={},
         series_id="two-gates",
         slot=1,
+        total_slots=4,
         mode="participatory",
         sleep_seconds=0,
         heartbeat_seconds=60,
@@ -603,6 +644,7 @@ def test_command_error_still_collects_authoritative_wait_and_attempts() -> None:
         frozen={},
         series_id="command-error",
         slot=1,
+        total_slots=4,
         mode="participatory",
         sleep_seconds=0,
         heartbeat_seconds=60,
@@ -654,13 +696,21 @@ def test_advisory_chapter_range_is_recorded_without_failing_a_completed_run(
     assert all(report["issues"] == [] for report in reports)
 
 
-def test_frozen_series_rejects_partial_run_count(tmp_path: Path) -> None:
-    with pytest.raises(ObservationConfigurationError, match="exactly four"):
+@pytest.mark.parametrize("runs", [0, 1, 3, 5])
+def test_frozen_series_rejects_unsupported_run_count(
+    tmp_path: Path,
+    runs: int,
+) -> None:
+    class ProfileMustNotBeReadApi(FakeObservationApi):
+        def profiles(self) -> dict[str, Any]:
+            pytest.fail("run-count validation must happen before Profile access")
+
+    with pytest.raises(ObservationConfigurationError, match="two or four"):
         run_series(
-            api=FakeObservationApi(),
+            api=ProfileMustNotBeReadApi(),
             case=load_case("benchmark-mother-natural-book-v1"),
             profile_id="grok-4.5",
-            runs=3,
+            runs=runs,
             report_root=tmp_path,
         )
 
