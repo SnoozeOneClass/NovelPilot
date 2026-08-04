@@ -17,6 +17,8 @@ from app.agents.contracts import (
     ChapterObservationResult,
     ChapterObservationsRepair,
     ChapterPlanProposal,
+    ChapterRepairVerificationIssue,
+    ChapterRepairVerificationResult,
     LayerEvaluationResult,
     SemanticCanonProposal,
 )
@@ -49,6 +51,7 @@ from app.domain.chapter.contracts import (
 )
 from app.domain.chapter.queries import ChapterQueryService
 from app.domain.commands import CommandPreconditionError
+from app.runtime.context import HarnessContextBuilder
 from app.store.canon import CanonRepository
 from app.store.command_bus import CommandBus
 from app.store.content import ContentRepository
@@ -403,11 +406,11 @@ def test_real_precheck_routes_conflicting_canon_assertions_to_repair(
             assert precheck["issues"][0]["code"] == "canon_subject_assertion_conflict"
             assert repair["authorized_components"] == ["canon"]
             assert repair["repair_stage"] == "primary_semantic"
-            assert repair["schema"] == "chapter-repair-contract-v5"
+            assert repair["schema"] == "chapter-repair-contract-v6"
             assert content_versions == {
-                "chapter.deterministic_precheck": 4,
-                "chapter.review_detail": 5,
-                "chapter.repair_contract": 5,
+                "chapter.deterministic_precheck": 5,
+                "chapter.review_detail": 6,
+                "chapter.repair_contract": 6,
                 "chapter.observations": 3,
             }
             assert workspace_state == "active"
@@ -452,7 +455,7 @@ def test_plan_repair_replaces_mutable_plan_and_invalidates_downstream(
                                 "The plan does not schedule observable evidence strong "
                                 "enough for its required conclusion."
                             ),
-                            affected_components=["plan"],
+                            observed_components=["plan"],
                         )
                     ],
                 ),
@@ -902,7 +905,7 @@ def test_local_repair_changes_only_authorized_component_and_consumes_one_budget(
                                 "No observable evidence supports converting uncertainty "
                                 "into knowledge."
                             ),
-                            affected_components=["prose"],
+                            observed_components=["prose"],
                         )
                     ],
                 ),
@@ -995,7 +998,7 @@ def test_observation_repair_patch_preserves_unauthorized_canon_component(
                             contrary_formal_statement=(
                                 "The frozen prose states that Mara cannot yet identify the actor."
                             ),
-                            affected_components=["observations"],
+                            observed_components=["observations"],
                         )
                     ],
                 ),
@@ -1197,7 +1200,7 @@ def test_canon_repair_patch_preserves_unauthorized_observation_components(
                             contrary_formal_statement=(
                                 "The frozen prose leaves the mutation mechanism unresolved."
                             ),
-                            affected_components=["canon"],
+                            observed_components=["canon"],
                         )
                     ],
                 ),
@@ -1308,7 +1311,7 @@ def test_multi_component_repair_union_stalls_when_same_issue_persists(
                             contrary_formal_statement=(
                                 "The candidate Canon projection states a settled conclusion."
                             ),
-                            affected_components=["observations", "canon"],
+                            observed_components=["observations", "canon"],
                         )
                     ],
                 ),
@@ -1409,6 +1412,43 @@ def test_multi_component_repair_union_stalls_when_same_issue_persists(
                 ),
                 idempotency_key=f"{ready.chapter_id}:resubmit-after-multi-repair",
             )
+            verification_context = await HarnessContextBuilder(engine).build(
+                task_kind="verify_repair.chapter",
+                project_id=ready.foundation.project_id,
+                book_id=ready.foundation.book_id,
+                arc_id=ready.foundation.arc_id,
+                chapter_id=ready.chapter_id,
+                semantic_goal="Verify only the authorized Chapter repair.",
+                source_chapter_candidate_review_id=ready.review_id,
+                book_baseline_id=ready.foundation.book_baseline_id,
+                canon_baseline_id=ready.foundation.canon_baseline_id,
+                workspace_lock_version=applied.result.workspace_lock_version,
+            )
+            manifest_items = verification_context.manifest["items"]
+            assert isinstance(manifest_items, list)
+            review_positions = [
+                index
+                for index, item in enumerate(manifest_items)
+                if isinstance(item, dict)
+                and item["role"] == "review_finding"
+                and item["time"] == "pre_repair"
+            ]
+            repaired_positions = [
+                index
+                for index, item in enumerate(manifest_items)
+                if isinstance(item, dict) and item["time"] == "post_repair"
+            ]
+            assert review_positions
+            assert repaired_positions
+            assert max(review_positions) < min(repaired_positions)
+            assert not any(
+                isinstance(item, dict)
+                and item["role"] == "comparison_snapshot"
+                for item in manifest_items
+            )
+            assert '"current_candidate_selector":{"time":"post_repair"}' in (
+                verification_context.prompt
+            )
             verification = LayerEvaluationResult(
                 guidance_authority_judgment="not_present",
                 decision="local_repair",
@@ -1431,7 +1471,7 @@ def test_multi_component_repair_union_stalls_when_same_issue_persists(
                         contrary_formal_statement=(
                             "The frozen prose leaves the cause unsettled."
                         ),
-                        affected_components=["canon"],
+                        observed_components=["canon"],
                     )
                 ],
             )
@@ -1530,7 +1570,7 @@ def test_prose_repair_allows_one_bounded_derived_dependency_closure(
                                 "The frozen assignment requires the device inside "
                                 "the locked data room."
                             ),
-                            affected_components=["prose", "canon"],
+                            observed_components=["prose", "canon"],
                         )
                     ],
                 ),
@@ -1661,14 +1701,14 @@ def test_prose_repair_allows_one_bounded_derived_dependency_closure(
                     observation_applied.result.workspace_lock_version
                 ),
                 source_chapter_candidate_review_id=ready.review_id,
-                result=LayerEvaluationResult(
+                result=ChapterRepairVerificationResult(
                     guidance_authority_judgment="not_present",
                     decision="local_repair",
                     summary=(
                         "The repaired prose is correct; only regenerated Canon is wrong."
                     ),
                     issues=[
-                        ChapterEvaluationIssue(
+                        ChapterRepairVerificationIssue(
                             kind="explicit_conflict",
                             code="archive_device_location",
                             subject="archive scanner location",
@@ -1684,7 +1724,7 @@ def test_prose_repair_allows_one_bounded_derived_dependency_closure(
                             contrary_formal_statement=(
                                 "The repaired prose places it inside the locked data room."
                             ),
-                            affected_components=["canon"],
+                            observed_components=["canon"],
                             recurrence="persists_after_authorized_repair",
                         )
                     ],
@@ -1919,7 +1959,7 @@ def test_second_distinct_semantic_repair_is_not_started_and_run_failure_pauses(
                             support_gap=(
                                 "The frozen prose supports suspicion but not certain knowledge."
                             ),
-                            affected_components=["observations"],
+                            observed_components=["observations"],
                         )
                     ],
                 ),
@@ -2020,7 +2060,7 @@ def test_second_distinct_semantic_repair_is_not_started_and_run_failure_pauses(
                                 "The Chapter must preserve Mara's already-established "
                                 "analogue-copy consequence."
                             ),
-                            affected_components=["observations"],
+                            observed_components=["observations"],
                         )
                     ],
                 ),
@@ -2095,7 +2135,7 @@ def test_chapter_escalation_opens_explicit_arc_request_and_blocks_workspace(
                             evidence=[
                                 "The frozen Chapter assignment conflicts with committed facts."
                             ],
-                            affected_components=["plan"],
+                            observed_components=["plan"],
                         )
                     ],
                 ),

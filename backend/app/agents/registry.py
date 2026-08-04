@@ -16,6 +16,7 @@ from app.agents.contracts import (
     ChapterObservationRepairPatch,
     ChapterObservationResult,
     ChapterPlanProposal,
+    ChapterRepairVerificationResult,
     LayerEvaluationResult,
     JsonValue,
     OutputMode,
@@ -127,23 +128,26 @@ CHAPTER_EVALUATION_CONTRACT = (
     "effect can be fully honored under the current Arc and Book, and requires_parent_review "
     "when honoring it would change either parent authority. requires_parent_review must use "
     "escalate_to_arc. "
-    "Every blocking issue must name a natural-language semantic subject and a unique non-empty "
-    "affected_components set. The Harness derives local repair authorization from the union; "
-    "do not return a separate repair scope. First distinguish candidate execution failure from "
+    "Every blocking issue must name a natural-language semantic subject. Every local-repair "
+    "issue must also list a unique non-empty observed_components set. These are diagnostic "
+    "locations, not permission. The Harness derives its separate dependency-aware repair "
+    "authorization only after local_repair. First distinguish candidate execution failure from "
     "plan failure and parent-assignment infeasibility. Use non-plan components when the current "
-    "plan can still fulfill the assigned Arc function; use plan as the only affected component "
+    "plan can still fulfill the assigned Arc function; use plan as the only observed component "
     "when the mutable Chapter plan fails to schedule sufficient evidence but can be replaced "
     "under the same frozen Arc and Canon. The Harness then invalidates and regenerates all "
     "downstream Chapter components. Use escalate_to_arc only for a concrete evidence-bound "
     "concern that the frozen Arc assignment itself cannot be executed under its prohibitions, "
-    "Canon, or committed facts; report the concern without judging or replacing the Arc. During "
+    "Canon, or committed facts; report the concern without judging or replacing the Arc. An "
+    "escalation may cite useful observed_components, but they never create a local repair scope "
+    "and plan exclusivity does not apply to them. During "
     "verify_repair.chapter, mark recurrence='persists_after_authorized_repair' only when the "
     "same semantic defect remains. If an unsupported claim was removed but the repair instead "
     "left the assigned Arc function unfulfilled, report a new assignment-fulfillment issue with "
     "recurrence='new', then select component repair, plan-only repair, or Arc review using the "
     "same boundary. If an authorized plan or prose repair is now correct but its regenerated "
     "Observation or Canon alone contradicts that repaired source, report only observations/canon "
-    "as affected components. That derived dependency is not permission to rewrite plan or prose; "
+    "as observed components. That derived dependency is not permission to rewrite plan or prose; "
     "the Harness may close it once inside the same repair cycle. Chapter evaluation cannot create "
     "a user wait. Never judge or route directly "
     "to Book. When active applied Chapter guidance is present, judge its authority impact "
@@ -242,7 +246,7 @@ CHAPTER_CANDIDATE_RUBRIC = (
     "verification, an eliminated overclaim followed by an unfulfilled assignment is a new "
     "assignment-fulfillment issue, not persistence of the original overclaim. Never judge Book. "
     "When verification finds the repaired plan/prose correct and only regenerated Observation or "
-    "Canon wrong, keep plan/prose out of affected_components so the Harness can perform one "
+    "Canon wrong, keep plan/prose out of observed_components so the Harness can perform one "
     "derived-evidence dependency closure without opening another narrative repair. "
     + EP1_BLOCKER_PROTOCOL
 )
@@ -265,11 +269,11 @@ ARC_PARENT_REVIEW_RUBRIC = (
     "observations/Canon correction goal; never emit a storage ID. Do not author a replacement "
     "Arc or claim the Book contract is invalid. book_review_required and a "
     "parent_authority_concern issue are atomic. chapter_evidence_review_required and a "
-    "derived_evidence_mismatch issue are atomic, except when the bounded correction has already "
-    "been consumed and only a creator-owned fact can resolve the recurrence; then return only "
-    "creator_owned_unknown with its creator_input_need. Select one disposition; do not combine "
-    "revision, parent review, evidence review, or creator wait, except for that evidence-review "
-    "creator recurrence. A remains-applicable result with no route carries no blockers. "
+    "derived_evidence_mismatch issue are atomic. A creator wait is a standalone outcome: set "
+    "arc_contract_judgment=unable_to_judge, return only creator_owned_unknown with one "
+    "creator_input_need, and keep every revision, parent-review, and evidence-review flag off. "
+    "The Harness owns correction-round legality. A remains-applicable result with no route "
+    "carries no blockers. "
     + EP1_BLOCKER_PROTOCOL
 )
 BOOK_PARENT_REVIEW_RUBRIC = (
@@ -281,11 +285,10 @@ BOOK_PARENT_REVIEW_RUBRIC = (
     "contract remains applicable, warrants its "
     "normal human-approved revision workflow, requires Arc evidence review, or cannot be "
     "judged without a specific creator-owned fact. arc_evidence_review_required and a "
-    "derived_evidence_mismatch issue are atomic, except when the bounded correction has already "
-    "been consumed and only a creator-owned fact can resolve the recurrence; then return only "
-    "creator_owned_unknown with its creator_input_need. Book is the top authority, so never "
-    "emit parent_authority_concern. Select one disposition; do not combine revision, evidence "
-    "review, or creator wait, except for that evidence-review creator recurrence. A "
+    "derived_evidence_mismatch issue are atomic. A creator wait is a standalone outcome: set "
+    "book_contract_judgment=unable_to_judge, return only creator_owned_unknown with one "
+    "creator_input_need, and keep revision and evidence-review flags off. Book is the top "
+    "authority, so never emit parent_authority_concern. A "
     "remains-applicable result with no route carries no blockers. Do not author replacement "
     "Book content. "
     + EP1_BLOCKER_PROTOCOL
@@ -298,11 +301,11 @@ ARC_CLOSURE_RUBRIC = (
     "observations/Canon correction goal; never emit a storage ID. Reaching the Chapter "
     "checkpoint is not semantic completion and you must not select a Domain command. "
     "book_review_required and a parent_authority_concern issue are atomic. "
-    "chapter_evidence_review_required and a derived_evidence_mismatch issue are atomic, except "
-    "when the bounded correction has already been consumed and only a creator-owned fact can "
-    "resolve the recurrence; then return only creator_owned_unknown with its creator_input_need. "
-    "Select one disposition; do not combine revision, parent review, evidence review, or creator "
-    "wait, except for that evidence-review creator recurrence. A fully satisfied closure with "
+    "chapter_evidence_review_required and a derived_evidence_mismatch issue are atomic. A creator "
+    "wait is a standalone outcome: set arc_contract_judgment=unable_to_judge, return only "
+    "creator_owned_unknown with one creator_input_need, and keep revision, parent-review, and "
+    "evidence-review flags off. The Harness owns correction-round legality. A fully satisfied "
+    "closure with "
     "no route carries no blockers. "
     + EP1_BLOCKER_PROTOCOL
 )
@@ -843,7 +846,7 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "unrelated_future_secrets",
                 "harness_storage_protocol",
             ),
-            rubric_id="chapter-candidate-rubric-v9",
+            rubric_id="chapter-candidate-rubric-v10",
             rubric_text=CHAPTER_CANDIDATE_RUBRIC,
             deterministic_prechecks=(
                 "frozen_submission_loaded",
@@ -856,8 +859,8 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "escalate_to_arc",
             ),
             output_model=LayerEvaluationResult,
-            strategy_version=9,
-            output_schema_version=7,
+            strategy_version=10,
+            output_schema_version=8,
             context_policy_version=4,
         ),
         _strategy(
@@ -879,7 +882,7 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "book_revision_commands",
                 "unrelated_agent_history",
             ),
-            rubric_id="arc-parent-contract-rubric-v6",
+            rubric_id="arc-parent-contract-rubric-v7",
             rubric_text=ARC_PARENT_REVIEW_RUBRIC,
             deterministic_prechecks=(
                 "request_open_and_current",
@@ -893,10 +896,11 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "chapter_evidence_review_required",
                 "chapter_evidence_target",
                 "unable_to_judge",
+                "creator_input_need",
             ),
             output_model=ArcParentContractEvaluation,
-            strategy_version=5,
-            output_schema_version=5,
+            strategy_version=6,
+            output_schema_version=6,
             context_policy_version=3,
         ),
         _strategy(
@@ -916,7 +920,7 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "chapter_repair_details",
                 "harness_route_commands",
             ),
-            rubric_id="book-parent-contract-rubric-v4",
+            rubric_id="book-parent-contract-rubric-v5",
             rubric_text=BOOK_PARENT_REVIEW_RUBRIC,
             deterministic_prechecks=(
                 "request_open_and_current",
@@ -928,10 +932,11 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "revision_warranted",
                 "arc_evidence_review_required",
                 "unable_to_judge",
+                "creator_input_need",
             ),
             output_model=BookParentContractEvaluation,
-            strategy_version=4,
-            output_schema_version=4,
+            strategy_version=5,
+            output_schema_version=5,
             context_policy_version=2,
         ),
         _strategy(
@@ -953,7 +958,7 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "replacement_arc_content",
                 "later_mutable_canon",
             ),
-            rubric_id="arc-closure-rubric-v4",
+            rubric_id="arc-closure-rubric-v5",
             rubric_text=ARC_CLOSURE_RUBRIC,
             deterministic_prechecks=(
                 "closure_checkpoint_reached_exactly",
@@ -970,8 +975,8 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 "creator_input_need",
             ),
             output_model=ArcClosureEvaluation,
-            strategy_version=3,
-            output_schema_version=3,
+            strategy_version=4,
+            output_schema_version=4,
         ),
         _strategy(
             task_kind="evaluate.book_completion",
@@ -1048,12 +1053,12 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 scope_layer=layer,
                 objective=f"Verify only the authorized {layer} repair.",
                 context_policy_id=(
-                    "chapter-repair-verification-context-v5"
+                    "chapter-repair-verification-context-v6"
                     if layer == "chapter"
                     else (
-                        "arc-repair-verification-context-v4"
+                        "arc-repair-verification-context-v5"
                         if layer == "arc"
-                        else f"{layer}-repair-verification-context-v3"
+                        else f"{layer}-repair-verification-context-v4"
                     )
                 ),
                 context_includes=(
@@ -1069,12 +1074,12 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                     "harness_route_commands",
                 ),
                 rubric_id=(
-                    "chapter-repair-rubric-v10"
+                    "chapter-repair-rubric-v12"
                     if layer == "chapter"
                     else (
-                        "arc-repair-rubric-v9"
+                        "arc-repair-rubric-v10"
                         if layer == "arc"
-                        else "book-repair-rubric-v7"
+                        else "book-repair-rubric-v8"
                     )
                 ),
                 rubric_text=(
@@ -1087,12 +1092,14 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                     )
                 )
                 + (
-                    " Verify only the complete original issue ledger against the frozen "
-                    "before candidate, repaired candidate, and Harness-generated changed-"
-                    "component manifest. Pass only when every original issue is gone, every "
-                    "change is relevant to those issues, and the repair introduced no new EP1 "
-                    "blocker. Do not reopen unrelated literary quality or authorize another "
-                    "repair round."
+                    " Verify only the complete original issue ledger against the repaired "
+                    "candidate and Harness-generated changed-component manifest. The "
+                    "target_descriptor binds time=post_repair as the current candidate; any "
+                    "comparison_snapshot and review_finding block is pre-repair evidence only "
+                    "and must never be quoted or judged as current content. Pass only when "
+                    "every original issue is gone, every change is relevant to those issues, "
+                    "and the repair introduced no new EP1 blocker. Do not reopen unrelated "
+                    "literary quality or authorize another repair round."
                 ),
                 deterministic_prechecks=(
                     "repair_scope_matches_authorization",
@@ -1107,16 +1114,20 @@ DEFAULT_EVALUATION_STRATEGY_REGISTRY = EvaluationStrategyRegistry(
                 output_model=(
                     BookEvaluation
                     if layer == "book"
-                    else ArcEvaluation if layer == "arc" else LayerEvaluationResult
+                    else (
+                        ArcEvaluation
+                        if layer == "arc"
+                        else ChapterRepairVerificationResult
+                    )
                 ),
                 strategy_version=(
-                    10 if layer == "chapter" else 9 if layer == "arc" else 6
+                    12 if layer == "chapter" else 10 if layer == "arc" else 7
                 ),
                 output_schema_version=(
-                    7 if layer == "chapter" else 7 if layer == "arc" else 5
+                    8 if layer == "chapter" else 7 if layer == "arc" else 5
                 ),
                 context_policy_version=(
-                    4 if layer == "chapter" else 4 if layer == "arc" else 3
+                    5 if layer == "chapter" else 5 if layer == "arc" else 4
                 ),
                 repairable_components=(
                     ()
@@ -1434,7 +1445,8 @@ DEFAULT_TASK_REGISTRY = TaskRegistry(
                             if strategy.output_model is ArcEvaluation
                             else (
                                 CHAPTER_EVALUATION_CONTRACT
-                                if strategy.output_model is LayerEvaluationResult
+                                if strategy.output_model
+                                in {LayerEvaluationResult, ChapterRepairVerificationResult}
                                 else ""
                             )
                         )

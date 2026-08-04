@@ -2,7 +2,7 @@
 
 NovelPilot 是一个面向长篇小说生成的本地 Agent Harness。它不把“连续调用模型”当成工作流，而是用确定性的三层领域生命周期管理 Book、Story Arc、Chapter 的规划、评审、审批、版本、Canon 和恢复边界。
 
-当前版本是一次 clean-slate 后端重构：旧文件状态机、thread `RunHost` 和手写 Provider HTTP 层已经退出生产路径。SQLite 是唯一权威状态，Pydantic AI 接管通用模型执行，NovelPilot 自己保留小说领域 Harness、Run Engine 和 Store。
+当前仓库以稳定后端基线为起点：SQLite 是唯一权威状态，Pydantic AI 接管通用模型执行，NovelPilot 自己保留小说领域 Harness、Run Engine 和 Store。数据库、Profile 和测试只支持当前正式契约，不承载开发期兼容路径。
 
 ## 核心架构
 
@@ -17,7 +17,7 @@ NovelPilot 是一个面向长篇小说生成的本地 Agent Harness。它不把�
 - 任务级 Prompt/Context、最终结果、usage、retry 和错误属于执行证据；逐 token delta 只在内存实时流中存在。
 - 普通暂停采用安全边界，失败只能显式 Retry；单次 activation 最多 6 个 Provider 请求、其中最多 5 次 transport retry。
 
-更完整的边界见 [架构说明](docs/architecture.md)，能力—测试对应关系见 [验收追踪](docs/acceptance-traceability.md)。
+更完整的边界见 [架构说明](docs/architecture.md)，能力—测试对应关系见 [验收追踪](docs/acceptance-traceability.md)，当前长跑事实见 [稳定后端基线](docs/stable-backend-baseline.md)。
 
 ## 技术栈
 
@@ -59,7 +59,7 @@ npm.cmd run frontend:dev
 - 一致备份：`data/backups/`，通过 SQLite Online Backup API 生成并带 hash manifest。
 - 本地 Profile/密钥：`config/llm-profiles.local.json`，不进入 SQLite。
 - 每本小说唯一对外文件能力是 Markdown 导出；导出只读取已提交 Chapter baseline，不读取草稿或实时流。
-- `output/` 中原有旧项目不会被迁移、读取或删除，只保留为人工参考。
+- `output/` 只保存可重新生成的 Markdown 导出，不参与状态恢复。
 
 项目选择是浏览器工作台状态，不是后端“当前项目”。所有 API 都显式携带 `project_id`。
 
@@ -69,7 +69,6 @@ npm.cmd run frontend:dev
 npm.cmd run test:fast
 npm.cmd run test:backend-real
 npm.cmd run acceptance
-npm.cmd run architecture:inventory
 npm.cmd run audit:secrets
 ```
 
@@ -83,8 +82,7 @@ npm.cmd run audit:secrets
 语义压力，以及关闭/重开后的持久恢复。`acceptance` 会先运行无模型 fast gate，
 再运行这些付费场景；报告落在 `data/backend-real-acceptance/`。
 
-`architecture:inventory` 只是非结论性的静态所有权清单。当前后端阶段不把前端优化
-纳入验收，待四次长跑通过后再集中处理前端。
+前端 lint、测试、类型检查与构建只作为仓库完整性检查；当前阶段不据此宣称前端产品设计已经完成。
 
 工程真实场景通过后，才由用户显式启动当前冻结的四轮真实模型观测：
 
@@ -105,8 +103,8 @@ npm.cmd run experiment:live-book
 - 针对长篇生成中上下文漂移、状态污染和失败后难恢复的问题，设计 Book／Story Arc／Chapter 三层确定性 Harness，将模型推理与领域状态提交隔离，Agent 只产生候选和评审结论，正式内容通过显式 Command、审批和不可变 baseline 落库。
 - 使用 Pydantic AI 重构模型连接与结构化输出底座，按 Provider 协议绑定 opaque model id；实现统一能力校验、30 分钟 activation deadline、最多 6 次真实请求预算及类型化失败证据，避免按具体模型硬编码。
 - 基于 SQLAlchemy 2 Core、Alembic 与异步 SQLite 构建 39 表 LT1 生命周期与分层权威模型、项目内 CAS 内容存储和 Transactional Outbox；实现单写者 Run Engine、幂等命令、崩溃重放、协作式暂停和专用失败重试。
-- 建立三层测试证据体系：无模型快速契约、固定低成本模型的生产路径语义压力场景、
-  以及四轮约 20 章无技术救援长跑；将跨 Loop 交接、分层权威和崩溃恢复纳入可追踪验收，
-  同时用长跑发现未知累积问题。
+- 建立三层测试证据体系：无模型快速契约、固定低成本模型的生产路径语义压力场景，
+  以及四轮无技术救援整书长跑；最近一次四轮全部完成，累计运行约 6.7 小时、消费
+  11,410,451 tokens，并记录 20 个语义修复任务、3 次传输重试与 7 次结构化输出补充请求。
 
-真实观测完成后，可把“完成章数、自动 retry/repair 次数、token 与零技术救援轮次”补成量化结果；在观测前不把概率性成功写进简历。
+这组结果是一轮可审计的真实观测，不把单次 4/4 结果外推为统计意义上的稳定性保证。

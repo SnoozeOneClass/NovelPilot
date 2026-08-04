@@ -79,6 +79,7 @@ ContextRole = Literal[
     "formal_outcome",
     "formal_prose",
     "working_candidate",
+    "comparison_snapshot",
     "current_assignment",
     "derived_evidence",
     "canon_projection",
@@ -762,7 +763,7 @@ _GROUP_SEMANTICS: dict[
         "repair_authorization",
     ),
     "book_pre_repair_candidate": (
-        "working_candidate",
+        "comparison_snapshot",
         "book",
         "pre_repair",
         "verification",
@@ -808,7 +809,7 @@ _GROUP_SEMANTICS: dict[
         "repair_authorization",
     ),
     "arc_pre_repair_candidate": (
-        "working_candidate",
+        "comparison_snapshot",
         "arc",
         "pre_repair",
         "verification",
@@ -2932,6 +2933,22 @@ class HarnessContextBuilder:
                     target_payload["changed_components"] = cast(
                         list[JsonValue], changed_components
                     )
+                if task_kind.startswith("verify_repair."):
+                    target_payload["current_candidate_selector"] = {
+                        "time": "post_repair",
+                    }
+                    target_payload["issue_ledger_selector"] = {
+                        "role": "review_finding",
+                        "time": "pre_repair",
+                    }
+                    if any(
+                        block.role == "comparison_snapshot"
+                        for block in context_policy.blocks
+                    ):
+                        target_payload["comparison_selector"] = {
+                            "role": "comparison_snapshot",
+                            "time": "pre_repair",
+                        }
                 add_synthetic(
                     "context_target",
                     "semantic_task_target",
@@ -3066,6 +3083,20 @@ class HarnessContextBuilder:
                 )
                 facts["source_change_request_layer"] = "arc_to_book"
 
+        if task_kind.startswith("verify_repair."):
+            order = {
+                "pre_repair": 0,
+                "historical": 1,
+                "cumulative": 1,
+                "current": 1,
+                "post_repair": 2,
+            }
+            items.sort(
+                key=lambda item: (
+                    3 if item.group == "context_target" else order[item.time]
+                )
+            )
+
         context_policy.validate(items)
         manifest_items: list[JsonValue] = [
             {
@@ -3112,7 +3143,7 @@ class HarnessContextBuilder:
             for item in items
         ]
         manifest: dict[str, JsonValue] = {
-            "schema_id": "novelpilot-task-context-manifest-v6",
+            "schema_id": "novelpilot-task-context-manifest-v7",
             "task_kind": task_kind,
             "facts": facts,
             "items": manifest_items,
@@ -3202,6 +3233,14 @@ class HarnessContextBuilder:
                 "are not semantic work. Return only the output required by the frozen task schema."
             ),
         ]
+        if task_kind.startswith("verify_repair."):
+            prompt_parts.append(
+                "Repair-verification binding is explicit: evaluate time=post_repair "
+                "blocks as the current candidate. role=comparison_snapshot and "
+                "role=review_finding blocks are pre-repair evidence only; never quote or "
+                "judge them as the current candidate. The target_descriptor repeats these "
+                "selectors and is authoritative when resolving candidate identity."
+            )
         if evaluation_strategy is not None:
             prompt_parts.extend(
                 [

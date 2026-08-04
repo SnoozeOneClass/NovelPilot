@@ -69,6 +69,7 @@ from app.domain.projects import (
     UpdateProjectSettingsRequest,
 )
 from app.runtime.control import RunControlRequest, RunControlService
+from app.runtime.context import HarnessContextBuilder
 from app.store.command_bus import CommandBus
 from app.store.content import ContentRepository
 from tests.helpers.lifecycle_seed import insert_successful_task
@@ -963,6 +964,46 @@ def test_arc_local_repair_is_bounded_by_components_and_one_correction(
                     setup.plan.chapter_outline
                 )
                 assert merged_plan.closure_signals == repaired_closure_signals
+
+            await service.submit_for_review(
+                SubmitArcRequest(
+                    project_id=setup.book.project_id,
+                    book_id=setup.book.book_id,
+                    arc_id=setup.arc_id,
+                    expected_workspace_lock_version=(
+                        repaired.result.workspace_lock_version
+                    ),
+                ),
+                idempotency_key="repair:submit-for-verification",
+            )
+            verification_context = await HarnessContextBuilder(engine).build(
+                task_kind="verify_repair.arc",
+                project_id=setup.book.project_id,
+                book_id=setup.book.book_id,
+                arc_id=setup.arc_id,
+                chapter_id=None,
+                semantic_goal="Verify only the authorized Story Arc repair.",
+                source_arc_candidate_review_id=setup.review.review_id,
+                book_baseline_id=setup.book.book_baseline_id,
+                canon_baseline_id=setup.book.canon_baseline_id,
+                workspace_lock_version=repaired.result.workspace_lock_version,
+            )
+            manifest_items = verification_context.manifest["items"]
+            assert isinstance(manifest_items, list)
+            old_candidate = [
+                item
+                for item in manifest_items
+                if isinstance(item, dict)
+                and item["group"] == "arc_pre_repair_candidate"
+            ]
+            assert len(old_candidate) == 1
+            assert old_candidate[0]["role"] == "comparison_snapshot"
+            assert verification_context.prompt.index("Witnesses disagree") < (
+                verification_context.prompt.index("Repaired beat")
+            )
+            assert '"current_candidate_selector":{"time":"post_repair"}' in (
+                verification_context.prompt
+            )
 
             exhausted = await _prepare_reviewed_arc(
                 engine,

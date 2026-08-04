@@ -3257,6 +3257,8 @@ class LoopAuthorityCommandService:
         "waiting_for_user",
         "no_legal_route",
     ]:
+        if evaluation.creator_input_need is not None:
+            return "waiting_for_user"
         if evaluation.book_review_concern == "book_review_required":
             return "book_review_required"
         if evaluation.arc_contract_judgment == "revision_warranted":
@@ -3266,8 +3268,6 @@ class LoopAuthorityCommandService:
             == "chapter_evidence_review_required"
         ):
             return "chapter_evidence_review_required"
-        if evaluation.creator_input_need is not None:
-            return "waiting_for_user"
         statuses = {item.signal_key: item.status for item in evaluation.signal_statuses}
         required_satisfied = all(
             not signal.required or statuses[signal.signal_key] == "satisfied"
@@ -3293,6 +3293,8 @@ class LoopAuthorityCommandService:
         "waiting_for_user",
         "no_legal_route",
     ]:
+        if evaluation.creator_input_need is not None:
+            return "waiting_for_user"
         if evaluation.book_review_concern == "book_review_required":
             return "book_review_required"
         if evaluation.arc_contract_judgment == "revision_warranted":
@@ -3302,8 +3304,6 @@ class LoopAuthorityCommandService:
             == "chapter_evidence_review_required"
         ):
             return "chapter_evidence_review_required"
-        if evaluation.creator_input_need is not None:
-            return "waiting_for_user"
         if evaluation.arc_contract_judgment == "remains_applicable":
             return "keep_arc"
         return "no_legal_route"
@@ -3318,12 +3318,12 @@ class LoopAuthorityCommandService:
         "waiting_for_user",
         "no_legal_route",
     ]:
+        if evaluation.creator_input_need is not None:
+            return "waiting_for_user"
         if evaluation.book_contract_judgment == "revision_warranted":
             return "book_revision_warranted"
         if evaluation.arc_evidence_concern == "arc_evidence_review_required":
             return "arc_evidence_review_required"
-        if evaluation.creator_input_need is not None:
-            return "waiting_for_user"
         if evaluation.book_contract_judgment == "remains_applicable":
             return "keep_book"
         return "no_legal_route"

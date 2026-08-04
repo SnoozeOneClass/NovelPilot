@@ -35,7 +35,7 @@ from app.db.schema import (
     books,
     generation_runs,
 )
-from app.domain.book.commands import BookCommandService
+from app.domain.book.commands import BookCommandService, _book_titles_equivalent
 from app.domain.book.contracts import (
     ApplyBookCandidateRequest,
     ApplyBookCandidateTaskRequest,
@@ -61,6 +61,7 @@ from app.domain.book.contracts import (
 from app.domain.commands import CommandPreconditionError
 from app.domain.projects import CreateProjectRequest, ProjectCommandService
 from app.runtime.control import RunControlRequest, RunControlService
+from app.runtime.context import HarnessContextBuilder
 from app.store.command_bus import CommandBus
 from app.store.content import ContentRepository
 from tests.helpers.lifecycle_seed import insert_successful_task
@@ -226,6 +227,22 @@ def test_book_candidate_completion_key_error_uses_framework_output_repair() -> N
 
     assert request_count == 2
     assert result.output == valid
+
+
+@pytest.mark.parametrize(
+    ("candidate_title", "approved_title", "expected"),
+    [
+        ("융됐도갭", "《융됐도갭》", True),
+        ("《융됐도갭》", "융됐도갭", True),
+        ("《융됐도갭·续篇》", "융됐도갭", False),
+    ],
+)
+def test_book_title_comparison_only_ignores_outer_book_title_marks(
+    candidate_title: str,
+    approved_title: str,
+    expected: bool,
+) -> None:
+    assert _book_titles_equivalent(candidate_title, approved_title) is expected
 
 
 async def _insert_successful_book_evaluator_task(
@@ -661,7 +678,7 @@ def test_task_driven_book_loop_reaches_baseline_only_after_explicit_approval(
             candidate = BookCandidatePack(
                 direction="An unreliable witness investigates who edited her memory.",
                 constraints=_book_constraints(),
-                selected_title="Echo Testimony",
+                selected_title="《Echo Testimony》",
                 rolling_plan=_book_rolling_plan(),
                 completion_contract=_completion_contract(),
                 arc_topology=_book_topology(),
@@ -1103,6 +1120,58 @@ def test_book_local_repair_is_scope_bounded_and_second_review_failure_pauses_run
                 ),
                 idempotency_key="submit-exhausted-book",
             )
+            verification_context = await HarnessContextBuilder(engine).build(
+                task_kind="verify_repair.book",
+                project_id="project-repair",
+                book_id=project.result.book_id,
+                arc_id=None,
+                chapter_id=None,
+                semantic_goal="Verify only the authorized Book repair.",
+                source_book_candidate_review_id=reviewed.result.review_id,
+                canon_baseline_id=project.result.canon_baseline_id,
+                workspace_lock_version=5,
+            )
+            manifest_items = verification_context.manifest["items"]
+            assert isinstance(manifest_items, list)
+            pre_repair_positions = [
+                index
+                for index, item in enumerate(manifest_items)
+                if isinstance(item, dict) and item["time"] == "pre_repair"
+            ]
+            post_repair_positions = [
+                index
+                for index, item in enumerate(manifest_items)
+                if isinstance(item, dict) and item["time"] == "post_repair"
+            ]
+            assert pre_repair_positions
+            assert post_repair_positions
+            assert max(pre_repair_positions) < min(post_repair_positions)
+            pre_repair_candidates = [
+                item
+                for item in manifest_items
+                if isinstance(item, dict)
+                and item["group"] == "book_pre_repair_candidate"
+            ]
+            assert pre_repair_candidates
+            assert {
+                item["role"] for item in pre_repair_candidates
+            } == {"comparison_snapshot"}
+            assert verification_context.manifest["schema_id"] == (
+                "novelpilot-task-context-manifest-v7"
+            )
+            assert verification_context.prompt.index(original.direction) < (
+                verification_context.prompt.index(
+                    repaired_candidate.changes[0].value
+                )
+            )
+            assert '"current_candidate_selector":{"time":"post_repair"}' in (
+                verification_context.prompt
+            )
+            assert (
+                '<NOVELPILOT_CONTEXT role="comparison_snapshot" '
+                'scope="book" time="pre_repair" use="verification" '
+                'access="read_only" target="false">'
+            ) in verification_context.prompt
             await insert_successful_task(
                 engine,
                 project_id="project-repair",

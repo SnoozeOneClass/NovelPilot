@@ -33,7 +33,7 @@ class CapabilityEvidence(BaseModel):
 
     checked_at: str
     profile_fingerprint: str = Field(min_length=64, max_length=64)
-    source: Literal["pydantic-ai-capability-v1", "legacy-responses-capability-v1"]
+    source: Literal["pydantic-ai-capability-v1"]
     capabilities: ProfileCapabilities
 
 
@@ -245,7 +245,7 @@ class ProfileCatalog:
             # Preserve the last declared task contract so a successful current
             # probe followed by explicit Retry can reuse the frozen semantic plan.
             # ProfileCatalog.resolve still blocks every Provider call while this
-            # evidence is missing, stale, or migration-only.
+            # evidence is missing or stale.
             capabilities = profile.capability_test.capabilities
         credential_value = profile.api_key.get_secret_value()
         credential = ProfileCredential.from_plaintext(
@@ -319,62 +319,6 @@ def profile_configuration_fingerprint(
             "request_options": request_options,
         }
     ).sha256
-
-
-def migrate_legacy_profiles(raw: dict[str, Any]) -> dict[str, Any]:
-    """One-shot local-config migration; runtime loading never accepts the old schema."""
-    migrated: list[dict[str, Any]] = []
-    for value in raw.get("profiles", []):
-        if not isinstance(value, dict) or value.get("protocol") != "openai-compatible":
-            raise ProfileConfigurationError(
-                "Only explicitly verified legacy Responses profiles can be migrated."
-            )
-        capability = value.get("capability_test")
-        structured = capability.get("structured_output", {}) if isinstance(capability, dict) else {}
-        tool = capability.get("tool_calling", {}) if isinstance(capability, dict) else {}
-        ready = bool(isinstance(capability, dict) and capability.get("ready_for_harness"))
-        capabilities = ProfileCapabilities(
-            text_output=True,
-            text_streaming=ready,
-            native_json_schema=ready and bool(structured.get("ok")),
-            tool_calling=bool(tool.get("ok")),
-            usage_reporting=True,
-        )
-        request_options = value.get("request_options") or {}
-        base_url = str(value.get("base_url", "")).rstrip("/")
-        model_id = str(value.get("model", ""))
-        fingerprint = profile_configuration_fingerprint(
-            api_family="openai_responses",
-            base_url=base_url,
-            model_id=model_id,
-            request_options=request_options,
-        )
-        evidence = None
-        if isinstance(capability, dict):
-            evidence = {
-                "checked_at": str(capability.get("checked_at", "unknown")),
-                "profile_fingerprint": fingerprint,
-                "source": "legacy-responses-capability-v1",
-                "capabilities": capabilities.model_dump(mode="json"),
-            }
-        migrated.append(
-            {
-                "id": value.get("id"),
-                "display_name": value.get("name"),
-                "api_family": "openai_responses",
-                "base_url": base_url,
-                "api_key": value.get("api_key"),
-                "model_id": model_id,
-                "request_options": request_options,
-                "enabled": bool(value.get("enabled", True)),
-                "capability_test": evidence,
-            }
-        )
-    return {
-        "schema_version": 2,
-        "selected_profile_id": raw.get("active_profile_id"),
-        "profiles": migrated,
-    }
 
 
 def encode_profiles_document(value: dict[str, Any] | ProfilesDocument) -> bytes:

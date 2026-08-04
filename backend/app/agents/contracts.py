@@ -1008,29 +1008,23 @@ class EvaluationIssue(BaseModel):
 class ChapterEvaluationIssue(EvaluationIssue):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    affected_components: list[ChapterRepairComponent] = Field(
-        min_length=1,
+    observed_components: list[ChapterRepairComponent] = Field(
+        default_factory=list,
         description=(
-            "Unique semantic Chapter components affected by this issue. The Harness derives "
-            "repair authorization from the union across issues."
-        ),
-    )
-    recurrence: Literal["new", "persists_after_authorized_repair"] = Field(
-        default="new",
-        description=(
-            "Use persists_after_authorized_repair only in repair verification when this "
-            "same semantic issue remains after its authorized correction."
+            "Unique semantic Chapter locations where this issue is visible. Local-repair "
+            "issues must name at least one location. On an Arc escalation these locations "
+            "are optional diagnostics only and never grant Chapter repair authority."
         ),
     )
 
-    @field_validator("affected_components")
+    @field_validator("observed_components")
     @classmethod
-    def _unique_affected_components(
+    def _unique_observed_components(
         cls,
         value: list[ChapterRepairComponent],
     ) -> list[ChapterRepairComponent]:
         if len(value) != len(set(value)):
-            raise ValueError("Chapter issue affected components must be unique.")
+            raise ValueError("Chapter issue observed components must be unique.")
         return value
 
     @model_validator(mode="after")
@@ -1040,7 +1034,19 @@ class ChapterEvaluationIssue(EvaluationIssue):
         return self
 
 
-class LayerEvaluationResult(BaseModel):
+class ChapterRepairVerificationIssue(ChapterEvaluationIssue):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    recurrence: Literal["new", "persists_after_authorized_repair"] = Field(
+        default="new",
+        description=(
+            "Use persists_after_authorized_repair only when this same semantic issue "
+            "remains after the one frozen authorized Chapter correction."
+        ),
+    )
+
+
+class _ChapterEvaluationResultBase(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     guidance_authority_judgment: GuidanceAuthorityJudgment = Field(
@@ -1061,16 +1067,11 @@ class LayerEvaluationResult(BaseModel):
         ),
     )
     summary: str = Field(min_length=1, description="Evidence-based evaluation summary.")
-    issues: list[ChapterEvaluationIssue] = Field(
-        default_factory=list,
-        description=(
-            "Blocking semantic issues. Each issue owns its typed affected-component set; "
-            "the Harness derives any local repair scope from their union."
-        ),
-    )
 
-    @model_validator(mode="after")
-    def _decision_payload(self) -> LayerEvaluationResult:
+    def _validate_decision_payload(
+        self,
+        issues: Sequence[ChapterEvaluationIssue],
+    ) -> None:
         if (
             self.guidance_authority_judgment == "requires_parent_review"
             and self.decision != "escalate_to_arc"
@@ -1078,40 +1079,78 @@ class LayerEvaluationResult(BaseModel):
             raise ValueError(
                 "Chapter guidance requiring parent authority must escalate to Arc."
             )
-        if self.decision == "pass" and self.issues:
+        if self.decision == "pass" and issues:
             raise ValueError("A passing Chapter evaluation cannot carry blocking issues.")
-        if self.decision != "pass" and not self.issues:
+        if self.decision != "pass" and not issues:
             raise ValueError("A non-passing Chapter evaluation requires blocking issues.")
-        repair_scope = {
+        observed_scope = {
             component
-            for issue in self.issues
-            for component in issue.affected_components
+            for issue in issues
+            for component in issue.observed_components
         }
-        if self.decision == "local_repair" and not repair_scope:
-            raise ValueError("local_repair requires affected Chapter components.")
         if self.decision == "local_repair" and any(
-            issue.kind == "parent_authority_concern" for issue in self.issues
+            not issue.observed_components for issue in issues
+        ):
+            raise ValueError(
+                "Every Chapter local-repair issue requires observed components."
+            )
+        if self.decision == "local_repair" and any(
+            issue.kind == "parent_authority_concern" for issue in issues
         ):
             raise ValueError(
                 "A parent-authority concern cannot authorize a Chapter-local repair."
             )
         if self.decision == "escalate_to_arc" and not any(
-            issue.kind == "parent_authority_concern" for issue in self.issues
+            issue.kind == "parent_authority_concern" for issue in issues
         ):
             raise ValueError(
                 "escalate_to_arc requires an evidence-bound parent-authority concern."
             )
         if self.decision == "escalate_to_arc" and any(
-            issue.kind != "parent_authority_concern" for issue in self.issues
+            issue.kind != "parent_authority_concern" for issue in issues
         ):
             raise ValueError(
                 "escalate_to_arc may carry only direct-parent concerns."
             )
-        if "plan" in repair_scope and repair_scope != {"plan"}:
+        if (
+            self.decision == "local_repair"
+            and "plan" in observed_scope
+            and observed_scope != {"plan"}
+        ):
             raise ValueError(
                 "A Chapter plan repair must be the only repair component; the Harness "
                 "invalidates and regenerates every downstream working component."
             )
+
+
+class LayerEvaluationResult(_ChapterEvaluationResultBase):
+    issues: list[ChapterEvaluationIssue] = Field(
+        default_factory=list,
+        description=(
+            "Blocking semantic issues. observed_components are diagnostic locations. "
+            "Only after local_repair does the Harness derive a separate narrow repair "
+            "authorization from those diagnostics."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _decision_payload(self) -> LayerEvaluationResult:
+        self._validate_decision_payload(self.issues)
+        return self
+
+
+class ChapterRepairVerificationResult(_ChapterEvaluationResultBase):
+    issues: list[ChapterRepairVerificationIssue] = Field(
+        default_factory=list,
+        description=(
+            "Blocking semantic issues from repair verification. Each issue additionally "
+            "classifies whether it is new or persists from the frozen authorized repair."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _decision_payload(self) -> ChapterRepairVerificationResult:
+        self._validate_decision_payload(self.issues)
         return self
 
 

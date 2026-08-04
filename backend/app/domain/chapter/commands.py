@@ -16,6 +16,8 @@ from app.agents.contracts import (
     ChapterObservationResult,
     ChapterPlanProposal,
     ChapterRepairComponent,
+    ChapterRepairVerificationIssue,
+    ChapterRepairVerificationResult,
     LayerEvaluationResult,
 )
 from app.agents.registry import DEFAULT_EVALUATION_STRATEGY_REGISTRY
@@ -136,17 +138,19 @@ _CHAPTER_DERIVED_REPAIR_COMPONENTS = frozenset({"observations", "canon"})
 
 
 def _chapter_repair_scope(
-    evaluation: LayerEvaluationResult,
+    evaluation: LayerEvaluationResult | ChapterRepairVerificationResult,
 ) -> list[ChapterRepairComponent]:
-    affected = {
+    if evaluation.decision != "local_repair":
+        return []
+    observed = {
         component
         for issue in evaluation.issues
-        for component in issue.affected_components
+        for component in issue.observed_components
     }
     return [
         component
         for component in _CHAPTER_REPAIR_COMPONENT_ORDER
-        if component in affected
+        if component in observed
     ]
 
 
@@ -161,6 +165,34 @@ def _chapter_issue_fingerprint(issue: ChapterEvaluationIssue) -> str:
             "subject": normalize(issue.subject),
         }
     ).sha256
+
+
+def _normalize_chapter_evaluation_result(
+    *,
+    task_kind: str,
+    result_bytes: bytes,
+) -> ChapterRepairVerificationResult:
+    if task_kind == "verify_repair.chapter":
+        return ChapterRepairVerificationResult.model_validate_json(result_bytes)
+    if task_kind != "evaluate.chapter":
+        raise CommandPreconditionError(
+            "Chapter review requires an initial evaluation or repair verification task."
+        )
+    initial = LayerEvaluationResult.model_validate_json(result_bytes)
+    return ChapterRepairVerificationResult(
+        guidance_authority_judgment=initial.guidance_authority_judgment,
+        decision=initial.decision,
+        summary=initial.summary,
+        issues=[
+            ChapterRepairVerificationIssue.model_validate(
+                {
+                    **issue.model_dump(mode="python"),
+                    "recurrence": "new",
+                }
+            )
+            for issue in initial.issues
+        ],
+    )
 
 
 def _is_derived_dependency_closure(
@@ -1330,7 +1362,7 @@ class ChapterCommandService:
                 ) from error
             operation = error.operation
             return {
-                "schema_id": "chapter-submission-precheck-v4",
+                "schema_id": "chapter-submission-precheck-v5",
                 "passed": False,
                 "checks": {
                     "frozen_submission_loaded": True,
@@ -1362,13 +1394,12 @@ class ChapterCommandService:
                             "One Chapter candidate must propose at most one coherent "
                             "current meaning for each exact Canon subject."
                         ),
-                        "affected_components": ["canon"],
-                        "recurrence": "new",
+                        "observed_components": ["canon"],
                     }
                 ],
             }
         return {
-            "schema_id": "chapter-submission-precheck-v4",
+            "schema_id": "chapter-submission-precheck-v5",
             "passed": True,
             "checks": {
                 "frozen_submission_loaded": True,
@@ -1445,17 +1476,13 @@ class ChapterCommandService:
                     ).unpack_and_verify()
                 )
         evaluation = _apply_chapter_precheck(
-            LayerEvaluationResult.model_validate_json(result_bytes),
+            _normalize_chapter_evaluation_result(
+                task_kind=task.task_kind,
+                result_bytes=result_bytes,
+            ),
             deterministic_precheck,
         )
         decision = _chapter_review_decision(evaluation)
-        if task.task_kind == "evaluate.chapter" and any(
-            issue.recurrence == "persists_after_authorized_repair"
-            for issue in evaluation.issues
-        ):
-            raise CommandPreconditionError(
-                "An initial Chapter evaluation cannot report repair recurrence."
-            )
         repair_scope = _chapter_repair_scope(evaluation)
         repair_scope_set = set(repair_scope)
         issue_fingerprints = [
@@ -1623,7 +1650,7 @@ class ChapterCommandService:
                 semantic_kind="chapter.deterministic_precheck",
                 media_type="application/json",
                 schema_id="chapter-precheck",
-                schema_version=4,
+                schema_version=5,
                 ref_id=precheck_ref_id,
                 created_at_ms=timestamp,
             )
@@ -1633,7 +1660,7 @@ class ChapterCommandService:
                 semantic_kind="chapter.review_detail",
                 media_type="application/json",
                 schema_id="chapter-evaluation-result",
-                schema_version=5,
+                schema_version=6,
                 ref_id=detail_ref_id,
                 created_at_ms=timestamp,
             )
@@ -1645,7 +1672,7 @@ class ChapterCommandService:
                     semantic_kind="chapter.repair_contract",
                     media_type="application/json",
                     schema_id="chapter-repair-contract",
-                    schema_version=5,
+                    schema_version=6,
                     ref_id=repair_ref_id,
                     created_at_ms=timestamp,
                 )
@@ -2610,15 +2637,15 @@ def _task_matches_workspace(
 
 
 def _chapter_review_decision(
-    evaluation: LayerEvaluationResult,
+    evaluation: LayerEvaluationResult | ChapterRepairVerificationResult,
 ) -> ChapterReviewDecision:
     return evaluation.decision
 
 
 def _apply_chapter_precheck(
-    evaluation: LayerEvaluationResult,
+    evaluation: ChapterRepairVerificationResult,
     precheck: dict[str, object],
-) -> LayerEvaluationResult:
+) -> ChapterRepairVerificationResult:
     passed = precheck.get("passed")
     if passed is True:
         return evaluation
@@ -2633,7 +2660,8 @@ def _apply_chapter_precheck(
         )
     try:
         precheck_issues = [
-            ChapterEvaluationIssue.model_validate(issue) for issue in raw_issues
+            ChapterRepairVerificationIssue.model_validate(issue)
+            for issue in raw_issues
         ]
     except ValidationError as error:
         raise CommandPreconditionError(
@@ -2648,7 +2676,7 @@ def _apply_chapter_precheck(
         # component in this review.
         return evaluation
 
-    return LayerEvaluationResult(
+    return ChapterRepairVerificationResult(
         guidance_authority_judgment=(
             evaluation.guidance_authority_judgment
         ),

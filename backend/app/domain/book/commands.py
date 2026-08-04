@@ -67,6 +67,16 @@ class BookNotFoundError(LookupError):
     pass
 
 
+def _book_titles_equivalent(candidate_title: str, approved_title: str) -> bool:
+    def comparison_value(title: str) -> str:
+        normalized = title.strip()
+        if normalized.startswith("《") and normalized.endswith("》"):
+            return normalized[1:-1].strip()
+        return normalized
+
+    return comparison_value(candidate_title) == comparison_value(approved_title)
+
+
 def _task_matches_workspace(
     task: SuccessfulTaskRecord,
     workspace: BookWorkspaceRecord,
@@ -1068,7 +1078,10 @@ class BookCommandService:
                 or state.selected_title is None
                 or state.selected_title_source is None
                 or candidate is None
-                or candidate.selected_title != state.selected_title
+                or not _book_titles_equivalent(
+                    candidate.selected_title,
+                    state.selected_title,
+                )
             ):
                 raise CommandPreconditionError(
                     "Book candidate does not preserve the approved discussion title."
@@ -1102,7 +1115,7 @@ class BookCommandService:
                 prepare_canonical_json(candidate.constraints),
                 prepare_canonical_json(
                     {
-                        "selected_title": candidate.selected_title,
+                        "selected_title": state.selected_title,
                         "title_source": state.selected_title_source,
                     }
                 ),

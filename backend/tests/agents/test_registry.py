@@ -483,7 +483,7 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
         "ChapterEvaluationIssue"
     ]["properties"]
     assert set(
-        chapter_issue_properties["affected_components"]["items"]["enum"]
+        chapter_issue_properties["observed_components"]["items"]["enum"]
     ) == {"plan", "prose", "observations", "canon"}
     assert set(chapter_issue_properties["kind"]["enum"]) == {
         "explicit_conflict",
@@ -494,10 +494,7 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
         "creator_owned_unknown",
     }
     assert "repair_scope" not in chapter_evaluation.output_schema["properties"]
-    assert set(chapter_issue_properties["recurrence"]["enum"]) == {
-        "new",
-        "persists_after_authorized_repair",
-    }
+    assert "recurrence" not in chapter_issue_properties
     assert "needs_user" not in (
         chapter_evaluation.output_schema["properties"]["decision"]["enum"]
     )
@@ -506,9 +503,9 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
         chapter_evaluation.task_instructions
     )
     assert "Harness derives" in chapter_evaluation.task_instructions
-    assert chapter_evaluation.output_schema_version == 7
-    assert chapter_evaluation.evaluation_strategy_version == 9
-    assert chapter_evaluation.rubric_id == "chapter-candidate-rubric-v9"
+    assert chapter_evaluation.output_schema_version == 8
+    assert chapter_evaluation.evaluation_strategy_version == 10
+    assert chapter_evaluation.rubric_id == "chapter-candidate-rubric-v10"
     assert chapter_evaluation.context_policy_id == "chapter-evaluator-context-v5"
     assert chapter_evaluation.context_policy_version == 4
 
@@ -520,14 +517,21 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
     chapter_repair_strategy = DEFAULT_EVALUATION_STRATEGY_REGISTRY.for_task(
         "verify_repair.chapter"
     )
-    assert chapter_repair_evaluation.output_schema_version == 7
-    assert chapter_repair_evaluation.evaluation_strategy_version == 10
-    assert chapter_repair_evaluation.rubric_id == "chapter-repair-rubric-v10"
+    repair_issue_properties = chapter_repair_evaluation.output_schema["$defs"][
+        "ChapterRepairVerificationIssue"
+    ]["properties"]
+    assert set(repair_issue_properties["recurrence"]["enum"]) == {
+        "new",
+        "persists_after_authorized_repair",
+    }
+    assert chapter_repair_evaluation.output_schema_version == 8
+    assert chapter_repair_evaluation.evaluation_strategy_version == 12
+    assert chapter_repair_evaluation.rubric_id == "chapter-repair-rubric-v12"
     assert (
         chapter_repair_evaluation.context_policy_id
-        == "chapter-repair-verification-context-v5"
+        == "chapter-repair-verification-context-v6"
     )
-    assert chapter_repair_evaluation.context_policy_version == 4
+    assert chapter_repair_evaluation.context_policy_version == 5
     assert set(chapter_repair_strategy.legal_semantic_signals) == {
         "pass",
         "local_repair",
@@ -577,8 +581,13 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
         contract_version=1,
     )
     assert arc_repair_evaluation.output_schema_version == 7
-    assert arc_repair_evaluation.evaluation_strategy_version == 9
-    assert arc_repair_evaluation.rubric_id == "arc-repair-rubric-v9"
+    assert arc_repair_evaluation.evaluation_strategy_version == 10
+    assert arc_repair_evaluation.rubric_id == "arc-repair-rubric-v10"
+    assert (
+        arc_repair_evaluation.context_policy_id
+        == "arc-repair-verification-context-v5"
+    )
+    assert arc_repair_evaluation.context_policy_version == 5
 
     book_repair_evaluation = DEFAULT_TASK_REGISTRY.get(
         role="evaluator",
@@ -586,8 +595,13 @@ def test_local_repair_contracts_are_patch_only_and_model_visible() -> None:
         contract_version=1,
     )
     assert book_repair_evaluation.output_schema_version == 5
-    assert book_repair_evaluation.evaluation_strategy_version == 6
-    assert book_repair_evaluation.rubric_id == "book-repair-rubric-v7"
+    assert book_repair_evaluation.evaluation_strategy_version == 7
+    assert book_repair_evaluation.rubric_id == "book-repair-rubric-v8"
+    assert (
+        book_repair_evaluation.context_policy_id
+        == "book-repair-verification-context-v4"
+    )
+    assert book_repair_evaluation.context_policy_version == 4
 
 
 def test_local_repair_patch_contracts_reject_empty_and_duplicate_changes() -> None:
@@ -687,8 +701,8 @@ def test_frozen_evaluator_plan_contains_concrete_rubric_and_strategy_identity() 
     )
 
     assert plan.evaluation_strategy_id == "evaluate.arc_closure-strategy"
-    assert plan.evaluation_strategy_version == 3
-    assert plan.rubric_id == "arc-closure-rubric-v4"
+    assert plan.evaluation_strategy_version == 4
+    assert plan.rubric_id == "arc-closure-rubric-v5"
     assert plan.rubric_text
     assert "Reaching the Chapter checkpoint is not semantic completion" in plan.rubric_text
     assert (
@@ -773,25 +787,25 @@ def test_parent_and_evidence_review_rubrics_expose_harness_route_shape() -> None
             "book_review_required and a parent_authority_concern issue are atomic",
             "chapter_evidence_review_required and a derived_evidence_mismatch issue "
             "are atomic",
-            5,
-            5,
-            "arc-parent-contract-rubric-v6",
+            6,
+            6,
+            "arc-parent-contract-rubric-v7",
         ),
         "evaluate.book_parent_contract": (
             "Book is the top authority",
             "arc_evidence_review_required and a derived_evidence_mismatch issue "
             "are atomic",
-            4,
-            4,
-            "book-parent-contract-rubric-v4",
+            5,
+            5,
+            "book-parent-contract-rubric-v5",
         ),
         "evaluate.arc_closure": (
             "book_review_required and a parent_authority_concern issue are atomic",
             "chapter_evidence_review_required and a derived_evidence_mismatch issue "
             "are atomic",
-            3,
-            3,
-            "arc-closure-rubric-v4",
+            4,
+            4,
+            "arc-closure-rubric-v5",
         ),
         "evaluate.book_completion": (
             "Book is the top authority",
@@ -826,6 +840,19 @@ def test_parent_and_evidence_review_rubrics_expose_harness_route_shape() -> None
         assert definition.evaluation_strategy_version == strategy_version
         assert definition.output_schema_version == output_version
         assert definition.rubric_id == rubric_id
+
+    for task_kind in (
+        "evaluate.arc_parent_contract",
+        "evaluate.book_parent_contract",
+        "evaluate.arc_closure",
+    ):
+        definition = DEFAULT_TASK_REGISTRY.get(
+            role="evaluator",
+            task_kind=task_kind,
+            contract_version=1,
+        )
+        assert "creator wait is a standalone outcome" in definition.task_instructions
+        assert "creator_input_need" in definition.output_schema["properties"]
 
     evidence_definition = DEFAULT_TASK_REGISTRY.get(
         role="evaluator",

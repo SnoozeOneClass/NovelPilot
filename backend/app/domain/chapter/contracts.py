@@ -5,9 +5,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.agents.contracts import (
-    ChapterEvaluationIssue,
     ChapterObservationResult,
     ChapterRepairComponent,
+    ChapterRepairVerificationIssue,
 )
 
 ChapterComponent = Literal[
@@ -38,13 +38,13 @@ class ChapterRepairContract(BaseModel):
         serialize_by_alias=True,
     )
 
-    contract_schema: Literal["chapter-repair-contract-v5"] = Field(
-        default="chapter-repair-contract-v5",
+    contract_schema: Literal["chapter-repair-contract-v6"] = Field(
+        default="chapter-repair-contract-v6",
         alias="schema",
     )
     repair_stage: ChapterRepairStage
     authorized_components: list[ChapterRepairComponent] = Field(min_length=1)
-    issues: list[ChapterEvaluationIssue] = Field(min_length=1)
+    issues: list[ChapterRepairVerificationIssue] = Field(min_length=1)
     issue_fingerprints: list[str] = Field(min_length=1)
     stalled_issue_fingerprints: list[str] = Field(default_factory=list)
 
@@ -78,11 +78,12 @@ class ChapterRepairContract(BaseModel):
         issue_scope = {
             component
             for issue in self.issues
-            for component in issue.affected_components
+            for component in issue.observed_components
         }
         if scope != issue_scope:
             raise ValueError(
-                "Chapter repair authorization must equal the typed issue component union."
+                "Chapter repair authorization must equal the Harness-derived diagnostic "
+                "component union."
             )
         if "plan" in scope and scope != {"plan"}:
             raise ValueError(

@@ -66,7 +66,7 @@ def test_chapter_context_projects_current_and_next_without_full_arc_outline(
             assert "approved_story_arc_plan" not in plan_context.prompt
             assert (
                 plan_context.manifest["schema_id"]
-                == "novelpilot-task-context-manifest-v6"
+                == "novelpilot-task-context-manifest-v7"
             )
             assert (
                 '<NOVELPILOT_CONTEXT role="current_assignment" '

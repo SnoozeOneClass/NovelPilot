@@ -1,8 +1,7 @@
 # 后端验收与证据追踪
 
-NovelPilot 不再把 Mock、手工插入的生命周期状态、`FunctionModel` 整书跑通，
-或源码字符串扫描解释为“后端已经可运行”。这些检查仍可用于快速定位局部错误，
-但项目级结论必须来自生产组件的真实路径。
+NovelPilot 按证据范围给出结论：Mock、手工生命周期状态和 `FunctionModel` 只验证
+局部契约，不能推出“后端已经可运行”。项目级结论必须来自生产组件的真实路径。
 
 ## 三层证据
 
@@ -10,7 +9,7 @@ NovelPilot 不再把 Mock、手工插入的生命周期状态、`FunctionModel` 
 | --- | --- | --- | --- |
 | 快速单元/契约证据 | 纯函数、Schema、SQL 约束、CAS、迁移、协议错误分类 | 通常不调用 | 某个局部契约成立 |
 | 工程真实场景验收 | 生产接线、跨 Loop 交接、分层权威、恢复、真实 Provider | 固定 `jemmy-gpt-5.4-mini` | 本次目标工程场景通过 |
-| 用户四次长跑 | 约 20 章长流程成功率和未知累积问题 | 当前用户实验 Profile | 最终后端稳定性里程碑 |
+| 用户四次长跑 | 整书长流程和未知累积问题 | 当前用户实验 Profile | 一次事实性长流程里程碑，不是统计保证 |
 
 四次长跑不是工程真实场景的替代品，工程场景也不冒充长篇稳定性证明。两者会经过
 一部分相同生产代码，这是必要的交叉证据：前者定向复现已知失败类别，后者发现未知
@@ -22,7 +21,6 @@ NovelPilot 不再把 Mock、手工插入的生命周期状态、`FunctionModel` 
 npm.cmd run test:fast
 npm.cmd run test:backend-real
 npm.cmd run acceptance
-npm.cmd run architecture:inventory
 npm.cmd run experiment:live-book
 ```
 
@@ -31,11 +29,10 @@ npm.cmd run experiment:live-book
   也不产生后端验收结论。
 - `test:backend-real`：先做 S0 Profile 探测，再运行 S1～S5。
 - `acceptance`：依次执行 `test:fast` 与 `test:backend-real`。
-- `architecture:inventory`：非结论性的源码所有权清单，不能代替运行。
 - `experiment:live-book`：仍由用户手动启动，保持四次长跑、当前 selected Profile
   和无技术救援边界；任何其他测试命令都不会调用它。
 
-前端当前不属于后端验收门槛。后端通过四次真实长跑后，再单独优化前端。
+前端 lint、测试、类型检查与构建属于仓库完整性检查，不作为后端验收结论，也不表示前端产品设计已经完成。
 
 ## 什么是工程真实场景
 
@@ -107,11 +104,10 @@ Run Engine 在真实异步循环运行，Provider 请求仍是外部 HTTP。
 | `MockTransport` 错误分类 | 确定性覆盖超时、重试和协议边界 | 单元/契约证据 |
 | `object.__new__(DomainRunDriver)`、`AsyncMock` 私有路由测试 | 可定位单个分支，但绕过生产装配 | `synthetic_integration`，不得宣称验收 |
 | `insert_successful_task()` / `seed_approved_book_and_arc()` | 低成本构造 Domain/DB 前置状态 | 仅限局部测试，真实场景禁止导入 |
-| `FunctionModel` 二十章测试 | 压测确定性 Route 与 Domain 组合 | `synthetic_integration`，不是模型/后端可用性 |
+| 局部 `FunctionModel` Agent/Executor 测试 | 验证结构化输出、文本流、超时和请求预算合同 | 单元/契约证据，不是模型/后端可用性 |
 | `run_engine_enabled=False` API 测试 | 请求验证、幂等和错误 envelope | 局部 API 契约 |
-| 静态源码 probe | 检查实现所有权和旧路径消失 | `architecture:inventory`，非 verdict |
 | S0～S5 | 生产装配、真实模型、跨层交接与权威 | 工程真实场景验收 |
-| 四次约 20 章实验 | 未知长流程稳定性 | 用户最终里程碑 |
+| 四次整书实验 | 未知长流程稳定性 | 用户长流程里程碑 |
 
 ## 证据位置
 
@@ -136,3 +132,6 @@ data/backend-real-acceptance/
 
 四次长跑仍写入 `data/live-observations/`，使用普通项目数据库和当前 selected
 Profile；它不会被 `acceptance` 隐式启动或重置。
+
+当前已接受的四轮事实摘要见 [稳定后端基线](stable-backend-baseline.md)。原始数据库、
+Prompt、Context、正文与诊断附件仍只保留在 git ignored 的本地目录。

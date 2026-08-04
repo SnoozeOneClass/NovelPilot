@@ -41,7 +41,7 @@ Repositories -> SQLAlchemy Core / AsyncConnection
 Domain -X-> FastAPI, Pydantic AI, SQLAlchemy Row, live stream
 ```
 
-旧 `RunHost`、旧 `app.llm` HTTP gateway、JSON/JSONL repository 和 active-project 文件均已删除。生产代码只有这一条路径。
+生产代码只保留上述单一依赖链：SQLite current rows 是权威状态，Domain event 与实时流都不能取代它。
 
 ## 3. Pydantic AI 与领域 Harness 的边界
 
@@ -98,8 +98,13 @@ Book/Arc 的这一次纠正按“完整同层语义问题”授权，而不是�
 候选包络，Agent 扫描每个原始 issue 在包络中的全部出现位置并只返回实际变化。
 Book 包络不含正式标题且 topology 只允许未来 suffix，Arc 包络只含当前 Arc
 candidate；Verifier 读取 before/after、原始 issue ledger 和 Harness 生成的实际
-变化清单。Chapter 继续使用现有 dependency-aware 精确组件授权，不为形式对称而
-扩大权限。纠正仍只有一轮，正式 baseline 和历史 prefix 始终不可写。
+变化清单。Chapter 的 `observed_components` 同样只表示问题出现的位置，但仍采用
+dependency-aware 窄授权：只有 `local_repair` 后 Harness 才从诊断位置派生并冻结
+独立 Repair Contract；`escalate_to_arc` 即使提到 plan/prose 也不会产生本地修改
+权限，plan-only 约束只检查真正的 Repair Contract。初次 Chapter 评审不暴露
+recurrence，只有绑定既有 Repair Contract 的 verifier 可以判断同一问题是否持续。
+这里不为形式对称扩大 Chapter 权限。纠正仍只有一轮，正式 baseline 和历史 prefix
+始终不可写。
 
 多 Arc 链路同样使用精确来源：Arc 2 及以后只能消费前一正式 Arc closure 产生的
 当前 `BookProgressHandoff`；Book completion 评审和由其打开的 Book successor
@@ -136,7 +141,11 @@ handoff。
 
 Arc Planner 和 Arc candidate/closure Evaluator 可以看到当前 Arc 的完整逐章大纲。正常 Chapter 计划与正文只看到当前项和至多一个下一项；Chapter 观察、Canon 抽取和评审只看到当前项。大纲遵循软语义约束：Chapter 必须完成宏观职责，但不要求标题、措辞、场景数量或事件描述逐字匹配。逐章大纲耗尽只触发 Arc 收束检查，不等于收束通过，也不引入周期性 Arc 质量复盘。
 
-Arc 收束或父层审查的自动向下纠正，在同一冻结评审 lineage 中最多一轮。第二次出现同类问题时，若拥有该问题的 Agent 给出了用户可以回答的具体问题，则进入显式 creator wait；执行、评估契约或上下文问题进入失败暂停，不能伪装成等待用户。
+Arc 收束或父层审查的自动向下纠正，在同一冻结评审 lineage 中最多一轮。
+creator wait 是独立语义结果，不能与“继续向下纠正”同时编码后再依赖字段优先级
+选路；Harness 使用冻结的纠正轮次决定合法动作。第二次出现同类问题时，若拥有
+该问题的 Agent 给出了用户可以回答的具体问题，则进入显式 creator wait；执行、
+评估契约或上下文问题进入失败暂停，不能伪装成等待用户。
 
 首版只允许叙事性 Chapter successor 修改当前 lineage 顶端。只要已有后续 Chapter、formal Arc closure 或 Book handoff，就进入 `waiting_for_user/historical_rewrite_unsupported` 并保持所有权威指针不变。正文逐字不变的 evidence-only correction 可以在 Arc 收束前修复 observations/Canon，但必须证明正文证据成立且后续 Chapter 不冲突。
 
@@ -163,7 +172,7 @@ Observation/Canon 都是可纠正的派生状态，发生争议时回到对应�
 
 每个 Agent task 使用固定 CXT1 Context View。模型可见上下文块只暴露六个
 属性：`role / scope / time / use / access / target`；内部 ID、hash 和完整
-source binding 只写入 `novelpilot-task-context-manifest-v6`。评审或修复任务
+source binding 只写入 `novelpilot-task-context-manifest-v7`。评审或修复任务
 恰好拥有一个逻辑 `target_descriptor`；正式契约、正式结果、正式正文、派生
 证据、Canon 和旧评审均为只读。Book 不重读全部 Chapter，Arc 只消费当前
 Arc 的正式事实，Chapter 只消费当前 assignment、至多下一 assignment、
@@ -194,6 +203,12 @@ Context policy 不只声明允许组，也声明每个 task kind 的必需组，
 evidence correction 所需的至少一个明确授权来源；缺块在 Provider 调用前以
 `context_assembly_invalid` 失败。正式 Canon 始终保持 `time=current`，不会因
 repair/verify 而误标成候选；只有实际候选块标记为 `pre_repair/post_repair`。
+修复复核进一步把旧候选标记为只读 `comparison_snapshot`，不再与修复后的
+`working_candidate` 共用角色；Prompt 固定按旧候选/旧问题、当前依赖、修复后
+候选、`target_descriptor` 排列。`target_descriptor` 明确绑定
+`time=post_repair` 为当前评审对象，因此旧候选和旧评审只能解释问题来源，不能
+再次被当作当前候选判错。Chapter 复核不重复装入完整旧候选，只使用冻结问题
+账本与修复后的当前候选。
 Raw user feedback 只有在仍是 applied feedback 的当前 content ref 时才标记为
 `creator_guidance`，父层 review 必须保持 `review_finding /
 repair_authorization` 身份。
@@ -245,7 +260,7 @@ review/approval 和内容 manifest 绑定。
 
 ## 5. SQLite、CAS 与 Transactional Outbox
 
-SQLite 是唯一权威状态。数据库包含 39 张应用表，由 Alembic revision 与共享 `MetaData` 共同约束。
+SQLite 是唯一权威状态。数据库包含 39 张应用表，由唯一无父节点的 Alembic 根迁移 `b6a2e74c9d18` 与共享 `MetaData` 共同约束。仓库只定义当前 schema，不提供开发期 revision 的升级兼容。
 
 大型 Prompt、Context、typed result、正文和诊断附件存入项目拥有的 Content-Addressed Storage：
 
@@ -324,10 +339,10 @@ NovelPilot 不按任务或领域层设置产品级输出 token 预算。Response
 
 1. 服务停止或所有运行到达安全边界；
 2. SQLite Online Backup API 创建快照；
-3. 校验 integrity、foreign keys、已知且可升级的 schema revision 和每个 Blob hash；
+3. 校验 integrity、foreign keys、当前 schema revision、完整表集合和每个 Blob hash；
 4. 写入绑定文件大小、SHA-256、event sequence 和 Blob count 的 manifest。
 
-迁移前备份允许处于当前 Alembic 迁移树中的旧 revision；它按备份自身 revision 校验，不会拿 head 表集合错误拒绝旧库。Restore 要求 FastAPI 已停止且无 WAL/SHM sidecar，先验证快照，再迁移 staging 库到 head，最后原子替换整库；不做项目行级 merge。
+备份、备份校验与恢复只接受当前 head。Restore 要求 FastAPI 已停止且无 WAL/SHM sidecar，先校验 manifest、文件 hash、当前 schema、integrity、foreign keys、Blob 与孤儿引用，再通过 SQLite Online Backup API 复制到 staging，校验后原子替换整库；它不升级历史快照，也不做项目行级 merge。
 
 单本小说只提供 Markdown 导出。导出按 book ordinal 读取正式 Chapter baseline，计算 snapshot fingerprint 与 content hash；workspace 草稿、失败 attempt 和 live delta 永远不会进入正文。
 

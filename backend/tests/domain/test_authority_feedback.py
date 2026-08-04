@@ -121,7 +121,7 @@ async def _prepare_arc_parent_fixture(
                     evidence=[
                         "The frozen Chapter evidence raises a concern about its direct Arc."
                     ],
-                    affected_components=["observations", "canon"],
+                    observed_components=["observations", "canon"],
                 )
             ],
         ),
@@ -745,6 +745,16 @@ def test_initial_authority_creator_wait_projects_and_starts_user_lineage(
             assert state.creator_input_request.review_id == review_id
             assert state.creator_input_request.route_layer == "arc"
             assert state.creator_input_request.question == _creator_need()
+            async with engine.connect() as connection:
+                assert (
+                    await connection.scalar(
+                        select(chapter_workspaces.c.lock_version).where(
+                            chapter_workspaces.c.chapter_id
+                            == fixture.chapter.chapter_id
+                        )
+                    )
+                    == fixture.chapter.workspace_lock_version
+                )
 
             feedback_service = FeedbackCommandService(CommandBus(engine))
             queued = await feedback_service.queue(
@@ -873,10 +883,9 @@ def test_round_one_recurrence_needs_creator_question_and_cannot_open_round_two(
                 fixture=fixture,
                 suffix="round-one-creator",
                 evaluation=ArcParentContractEvaluation(
-                    arc_contract_judgment="remains_applicable",
+                    arc_contract_judgment="unable_to_judge",
                     book_review_concern="not_required",
-                    chapter_evidence_concern="chapter_evidence_review_required",
-                    chapter_evidence_target=target,
+                    chapter_evidence_concern="not_required",
                     summary="The remaining ambiguity belongs to creator intent.",
                     issues=[
                         EvaluationIssue(
@@ -1020,7 +1029,7 @@ def test_evidence_correction_preserves_chapter_bytes_and_committed_descendants(
                             evidence=[
                                 "The reviewed Chapter evidence challenges its current Arc."
                             ],
-                            affected_components=["observations", "canon"],
+                            observed_components=["observations", "canon"],
                         )
                     ],
                 ),

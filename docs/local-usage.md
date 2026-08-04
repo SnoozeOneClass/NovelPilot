@@ -58,17 +58,11 @@ npm.cmd run profile:probe -- grok-4.5
 npm.cmd run profile:probe -- tool-profile --require-tools
 ```
 
-所有探测通过后才会原子更新 capability evidence；`--no-write` 只执行探测。任何 `api_family + base_url + model_id + request_options` 变化都会使旧 evidence 失效，旧迁移标记也只显示为 stale，不能替代当前 Adapter 探测。命令不会打印 API key。
+所有探测通过后才会原子更新 capability evidence；`--no-write` 只执行探测。任何 `api_family + base_url + model_id + request_options` 变化都会使 evidence 失效。schema v2 只接受 `pydantic-ai-capability-v1`，其他 evidence source 会使整个配置明确失败。命令不会打印 API key。
 
 运行中的项目若在领取下一任务时发现 Profile 缺失、disabled 或 capability stale，会用零 Provider 请求写入一次明确失败并进入 `failure_paused`，不会让 queued task 被后台反复领取。修好配置并重新探测后，仍需用户显式 Retry。
 
-从旧本地配置一次性迁移：
-
-```powershell
-scripts\python.cmd scripts/migrate_profile_config.py
-```
-
-迁移不会打印或移动 API key。能力不满足 `text_streaming` 或 `native_json_schema` 时任务明确失败，不会降级到另一种输出协议。
+能力不满足 `text_streaming` 或 `native_json_schema` 时任务明确失败，不会降级到另一种输出协议。
 
 ## 4. 正常创作流程
 
@@ -87,7 +81,7 @@ scripts\python.cmd scripts/migrate_profile_config.py
 
 页面刷新、SSE 重连、切换项目和普通 GET 不会改变 Route。
 
-## 5. 权威数据、导出和旧输出
+## 5. 权威数据与本地输出
 
 ```text
 data/novelpilot.sqlite3       # 唯一权威应用库
@@ -95,10 +89,10 @@ data/backups/                 # 一致快照及 manifest
 data/backend-real-acceptance/ # 5.4-mini 工程真实场景报告与隔离数据库
 data/live-observations/       # 四轮真实观测报告
 config/*.local.json           # Profile 与本地密钥
-output/                       # Markdown 导出及保留的旧输出
+output/                       # 可重新生成的 Markdown 导出
 ```
 
-旧 `output/project-*` 文件项目不会自动迁移，也不会被新后端读取或删除。新小说的状态恢复依赖 SQLite current rows、pending gates、attempt/delivery metadata，不依赖旧 JSONL 或实时 token。
+状态恢复只依赖 SQLite current rows、pending gates 和 attempt/delivery metadata。`output/` 与实时 token 流都不是权威状态，也不会被重放来推导 Route。
 
 ## 6. 备份与恢复
 
@@ -120,7 +114,7 @@ npm.cmd run backend:backup:validate -- data\backups\novelpilot-2026-07-23.sqlite
 npm.cmd run backend:restore -- data\backups\novelpilot-2026-07-23.sqlite3
 ```
 
-备份可以来自当前迁移树中的旧 schema revision，因此应在不兼容迁移前先执行备份命令。Restore 验证 manifest、文件 hash、integrity、FK、备份自身 revision 与 Blob hash，在 staging 库升级到当前 head 后再原子替换整库。它不支持把一个项目合并进另一个正在运行的数据库。
+备份、备份校验和恢复只接受当前 head。Restore 验证 manifest、文件 hash、完整表集合、schema revision、integrity、FK、Blob hash 与孤儿引用，通过 SQLite Online Backup API 复制到 staging 并再次校验后原子替换整库。它不升级历史快照，也不支持把一个项目合并进另一个正在运行的数据库。
 
 ## 7. 后端质量与真实场景门禁
 
@@ -128,7 +122,6 @@ npm.cmd run backend:restore -- data\backups\novelpilot-2026-07-23.sqlite3
 npm.cmd run test:fast
 npm.cmd run test:backend-real
 npm.cmd run acceptance
-npm.cmd run architecture:inventory
 npm.cmd run audit:secrets
 ```
 
@@ -144,10 +137,9 @@ npm.cmd run audit:secrets
   手工写领域状态；
 - `acceptance` 先运行 fast gate，再运行付费真实场景；失败报告和场景数据库保留在
   `data/backend-real-acceptance/`；
-- `architecture:inventory` 只检查实现与局部测试所有权，明确不是验收结论；
 - `test:backend-real` 与 `acceptance` 不会改变当前 selected Profile，也不会启动
   `experiment:live-book`；
-- 当前后端阶段不把前端 lint/test/build 纳入验收。后端通过四次长跑后再单独优化前端；
+- 前端 lint/test/typecheck/build 是仓库完整性检查，不代表当前前端已经完成产品验收；
 - secret audit 扫描 `data/` 和 `output/`，发现 API key 时只报告脱敏路径、
   Profile id 和值类型。
 
@@ -160,9 +152,7 @@ npm.cmd run experiment:live-book
 ```
 
 runner 默认使用应用当前选中的 Profile；需要刻意覆盖时才传
-`-- --profile-id <profile-id>`。当前选中测试 Profile 是
-`jemmy-gpt-5.6-terra`：OpenAI Responses 协议、模型 `gpt-5.6-terra`、base URL
-`https://api.jemmy.icu/v1`。runner 只检查本地已记录的 Profile readiness、Prompt
+`-- --profile-id <profile-id>`。runner 只检查本地已记录的 Profile readiness、Prompt
 SHA-256、固定四轮顺序与 fingerprint，不会先发 Provider 探测请求，也不会输出
 secret。四轮各创建一个全新普通项目：
 

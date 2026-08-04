@@ -175,19 +175,16 @@ def test_stale_or_mismatched_capability_evidence_fails_closed(tmp_path: Path) ->
         catalog.resolve("profile-a")
 
 
-def test_legacy_migration_evidence_never_replaces_current_adapter_probe(
+def test_profile_document_rejects_non_current_capability_evidence(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "profiles.local.json"
     payload = json.loads(encode_profiles_document(_document()))
     payload["profiles"][0]["capability_test"]["source"] = (
-        "legacy-responses-capability-v1"
+        "unsupported-capability-v0"
     )
     path.write_text(json.dumps(payload), encoding="utf-8")
     catalog = ProfileCatalog(path)
 
-    _selected, public = catalog.list_public()
-
-    assert public[0].capability_status == "stale"
-    with pytest.raises(ProfileConfigurationError, match="current production Adapter"):
-        catalog.resolve("profile-a")
+    with pytest.raises(ProfileConfigurationError, match="schema version 2"):
+        catalog.load()

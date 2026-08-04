@@ -5,6 +5,8 @@ from pydantic import ValidationError
 
 from app.agents.contracts import (
     ChapterEvaluationIssue,
+    ChapterRepairVerificationIssue,
+    ChapterRepairVerificationResult,
     EstablishedFactCandidate,
     EvaluationIssue,
     LayerEvaluationResult,
@@ -200,7 +202,7 @@ def test_layer_authority_and_creator_wait_decisions_fail_closed() -> None:
         subject="current Arc assignment",
         summary="The assignment conflicts with committed facts.",
         evidence=["The assignment requires an event prohibited by the current Arc."],
-        affected_components=["plan"],
+        observed_components=["plan"],
     )
     with pytest.raises(ValidationError, match="cannot authorize a Chapter-local repair"):
         LayerEvaluationResult(
@@ -209,6 +211,19 @@ def test_layer_authority_and_creator_wait_decisions_fail_closed() -> None:
             summary="Attempted lower-layer repair.",
             issues=[chapter_parent],
         )
+
+    escalation = LayerEvaluationResult(
+        guidance_authority_judgment="requires_parent_review",
+        decision="escalate_to_arc",
+        summary="The diagnostic locations do not grant a local repair.",
+        issues=[
+            chapter_parent.model_copy(
+                update={"observed_components": ["plan", "prose"]}
+            )
+        ],
+    )
+    assert escalation.decision == "escalate_to_arc"
+    assert escalation.issues[0].observed_components == ["plan", "prose"]
 
     arc_parent = ArcEvaluationIssue(
         kind="parent_authority_concern",
@@ -352,7 +367,7 @@ def test_one_decision_cannot_hide_mixed_issues_and_observations_are_diagnostic()
         subject="Arc assignment",
         summary="The assignment requires Arc review.",
         evidence=["Formal Chapter evidence conflicts with the assigned Arc outcome."],
-        affected_components=["plan"],
+        observed_components=["plan"],
     )
     chapter_local = ChapterEvaluationIssue(
         kind="contract_unfulfilled",
@@ -361,7 +376,7 @@ def test_one_decision_cannot_hide_mixed_issues_and_observations_are_diagnostic()
         summary="The candidate omits its local goal.",
         evidence=["The frozen candidate does not perform the assigned Chapter action."],
         contract_item="Perform the assigned Chapter action.",
-        affected_components=["prose"],
+        observed_components=["prose"],
     )
     with pytest.raises(ValidationError, match="only direct-parent concerns"):
         LayerEvaluationResult(
@@ -563,7 +578,7 @@ def test_successful_closure_and_completion_cannot_hide_ep1_blockers() -> None:
         )
 
 
-def test_bounded_evidence_recurrence_can_wait_only_on_creator_owned_input() -> None:
+def test_creator_wait_is_standalone_from_bounded_evidence_correction() -> None:
     question = "Did the witness knowingly conceal the altered statement?"
     creator_issue = EvaluationIssue(
         kind="creator_owned_unknown",
@@ -579,16 +594,103 @@ def test_bounded_evidence_recurrence_can_wait_only_on_creator_owned_input() -> N
         evidence=["Formal prose deliberately leaves the intent unresolved."],
     )
 
+    with pytest.raises(ValidationError):
+        ArcParentContractEvaluation(
+            arc_contract_judgment="remains_applicable",
+            book_review_concern="not_required",
+            chapter_evidence_concern="chapter_evidence_review_required",
+            chapter_evidence_target=ChapterEvidenceTarget(
+                chapter_book_ordinal=2,
+                correction_goal="Resolve the remaining creator-owned intent ambiguity.",
+            ),
+            summary="An invalid result combines evidence correction and creator wait.",
+            issues=[creator_issue],
+            creator_input_need=need,
+        )
+
     evaluation = ArcParentContractEvaluation(
-        arc_contract_judgment="remains_applicable",
+        arc_contract_judgment="unable_to_judge",
         book_review_concern="not_required",
-        chapter_evidence_concern="chapter_evidence_review_required",
-        chapter_evidence_target=ChapterEvidenceTarget(
-            chapter_book_ordinal=2,
-            correction_goal="Resolve the remaining creator-owned intent ambiguity.",
-        ),
+        chapter_evidence_concern="not_required",
         summary="Only creator intent can resolve the recurrence.",
         issues=[creator_issue],
         creator_input_need=need,
     )
     assert evaluation.creator_input_need == need
+
+    with pytest.raises(ValidationError):
+        BookParentContractEvaluation(
+            book_contract_judgment="remains_applicable",
+            arc_evidence_concern="arc_evidence_review_required",
+            summary="An invalid result combines evidence correction and creator wait.",
+            issues=[creator_issue],
+            creator_input_need=need,
+        )
+    book_wait = BookParentContractEvaluation(
+        book_contract_judgment="unable_to_judge",
+        arc_evidence_concern="not_required",
+        summary="Only creator intent can resolve the Book-parent review.",
+        issues=[creator_issue],
+        creator_input_need=need,
+    )
+    assert book_wait.creator_input_need == need
+
+    closure_status = ContractSignalStatus(
+        signal_key="intent_resolved",
+        status="unresolved",
+        rationale="The creator-owned intent is deliberately undefined.",
+    )
+    with pytest.raises(ValidationError):
+        ArcClosureEvaluation(
+            signal_statuses=[closure_status],
+            arc_contract_judgment="remains_applicable",
+            book_review_concern="not_required",
+            chapter_evidence_concern="chapter_evidence_review_required",
+            chapter_evidence_target=ChapterEvidenceTarget(
+                chapter_book_ordinal=2,
+                correction_goal="Resolve the remaining creator-owned intent ambiguity.",
+            ),
+            summary="An invalid closure combines evidence correction and creator wait.",
+            issues=[creator_issue],
+            creator_input_need=need,
+        )
+    closure_wait = ArcClosureEvaluation(
+        signal_statuses=[closure_status],
+        arc_contract_judgment="unable_to_judge",
+        book_review_concern="not_required",
+        chapter_evidence_concern="not_required",
+        summary="Only creator intent can resolve the closure review.",
+        issues=[creator_issue],
+        creator_input_need=need,
+    )
+    assert closure_wait.creator_input_need == need
+
+
+def test_initial_chapter_result_cannot_encode_repair_recurrence() -> None:
+    issue = {
+        "kind": "contract_unfulfilled",
+        "code": "chapter_goal_missing",
+        "subject": "Chapter goal",
+        "summary": "The repaired candidate still omits its goal.",
+        "evidence": ["The frozen assignment remains unfulfilled."],
+        "contract_item": "Perform the assigned Chapter action.",
+        "observed_components": ["prose"],
+        "recurrence": "persists_after_authorized_repair",
+    }
+    with pytest.raises(ValidationError, match="recurrence"):
+        LayerEvaluationResult.model_validate(
+            {
+                "guidance_authority_judgment": "not_present",
+                "decision": "local_repair",
+                "summary": "Initial review cannot claim recurrence.",
+                "issues": [issue],
+            }
+        )
+
+    verification = ChapterRepairVerificationResult(
+        guidance_authority_judgment="not_present",
+        decision="local_repair",
+        summary="Verification may classify recurrence.",
+        issues=[ChapterRepairVerificationIssue.model_validate(issue)],
+    )
+    assert verification.issues[0].recurrence == "persists_after_authorized_repair"

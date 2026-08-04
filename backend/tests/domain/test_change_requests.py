@@ -30,8 +30,9 @@ from app.db.schema import (
     book_baselines,
     book_workspaces,
     chapters,
-    chapter_workspaces,
     chapter_arc_change_requests,
+    chapter_reviews,
+    chapter_workspaces,
     metadata,
 )
 from app.domain.authority import (
@@ -384,7 +385,7 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                             evidence=[
                                 "The frozen assignment cannot be fulfilled under the Arc constraints."
                             ],
-                            affected_components=["plan"],
+                            observed_components=["plan", "prose"],
                         )
                     ],
                 ),
@@ -400,7 +401,13 @@ def test_chapter_to_arc_request_resolves_only_when_arc_v2_commits(
                         arc_workspaces.c.arc_id == ready.foundation.arc_id
                     )
                 )
+                repair_contract_ref_id = await connection.scalar(
+                    select(chapter_reviews.c.repair_contract_ref_id).where(
+                        chapter_reviews.c.id == ready.review_id
+                    )
+                )
             assert change_request_id is not None and arc_lock is not None
+            assert repair_contract_ref_id is None
             async with engine.connect() as connection:
                 assert (
                     await connection.scalar(
@@ -780,7 +787,7 @@ def test_rejected_change_request_keeps_formal_baselines_and_blocks_source_for_us
                             evidence=[
                                 "The proposed reveal exceeds the current Arc assignment."
                             ],
-                            affected_components=["plan"],
+                            observed_components=["plan"],
                         )
                     ],
                 ),

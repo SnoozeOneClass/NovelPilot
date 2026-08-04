@@ -138,6 +138,28 @@ def test_every_context_policy_is_task_specific_and_cxt1_complete() -> None:
         policy = CONTEXT_POLICY_REGISTRY[task_kind]
         if "canon" in policy.allowed_groups:
             assert policy.block_for("canon").time == "current"
+    for task_kind in (
+        "verify_repair.book",
+        "verify_repair.arc",
+        "verify_repair.chapter",
+    ):
+        policy = CONTEXT_POLICY_REGISTRY[task_kind]
+        assert not any(
+            block.role == "working_candidate" and block.time == "pre_repair"
+            for block in policy.blocks
+        )
+    assert (
+        CONTEXT_POLICY_REGISTRY["verify_repair.book"]
+        .block_for("book_pre_repair_candidate")
+        .role
+        == "comparison_snapshot"
+    )
+    assert (
+        CONTEXT_POLICY_REGISTRY["verify_repair.arc"]
+        .block_for("arc_pre_repair_candidate")
+        .role
+        == "comparison_snapshot"
+    )
     assert (
         CONTEXT_POLICY_REGISTRY["chapter.repair.observation"]
         .block_for("chapter_canon_patch")

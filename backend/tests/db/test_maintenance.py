@@ -20,7 +20,6 @@ from app.db.maintenance import (
     validate_backup,
     validate_database,
 )
-from app.db.revisions import HEAD_REVISION
 from app.db.schema import books, canon_baselines, generation_runs, projects
 from app.store.content import ContentRepository, prepare_canonical_json, prepare_exact_text
 
@@ -120,22 +119,22 @@ def test_backup_is_consistent_validated_and_restorable(tmp_path: Path) -> None:
     assert project_ids == {"project-before-cut"}
 
 
-def test_backup_accepts_supported_pre_head_database_and_restore_migrates(
-    tmp_path: Path,
-) -> None:
-    source = tmp_path / "source-old.sqlite3"
-    backup = tmp_path / "snapshot-old.sqlite3"
-    restored = tmp_path / "restored-current.sqlite3"
-    command.upgrade(alembic_config(source), "7c0d2a9f4b31")
+def test_backup_rejects_database_not_at_current_head(tmp_path: Path) -> None:
+    source = tmp_path / "source.sqlite3"
+    backup = tmp_path / "snapshot.sqlite3"
+    command.upgrade(alembic_config(source), "head")
+    with sqlite3.connect(source) as connection:
+        connection.execute(
+            "UPDATE alembic_version SET version_num = ?",
+            ("obsolete-development-revision",),
+        )
+        connection.commit()
 
-    manifest = create_consistent_backup(source, backup)
-    assert manifest.schema_revision == "7c0d2a9f4b31"
-    verified_manifest, backup_health = validate_backup(backup)
-    assert verified_manifest == manifest
-    assert backup_health.schema_revision == "7c0d2a9f4b31"
+    with pytest.raises(DatabaseHealthError, match="Schema revision mismatch"):
+        create_consistent_backup(source, backup)
 
-    restored_health = restore_database(backup, restored)
-    assert restored_health.schema_revision == HEAD_REVISION
+    assert not backup.exists()
+    assert not manifest_path_for(backup).exists()
 
 
 def test_backup_refuses_active_execution_state(tmp_path: Path) -> None:
