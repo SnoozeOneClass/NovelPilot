@@ -11,12 +11,12 @@ BACKEND_ROOT = REPO_ROOT / "backend"
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from app.agents.probe import (  # noqa: E402
+from app.authoring.models.catalog import ProfileCatalog, ProfileConfigurationError
+from app.authoring.models.probe import (
     ProfileCapabilityProbeError,
     probe_stored_profile,
 )
-from app.core.config import LLM_PROFILES_PATH  # noqa: E402
-from app.profiles import ProfileCatalog  # noqa: E402
+from app.core.config import LLM_PROFILES_PATH
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -61,10 +61,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Capability probe failed: {exc}", file=sys.stderr, flush=True)
         return 1
     if not arguments.no_write:
-        catalog.record_capability_evidence(
-            profile_id=profile.id,
-            evidence=evidence,
-        )
+        try:
+            catalog.record_capability_evidence(
+                profile_id=profile.id,
+                evidence=evidence,
+                expected_profile=profile,
+            )
+        except (OSError, ProfileConfigurationError):
+            print(
+                "Capability probe failed: settings changed or evidence could not be saved; retry.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
     print(
         "Capability probe passed: "
         f"profile={profile.id} protocol={profile.api_family} model={profile.model_id} "

@@ -3,17 +3,17 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 BACKEND_DIR = ROOT_DIR / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from app.core.config import DATA_DIR, LLM_PROFILES_PATH, OUTPUT_DIR  # noqa: E402
-from app.profiles import ProfileCatalog  # noqa: E402
-from app.security.audit import SecretAuditResult, audit_runtime_paths  # noqa: E402
+from app.authoring.models.catalog import ProfileCatalog
+from app.authoring.security import SecretAuditResult, audit_runtime_paths
+from app.core.config import DATA_DIR, LLM_PROFILES_PATH, OUTPUT_DIR
 
 
 def render_text(result: SecretAuditResult) -> str:
@@ -30,7 +30,9 @@ def render_text(result: SecretAuditResult) -> str:
             for finding in result.findings
         )
     else:
-        lines.append("No configured profile API keys were found in databases, backups, exports, or reports.")
+        lines.append(
+            "No configured profile API keys were found in databases, backups, exports, or reports."
+        )
     return "\n".join(lines) + "\n"
 
 
