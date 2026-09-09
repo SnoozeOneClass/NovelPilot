@@ -1,5 +1,6 @@
 # Local secrets
 config/*.local.json
+config/.*.json.lock
 
 # Generated novel output
 output/
