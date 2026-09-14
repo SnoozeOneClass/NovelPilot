@@ -1,1 +1,0 @@
-"""Novelpilot backend application."""

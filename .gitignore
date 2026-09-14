@@ -15,7 +15,7 @@ data/
 .cursor/
 .trellis/
 
-# Python
+# Local workflow Python caches (Trellis tooling, not the product)
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -29,9 +29,7 @@ venv/
 # Node
 node_modules/
 .vite/
-frontend/.vite/
 dist/
-frontend/dist/
 *.tsbuildinfo
 
 # OS / editor

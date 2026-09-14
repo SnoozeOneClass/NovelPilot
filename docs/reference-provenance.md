@@ -1,28 +1,9 @@
-# Authoring Runtime Provenance
+# Reference provenance
 
-NovelPilot's isolated authoring runtime was designed after studying `ainovel-cli` at commit
-`6ed363a9fba51dbf40cc2c9b08dac121727960d9`. The reference project is Apache-2.0 licensed.
+NovelPilot studies ainovel-cli at commit `6ed363a9fba51dbf40cc2c9b08dac121727960d9` as a reference for co-creation, automatic writing, user intervention, role-scoped tools and recoverable file storage.
 
-The following ideas are architectural references: one serial engine, fact-driven routing,
-programmatic role dispatch, role-scoped tools, durable checkpoints, bounded retries, rolling
-planning, context compaction, and recovery from persisted facts.
+The current implementation lives only in `cli/` and uses TypeScript and Pi SDK 0.85.1. The previous Python/Web implementation is removed and is not a dependency or compatibility layer.
 
-The implementation under `backend/app/authoring/` is an independent Python design using Pydantic
-AI, SQLite, FastAPI, and NovelPilot's existing Profile adapters. No Go source file or translated
-source fragment from `ainovel-cli` is included. If a future change copies or translates reference
-source, that change must carry the Apache-2.0 license, upstream attribution, and a modification
-notice before merge.
+The reference project is Apache-2.0 licensed. Architectural study does not establish that all reference behavior has already been implemented. If source is copied or translated in subsequent work, retain the applicable upstream copyright, license and modification notices.
 
-The refactor branch contains only the Authoring runtime and database. The previous three-layer
-NovelPilot implementation remains available from `main`; no old-data migration or compatibility
-runtime is included here.
-
-Capability evidence deliberately has no wall-clock TTL. It remains usable only while the Profile
-configuration fingerprint and the authoring metadata sidecar fingerprint match. Any configuration,
-model id, request option, context window, output limit, or price change produces a new fingerprint.
-This prevents a long book from expiring a frozen Profile mid-run while still invalidating changed
-configuration before the next episode.
-
-`scripts/upsert_authoring_metadata.py` is a local configuration helper written for NovelPilot. It
-derives the sidecar fingerprint through NovelPilot's own Profile contract and contains no upstream
-source or credential material.
+Pi and native-lock dependencies retain their own package licenses. The book lease currently uses `fs-native-extensions` 1.5.0. Runtime evidence is recorded separately in [engineering evidence](engineering-evidence.md).

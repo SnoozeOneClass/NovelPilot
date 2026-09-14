@@ -2,24 +2,14 @@
   "name": "novelpilot",
   "private": true,
   "version": "0.1.0",
+  "description": "NovelPilot TUI development entry points",
   "scripts": {
-    "backend:dev": "scripts\\python.cmd -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8010 --reload",
-    "backend:lint": "scripts\\python.cmd -m ruff check backend scripts",
-    "backend:test": "scripts\\python.cmd -m pytest backend/tests --basetemp .tmp\\pytest-%RANDOM%-%RANDOM%",
-    "backend:typecheck": "scripts\\python.cmd -m mypy backend",
-    "test:fast": "npm.cmd run backend:lint && npm.cmd run backend:typecheck && npm.cmd run backend:test && npm.cmd run frontend:lint && npm.cmd run frontend:test && npm.cmd run frontend:typecheck && npm.cmd run frontend:build",
-    "frontend:dev": "npm.cmd --prefix frontend run dev",
-    "frontend:lint": "npm.cmd --prefix frontend run lint",
-    "frontend:test": "npm.cmd --prefix frontend run test",
-    "frontend:build": "npm.cmd --prefix frontend run build",
-    "frontend:typecheck": "npm.cmd --prefix frontend run typecheck",
-    "authoring:eval:fake": "scripts\\python.cmd -m app.authoring.eval --case full-auto-3-chapters --fake --judge fake",
-    "authoring:eval:real": "scripts\\python.cmd -m app.authoring.eval --case full-auto-3-chapters --real --judge real",
-    "profile:probe": "scripts\\python.cmd scripts/probe_profile.py",
-    "profile:authoring-metadata": "scripts\\python.cmd scripts/upsert_authoring_metadata.py",
-    "audit:secrets": "scripts\\python.cmd scripts/audit_runtime_secrets.py",
-    "lint": "npm.cmd run backend:lint && npm.cmd run frontend:lint",
-    "typecheck": "npm.cmd run backend:typecheck && npm.cmd run frontend:typecheck",
-    "test": "npm.cmd run backend:test && npm.cmd run frontend:test"
+    "setup": "npm --prefix cli ci --ignore-scripts",
+    "dev": "node cli/scripts/dev.mjs",
+    "build": "npm --prefix cli run build",
+    "typecheck": "npm --prefix cli run typecheck",
+    "test": "npm --prefix cli test",
+    "check": "npm run typecheck && npm test && npm run build",
+    "smoke:pack": "npm --prefix cli run smoke:pack"
   }
 }

@@ -1,59 +1,42 @@
 # NovelPilot
 
-NovelPilot 是面向写作小白的全自动长篇小说 Agent Harness。用户输入一句话创意后，系统自动
-完成设定、滚动规划、逐章写作、质量检查、有限返工、摘要维护、完结和 TXT/Markdown 导出。
+基于 TypeScript、Pi SDK 和 TUI 的本地小说 Agent，以 ainovel-cli 为交互与工作流参考。
 
-工程核心是一个可长期运行、可观测、可验证、可恢复的串行 Agent Loop：
+产品围绕同一本书展开：先讨论人物、世界观与设定，用户明确开始后自动规划、写作和评审，写作中允许提出修改意见。
+当前已实现运行基础和最小终端入口，完整创作流程仍在开发中。
 
-- Pure Route 只根据 SQLite 权威事实选择下一条 Instruction；
-- Architect、Writer、Editor 使用 Pydantic AI Tool loop，角色 Tool 权限相互隔离；
-- Tool 事务同时提交正文/事实、Checkpoint、幂等证据和 Domain Event；
-- 单项目 lease、崩溃对账、有限重试和 Failure Arbiter 防止重复副作用与无限循环；
-- 上下文预算包含 System Prompt、Tool schema、请求选项和输出预留，达到 85% 窗口或
-  更严格的输出预算阈值后分级压缩，并恢复 Canon、章节计划、Review 和已完成 Checkpoint；
-- Profile 能力、Provider、fallback、实际 token/缓存/延迟/费用均形成冻结证据；
-- FastAPI、SSE、React 和 Headless/Eval 共用同一事实与事件序列。
+## 设计原则
 
-本实现调研并独立复现了 Apache-2.0 项目 `ainovel-cli` 的核心架构思想。来源边界见
-[reference-provenance.md](docs/reference-provenance.md)。
+- 每次启动绑定当前作品目录；退出后切换目录即可换书。
+- 讨论保留多轮上下文；规划、写作、评审按任务隔离，跨任务事实来自作品文件。
+- 角色使用各自的小说工具，应用层负责权限、任务完成与持久化，Pi 负责角色内的模型和工具循环。
+- 采用 Markdown、JSON、JSONL 文件方案；目录独占和恢复协议由应用管理。
 
-## 本地启动
+## 开发与启动
+
+需要 Node.js 22.19.0 或以上。在仓库根目录运行：
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-npm.cmd --prefix frontend install
-npm.cmd run backend:dev
+npm.cmd run setup
+npm.cmd run build
 ```
 
-另一个终端：
+进入准备存放一本书的目录，再启动：
 
 ```powershell
-npm.cmd run frontend:dev
+node E:/project/NovelPilot/cli/dist/main.js
 ```
 
-打开 `http://127.0.0.1:5173`。页面唯一产品路径是一句话全自动创作。
+输入 `/quit` 或按 Ctrl+C 退出。当前入口不调用模型。
+开发时可在作品目录使用 `npm.cmd --prefix E:/project/NovelPilot run dev`。
 
-## 配置模型
+## 项目结构
 
-从 `config/llm-profiles.example.json` 创建 git ignored 的 `config/llm-profiles.local.json`，
-然后执行：
+- `cli/src/`：新版应用、Pi 适配、文件存储和终端界面。
+- `cli/assets/`：随安装包交付的内置资源。
+- `cli/tests/`：新版行为测试。
+- `docs/`：使用说明、来源与验证证据。
 
-```powershell
-npm.cmd run profile:probe -- <profile-id> --require-tools
-npm.cmd run profile:authoring-metadata -- <profile-id> --context-window 128000 --max-output-tokens 8192
-```
+根目录命令全部面向新 CLI。旧产品代码、依赖、数据与入口已移除，不提供旧版兼容或迁移。
 
-第二个命令自动写入当前配置 fingerprint，不会打印或复制 API key。完整步骤见
-[local-usage.md](docs/local-usage.md)。
-
-## 本地门禁
-
-```powershell
-npm.cmd run test:fast
-npm.cmd run authoring:eval:fake
-npm.cmd run audit:secrets
-```
-
-真实 Eval 会产生费用，只能显式运行 `npm.cmd run authoring:eval:real -- --profile <id>`。
-Fake Eval 只证明流程合同，不代表真实模型质量或稳定性。
+详见 [使用说明](docs/local-usage.md)、[参考来源](docs/reference-provenance.md)、[验证证据](docs/engineering-evidence.md)。

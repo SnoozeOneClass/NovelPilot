@@ -1,0 +1,29 @@
+{
+  "name": "novelpilot-cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local TUI novel agent powered by Pi",
+  "type": "module",
+  "engines": { "node": ">=22.19.0" },
+  "bin": { "novelpilot": "dist/main.js" },
+  "files": ["dist", "assets"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "smoke:pack": "node scripts/pack-smoke.mjs",
+    "dev": "node scripts/dev.mjs",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "0.85.1",
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@earendil-works/pi-tui": "0.85.1",
+    "fs-native-extensions": "1.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3"
+  }
+}
