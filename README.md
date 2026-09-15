@@ -1,42 +1,49 @@
 # NovelPilot
 
-基于 TypeScript、Pi SDK 和 TUI 的本地小说 Agent，以 ainovel-cli 为交互与工作流参考。
+使用 TypeScript、Pi SDK 和 TUI 构建的本地小说 Agent。先讨论人物、世界观和设定，再由系统自动规划、写作和评审；写作中可以提出修改意见。
 
-产品围绕同一本书展开：先讨论人物、世界观与设定，用户明确开始后自动规划、写作和评审，写作中允许提出修改意见。
-当前已实现运行基础和最小终端入口，完整创作流程仍在开发中。
+## 设计
 
-## 设计原则
+- 固定从项目目录启动，新书直接共创，不要求预先起名；已有作品可以选择继续。确定书名后统一整理到 `books/<书名>/`。
+- 共创阶段使用“对话＋完整草稿”双栏，写作后进入三栏监控工作台；底部按钮和可搜索操作菜单提供当前阶段可用的操作。
+- 讨论保留多轮上下文；规划、写作、评审按任务创建独立会话，从作品文件获取当前事实。
+- 不同角色使用各自的小说工具。Pi 处理模型与工具循环，应用负责权限、任务调度和完成判定。
+- 正文使用 Markdown，状态和检查点使用 JSON/JSONL。提交与人工改稿同步使用固定载荷和分阶段恢复。
+- Skills 由模型按需选择并加载说明与资料。
 
-- 每次启动绑定当前作品目录；退出后切换目录即可换书。
-- 讨论保留多轮上下文；规划、写作、评审按任务隔离，跨任务事实来自作品文件。
-- 角色使用各自的小说工具，应用层负责权限、任务完成与持久化，Pi 负责角色内的模型和工具循环。
-- 采用 Markdown、JSON、JSONL 文件方案；目录独占和恢复协议由应用管理。
+## 安装与启动
 
-## 开发与启动
-
-需要 Node.js 22.19.0 或以上。在仓库根目录运行：
+需要 Node.js 22.19.0 或以上，在仓库根目录执行：
 
 ```powershell
 npm.cmd run setup
 npm.cmd run build
 ```
 
-进入准备存放一本书的目录，再启动：
+在项目目录启动程序：
 
 ```powershell
-node E:/project/NovelPilot/cli/dist/main.js
+npm.cmd run dev
 ```
 
-输入 `/quit` 或按 Ctrl+C 退出。当前入口不调用模型。
-开发时可在作品目录使用 `npm.cmd --prefix E:/project/NovelPilot run dev`。
+首次启动直接进入未命名共创。点击底部「设置」配置模型，再在输入区讨论人物和设定；准备好后选择「开始创作」。
+没有预先确定书名时，模型提供候选，可直接采用推荐、自填或返回讨论。未命名草稿会自动保存，命名后连同本书配置一起归入书籍目录，同名目录不会覆盖。
+常用操作可点击底部按钮或按 F2 搜索，用方向键和 Enter 选择；共创时 Tab 切换对话/草稿焦点。模型配置在单页原位编辑并统一保存，斜杠命令保留为快捷方式。
 
-## 项目结构
+模型服务目前支持显式配置 OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages 协议。
+真实服务的鉴权与生成效果取决于所配置的 Provider；当前验证情况见 [工程证据](docs/engineering-evidence.md)。
 
-- `cli/src/`：新版应用、Pi 适配、文件存储和终端界面。
-- `cli/assets/`：随安装包交付的内置资源。
-- `cli/tests/`：新版行为测试。
-- `docs/`：使用说明、来源与验证证据。
+## 开发
 
-根目录命令全部面向新 CLI。旧产品代码、依赖、数据与入口已移除，不提供旧版兼容或迁移。
+产品实现位于 `cli/`，根目录命令全部指向新版：
 
-详见 [使用说明](docs/local-usage.md)、[参考来源](docs/reference-provenance.md)、[验证证据](docs/engineering-evidence.md)。
+```powershell
+npm.cmd run check
+npm.cmd run eval
+npm.cmd run smoke:pack
+```
+
+例如《灯塔》的正文、计划、草稿和导出都位于 `E:/project/NovelPilot/books/灯塔/`，该目录默认不提交到 Git。
+旧产品代码与数据已删除，不提供旧版兼容或迁移。
+
+[操作说明](docs/local-usage.md) · [模型配置](docs/model-configuration.md) · [参考来源](docs/reference-provenance.md)

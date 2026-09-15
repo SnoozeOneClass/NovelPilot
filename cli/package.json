@@ -8,10 +8,11 @@
   "bin": { "novelpilot": "dist/main.js" },
   "files": ["dist", "assets"],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "smoke:pack": "node scripts/pack-smoke.mjs",
+    "eval": "node scripts/eval.mjs",
     "dev": "node scripts/dev.mjs",
     "prepack": "npm run build"
   },

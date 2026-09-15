@@ -3,6 +3,7 @@ config/*.local.json
 config/.*.json.lock
 
 # Generated novel output
+books/
 output/
 
 # Local application database and consistent backups

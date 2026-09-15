@@ -10,6 +10,7 @@
     "typecheck": "npm --prefix cli run typecheck",
     "test": "npm --prefix cli test",
     "check": "npm run typecheck && npm test && npm run build",
-    "smoke:pack": "npm --prefix cli run smoke:pack"
+    "smoke:pack": "npm --prefix cli run smoke:pack",
+    "eval": "node cli/scripts/eval.mjs"
   }
 }
